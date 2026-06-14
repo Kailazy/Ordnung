@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ordnung-core",
+    "crates/ordnung-rbdb",
+    "crates/ordnung-cli",
+    "crates/ordnung-gui",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+authors = ["Kai Lazarov"]
+
+# Dependencies are added per-phase (see PLAN.md / ordnung-roadmap skill).
+# Phase 0 is intentionally std-only so the scaffold builds anywhere.
+[workspace.dependencies]

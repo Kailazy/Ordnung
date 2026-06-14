@@ -1,0 +1,20 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Local catalog/test artifacts — do not commit the user's audio or DBs.
+/testdata/*.db
+/testdata/*.db-*
+/testdata/seeker-sample/
+*.db-wal
+*.db-shm
+
+# macOS cruft
+.DS_Store
+
+# Built app bundle — regenerate with tools/build-app.sh
+/Ordnung.app/
+
+# Local-only Claude Code state
+/.claude/settings.local.json
+/.claude/scheduled_tasks.lock
