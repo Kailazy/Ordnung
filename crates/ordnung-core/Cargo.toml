@@ -1,0 +1,35 @@
+[package]
+name = "ordnung-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Domain model and engines for Ordnung (DJ catalog / rekordbox exporter)."
+
+[dependencies]
+# Cover-art thumbnail decode + downscale on scan. Limited features keep compile
+# fast and the binary small — embedded covers are essentially always JPEG/PNG.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+lofty = "0.24.0"
+# Data-parallel fan-out for the batch passes that are pairwise-independent
+# (e.g. the acoustic-duplicate fingerprint comparison, which is O(n²)-in-window).
+rayon = "1.12.0"
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+rustfft = "6.4.1"
+# Blocking HTTP for external enrichment (Discogs). The mature 2.x line is fine
+# for our needs; rustls TLS keeps us off the system openssl dep.
+ureq = { version = "2.12", features = ["tls", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Pinned to the mature 0.5 line; 0.6.0 is a fresh API rewrite with sparse docs.
+# Codecs/containers must cover every extension scan ingests (see scan.rs
+# AUDIO_EXTS), or those files scan in but fail to decode. pcm/adpcm back the
+# wav + aiff PCM payloads; ogg+vorbis back .ogg; flac is its own codec.
+symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "alac", "aiff", "flac", "vorbis", "ogg", "wav", "pcm", "adpcm"] }
+thiserror = "2.0.18"
+# Normalize tag/filename text to NFC on scan. macOS hands back filenames (and
+# some embedded tags) in NFD, where accents are separate combining marks the UI
+# font can't render (tofu) and that break byte-wise search/dedup.
+unicode-normalization = "0.1"
+walkdir = "2.5.0"
+# Phase 1+: symphonia, lofty, rusqlite, rustfft, rayon (see PLAN.md).
