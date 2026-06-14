@@ -1,0 +1,77 @@
+[package]
+name = "ordnung-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Ordnung desktop GUI — browse catalog, convert tracks via double-click."
+
+# Binary artifact is "Ordnung" (capital, no suffix) so macOS labels the Dock
+# tile / app-switcher "Ordnung" even when the raw binary is launched instead of
+# the .app bundle. The package itself stays `ordnung-gui` (see [package] above).
+[[bin]]
+name = "Ordnung"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.102"
+# `persistence` lets eframe auto-save egui's memory (and window geometry) to the
+# OS app-data dir on exit and restore it on launch. We rely on this so resized
+# table column widths — which egui_extras keeps in egui memory — survive restarts.
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+egui = "0.29"
+# `serde` makes egui_extras store its TableState (the per-column widths) as
+# *persisted* egui memory instead of transient temp memory; only persisted memory
+# is written to disk by eframe, so without this the column widths reset each launch.
+egui_extras = { version = "0.29", features = ["serde"] }
+# Decode the cover-art thumbnail bytes the catalog stores (PNG written by scan).
+image = { version = "0.25", default-features = false, features = ["png"] }
+ordnung-core = { path = "../ordnung-core" }
+rayon = "1.12.0"
+rfd = "0.15"
+# Audio output for the thumbnail snippet-preview button. We feed it raw f32 PCM
+# decoded by ordnung-core, so rodio's format decoders (its default features)
+# aren't needed — only the cpal-backed output stream.
+rodio = { version = "0.20", default-features = false }
+# OS media-control bridge: exposes the now-playing track to the system (macOS
+# Control Center "Now Playing" + the keyboard play/pause/media keys, via
+# MPNowPlayingInfoCenter / MPRemoteCommandCenter) and feeds remote play/pause/seek
+# commands back to the AudioEngine. Cross-platform (MPRIS on Linux, SMTC on
+# Windows); the dbus deps are target-gated to Linux so macOS doesn't pull them.
+souvlaki = "0.8"
+# Persist GUI settings (Discogs token) to ~/.ordnung/config.toml so they survive
+# restarts and Finder launches that inherit no shell environment.
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+# Delete a duplicate copy by moving its source file to the OS Trash rather than
+# hard-unlinking it — a deleted master must stay recoverable. Used only by the
+# Duplicates view's per-copy delete action.
+trash = "5"
+
+# Native macOS drag-out: start an NSDraggingSession carrying the selected tracks'
+# file URLs so they can be dropped straight into rekordbox / Finder. Versions are
+# pinned to the set already linked transitively by winit 0.30, so the AppKit
+# framework bindings aren't duplicated. See src/macos_drag.rs.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5.2"
+objc2-foundation = { version = "0.2.2", features = [
+    "NSString",
+    "NSURL",
+    "NSArray",
+    "NSGeometry",
+    "NSObject",
+] }
+objc2-app-kit = { version = "0.2.2", features = [
+    "NSView",
+    "NSDragging",
+    "NSDraggingItem",
+    "NSDraggingSession",
+    "NSEvent",
+    "NSImage",
+    "NSApplication",
+    "NSWindow",
+    "NSResponder",
+    "NSPasteboard",
+    "NSWorkspace",
+] }
+raw-window-handle = "0.6.2"
