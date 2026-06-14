@@ -102,6 +102,43 @@ impl App {
 
 }
 
+/// The sidebar/toolbar accent — matches the "Add songs…" primary button so the
+/// active navigation target reads as part of the same visual language.
+pub(crate) const NAV_ACCENT: egui::Color32 = egui::Color32::from_rgb(64, 110, 180);
+
+/// A large, full-width rectangular navigation button for the sidebar. `height`
+/// sizes the tile (Library is tallest, playlists / collection views a bit
+/// shorter) and `text_size` its label; `selected` paints the accent fill. The
+/// `Response` is returned so callers can wire clicks, drag-and-drop drop targets
+/// and context menus on top of it.
+pub(crate) fn nav_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: bool,
+    height: f32,
+    text_size: f32,
+) -> egui::Response {
+    let w = ui.available_width();
+    let mut text = egui::RichText::new(label).size(text_size);
+    if selected {
+        text = text.color(egui::Color32::WHITE).strong();
+    }
+    let mut btn = egui::Button::new(text)
+        .min_size(egui::vec2(w, height))
+        .rounding(egui::Rounding::same(6.0));
+    if selected {
+        btn = btn.fill(NAV_ACCENT);
+    }
+    // Indent the label off the left edge so it reads as a roomy nav tile rather
+    // than text crammed against the border. `button_padding` is the left inset
+    // for the (left-aligned) content; restore it so only this button is affected.
+    let prev_padding = ui.spacing().button_padding;
+    ui.spacing_mut().button_padding.x = 12.0;
+    let resp = ui.add(btn);
+    ui.spacing_mut().button_padding = prev_padding;
+    resp
+}
+
 /// Render the children of `parent` in the sidebar tree, recursing into folders.
 /// Folders are collapsible; playlists are selectable rows that double as
 /// drag-and-drop targets for table rows. Plain-field state (`view`, `renaming`)
@@ -122,7 +159,7 @@ pub(crate) fn draw_playlist_nodes(
             continue;
         }
         if p.is_folder {
-            egui::CollapsingHeader::new(p.name.as_str())
+            egui::CollapsingHeader::new(egui::RichText::new(p.name.as_str()).size(13.5))
                 .id_salt(("pl-folder", p.id))
                 .default_open(true)
                 .show(ui, |ui| {
@@ -130,6 +167,7 @@ pub(crate) fn draw_playlist_nodes(
                 })
                 .header_response
                 .context_menu(|ui| folder_context_menu(ui, p, renaming, action));
+            ui.add_space(3.0);
         } else {
             draw_playlist_leaf(ui, p, view, renaming, action);
         }
@@ -198,13 +236,14 @@ pub(crate) fn draw_playlist_leaf(
     action: &mut Option<SidebarAction>,
 ) {
     let selected = *view == LibraryView::Playlist(p.id);
-    let resp = ui
-        .selectable_label(selected, format!("♪ {}", p.name))
+    let resp = nav_button(ui, &format!("♪  {}", p.name), selected, 30.0, 13.5)
         .on_hover_text("Click to view. Drag tracks here to add them.");
     if resp.dnd_hover_payload::<DraggedTracks>().is_some() {
+        // Inset the highlight so the stroke sits inside the tile's rounded box
+        // (drawn on the edge, not floating outside it) and the corners stay round.
         ui.painter().rect_stroke(
-            resp.rect.expand(1.0),
-            egui::Rounding::same(3.0),
+            resp.rect.shrink(1.0),
+            egui::Rounding::same(6.0),
             egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 150, 220)),
         );
     }
@@ -231,6 +270,7 @@ pub(crate) fn draw_playlist_leaf(
             ui.close_menu();
         }
     });
+    ui.add_space(3.0);
 }
 
 

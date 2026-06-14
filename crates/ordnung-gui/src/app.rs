@@ -747,71 +747,140 @@ impl eframe::App for App {
             .default_width(200.0)
             .width_range(150.0..=360.0)
             .show(ctx, |ui| {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.heading("Library");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("+").on_hover_text("New playlist").clicked() {
-                            sidebar_action = Some(SidebarAction::NewPlaylist(None));
-                        }
-                    });
-                });
-                ui.separator();
-                if ui
-                    .selectable_label(self.view == LibraryView::Library, "♪ All songs")
-                    .on_hover_text("Every track in the catalog")
-                    .clicked()
-                {
-                    self.view = LibraryView::Library;
-                }
-                if ui
-                    .selectable_label(self.view == LibraryView::Duplicates, "⧉ Duplicates")
-                    .on_hover_text("Find identical imports and same-song format variants")
-                    .clicked()
-                {
-                    self.view = LibraryView::Duplicates;
-                }
-                let missing_label = if self.missing_count > 0 {
-                    format!("⚠ Missing ({})", self.missing_count)
-                } else {
-                    "⚠ Missing".to_string()
-                };
-                if ui
-                    .selectable_label(self.view == LibraryView::Missing, missing_label)
-                    .on_hover_text("Tracks whose source file is no longer on disk — relocate or remove them")
-                    .clicked()
-                {
-                    self.view = LibraryView::Missing;
-                }
-                ui.add_space(4.0);
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let all = self.playlists.clone();
-                    draw_playlist_nodes(
-                        ui,
-                        &all,
-                        None,
-                        &mut self.view,
-                        &mut self.renaming,
-                        &mut sidebar_action,
+                // Header for a section: a small dimmed all-caps caption that sets
+                // the playlist / collection groups apart without competing with
+                // the big nav tiles below it.
+                let section_caption = |ui: &mut egui::Ui, text: &str| {
+                    ui.label(
+                        egui::RichText::new(text)
+                            .size(11.0)
+                            .color(egui::Color32::from_gray(140))
+                            .strong(),
                     );
-                });
-                // "My Vinyl Collection" — the user's Discogs records, cached
-                // locally. Pinned below the playlist tree so it reads as its own
-                // section (physical records, separate from the digital catalog).
-                ui.add_space(6.0);
-                ui.separator();
-                let vinyl_label = if self.vinyl_count > 0 {
-                    format!("💿 My Vinyl Collection ({})", self.vinyl_count)
-                } else {
-                    "💿 My Vinyl Collection".to_string()
                 };
-                if ui
-                    .selectable_label(self.view == LibraryView::Vinyl, vinyl_label)
-                    .on_hover_text("Your Discogs vinyl collection — refresh to sync new records")
-                    .clicked()
-                {
-                    self.view = LibraryView::Vinyl;
-                }
+
+                // ── Library (top) ─────────────────────────────────────────────
+                // The whole catalog. Biggest tile in the sidebar — it's the home
+                // base every other view branches off from.
+                egui::TopBottomPanel::top("nav_library")
+                    .frame(egui::Frame::none())
+                    .show_separator_line(false)
+                    .show_inside(ui, |ui| {
+                        ui.add_space(8.0);
+                        if nav_button(
+                            ui,
+                            "♪  All songs",
+                            self.view == LibraryView::Library,
+                            46.0,
+                            17.0,
+                        )
+                        .on_hover_text("Every track in the catalog")
+                        .clicked()
+                        {
+                            self.view = LibraryView::Library;
+                        }
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            section_caption(ui, "PLAYLISTS");
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button("+")
+                                        .on_hover_text("New playlist")
+                                        .clicked()
+                                    {
+                                        sidebar_action = Some(SidebarAction::NewPlaylist(None));
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(4.0);
+                    });
+
+                // ── Collections (bottom, pinned) ──────────────────────────────
+                // The unique, non-playlist views read as their own group, set off
+                // from the playlist tree by living in a separate pinned section.
+                egui::TopBottomPanel::bottom("nav_collections")
+                    .frame(egui::Frame::none())
+                    .show_separator_line(false)
+                    .show_inside(ui, |ui| {
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        section_caption(ui, "COLLECTIONS");
+                        ui.add_space(4.0);
+                        if nav_button(
+                            ui,
+                            "⧉  Duplicates",
+                            self.view == LibraryView::Duplicates,
+                            34.0,
+                            14.0,
+                        )
+                        .on_hover_text("Find identical imports and same-song format variants")
+                        .clicked()
+                        {
+                            self.view = LibraryView::Duplicates;
+                        }
+                        ui.add_space(4.0);
+                        let missing_label = if self.missing_count > 0 {
+                            format!("⚠  Missing ({})", self.missing_count)
+                        } else {
+                            "⚠  Missing".to_string()
+                        };
+                        if nav_button(
+                            ui,
+                            &missing_label,
+                            self.view == LibraryView::Missing,
+                            34.0,
+                            14.0,
+                        )
+                        .on_hover_text(
+                            "Tracks whose source file is no longer on disk — relocate or remove them",
+                        )
+                        .clicked()
+                        {
+                            self.view = LibraryView::Missing;
+                        }
+                        ui.add_space(4.0);
+                        let vinyl_label = if self.vinyl_count > 0 {
+                            format!("💿  My Vinyl Collection ({})", self.vinyl_count)
+                        } else {
+                            "💿  My Vinyl Collection".to_string()
+                        };
+                        if nav_button(
+                            ui,
+                            &vinyl_label,
+                            self.view == LibraryView::Vinyl,
+                            34.0,
+                            14.0,
+                        )
+                        .on_hover_text("Your Discogs vinyl collection — refresh to sync new records")
+                        .clicked()
+                        {
+                            self.view = LibraryView::Vinyl;
+                        }
+                        ui.add_space(8.0);
+                    });
+
+                // ── Playlist tree (middle, scrolls) ───────────────────────────
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none())
+                    .show_inside(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                let all = self.playlists.clone();
+                                draw_playlist_nodes(
+                                    ui,
+                                    &all,
+                                    None,
+                                    &mut self.view,
+                                    &mut self.renaming,
+                                    &mut sidebar_action,
+                                );
+                            });
+                    });
             });
         match sidebar_action {
             Some(SidebarAction::NewPlaylist(parent)) => {
