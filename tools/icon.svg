@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ordnung app icon source. Rendered to a 1024×1024 PNG by `build-app.sh`,
+     then resized into a macOS iconset and packed into Ordnung.icns.
+     Design: an off-gray squircle background with a bold off-gray-blue "O"
+     (soft, fuzzed edges) surrounding a sharp "ordering" bar — DJ catalog
+     ordered/organized. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- Soft-edge fuzz for the "O" only. stdDeviation is in the (unscaled) user
+         space of the group below, so the ~60px blur reads as a heavy ~48px halo
+         after the 0.8047 scale — the ring melts into a soft cloud. The bar is
+         drawn outside this filter and stays crisp. The padded filter region
+         keeps the wide halo from clipping. -->
+    <filter id="o-fuzz" x="-120%" y="-120%" width="340%" height="340%"
+            color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="60"/>
+    </filter>
+
+    <!-- Big Sur "domed glass" edge effect: a bright rim catching the top edge,
+         fading out by mid-height, then a soft darkening along the bottom edge.
+         Painted as a stroke on the squircle outline and clipped to the squircle
+         so only the inner half of the stroke shows as a thin inner bevel. -->
+    <clipPath id="squircle-clip">
+      <rect x="0" y="0" width="1024" height="1024" rx="229" ry="229"/>
+    </clipPath>
+    <linearGradient id="edge-light" x1="512" y1="0" x2="512" y2="1024"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0"    stop-color="#ffffff" stop-opacity="0.55"/>
+      <stop offset="0.06" stop-color="#ffffff" stop-opacity="0.12"/>
+      <stop offset="0.32" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="0.70" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="0.95" stop-color="#000000" stop-opacity="0.12"/>
+      <stop offset="1"    stop-color="#000000" stop-opacity="0.32"/>
+    </linearGradient>
+  </defs>
+  <!-- macOS Big Sur+ icon grid: the rounded-square body is 824×824 centered on
+       the 1024 canvas, leaving ~100px transparent margin on every side. Standard
+       Mac apps follow this grid, so matching it makes Ordnung's Dock footprint
+       the same size as its neighbors instead of full-bleed (oversized).
+       We keep the original full-canvas artwork and scale it by 0.8047 about the
+       center (824/1024) so the squircle lands exactly on the grid. -->
+  <g transform="translate(512 512) scale(0.8047) translate(-512 -512)">
+    <!-- Background squircle. ~22.4% corner radius (229px on 1024) approximates
+         the modern continuous-corner shape. Really off-gray (cool, desaturated). -->
+    <rect x="0" y="0" width="1024" height="1024" rx="229" ry="229" fill="#42454b"/>
+
+    <!-- The "O" — bold letterform. Outer radius 320, inner 220, centered.
+         Drawn as a single donut path (one outer arc + one inner reverse arc).
+         Off gray-blue, with fuzzed/soft edges via the o-fuzz filter. -->
+    <path d="
+        M 512 192
+        A 320 320 0 1 0 512 832
+        A 320 320 0 1 0 512 192
+        Z
+        M 512 292
+        A 220 220 0 1 1 512 732
+        A 220 220 0 1 1 512 292
+        Z"
+      fill="#93a6bf" fill-rule="evenodd" filter="url(#o-fuzz)"/>
+
+    <!-- Single ordering bar inside the O, centered. Thickened from 22 -> 44px;
+         y/rx track the height so it stays centered on 512 with rounded caps.
+         Same off gray-blue as the O, but NOT filtered — stays sharp. -->
+    <rect x="402" y="490" width="220" height="44" rx="22" fill="#93a6bf"/>
+
+    <!-- Inner-edge bevel. Stroke-width 16 → ~8px visible inside the clip, ~6.4px
+         after the 0.8047 scale. Sits on top so the rim reads as glass over the
+         whole face, including where the O's glow meets the edge. -->
+    <g clip-path="url(#squircle-clip)">
+      <rect x="0" y="0" width="1024" height="1024" rx="229" ry="229"
+            fill="none" stroke="url(#edge-light)" stroke-width="16"/>
+    </g>
+  </g>
+</svg>

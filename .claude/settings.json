@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(perl -CSD -i -pe 's/\\\\x{2913}/\\\\x{2B07}/g; s/format!\\\\\\(\"\\\\x{1F5C0} \\\\{\\\\}\", p\\\\.name\\\\\\)/p.name.as_str\\(\\)/' src/main.rs)",
+      "Bash(cargo build *)",
+      "Bash(cargo test *)",
+      "Bash(awk 'NR>=3380 && NR<=3900 { if \\($0 ~ /^            \\\\.body\\\\\\(\\\\|body\\\\|/\\) print \"BODYSTART:\"NR; if \\($0 ~ /^            \\\\}\\\\\\);/\\) print \"ENDSEMI:\"NR; if \\($0 ~ /^        \\\\/\\\\/ /\\) print \"POST?:\"NR\" \"$0 }' crates/ordnung-gui/src/main.rs)",
+      "Bash(awk -F: '$1>3441 && $1<3950')",
+      "Bash(awk '/^fn.*tx.*ctx.*cancel/,/^fn [^{]*\\\\{/' /Users/kailazarov/Desktop/Ordnung/crates/ordnung-gui/src/main.rs)"
+    ]
+  }
+}
