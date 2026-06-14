@@ -1,0 +1,11 @@
+[package]
+name = "ordnung-rbdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "rekordbox/CDJ export: export.pdb (DeviceSQL) + ANLZ writers."
+
+[dependencies]
+ordnung-core = { path = "../ordnung-core" }
+# Phase 5: rekordcrate (binrw read/write of DeviceSQL). See the rekordbox-format skill.
