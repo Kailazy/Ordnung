@@ -250,8 +250,31 @@ pub fn convert_file(
     }
 }
 
+/// Resolve a tool binary (`ffmpeg`/`ffprobe`) to an absolute path.
+///
+/// macOS apps launched from Finder/Dock inherit a minimal `PATH`
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`) that excludes Homebrew, so a bare
+/// `Command::new("ffmpeg")` fails with ENOENT even when the tool is installed.
+/// We probe the common install locations and fall back to the bare name (which
+/// still works when `PATH` is inherited, e.g. CLI use from a shell).
+fn resolve_tool(name: &str) -> PathBuf {
+    const DIRS: &[&str] = &[
+        "/opt/homebrew/bin", // Apple Silicon Homebrew
+        "/usr/local/bin",    // Intel Homebrew
+        "/opt/local/bin",    // MacPorts
+        "/usr/bin",
+    ];
+    for dir in DIRS {
+        let candidate = Path::new(dir).join(name);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(name)
+}
+
 fn run_ffmpeg(src: &Path, spec: &ConvertSpec, dest: &Path) -> Result<()> {
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = Command::new(resolve_tool("ffmpeg"));
     cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(src)
         // Audio only (drop attached cover-art video streams that break some
@@ -282,7 +305,7 @@ fn run_ffmpeg(src: &Path, spec: &ConvertSpec, dest: &Path) -> Result<()> {
 
 /// Confirm the produced file carries an audio stream of the expected codec.
 fn verify_codec(path: &Path, target: Format) -> Result<()> {
-    let output = Command::new("ffprobe")
+    let output = Command::new(resolve_tool("ffprobe"))
         .args([
             "-hide_banner",
             "-loglevel",

@@ -382,6 +382,72 @@ fn is_mp3(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("mp3"))
 }
 
+fn is_aiff(path: &Path) -> bool {
+    path.extension().is_some_and(|e| {
+        e.eq_ignore_ascii_case("aif")
+            || e.eq_ignore_ascii_case("aiff")
+            || e.eq_ignore_ascii_case("aifc")
+    })
+}
+
+/// Some taggers write an AIFF's trailing odd-sized chunk (commonly the `ID3 `
+/// metadata chunk) without the pad byte the AIFF spec requires after every
+/// odd-length chunk. lofty *reads* such a file fine, but its writer walks the
+/// chunk list strictly and does a `read_exact` for that pad byte — hitting EOF
+/// ("failed to fill whole buffer") and aborting the entire tag write.
+///
+/// Detect that exact shape — a final chunk whose odd-length data ends precisely
+/// at EOF, with no pad byte on disk — and append the missing `0x00`, bumping the
+/// FORM size to count it, so the container is spec-compliant before lofty touches
+/// it. Returns whether the file was repaired. Only chunk *headers* are read (via
+/// seek), never audio data, and the only write is one appended byte plus the
+/// 4-byte FORM size — the SSND audio is left byte-for-byte intact. Idempotent: a
+/// properly padded file returns `Ok(false)` untouched.
+fn pad_trailing_aiff_chunk(path: &Path) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let size = f.metadata()?.len();
+    if size < 12 {
+        return Ok(false);
+    }
+    let mut hdr = [0u8; 12];
+    f.read_exact(&mut hdr)?;
+    // AIFF (PCM) and AIFC (compressed) share the FORM container layout.
+    if &hdr[0..4] != b"FORM" || (&hdr[8..12] != b"AIFF" && &hdr[8..12] != b"AIFC") {
+        return Ok(false);
+    }
+    // Walk chunk headers (8 bytes each) by seeking, accounting for each chunk's
+    // own pad byte. A clean file ends with `pos == size`; a file missing only the
+    // final odd chunk's pad byte overshoots by exactly one (`pos == size + 1`).
+    let mut pos: u64 = 12;
+    let mut last_odd = false;
+    while pos + 8 <= size {
+        f.seek(SeekFrom::Start(pos))?;
+        let mut ch = [0u8; 8];
+        f.read_exact(&mut ch)?;
+        let csz = u32::from_be_bytes([ch[4], ch[5], ch[6], ch[7]]) as u64;
+        let data_end = pos + 8 + csz;
+        // A chunk that runs past EOF is a different (real) truncation we don't
+        // touch — let lofty surface it.
+        if data_end > size {
+            return Ok(false);
+        }
+        last_odd = csz & 1 == 1;
+        pos = data_end + (csz & 1);
+    }
+    if pos != size + 1 || !last_odd {
+        return Ok(false);
+    }
+    // Append the missing pad byte and grow FORM's size by one to count it.
+    f.seek(SeekFrom::End(0))?;
+    f.write_all(&[0u8])?;
+    let form = u32::from_be_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+    f.seek(SeekFrom::Start(4))?;
+    f.write_all(&form.saturating_add(1).to_be_bytes())?;
+    f.flush()?;
+    Ok(true)
+}
+
 /// Byte range `[start, end)` of an APE tag sitting at the end of the file, or
 /// `None` if there isn't one. Reads only the 32-byte APE footer's fixed-width
 /// little-endian fields — never the text items — so a tag that's unreadable to
@@ -446,6 +512,13 @@ fn fmt_db(v: f32) -> String {
 /// significantly more of the file than text tags.
 pub fn write_to_file(path: impl AsRef<Path>, tags: &Tags, artwork: Option<&[u8]>) -> Result<()> {
     let path = path.as_ref();
+    // Normalize a spec-violating AIFF (trailing odd chunk missing its pad byte)
+    // before lofty reads it, or its writer aborts with "failed to fill whole
+    // buffer". Best-effort: any probe error falls through to let lofty report the
+    // real problem.
+    if is_aiff(path) {
+        let _ = pad_trailing_aiff_chunk(path);
+    }
     let mut tagged = match lofty::read_from_path(path) {
         Ok(tagged) => tagged,
         // A non-UTF-8 APE tag (APEv2 mandates UTF-8, but some MP3 taggers write
@@ -945,6 +1018,52 @@ mod tests {
         let scanned = crate::scan::scan_file(&dst).unwrap();
         assert_eq!(scanned.tags.title.as_deref(), Some("Salvaged"));
         assert!(scanned.properties.duration_ms > 0, "audio preserved");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An AIFF whose trailing odd-sized chunk lacks its spec-required pad byte
+    /// (as written by some taggers) is repaired in place by appending the pad and
+    /// bumping the FORM size, so a chunk walk lands exactly at EOF. This is the
+    /// shape that made lofty's writer fail with "failed to fill whole buffer".
+    #[test]
+    fn pads_unpadded_trailing_aiff_chunk() {
+        // Minimal AIFF: FORM/AIFF, an even COMM, then an odd-length ID3 chunk
+        // with NO pad byte — deliberately one byte short of spec.
+        let mut body: Vec<u8> = Vec::new();
+        // COMM chunk: id + size(0) — even, no data (content is irrelevant here).
+        body.extend_from_slice(b"COMM");
+        body.extend_from_slice(&0u32.to_be_bytes());
+        // ID3 chunk: id + size(3) + 3 bytes, odd length, and we omit the pad.
+        body.extend_from_slice(b"ID3 ");
+        body.extend_from_slice(&3u32.to_be_bytes());
+        body.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+
+        let mut file: Vec<u8> = Vec::new();
+        file.extend_from_slice(b"FORM");
+        // FORM size counts "AIFF" + body (no pad byte present yet).
+        file.extend_from_slice(&((4 + body.len()) as u32).to_be_bytes());
+        file.extend_from_slice(b"AIFF");
+        file.extend_from_slice(&body);
+
+        let dir = std::env::temp_dir().join(format!("ordnung-aiff-pad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("unpadded.aif");
+        std::fs::write(&p, &file).unwrap();
+        let before = file.len() as u64;
+
+        // First call repairs; second is a no-op (idempotent).
+        assert!(pad_trailing_aiff_chunk(&p).unwrap(), "missing pad detected");
+        assert!(
+            !pad_trailing_aiff_chunk(&p).unwrap(),
+            "already-padded file left untouched"
+        );
+
+        let out = std::fs::read(&p).unwrap();
+        assert_eq!(out.len() as u64, before + 1, "exactly one pad byte appended");
+        assert_eq!(*out.last().unwrap(), 0, "pad byte is zero");
+        let form = u32::from_be_bytes([out[4], out[5], out[6], out[7]]);
+        assert_eq!(form as usize + 8, out.len(), "FORM size now matches EOF");
 
         std::fs::remove_dir_all(&dir).ok();
     }
