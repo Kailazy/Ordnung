@@ -32,6 +32,20 @@ pub struct Catalog {
     conn: Connection,
 }
 
+/// One other track sharing an album with a given track. Returned by
+/// [`Catalog::album_siblings_detailed`] so the GUI can present album-mates by
+/// name (with whether each already has a cover) when applying a dropped or
+/// fetched cover across an album.
+#[derive(Debug, Clone)]
+pub struct AlbumSibling {
+    pub id: Id,
+    pub artist: Option<String>,
+    pub title: Option<String>,
+    /// True when the track already has a cover — embedded (`has_cover`) or a
+    /// fetched external image. Used to default which mates are pre-selected.
+    pub has_art: bool,
+}
+
 /// Minimum fields needed to search an external source for a track's artwork —
 /// returned by `Catalog::tracks_missing_artwork` and consumed by the
 /// `discogs` engine.
@@ -1128,6 +1142,60 @@ impl Catalog {
         Ok(out)
     }
 
+    /// Every other track on the same album as `track_id`, with the name fields
+    /// and a per-track `has_art` flag. Same "same album" identity as
+    /// [`Catalog::album_siblings`]; this richer form lets the GUI list mates by
+    /// name and pre-select the cover-less ones when copying a cover across an
+    /// album.
+    pub fn album_siblings_detailed(&self, track_id: Id) -> Result<Vec<AlbumSibling>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.artist, t.title,
+                 (COALESCE(t.has_cover, 0) = 1
+                  OR EXISTS (
+                      SELECT 1 FROM track_external_artwork e
+                      WHERE e.track_id = t.id AND e.png_bytes IS NOT NULL
+                  )) AS has_art
+             FROM tracks t
+             JOIN tracks me ON me.id = ?1
+             WHERE t.id <> me.id
+               AND TRIM(COALESCE(me.album, '')) <> ''
+               AND lower(TRIM(t.album)) = lower(TRIM(me.album))
+               AND lower(COALESCE(NULLIF(TRIM(t.album_artist), ''), t.artist, ''))
+                   = lower(COALESCE(NULLIF(TRIM(me.album_artist), ''), me.artist, ''))
+             ORDER BY t.id",
+        )?;
+        let rows = stmt.query_map(params![track_id as i64], |r| {
+            Ok(AlbumSibling {
+                id: r.get::<_, i64>(0)? as Id,
+                artist: r.get::<_, Option<String>>(1)?,
+                title: r.get::<_, Option<String>>(2)?,
+                has_art: r.get::<_, i64>(3)? != 0,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Whether `track_id` already has *some* cover — either an embedded one
+    /// (`has_cover`) or a fetched external image. Used by the song-data picker to
+    /// default the "set cover" toggle off when art already exists, so enriching a
+    /// track's tags doesn't silently clobber a cover it already had.
+    pub fn track_has_art(&self, track_id: Id) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(t.has_cover, 0) = 1
+                 OR EXISTS (
+                     SELECT 1 FROM track_external_artwork e
+                     WHERE e.track_id = t.id AND e.png_bytes IS NOT NULL
+                 )
+             FROM tracks t WHERE t.id = ?1",
+            params![track_id as i64],
+            |r| r.get::<_, i64>(0),
+        )? != 0)
+    }
+
     /// Mark (or unmark) `track_id`'s fetched cover as superseding the file's
     /// embedded art. A no-op when the track has no external-artwork row. Set when
     /// the user overwrites an album-mate's cover so display and export both show
@@ -1279,24 +1347,22 @@ impl Catalog {
         Ok(())
     }
 
-    /// List tracks, optionally filtering by a substring match across
-    /// artist/title/album/genre/album_artist (case-insensitive). `limit` of 0
-    /// means no limit.
+    /// List tracks, optionally filtering by a flexible free-text search across
+    /// artist/title/album/genre/album_artist (case-insensitive). See
+    /// [`search_filter`] for the term semantics. `limit` of 0 means no limit.
     pub fn list_tracks(&self, query: Option<&str>, limit: usize) -> Result<Vec<Track>> {
-        let like = query.map(|q| format!("%{}%", q.to_lowercase()));
+        let (filter_sql, filter_params) = search_filter(query, "");
+        let limit = if limit == 0 { -1i64 } else { limit as i64 };
         let sql = format!(
             "SELECT {SELECT_COLS} FROM tracks
-              WHERE ?1 IS NULL OR (
-                  lower(coalesce(artist,''))       LIKE ?1 OR
-                  lower(coalesce(title,''))        LIKE ?1 OR
-                  lower(coalesce(album,''))        LIKE ?1 OR
-                  lower(coalesce(genre,''))        LIKE ?1 OR
-                  lower(coalesce(album_artist,'')) LIKE ?1 )
+              WHERE {filter_sql}
               ORDER BY artist, title
-              LIMIT CASE WHEN ?2 = 0 THEN -1 ELSE ?2 END"
+              LIMIT {limit}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![like, limit as i64], row_to_track)?;
+        let refs: Vec<&dyn rusqlite::ToSql> =
+            filter_params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(refs.as_slice(), row_to_track)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -1311,6 +1377,78 @@ impl Catalog {
             Ok((r.get::<_, i64>("id")? as Id, r.get::<_, i64>("added_at")?))
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The "recently added" inbox: tracks that still need finishing work, newest
+    /// first. A track appears here until it has been BOTH analyzed at the current
+    /// analyzer `version` AND had its Discogs song-data fetched
+    /// (`discogs_meta_fetched_at` set) — at which point it "expires" out of the
+    /// view automatically. So it's a self-clearing to-do list of fresh imports:
+    /// analyze + fetch a track and it leaves on the next reload. `query` filters
+    /// the same fields as [`Catalog::list_tracks`].
+    pub fn list_recently_added(&self, query: Option<&str>, version: u32) -> Result<Vec<Track>> {
+        let (filter_sql, filter_params) = search_filter(query, "");
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM tracks
+              WHERE ({filter_sql})
+                AND (
+                  discogs_meta_fetched_at IS NULL
+                  OR id NOT IN (SELECT track_id FROM analysis WHERE analyzer_version >= ?)
+                )
+              ORDER BY added_at DESC, id DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = filter_params
+            .into_iter()
+            .map(|p| Box::new(p) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        params.push(Box::new(version as i64));
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), row_to_track)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Load specific tracks by id, optionally narrowed by the same `query` as
+    /// [`Catalog::list_tracks`]. Used by the "recently added" view to keep tracks
+    /// that have *just* finished (analyzed + fetched) pinned in place until the
+    /// user leaves the tab — those rows are no longer "recent" by the inbox query,
+    /// so they're re-fetched explicitly by id. Returns whatever subset of `ids`
+    /// exists and matches the filter; order is unspecified (the caller re-sorts).
+    pub fn list_tracks_by_ids(&self, ids: &[Id], query: Option<&str>) -> Result<Vec<Track>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (filter_sql, filter_params) = search_filter(query, "");
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM tracks
+              WHERE id IN ({placeholders})
+                AND ({filter_sql})"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        // Bind the id placeholders first, then the search-filter `%term%` params,
+        // matching the `?` order in the statement.
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+            ids.iter().map(|&id| Box::new(id as i64) as Box<dyn rusqlite::ToSql>).collect();
+        params.extend(filter_params.into_iter().map(|p| Box::new(p) as Box<dyn rusqlite::ToSql>));
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), row_to_track)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// How many tracks are in the "recently added" inbox — i.e. not yet both
+    /// analyzed at `version` and song-data fetched. Cheap (no `Track` building),
+    /// so it can drive the sidebar badge on every refresh. See
+    /// [`Catalog::list_recently_added`].
+    pub fn count_recently_added(&self, version: u32) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tracks
+              WHERE discogs_meta_fetched_at IS NULL
+                 OR id NOT IN (SELECT track_id FROM analysis WHERE analyzer_version >= ?1)",
+            params![version as i64],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
     }
 
     /// Tracks whose recorded `source_path` no longer exists on disk — the file
@@ -1659,21 +1797,20 @@ impl Catalog {
     /// Folders have no tracks and yield an empty vec. Mirrors `list_tracks` so
     /// the GUI can swap between the whole library and a single playlist.
     pub fn list_playlist_tracks(&self, playlist_id: Id, query: Option<&str>) -> Result<Vec<Track>> {
-        let like = query.map(|q| format!("%{}%", q.to_lowercase()));
+        let (filter_sql, filter_params) = search_filter(query, "t.");
         let sql = format!(
             "SELECT {SELECT_COLS} FROM tracks t
                JOIN playlist_tracks pt ON pt.track_id = t.id
-              WHERE pt.playlist_id = ?2
-                AND (?1 IS NULL OR (
-                  lower(coalesce(t.artist,''))       LIKE ?1 OR
-                  lower(coalesce(t.title,''))        LIKE ?1 OR
-                  lower(coalesce(t.album,''))        LIKE ?1 OR
-                  lower(coalesce(t.genre,''))        LIKE ?1 OR
-                  lower(coalesce(t.album_artist,'')) LIKE ?1 ))
+              WHERE pt.playlist_id = ?
+                AND ({filter_sql})
               ORDER BY pt.position, pt.track_id"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![like, playlist_id as i64], row_to_track)?;
+        // playlist_id binds first (its `?` leads the statement), then the filter params.
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(playlist_id as i64)];
+        params.extend(filter_params.into_iter().map(|p| Box::new(p) as Box<dyn rusqlite::ToSql>));
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), row_to_track)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -2445,6 +2582,42 @@ const SELECT_COLS: &str = "id, source_path, format, sample_rate, bit_depth, chan
     mb_artist_id, mb_release_artist_id, mb_work_id, mb_release_type, acoust_id,
     rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak, has_cover";
 
+/// Build a SQL WHERE fragment (and its bound `%term%` params) for a flexible
+/// free-text search across the human-visible text columns
+/// (artist/title/album/genre/album_artist, case-insensitive).
+///
+/// The query is split on whitespace into terms; every term must match at least
+/// one column, AND-ed across terms and OR-ed across columns within a term. So
+/// `"apple dj pear"` finds the track titled "Apple" by artist "DJ Pear" even
+/// though no single column holds the whole phrase — order doesn't matter either.
+/// A blank/`None` query yields the always-true `"1"` fragment and no params.
+///
+/// `prefix` is a table alias plus dot (e.g. `"t."` for a join) or `""`. The
+/// fragment uses positional `?` placeholders, so its params must be bound in
+/// order ahead of any params that follow it in the statement.
+fn search_filter(query: Option<&str>, prefix: &str) -> (String, Vec<String>) {
+    let terms: Vec<String> = query
+        .into_iter()
+        .flat_map(|q| q.split_whitespace())
+        .map(|t| format!("%{}%", t.to_lowercase()))
+        .collect();
+    if terms.is_empty() {
+        return ("1".to_string(), Vec::new());
+    }
+    let clause = format!(
+        "(lower(coalesce({p}artist,'')) LIKE ? \
+          OR lower(coalesce({p}title,'')) LIKE ? \
+          OR lower(coalesce({p}album,'')) LIKE ? \
+          OR lower(coalesce({p}genre,'')) LIKE ? \
+          OR lower(coalesce({p}album_artist,'')) LIKE ?)",
+        p = prefix
+    );
+    let sql = vec![clause; terms.len()].join(" AND ");
+    // Each term binds its `%term%` once per column (5 columns).
+    let params = terms.into_iter().flat_map(|t| std::iter::repeat(t).take(5)).collect();
+    (sql, params)
+}
+
 fn row_to_track(r: &Row) -> rusqlite::Result<Track> {
     let format: String = r.get("format")?;
     Ok(Track {
@@ -3086,6 +3259,26 @@ mod tests {
     }
 
     #[test]
+    fn track_has_art_sees_embedded_and_external() {
+        let cat = Catalog::open(":memory:").unwrap();
+
+        // No embedded cover, no fetched art → no art.
+        let (bare, _) = cat.upsert_scanned(&scanned("/bare.mp3", "A", "House", 1000)).unwrap();
+        assert!(!cat.track_has_art(bare).unwrap());
+
+        // Embedded cover counts.
+        let mut s = scanned("/embed.mp3", "B", "House", 1000);
+        s.tags.has_cover = true;
+        let (embed, _) = cat.upsert_scanned(&s).unwrap();
+        assert!(cat.track_has_art(embed).unwrap());
+
+        // A fetched external cover counts even with no embedded art.
+        cat.set_external_artwork(bare, "discogs", None, None, Some(&[1, 2, 3]), Some(&[4, 5, 6]))
+            .unwrap();
+        assert!(cat.track_has_art(bare).unwrap());
+    }
+
+    #[test]
     fn rescan_refreshes_tags_when_not_user_edited() {
         let cat = Catalog::open(":memory:").unwrap();
         let (id, _) = cat.upsert_scanned(&scanned("/b.mp3", "A1", "House", 1000)).unwrap();
@@ -3205,6 +3398,32 @@ mod tests {
 
         // A folder holds no tracks.
         assert!(cat.list_playlist_tracks(folder, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_matches_terms_across_fields() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let mut s = scanned("/apple.mp3", "DJ Pear", "House", 1000);
+        s.tags.title = Some("Apple".into());
+        let (apple, _) = cat.upsert_scanned(&s).unwrap();
+        // A decoy that shares the title word but not the artist.
+        let mut other = scanned("/apple2.mp3", "Someone Else", "House", 1000);
+        other.tags.title = Some("Apple".into());
+        cat.upsert_scanned(&other).unwrap();
+
+        // Each whitespace term may match a different field, in any order: "apple"
+        // is the title, "dj"/"pear" the artist. The old single-substring filter
+        // failed this because no one column held the whole phrase.
+        for q in ["apple dj pear", "pear apple", "DJ APPLE"] {
+            let hits = cat.list_tracks(Some(q), 0).unwrap();
+            assert_eq!(hits.len(), 1, "query {q:?} should match only the Pear track");
+            assert_eq!(hits[0].id, apple, "query {q:?}");
+        }
+
+        // A term that matches nothing rules the row out (terms are AND-ed).
+        assert!(cat.list_tracks(Some("apple banana"), 0).unwrap().is_empty());
+        // A blank / whitespace-only query still returns everything.
+        assert_eq!(cat.list_tracks(Some("   "), 0).unwrap().len(), 2);
     }
 
     #[test]

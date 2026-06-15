@@ -16,8 +16,8 @@ pub mod scan;
 pub mod tag;
 
 pub use catalog::{
-    best_copy_index, Catalog, DuplicateGroup, DuplicateKind, MissingArtwork, MissingTrack,
-    ScannedTrack,
+    best_copy_index, AlbumSibling, Catalog, DuplicateGroup, DuplicateKind, MissingArtwork,
+    MissingTrack, ScannedTrack,
 };
 pub use error::{Error, Result};
 pub use model::key::{Camelot, Key, Mode, PitchClass};
