@@ -1,21 +1,37 @@
 #!/usr/bin/env bash
-# Build a macOS .app bundle for Ordnung.
+# Build, sign, and install the macOS .app bundle for Ordnung.
+#
+# Usage:
+#   tools/build-app.sh            # build → sign → install to /Applications → relaunch
+#   tools/build-app.sh --no-install   # build the local Ordnung.app only, don't touch /Applications
+#   tools/build-app.sh --no-launch    # install but don't relaunch the app
 #
 # What it does:
 #   1. cargo build --release -p ordnung-gui
-#   2. Rasterizes tools/icon.svg → 1024×1024 PNG
-#   3. Generates a full macOS iconset (16, 32, 64, 128, 256, 512, 1024)
-#   4. Packs the iconset → Ordnung.icns via `iconutil`
-#   5. Assembles the .app: Contents/MacOS, Contents/Resources, Info.plist
+#   2. Rasterizes tools/icon.svg → 1024×1024 PNG, regenerates the iconset → .icns
+#   3. Assembles the .app (Contents/MacOS, Resources, Info.plist)
+#   4. Deep ad-hoc codesigns with a stable identity (icon + permissions persist)
+#   5. Installs to /Applications, registers with LaunchServices, relaunches
 #
-# Run again any time after rebuilding the binary; the .app is rewritten in place.
+# Run it any time after editing the GUI; one command refreshes the Dock app.
 
 set -euo pipefail
+
+install=1
+launch=1
+for arg in "$@"; do
+  case "$arg" in
+    --no-install) install=0 ;;
+    --no-launch)  launch=0 ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
 src_icon="$here/tools/icon.svg"
 bin="$here/target/release/Ordnung"
 out_app="$here/Ordnung.app"
+installed_app="/Applications/Ordnung.app"
 work="$here/tools/.app-build"
 
 echo "==> Rendering icons"
@@ -83,6 +99,59 @@ cat >"$out_app/Contents/Info.plist" <<'PLIST'
 PLIST
 
 rm -rf "$work"
+
+# Deep ad-hoc codesign with a STABLE identifier. Without this the bundle carries
+# only the linker's per-build ad-hoc signature, whose identifier changes every
+# rebuild — macOS then treats each build as a different app and re-prompts for
+# file-access / media-key permissions and can drop the Dock icon to a generic
+# tile. Pinning `--identifier app.ordnung.gui` keeps one stable identity so
+# permissions and the custom icon persist across rebuilds.
+echo "==> Code signing (ad-hoc, stable identity)"
+codesign --force --deep --sign - \
+  --identifier app.ordnung.gui \
+  "$out_app"
+codesign --verify --deep --strict "$out_app" && echo "    signature OK"
+
+# Nudge LaunchServices/Finder to re-read the bundle icon instead of serving a
+# stale cached tile.
+touch "$out_app"
+
 echo
 echo "Built: $out_app"
-echo "Drag it to /Applications, then to the Dock to pin."
+
+if [[ "$install" -eq 0 ]]; then
+  echo "Skipped install (--no-install). Drag it to /Applications to pin."
+  exit 0
+fi
+
+# Quit a running instance so we can overwrite the bundle and relaunch fresh code.
+if pgrep -x Ordnung >/dev/null 2>&1; then
+  echo "==> Quitting running Ordnung"
+  osascript -e 'tell application "Ordnung" to quit' >/dev/null 2>&1 || killall Ordnung 2>/dev/null || true
+  # give it a moment to release the bundle
+  for _ in 1 2 3 4 5; do pgrep -x Ordnung >/dev/null 2>&1 || break; sleep 0.3; done
+fi
+
+echo "==> Installing to $installed_app"
+rm -rf "$installed_app"
+cp -R "$out_app" "$installed_app"
+
+# Re-register so Finder/Dock pick up the current icon + identity immediately.
+lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+[[ -x "$lsregister" ]] && "$lsregister" -f "$installed_app" >/dev/null 2>&1 || true
+touch "$installed_app"
+
+# Pin to the Dock once (idempotent).
+if ! defaults read com.apple.dock persistent-apps 2>/dev/null | grep -q "Ordnung.app"; then
+  echo "==> Pinning to Dock"
+  defaults write com.apple.dock persistent-apps -array-add "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>$installed_app</string><key>_CFURLStringType</key><integer>0</integer></dict></dict></dict>"
+  killall Dock 2>/dev/null || true
+fi
+
+if [[ "$launch" -eq 1 ]]; then
+  echo "==> Launching"
+  open "$installed_app"
+fi
+
+echo
+echo "Done: $installed_app (installed, signed, pinned)."
