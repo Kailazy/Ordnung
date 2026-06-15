@@ -72,7 +72,6 @@ impl App {
         self.refresh_selected();
     }
 
-
     /// Apply edited title/artist/album to the catalog (and update_tags marks the
     /// row user_edited so rescans don't overwrite it). Returns user-facing error.
     pub(crate) fn save_name(&mut self, modal: &mut ConvertModal) {
@@ -103,13 +102,20 @@ impl App {
         }
         modal.track_label = format!(
             "{} — {}",
-            if modal.edit_artist.trim().is_empty() { "Unknown" } else { modal.edit_artist.trim() },
-            if modal.edit_title.trim().is_empty() { "Untitled" } else { modal.edit_title.trim() },
+            if modal.edit_artist.trim().is_empty() {
+                "Unknown"
+            } else {
+                modal.edit_artist.trim()
+            },
+            if modal.edit_title.trim().is_empty() {
+                "Untitled"
+            } else {
+                modal.edit_title.trim()
+            },
         );
         modal.name_status = Some("Saved to catalog (rescan-safe).".into());
         modal.name_is_error = false;
     }
-
 
     /// The right-hand inspector — every standardized metadata field we have
     /// for the selected track. Empty fields are hidden so visible content is
@@ -117,7 +123,11 @@ impl App {
     /// Returns `Some((id, source_path))` when the user clicked "embed cover into
     /// file" this frame, so the caller can run the writeback after this `&mut
     /// self` borrow ends.
-    pub(crate) fn draw_inspector(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) -> Option<InspectorAction> {
+    pub(crate) fn draw_inspector(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+    ) -> Option<InspectorAction> {
         ui.heading("Track inspector");
         ui.add_space(4.0);
 
@@ -145,10 +155,7 @@ impl App {
         };
 
         let Some(t) = &self.selected_track else {
-            ui.label(
-                egui::RichText::new("Click a track in the table to inspect.")
-                    .weak(),
-            );
+            ui.label(egui::RichText::new("Click a track in the table to inspect.").weak());
             return None;
         };
         let id = t.id;
@@ -162,11 +169,7 @@ impl App {
             ))
             .strong(),
         );
-        ui.label(
-            egui::RichText::new(t.source_path.clone())
-                .small()
-                .weak(),
-        );
+        ui.label(egui::RichText::new(t.source_path.clone()).small().weak());
 
         // Cover art preview. Decoded off-thread (see `cover_full_texture`): once
         // ready we show the high-quality image (embedded art wins, fetched
@@ -203,7 +206,7 @@ impl App {
             ui.add_enabled_ui(!busy, |ui| {
                 if ui
                     .button("⬇ Embed fetched cover into file")
-                    .on_hover_text("Writes the fetched cover art into the source file's tags")
+                    .on_hover_note("Writes the fetched cover art into the source file's tags")
                     .clicked()
                 {
                     action = Some(InspectorAction::EmbedCover(id, source_path.clone()));
@@ -237,14 +240,16 @@ impl App {
                 ui.add_enabled_ui(dirty && !busy, |ui| {
                     if ui
                         .button("Save")
-                        .on_hover_text("Save these edits to the catalog (does not touch the source file)")
+                        .on_hover_note(
+                            "Save these edits to the catalog (does not touch the source file)",
+                        )
                         .clicked()
                     {
                         action = Some(InspectorAction::SaveToCatalog(id));
                     }
                     if ui
                         .button("⬇ Write to source file")
-                        .on_hover_text(
+                        .on_hover_note(
                             "Save to the catalog AND write these tags into the original \
                              file on disk. This modifies the source file.",
                         )
@@ -286,9 +291,13 @@ impl App {
                     inspector_section(ui, "Spectral quality", |ui| {
                         let verdict = a.transcode_verdict();
                         let (label, color) = match verdict {
-                            TranscodeVerdict::Clean => {
-                                ("Full-band — looks lossless", egui::Color32::from_rgb(120, 200, 130))
-                            }
+                            // Clean and Inconclusive both mean "no transcode
+                            // signature" — band-limiting is a mastering choice, not
+                            // a flag — so they read identically here.
+                            TranscodeVerdict::Clean | TranscodeVerdict::Inconclusive => (
+                                "No transcode signature",
+                                egui::Color32::from_rgb(120, 200, 130),
+                            ),
                             TranscodeVerdict::Suspect => (
                                 "Cutoff ~20 kHz — possible 320k transcode",
                                 egui::Color32::from_rgb(220, 190, 90),
@@ -297,17 +306,17 @@ impl App {
                                 "Brick wall — likely lossy transcode",
                                 egui::Color32::from_rgb(225, 110, 100),
                             ),
-                            TranscodeVerdict::Inconclusive => (
-                                "Band-limited (gentle roll-off)",
-                                egui::Color32::from_rgb(150, 160, 175),
-                            ),
                         };
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Verdict:").weak().small());
                             ui.label(egui::RichText::new(label).color(color).strong());
                         });
                         if let Some(hz) = a.lowpass_hz {
-                            inspector_row(ui, "Low-pass cutoff", &format!("{:.1} kHz", hz / 1000.0));
+                            inspector_row(
+                                ui,
+                                "Low-pass cutoff",
+                                &format!("{:.1} kHz", hz / 1000.0),
+                            );
                         }
                         if matches!(
                             verdict,
@@ -466,7 +475,6 @@ impl App {
         action
     }
 
-
     /// Imprint the fetched (external) full-resolution cover into the track's
     /// source file via the core `tag` engine — the GUI counterpart to the CLI's
     /// `tag --write --art`. Runs inline (single quick file write) and reports
@@ -530,8 +538,10 @@ impl App {
                 if let Err(e) = catalog.clear_external_artwork(id) {
                     self.status = format!("Embedded cover, but failed to clear fetched art: {e}");
                 } else if !verified {
-                    self.status =
-                        format!("Embedded cover into {} (read-back unverified)", path.display());
+                    self.status = format!(
+                        "Embedded cover into {} (read-back unverified)",
+                        path.display()
+                    );
                 }
                 // The file now carries the catalog's tags + cover, so this track
                 // is fully synced — drop the user_edited flag (set when the art
@@ -551,14 +561,20 @@ impl App {
             Err(e) => self.status = format!("Embed failed: {e}"),
         }
     }
-
 }
 
 /// Returns true if any "credit"-type field is populated.
 pub(crate) fn has_any_credit(g: &ordnung_core::Tags) -> bool {
     [
-        &g.composer, &g.remixer, &g.producer, &g.conductor, &g.lyricist,
-        &g.arranger, &g.performer, &g.mix_dj, &g.writer,
+        &g.composer,
+        &g.remixer,
+        &g.producer,
+        &g.conductor,
+        &g.lyricist,
+        &g.arranger,
+        &g.performer,
+        &g.mix_dj,
+        &g.writer,
     ]
     .iter()
     .any(|v| has_value(v))
@@ -573,7 +589,11 @@ pub(crate) fn has_any_dj(g: &ordnung_core::Tags) -> bool {
 
 pub(crate) fn has_any_release(g: &ordnung_core::Tags) -> bool {
     [
-        &g.isrc, &g.catalog_number, &g.barcode, &g.publisher, &g.copyright,
+        &g.isrc,
+        &g.catalog_number,
+        &g.barcode,
+        &g.publisher,
+        &g.copyright,
         &g.release_country,
     ]
     .iter()
@@ -598,8 +618,11 @@ pub(crate) fn has_any_mb(g: &ordnung_core::Tags) -> bool {
 
 pub(crate) fn has_any_encoder(g: &ordnung_core::Tags) -> bool {
     [
-        &g.encoded_by, &g.encoder_software, &g.encoder_settings,
-        &g.original_artist, &g.original_album,
+        &g.encoded_by,
+        &g.encoder_software,
+        &g.encoder_settings,
+        &g.original_artist,
+        &g.original_album,
     ]
     .iter()
     .any(|v| has_value(v))
@@ -607,8 +630,14 @@ pub(crate) fn has_any_encoder(g: &ordnung_core::Tags) -> bool {
 
 pub(crate) fn has_any_content(g: &ordnung_core::Tags) -> bool {
     [
-        &g.subtitle, &g.description, &g.language, &g.script, &g.work,
-        &g.movement, &g.comment, &g.lyrics,
+        &g.subtitle,
+        &g.description,
+        &g.language,
+        &g.script,
+        &g.work,
+        &g.movement,
+        &g.comment,
+        &g.lyrics,
     ]
     .iter()
     .any(|v| has_value(v))
@@ -618,7 +647,6 @@ pub(crate) fn has_any_content(g: &ordnung_core::Tags) -> bool {
 pub(crate) fn has_value(v: &Option<String>) -> bool {
     v.as_deref().is_some_and(|s| !s.trim().is_empty())
 }
-
 
 pub(crate) fn inspector_section(
     ui: &mut egui::Ui,
@@ -630,25 +658,18 @@ pub(crate) fn inspector_section(
     add_body(ui);
 }
 
-
 pub(crate) fn inspector_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(format!("{label}:"))
-                .weak()
-                .small(),
-        );
+        ui.label(egui::RichText::new(format!("{label}:")).weak().small());
         ui.label(value);
     });
 }
-
 
 pub(crate) fn opt_row(ui: &mut egui::Ui, label: &str, value: &Option<String>) {
     if let Some(s) = value.as_deref().filter(|s| !s.trim().is_empty()) {
         inspector_row(ui, label, s);
     }
 }
-
 
 /// One editable label + single-line field row inside the inspector's edit grid.
 /// `ui.end_row()` advances the surrounding `egui::Grid`.
@@ -661,5 +682,3 @@ pub(crate) fn edit_row(ui: &mut egui::Ui, label: &str, value: &mut String) {
     );
     ui.end_row();
 }
-
-

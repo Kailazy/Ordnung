@@ -51,7 +51,6 @@ impl App {
         }
     }
 
-
     /// Render the bottom now-playing bar: artwork, title/artist, a play/pause
     /// button and a draggable scrubber. Shown only while the engine still has the
     /// `now_playing` track loaded (or decoding). The seek fires on scrub release so
@@ -263,11 +262,7 @@ impl App {
 
                     // Dismiss the player.
                     ui.add_space(4.0);
-                    if ui
-                        .small_button("✕")
-                        .on_hover_text("Close player")
-                        .clicked()
-                    {
+                    if ui.small_button("✕").on_hover_note("Close player").clicked() {
                         close = true;
                     }
                 });
@@ -291,13 +286,9 @@ impl App {
             self.scrub = None;
         }
     }
-
-
 }
 
 pub(crate) fn fmt_duration(ms: u64) -> String {
     let secs = ms / 1000;
     format!("{}:{:02}", secs / 60, secs % 60)
 }
-
-

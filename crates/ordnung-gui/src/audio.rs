@@ -383,7 +383,9 @@ impl AudioEngine {
         } else {
             let playing = self.is_playing();
             self.reported_playing = Some(playing);
-            let progress = Some(MediaPosition(Duration::from_secs_f32(self.position().max(0.0))));
+            let progress = Some(MediaPosition(Duration::from_secs_f32(
+                self.position().max(0.0),
+            )));
             if playing {
                 MediaPlayback::Playing { progress }
             } else {

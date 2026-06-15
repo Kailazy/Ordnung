@@ -98,8 +98,6 @@ impl App {
         }
         self.reload();
     }
-
-
 }
 
 /// The sidebar/toolbar accent — matches the "Add songs…" primary button so the
@@ -119,6 +117,21 @@ pub(crate) fn nav_button(
     text_size: f32,
 ) -> egui::Response {
     let w = ui.available_width();
+    nav_button_sized(ui, label, selected, w, height, text_size)
+}
+
+/// Like [`nav_button`] but with an explicit tile `width` instead of filling the
+/// available space — used when two tiles share a row (e.g. the big "All songs"
+/// tile alongside the smaller "Recent" tile).
+pub(crate) fn nav_button_sized(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: bool,
+    width: f32,
+    height: f32,
+    text_size: f32,
+) -> egui::Response {
+    let w = width;
     let mut text = egui::RichText::new(label).size(text_size);
     if selected {
         text = text.color(egui::Color32::WHITE).strong();
@@ -134,7 +147,22 @@ pub(crate) fn nav_button(
     // for the (left-aligned) content; restore it so only this button is affected.
     let prev_padding = ui.spacing().button_padding;
     ui.spacing_mut().button_padding.x = 12.0;
+
+    // The tile fills the sidebar's full width, so its left/right edges sit on the
+    // panel clip boundary. egui's default hover/active state draws a 1px outline
+    // on those edges — which gets clipped, leaving a border "cut out" on the sides.
+    // Swap that edge-stroke feedback for a subtle fill so hover reads cleanly with
+    // no clipped border. Saved and restored so only this button is affected.
+    let prev_widgets = ui.visuals().widgets.clone();
+    {
+        let w = &mut ui.visuals_mut().widgets;
+        w.hovered.bg_stroke = egui::Stroke::NONE;
+        w.hovered.weak_bg_fill = egui::Color32::from_gray(64);
+        w.active.bg_stroke = egui::Stroke::NONE;
+        w.active.weak_bg_fill = egui::Color32::from_gray(74);
+    }
     let resp = ui.add(btn);
+    ui.visuals_mut().widgets = prev_widgets;
     ui.spacing_mut().button_padding = prev_padding;
     resp
 }
@@ -174,7 +202,6 @@ pub(crate) fn draw_playlist_nodes(
     }
 }
 
-
 /// If `p` is the entry currently being renamed, draw its inline text editor and
 /// return `true` (the caller should skip drawing the normal row).
 ///
@@ -195,7 +222,11 @@ pub(crate) fn draw_inline_rename(
     let Some(state) = renaming.as_mut().filter(|s| s.id == p.id) else {
         return false;
     };
-    let hint = if p.is_folder { "New folder" } else { "New playlist" };
+    let hint = if p.is_folder {
+        "New folder"
+    } else {
+        "New playlist"
+    };
     let resp = ui.add(
         egui::TextEdit::singleline(&mut state.buf)
             .hint_text(hint)
@@ -225,7 +256,6 @@ pub(crate) fn draw_inline_rename(
     true
 }
 
-
 /// One playlist row: inline-rename when active, otherwise a selectable label
 /// that highlights on drag-hover and adds the dragged tracks when dropped on.
 pub(crate) fn draw_playlist_leaf(
@@ -237,7 +267,7 @@ pub(crate) fn draw_playlist_leaf(
 ) {
     let selected = *view == LibraryView::Playlist(p.id);
     let resp = nav_button(ui, &format!("♪  {}", p.name), selected, 30.0, 13.5)
-        .on_hover_text("Click to view. Drag tracks here to add them.");
+        .on_hover_note("Click to view. Drag tracks here to add them.");
     if resp.dnd_hover_payload::<DraggedTracks>().is_some() {
         // Inset the highlight so the stroke sits inside the tile's rounded box
         // (drawn on the edge, not floating outside it) and the corners stay round.
@@ -258,11 +288,11 @@ pub(crate) fn draw_playlist_leaf(
     resp.context_menu(|ui| {
         if ui.button("Rename").clicked() {
             *renaming = Some(Renaming {
-            id: p.id,
-            buf: p.name.clone(),
-            is_new: false,
-            needs_focus: true,
-        });
+                id: p.id,
+                buf: p.name.clone(),
+                is_new: false,
+                needs_focus: true,
+            });
             ui.close_menu();
         }
         if ui.button("Delete").clicked() {
@@ -272,7 +302,6 @@ pub(crate) fn draw_playlist_leaf(
     });
     ui.add_space(3.0);
 }
-
 
 pub(crate) fn folder_context_menu(
     ui: &mut egui::Ui,
@@ -299,5 +328,3 @@ pub(crate) fn folder_context_menu(
         ui.close_menu();
     }
 }
-
-

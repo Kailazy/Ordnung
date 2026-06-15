@@ -112,8 +112,9 @@ mod imp {
             // The file URL is the payload rekordbox/Finder read on drop.
             let url: Retained<NSURL> = unsafe { NSURL::fileURLWithPath(&path_str) };
             let writer: &ProtocolObject<dyn NSPasteboardWriting> = ProtocolObject::from_ref(&*url);
-            let item: Retained<NSDraggingItem> =
-                unsafe { NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), writer) };
+            let item: Retained<NSDraggingItem> = unsafe {
+                NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), writer)
+            };
 
             // Finder icon as the drag image, staggered per item.
             let icon: Retained<NSImage> = unsafe { workspace.iconForFile(&path_str) };

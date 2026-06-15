@@ -10,7 +10,6 @@ pub(crate) fn non_empty(s: &str) -> Option<String> {
     }
 }
 
-
 pub(crate) fn short<'a>(s: &'a str, fallback: &'a str) -> &'a str {
     if s.is_empty() {
         fallback
@@ -18,7 +17,6 @@ pub(crate) fn short<'a>(s: &'a str, fallback: &'a str) -> &'a str {
         s
     }
 }
-
 
 /// Clip `s` to at most `max` characters, appending an ellipsis when cut. Counts
 /// chars (not bytes) so it never splits a multibyte glyph. Used by the player
@@ -31,16 +29,11 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     format!("{}…", kept.trim_end())
 }
 
-
 /// Sensible default: convert to a different format than the source (mp3 → flac,
 /// flac → mp3, anything else → mp3).
-pub(crate) fn default_target_for(src: Format) -> Format {
-    match src {
-        Format::Mp3 => Format::Flac,
-        _ => Format::Mp3,
-    }
+pub(crate) fn default_target_for(_src: Format) -> Format {
+    Format::Aiff
 }
-
 
 pub(crate) fn format_label(f: Format) -> &'static str {
     match f {
@@ -53,7 +46,6 @@ pub(crate) fn format_label(f: Format) -> &'static str {
     }
 }
 
-
 pub(crate) fn default_bitrate_hint(f: Format) -> &'static str {
     match f {
         Format::Mp3 => "320",
@@ -62,21 +54,21 @@ pub(crate) fn default_bitrate_hint(f: Format) -> &'static str {
     }
 }
 
-
 /// Reveal a file in macOS Finder, selecting it in its containing folder.
 /// Best-effort: a spawn failure is ignored — this is a convenience shortcut, not
 /// a catalog operation, and never touches the file itself.
 pub(crate) fn reveal_in_finder(path: &Path) {
-    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
 }
-
 
 /// Open a URL in the user's default browser. Best-effort, like `reveal_in_finder`:
 /// a spawn failure is ignored — this is a convenience shortcut, not a catalog op.
 pub(crate) fn open_url(url: &str) {
     let _ = std::process::Command::new("open").arg(url).spawn();
 }
-
 
 /// Build the free-text query for a Discogs release search from a track's tags.
 /// Joins artist with album (preferred) or title so the search lands on the right
@@ -93,7 +85,6 @@ pub(crate) fn soulseek_query(artist: &str, title: &str) -> String {
     }
 }
 
-
 pub(crate) fn discogs_search_query(artist: &str, album: &str, title: &str) -> String {
     let release = if album.trim().is_empty() {
         title.trim()
@@ -108,7 +99,6 @@ pub(crate) fn discogs_search_query(artist: &str, album: &str, title: &str) -> St
         .join(" ")
 }
 
-
 /// The Discogs web URL to open for a track. Deep-links to the exact release page
 /// when one was fetched (`release_id` from a prior artwork run); otherwise opens
 /// a Discogs release search seeded with `query`.
@@ -121,7 +111,6 @@ pub(crate) fn discogs_url(release_id: Option<&str>, query: &str) -> String {
         ),
     }
 }
-
 
 /// Minimal RFC-3986 percent-encoding for a query value: keep the unreserved set,
 /// `%XX`-encode everything else (spaces included). Enough for a Discogs search
@@ -138,7 +127,6 @@ pub(crate) fn percent_encode(s: &str) -> String {
     }
     out
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -183,4 +171,3 @@ mod tests {
         assert_eq!(percent_encode("A-Z_0.9~"), "A-Z_0.9~");
     }
 }
-

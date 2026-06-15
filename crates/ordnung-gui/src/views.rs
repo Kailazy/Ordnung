@@ -15,8 +15,10 @@ fn confirm_window(
     let win = match pos {
         // Nudge up-left so the cursor sits inside the dialog body, a short hop
         // from the confirm button row.
-        Some(p) => win.fixed_pos(p - egui::vec2(28.0, 16.0)),
-        None => win.anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)),
+        Some(p) => win.default_pos(p - egui::vec2(28.0, 16.0)),
+        None => win
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center()),
     };
     win.show(ctx, add_contents);
 }
@@ -31,7 +33,6 @@ impl App {
             .unwrap_or_default();
         self.missing_count = self.missing_labels.len() as u64;
     }
-
 
     /// Render the Duplicates view: grouped blocks (identical audio first, then
     /// same-song variants). Each group proposes keeping the ★ best copy and
@@ -112,28 +113,29 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
-        let make_copy = |t: &Track, audio: &Option<AudioEngine>, is_best: bool, marked_delete: bool| {
-            let (qv, qcut, qsrc) = quality.get(&t.id).copied().unwrap_or((None, None, None));
-            CopyView {
-                id: t.id,
-                fmt: format_label(t.format).to_string(),
-                br: t
-                    .properties
-                    .as_ref()
-                    .and_then(|p| p.bitrate_kbps)
-                    .map(|b| format!("{b}k"))
-                    .unwrap_or_else(|| "—".into()),
-                path: PathBuf::from(&t.source_path),
-                playing: audio
-                    .as_ref()
-                    .is_some_and(|a| matches!(a.state_for(t.id), PlayState::Playing)),
-                is_best,
-                marked_delete,
-                quality: qv,
-                quality_cut_hz: qcut,
-                quality_src: qsrc,
-            }
-        };
+        let make_copy =
+            |t: &Track, audio: &Option<AudioEngine>, is_best: bool, marked_delete: bool| {
+                let (qv, qcut, qsrc) = quality.get(&t.id).copied().unwrap_or((None, None, None));
+                CopyView {
+                    id: t.id,
+                    fmt: format_label(t.format).to_string(),
+                    br: t
+                        .properties
+                        .as_ref()
+                        .and_then(|p| p.bitrate_kbps)
+                        .map(|b| format!("{b}k"))
+                        .unwrap_or_else(|| "—".into()),
+                    path: PathBuf::from(&t.source_path),
+                    playing: audio
+                        .as_ref()
+                        .is_some_and(|a| matches!(a.state_for(t.id), PlayState::Playing)),
+                    is_best,
+                    marked_delete,
+                    quality: qv,
+                    quality_cut_hz: qcut,
+                    quality_src: qsrc,
+                }
+            };
         let groups: Vec<GroupView> = self
             .dup_groups
             .iter()
@@ -169,9 +171,18 @@ impl App {
             })
             .collect();
 
-        let identical_n = groups.iter().filter(|g| g.kind == DuplicateKind::Identical).count();
-        let variant_n = groups.iter().filter(|g| g.kind == DuplicateKind::SameTrack).count();
-        let acoustic_n = groups.iter().filter(|g| g.kind == DuplicateKind::Acoustic).count();
+        let identical_n = groups
+            .iter()
+            .filter(|g| g.kind == DuplicateKind::Identical)
+            .count();
+        let variant_n = groups
+            .iter()
+            .filter(|g| g.kind == DuplicateKind::SameTrack)
+            .count();
+        let acoustic_n = groups
+            .iter()
+            .filter(|g| g.kind == DuplicateKind::Acoustic)
+            .count();
         // Total copies marked for deletion across every group — drives the
         // "Delete N marked" commit button.
         let marked_total = groups
@@ -219,7 +230,7 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("↻ Recompute")
-                    .on_hover_text("Re-scan the catalog for duplicates")
+                    .on_hover_note("Re-scan the catalog for duplicates")
                     .clicked()
                 {
                     recompute = true;
@@ -228,7 +239,7 @@ impl App {
                     let n = unanalyzed.len();
                     if ui
                         .button(format!("⚡ Analyze {n} for quality"))
-                        .on_hover_text(
+                        .on_hover_note(
                             "Scan every copy that hasn't been checked for a lossy-transcode \
                              signature; the quality chips fill in when it finishes",
                         )
@@ -250,7 +261,7 @@ impl App {
                     .fill(egui::Color32::from_rgb(0xB0, 0x30, 0x30)),
                 );
                 if resp
-                    .on_hover_text(
+                    .on_hover_note(
                         "Move every copy marked Delete to the Trash (recoverable) in the \
                          background. The kept copy in each group inherits its playlist slots.",
                     )
@@ -286,66 +297,100 @@ impl App {
                 "{identical_n} identical-audio · {variant_n} same-track variant · \
                  {acoustic_n} sounds-identical group(s).  \
                  Each group keeps the ★ best copy (lossless, else highest bitrate) and marks \
-                 the rest for deletion — click any ✓ Keep / 🗑 Delete chip to change a \
-                 decision. When you're happy, hit \"Delete N marked\" to trash every marked \
-                 copy at once (recoverable, runs in the background)."
+                 the rest for deletion — click any copy's tile to keep or reject it. When \
+                 you're happy, hit \"Delete N marked\" to trash every marked copy at once \
+                 (recoverable, runs in the background)."
             ))
             .weak(),
         );
         ui.separator();
 
-        // Render one copy as a row: an explicit Keep | Delete pair, the ★ best
-        // badge, the format/bitrate, the transcode-quality chip (or an inline
-        // Analyze), and Preview / Reveal. The pair shows both choices on every row
-        // and highlights the active one, so it's unambiguous which file is kept and
-        // which is deleted — and either (or both) can be set to Delete. Editing a
-        // decision is instant: it only touches in-memory state, so it never blocks.
-        // Marked copies read red with a struck-out filename so decisions scan fast.
-        fn render_copy(ui: &mut egui::Ui, c: &CopyView, audio_enabled: bool, acts: &mut Vec<Act>) {
+        // Render one copy as a node tile: a click-to-toggle card showing its
+        // keep/reject state, the ★ best badge, format + bitrate, the transcode-
+        // quality chip (or an inline Analyze), and Preview / Reveal. Clicking
+        // anywhere on the card flips keep⇄reject — the whole tile is the target, so
+        // triaging a group is one click per copy. The inner buttons (Analyze /
+        // Preview / Reveal) keep their own clicks and never toggle. Rejected tiles
+        // read red and dim with a struck-out filename so decisions scan at a glance.
+        // Toggling is pure in-memory state — it never touches disk, so it never blocks.
+        fn render_tile(ui: &mut egui::Ui, c: &CopyView, audio_enabled: bool, acts: &mut Vec<Act>) {
+            const TILE_W: f32 = 252.0;
+            const TILE_H: f32 = 104.0;
+            let kept = !c.marked_delete;
+            let green = egui::Color32::from_rgb(0x3A, 0x8A, 0x4E);
+            let red = egui::Color32::from_rgb(0xB0, 0x40, 0x40);
+
+            // Reserve the tile rect first so the inner buttons, added afterwards,
+            // sit on top and win their own clicks; the surrounding card click then
+            // only fires when it lands on bare tile, not on a button.
+            let (rect, tile) =
+                ui.allocate_exact_size(egui::vec2(TILE_W, TILE_H), egui::Sense::click());
+            let tile = tile.on_hover_cursor(egui::CursorIcon::PointingHand);
+            let hovered = tile.hovered();
+            // Keep = neutral card with a green edge; reject = red-tinted and darker.
+            let (fill, edge) = if kept {
+                (
+                    egui::Color32::from_gray(if hovered { 0x30 } else { 0x29 }),
+                    if hovered {
+                        green.gamma_multiply(1.4)
+                    } else {
+                        green
+                    },
+                )
+            } else {
+                (
+                    egui::Color32::from_rgb(0x33, 0x24, 0x24),
+                    if hovered {
+                        red.gamma_multiply(1.4)
+                    } else {
+                        red
+                    },
+                )
+            };
+            ui.painter().rect(
+                rect,
+                egui::Rounding::same(8.0),
+                fill,
+                egui::Stroke::new(if kept { 1.5 } else { 2.0 }, edge),
+            );
+
+            let mut inner_clicked = false;
+            let mut content = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect.shrink(9.0))
+                    .layout(egui::Layout::top_down(egui::Align::Min))
+                    .id_salt(("dup-tile", c.id)),
+            );
+            let ui = &mut content;
+            ui.spacing_mut().item_spacing.y = 5.0;
+
+            // Row 1: keep/reject state pill · ★ best · format + bitrate (right).
             ui.horizontal(|ui| {
-                // A two-button segmented control. The selected side is filled and
-                // white; the other is a plain, dim button you click to switch. Both
-                // labels are always visible, so the row states the outcome outright
-                // ("this file will be kept / deleted") rather than encoding it in a
-                // single toggle's current colour.
-                let green = egui::Color32::from_rgb(0x2E, 0x6E, 0x3A);
-                let red = egui::Color32::from_rgb(0xB0, 0x30, 0x30);
-                let dim = egui::Color32::from_gray(0x9A);
-                let seg = |ui: &mut egui::Ui, text: &str, active: bool, active_fill: egui::Color32| {
-                    let label = egui::RichText::new(text).small().color(if active {
-                        egui::Color32::WHITE
-                    } else {
-                        dim
-                    });
-                    let mut btn = egui::Button::new(label).min_size(egui::vec2(58.0, 0.0));
-                    btn = if active {
-                        btn.fill(active_fill)
-                    } else {
-                        btn.fill(egui::Color32::TRANSPARENT)
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(0x55)))
-                    };
-                    ui.add(btn)
+                let (pill, pill_bg) = if kept {
+                    ("✓ KEEP", green)
+                } else {
+                    ("🗑 REJECT", red)
                 };
-                if seg(ui, "✓ Keep", !c.marked_delete, green)
-                    .on_hover_text("Keep this file")
-                    .clicked()
-                {
-                    acts.push(Act::SetDelete(c.id, false));
-                }
-                if seg(ui, "🗑 Delete", c.marked_delete, red)
-                    .on_hover_text("Move this file to the Trash on commit")
-                    .clicked()
-                {
-                    acts.push(Act::SetDelete(c.id, true));
-                }
+                ui.label(
+                    egui::RichText::new(pill)
+                        .small()
+                        .strong()
+                        .color(egui::Color32::WHITE)
+                        .background_color(pill_bg),
+                );
                 if c.is_best {
-                    ui.label(egui::RichText::new("★").color(egui::Color32::from_rgb(0xD8, 0xB0, 0x4A)))
-                        .on_hover_text("Best copy — lossless, else highest bitrate");
+                    ui.label(
+                        egui::RichText::new("★").color(egui::Color32::from_rgb(0xD8, 0xB0, 0x4A)),
+                    )
+                    .on_hover_note("Best copy — lossless, else highest bitrate");
                 }
-                ui.monospace(format!("{:>4} {:>5}", c.fmt, c.br));
-                // Transcode-quality chip — the same verdict the Library shows, so
-                // you can spot a lossy copy masquerading among the duplicates. When
-                // a copy hasn't been analyzed for it, offer an inline Analyze.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.monospace(egui::RichText::new(format!("{} {}", c.fmt, c.br)).strong());
+                });
+            });
+
+            // Row 2: transcode-quality chip (or inline Analyze) · Preview · Reveal.
+            ui.horizontal(|ui| {
                 match c.quality {
                     Some(v) => {
                         let (label, bg) = quality_chip(v);
@@ -355,33 +400,59 @@ impl App {
                                 .color(chip_text_color(bg))
                                 .background_color(bg),
                         )
-                        .on_hover_text(quality_blurb(v, c.quality_cut_hz, c.quality_src));
+                        .on_hover_note(quality_blurb(
+                            v,
+                            c.quality_cut_hz,
+                            c.quality_src,
+                        ));
                     }
                     None => {
                         if ui
-                            .button("Analyze")
-                            .on_hover_text("Scan this copy for a lossy-transcode signature")
+                            .small_button("Analyze")
+                            .on_hover_note("Scan this copy for a lossy-transcode signature")
                             .clicked()
                         {
+                            inner_clicked = true;
                             acts.push(Act::Analyze(vec![c.id]));
                         }
                     }
                 }
-                if audio_enabled {
-                    let label = if c.playing { "⏸" } else { "▶" };
-                    if ui.button(label).on_hover_text("Preview").clicked() {
-                        acts.push(Act::Preview(c.id, c.path.clone()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("Reveal")
+                        .on_hover_note("Show in Finder")
+                        .clicked()
+                    {
+                        inner_clicked = true;
+                        acts.push(Act::Reveal(c.path.clone()));
                     }
-                }
-                if ui.button("Reveal").on_hover_text("Show in Finder").clicked() {
-                    acts.push(Act::Reveal(c.path.clone()));
-                }
-                let name = c.path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                let mut name_text = egui::RichText::new(name).monospace().weak();
-                if c.marked_delete {
-                    name_text = name_text.strikethrough();
-                }
-                ui.label(name_text).on_hover_text(c.path.display().to_string());
+                    if audio_enabled {
+                        let label = if c.playing { "⏸" } else { "▶" };
+                        if ui.small_button(label).on_hover_note("Preview").clicked() {
+                            inner_clicked = true;
+                            acts.push(Act::Preview(c.id, c.path.clone()));
+                        }
+                    }
+                });
+            });
+
+            // Row 3: filename, struck out when rejected.
+            let name = c.path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let mut name_text = egui::RichText::new(name).monospace().small().weak();
+            if !kept {
+                name_text = name_text.strikethrough();
+            }
+            ui.add(egui::Label::new(name_text).truncate())
+                .on_hover_note(c.path.display().to_string());
+
+            // Whole-tile click toggles keep⇄reject, unless an inner button took it.
+            if tile.clicked() && !inner_clicked {
+                acts.push(Act::SetDelete(c.id, kept));
+            }
+            tile.on_hover_note(if kept {
+                "Click to reject this copy (mark for deletion)"
+            } else {
+                "Click to keep this copy"
             });
         }
 
@@ -401,7 +472,7 @@ impl App {
                                     .strong()
                                     .color(egui::Color32::from_rgb(0xE0, 0x6C, 0x6C)),
                             )
-                            .on_hover_text("No copy is kept — all copies move to the Trash.");
+                            .on_hover_note("No copy is kept — all copies move to the Trash.");
                         } else {
                             ui.label(
                                 egui::RichText::new(format!("· {marked} to delete"))
@@ -413,7 +484,7 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .button("Not a dup")
-                            .on_hover_text(
+                            .on_hover_note(
                                 "These aren't the same song (e.g. two different \"Untitled\" \
                                  tracks). Dismiss this group for good — nothing is deleted.",
                             )
@@ -424,7 +495,7 @@ impl App {
                         let ids: Vec<Id> = g.copies.iter().map(|c| c.id).collect();
                         if ui
                             .button("Keep all")
-                            .on_hover_text("Clear every delete mark in this group")
+                            .on_hover_note("Clear every delete mark in this group")
                             .clicked()
                         {
                             acts.push(Act::KeepAll(ids.clone()));
@@ -432,7 +503,7 @@ impl App {
                         if let Some(best) = g.copies.iter().find(|c| c.is_best).map(|c| c.id) {
                             if ui
                                 .button("★ Suggest")
-                                .on_hover_text("Keep the best copy, mark the rest for deletion")
+                                .on_hover_note("Keep the best copy, mark the rest for deletion")
                                 .clicked()
                             {
                                 acts.push(Act::Suggest { best, ids });
@@ -440,10 +511,15 @@ impl App {
                         }
                     });
                 });
-                ui.add_space(2.0);
-                for c in &g.copies {
-                    render_copy(ui, c, audio_enabled, acts);
-                }
+                ui.add_space(6.0);
+                // Lay the copies out as a wrapping row of node tiles so the dupes
+                // of one song read as a cluster of cards rather than a stack.
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                    for c in &g.copies {
+                        render_tile(ui, c, audio_enabled, acts);
+                    }
+                });
             });
         };
 
@@ -574,60 +650,71 @@ impl App {
             // Copies staged self-referencing (keeper == drop) belong to groups where
             // every copy was marked — those remove the track entirely, so warn.
             let whole_track = batch.iter().filter(|(k, d, _)| k == d).count();
-            confirm_window("Delete marked duplicates", self.dup_confirm_pos, ui.ctx(), |ui| {
-                ui.label(format!(
-                    "Move {n} marked cop{} to the Trash and remove {} from the catalog? \
+            confirm_window(
+                "Delete marked duplicates",
+                self.dup_confirm_pos,
+                ui.ctx(),
+                |ui| {
+                    ui.label(format!(
+                        "Move {n} marked cop{} to the Trash and remove {} from the catalog? \
                      The kept copy in each group stays.",
-                    if n == 1 { "y" } else { "ies" },
-                    if n == 1 { "it" } else { "them" },
-                ));
-                if whole_track > 0 {
-                    ui.label(
-                        egui::RichText::new(if whole_track == 1 {
-                            "⚠ One of these is in a group with no copy kept — \
+                        if n == 1 { "y" } else { "ies" },
+                        if n == 1 { "it" } else { "them" },
+                    ));
+                    if whole_track > 0 {
+                        ui.label(
+                            egui::RichText::new(if whole_track == 1 {
+                                "⚠ One of these is in a group with no copy kept — \
                              that track leaves the catalog entirely."
-                                .to_string()
-                        } else {
-                            format!(
-                                "⚠ {whole_track} of these are in groups with no copy kept — \
+                                    .to_string()
+                            } else {
+                                format!(
+                                    "⚠ {whole_track} of these are in groups with no copy kept — \
                                  those tracks leave the catalog entirely."
+                                )
+                            })
+                            .color(egui::Color32::from_rgb(0xE0, 0x6C, 0x6C)),
+                        );
+                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for (_, _, path) in &batch {
+                                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                                ui.label(egui::RichText::new(name).weak().monospace())
+                                    .on_hover_note(path.display().to_string());
+                            }
+                        });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        let confirm = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(format!("Move {n} to Trash"))
+                                    .color(egui::Color32::WHITE),
                             )
-                        })
-                        .color(egui::Color32::from_rgb(0xE0, 0x6C, 0x6C)),
+                            .fill(egui::Color32::from_rgb(0xB0, 0x30, 0x30)),
+                        );
+                        // Focus the confirm button on open so Enter/Space commits
+                        // without moving the mouse.
+                        if ui.memory(|m| m.focused().is_none()) {
+                            confirm.request_focus();
+                        }
+                        if confirm.clicked() {
+                            spawn_batch = Some(batch.clone());
+                            close = true;
+                        }
+                    });
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new("Enter to confirm · Esc to cancel")
+                            .weak()
+                            .small(),
                     );
-                }
-                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                    for (_, _, path) in &batch {
-                        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                        ui.label(egui::RichText::new(name).weak().monospace())
-                            .on_hover_text(path.display().to_string());
-                    }
-                });
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        close = true;
-                    }
-                    let confirm = ui.add(
-                        egui::Button::new(
-                            egui::RichText::new(format!("Move {n} to Trash"))
-                                .color(egui::Color32::WHITE),
-                        )
-                        .fill(egui::Color32::from_rgb(0xB0, 0x30, 0x30)),
-                    );
-                    // Focus the confirm button on open so Enter/Space commits
-                    // without moving the mouse.
-                    if ui.memory(|m| m.focused().is_none()) {
-                        confirm.request_focus();
-                    }
-                    if confirm.clicked() {
-                        spawn_batch = Some(batch.clone());
-                        close = true;
-                    }
-                });
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new("Enter to confirm · Esc to cancel").weak().small());
-            });
+                },
+            );
             if close {
                 self.dup_pending_bulk = None;
                 self.dup_confirm_pos = None;
@@ -643,7 +730,6 @@ impl App {
             self.reload();
         }
     }
-
 
     /// Render the Missing files view: every track whose source file is gone from
     /// disk, as a review list. Each can be relocated (pick a folder; files found by
@@ -676,7 +762,7 @@ impl App {
                 ui.add_enabled_ui(!busy, |ui| {
                     if ui
                         .button("↻ Refresh")
-                        .on_hover_text(
+                        .on_hover_note(
                             "Sync from Discogs: pull new records, drop removed ones, \
                              and download any missing covers.",
                         )
@@ -688,7 +774,7 @@ impl App {
                 if let Some(url) = &collection_url {
                     if ui
                         .button("↗ Open in Discogs")
-                        .on_hover_text("Open your collection on discogs.com in a browser")
+                        .on_hover_note("Open your collection on discogs.com in a browser")
                         .clicked()
                     {
                         open_url(url);
@@ -766,7 +852,11 @@ impl App {
                     artist: v.artist.clone(),
                     sub,
                     has_cover: v.has_cover,
-                    linked: self.vinyl_links.get(&v.release_id).cloned().unwrap_or_default(),
+                    linked: self
+                        .vinyl_links
+                        .get(&v.release_id)
+                        .cloned()
+                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -792,8 +882,7 @@ impl App {
                     };
                     // One cell: cover icon + two caption lines, all clipped to the
                     // cover width so long titles don't break the grid alignment.
-                    let release_url =
-                        format!("https://www.discogs.com/release/{}", c.release_id);
+                    let release_url = format!("https://www.discogs.com/release/{}", c.release_id);
                     ui.allocate_ui_with_layout(
                         egui::vec2(COVER, COVER + 42.0),
                         egui::Layout::top_down(egui::Align::Min),
@@ -857,11 +946,8 @@ impl App {
                                 } else {
                                     egui::Color32::from_rgb(90, 200, 120)
                                 };
-                                ui.painter().rect_filled(
-                                    badge_rect,
-                                    egui::Rounding::same(5.0),
-                                    bg,
-                                );
+                                ui.painter()
+                                    .rect_filled(badge_rect, egui::Rounding::same(5.0), bg);
                                 ui.painter().text(
                                     badge_rect.center(),
                                     egui::Align2::CENTER_CENTER,
@@ -876,7 +962,7 @@ impl App {
                                     "In your catalog — click to show the track".to_string()
                                 };
                                 let badge = badge.on_hover_cursor(egui::CursorIcon::PointingHand);
-                                if badge.on_hover_text(tip).clicked() {
+                                if badge.on_hover_note(tip).clicked() {
                                     badge_clicked = true;
                                     goto = Some((c.title.clone(), c.linked.clone()));
                                 }
@@ -884,14 +970,11 @@ impl App {
                             let tip = if c.sub.is_empty() {
                                 format!("{}\n{}\n\nOpen on Discogs ↗", c.artist, c.title)
                             } else {
-                                format!(
-                                    "{}\n{}\n{}\n\nOpen on Discogs ↗",
-                                    c.artist, c.title, c.sub
-                                )
+                                format!("{}\n{}\n{}\n\nOpen on Discogs ↗", c.artist, c.title, c.sub)
                             };
                             // The cover opens Discogs — but not when the click landed
                             // on the catalog badge layered above it.
-                            if resp.on_hover_text(tip).clicked() && !badge_clicked {
+                            if resp.on_hover_note(tip).clicked() && !badge_clicked {
                                 open_url(&release_url);
                             }
                             ui.set_max_width(COVER);
@@ -909,8 +992,7 @@ impl App {
                                 open_url(&release_url);
                             }
                             ui.add(
-                                egui::Label::new(egui::RichText::new(&c.artist).weak())
-                                    .truncate(),
+                                egui::Label::new(egui::RichText::new(&c.artist).weak()).truncate(),
                             );
                         },
                     );
@@ -926,7 +1008,6 @@ impl App {
             self.jump_to_catalog_tracks(album, tracks);
         }
     }
-
 
     /// Jump from the vinyl grid into the catalog: show the full library narrowed
     /// to this release's album (so only its songs are listed), then select and
@@ -959,7 +1040,6 @@ impl App {
         self.scroll_to_track = self.selected;
         self.refresh_selected();
     }
-
 
     pub(crate) fn draw_missing(&mut self, ui: &mut egui::Ui) {
         // Snapshot what we draw so the egui closures don't borrow `self` (needed
@@ -995,7 +1075,7 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("↻ Recheck")
-                    .on_hover_text("Re-scan disk for tracks whose source file is gone")
+                    .on_hover_note("Re-scan disk for tracks whose source file is gone")
                     .clicked()
                 {
                     recompute = true;
@@ -1009,7 +1089,7 @@ impl App {
                             )
                             .fill(egui::Color32::from_rgb(150, 90, 40)),
                         )
-                        .on_hover_text(
+                        .on_hover_note(
                             "Pick a folder to search; files found there by name (confirmed by \
                              content when names collide) are repointed in the catalog. Your \
                              files are never moved or modified.",
@@ -1051,7 +1131,7 @@ impl App {
                     ui.horizontal(|ui| {
                         if ui
                             .button("Remove")
-                            .on_hover_text(
+                            .on_hover_note(
                                 "Drop this stale entry from the catalog. The file is already \
                                  gone, so nothing on disk is touched.",
                             )
@@ -1073,7 +1153,7 @@ impl App {
         ui.separator();
         if ui
             .button(format!("Remove all {}", all_ids.len()))
-            .on_hover_text("Remove every missing entry from the catalog. Files are not touched.")
+            .on_hover_note("Remove every missing entry from the catalog. Files are not touched.")
             .clicked()
         {
             remove_all = true;
@@ -1100,7 +1180,8 @@ impl App {
             egui::Window::new("Remove missing tracks")
                 .collapsible(false)
                 .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(ui.ctx().screen_rect().center())
                 .show(ui.ctx(), |ui| {
                     ui.label(format!(
                         "Remove {n} missing track{} from the catalog? Their source file{} \
@@ -1116,18 +1197,21 @@ impl App {
                             close = true;
                         }
                         if ui
-                            .add(egui::Button::new(
-                                egui::RichText::new(format!("Remove {n}"))
-                                    .color(egui::Color32::WHITE),
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(format!("Remove {n}"))
+                                        .color(egui::Color32::WHITE),
+                                )
+                                .fill(egui::Color32::from_rgb(0xB0, 0x30, 0x30)),
                             )
-                            .fill(egui::Color32::from_rgb(0xB0, 0x30, 0x30)))
                             .clicked()
                         {
                             match Catalog::open(&self.db_path) {
                                 Ok(c) => match c.delete_tracks(&ids) {
                                     Ok(removed) => {
-                                        self.status =
-                                            format!("Removed {removed} missing track(s) from the catalog.");
+                                        self.status = format!(
+                                            "Removed {removed} missing track(s) from the catalog."
+                                        );
                                         recompute = true;
                                     }
                                     Err(e) => self.status = format!("Couldn't remove: {e}"),
@@ -1147,7 +1231,4 @@ impl App {
             self.reload();
         }
     }
-
-
 }
-
