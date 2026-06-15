@@ -13,18 +13,20 @@ impl App {
         let _ = self.thumb_req_tx.send(id);
     }
 
-
     /// Drain finished thumbnail decodes from the worker, uploading each to a GPU
     /// texture (a UI-thread-only op) and caching it. Called once per frame.
     pub(crate) fn poll_thumbs(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.thumb_rx.try_recv() {
             let tex = msg.image.map(|img| {
-                ctx.load_texture(format!("cover-{}", msg.id), img, egui::TextureOptions::LINEAR)
+                ctx.load_texture(
+                    format!("cover-{}", msg.id),
+                    img,
+                    egui::TextureOptions::LINEAR,
+                )
             });
             self.cover_cache.insert(msg.id, ThumbState::Ready(tex));
         }
     }
-
 
     /// Ask the vinyl-cover worker to decode `instance_id`'s cached cover unless
     /// it's already loaded or in flight. Mirrors `request_thumb` for table rows.
@@ -36,18 +38,20 @@ impl App {
         let _ = self.vinyl_cover_req_tx.send(instance_id);
     }
 
-
     /// Drain finished vinyl-cover decodes, uploading each to a texture. Called
     /// once per frame alongside `poll_thumbs`.
     pub(crate) fn poll_vinyl_covers(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.vinyl_cover_rx.try_recv() {
             let tex = msg.image.map(|img| {
-                ctx.load_texture(format!("vinyl-{}", msg.id), img, egui::TextureOptions::LINEAR)
+                ctx.load_texture(
+                    format!("vinyl-{}", msg.id),
+                    img,
+                    egui::TextureOptions::LINEAR,
+                )
             });
             self.vinyl_covers.insert(msg.id, ThumbState::Ready(tex));
         }
     }
-
 
     /// Full-resolution cover for the inspector preview, loaded asynchronously so
     /// a multi-megapixel decode never blocks the UI thread. Returns the cached
@@ -80,6 +84,154 @@ impl App {
         None
     }
 
+    /// Build a [`CoverDrop`] for an image dropped onto track `track_id` and open
+    /// the confirmation modal. Decodes the image (and re-encodes it to PNG so the
+    /// stored cover and its thumbnail are always valid PNG), looks up the track's
+    /// album-mates so the modal can offer to apply the cover across the album, and
+    /// builds a small preview texture. Reports through the status line and opens
+    /// nothing if the file isn't a decodable image.
+    pub(crate) fn open_cover_drop(&mut self, ctx: &egui::Context, track_id: Id, image_path: PathBuf) {
+        let bytes = match std::fs::read(&image_path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("Couldn't read {}: {e}", image_path.display());
+                return;
+            }
+        };
+        let img = match image::load_from_memory(&bytes) {
+            Ok(img) => img,
+            Err(_) => {
+                self.status = format!(
+                    "{} isn't an image Ordnung can read (PNG/JPEG/WebP).",
+                    image_path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| image_path.display().to_string())
+                );
+                return;
+            }
+        };
+        let Some(full_png) = encode_png(&img) else {
+            self.status = "Couldn't process that image.".into();
+            return;
+        };
+        // A downscaled copy serves both the stored table thumbnail and the modal
+        // preview, so neither carries a multi-megapixel decode around.
+        let thumb_img = img.thumbnail(256, 256);
+        let thumb_png = encode_png(&thumb_img).unwrap_or_else(|| full_png.clone());
+        let preview = {
+            let rgba = thumb_img.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let color = egui::ColorImage::from_rgba_unmultiplied(size, &rgba.into_raw());
+            Some(ctx.load_texture("cover-drop-preview", color, egui::TextureOptions::LINEAR))
+        };
+
+        // Pull the target track's label + album, then its album-mates so the modal
+        // can offer to apply the cover to the rest of the album by name.
+        let (track_label, album, siblings) = match Catalog::open(&self.db_path) {
+            Ok(c) => {
+                let (label, album) = c
+                    .get_track(track_id)
+                    .map(|t| {
+                        (
+                            track_display_label(t.tags.artist.as_deref(), t.tags.title.as_deref()),
+                            t.tags.album.clone().unwrap_or_default(),
+                        )
+                    })
+                    .unwrap_or_else(|_| ("this track".into(), String::new()));
+                let siblings = c
+                    .album_siblings_detailed(track_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|s| CoverSibling {
+                        id: s.id,
+                        label: track_display_label(s.artist.as_deref(), s.title.as_deref()),
+                        has_art: s.has_art,
+                        // Pre-select the cover-less mates; leave ones that already
+                        // have art unchecked so we never silently replace a cover.
+                        selected: !s.has_art,
+                    })
+                    .collect();
+                (label, album, siblings)
+            }
+            Err(e) => {
+                self.status = format!("Couldn't open catalog: {e}");
+                return;
+            }
+        };
+
+        self.cover_drop = Some(CoverDrop {
+            track_id,
+            track_label,
+            album,
+            image_path,
+            full_png,
+            thumb_png,
+            preview,
+            siblings,
+        });
+    }
+
+    /// Commit a confirmed cover drop: set the dropped image as the target track's
+    /// cover, and as the cover of every album-mate the user ticked. The fetched
+    /// image is flagged to supersede any embedded art (so it shows and exports),
+    /// mirroring the Discogs "apply to album / overwrite" path. Catalog-only — the
+    /// source files aren't touched until the user runs the bulk "write edits".
+    pub(crate) fn apply_cover_drop(&mut self, drop: CoverDrop) {
+        let catalog = match Catalog::open(&self.db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.status = format!("Couldn't open catalog: {e}");
+                return;
+            }
+        };
+        let mut touched: Vec<Id> = Vec::new();
+        let mut set_cover = |id: Id| {
+            if catalog
+                .set_external_artwork(
+                    id,
+                    "drag",
+                    None,
+                    None,
+                    Some(&drop.thumb_png),
+                    Some(&drop.full_png),
+                )
+                .is_ok()
+            {
+                let _ = catalog.set_prefer_external_artwork(id, true);
+                touched.push(id);
+            }
+        };
+        set_cover(drop.track_id);
+        let mates: Vec<Id> = drop
+            .siblings
+            .iter()
+            .filter(|s| s.selected)
+            .map(|s| s.id)
+            .collect();
+        for id in &mates {
+            set_cover(*id);
+        }
+
+        // Drop cached textures for every touched track so each re-decodes the new
+        // cover on the next render.
+        for id in &touched {
+            self.cover_cache.remove(id);
+            self.cover_full_cache.remove(id);
+            self.cover_inflight.remove(id);
+        }
+        self.status = if mates.is_empty() {
+            format!("Set cover for {}.", drop.track_label)
+        } else {
+            format!(
+                "Set cover for {} and {} other track(s) on the album.",
+                drop.track_label,
+                mates.len()
+            )
+        };
+        self.reload();
+        self.refresh_selected();
+    }
 
     /// Drain finished cover decodes, turning each into a texture on the UI thread
     /// (texture upload must happen here) and caching it. Called once per frame.
@@ -96,8 +248,54 @@ impl App {
             self.cover_full_cache.insert(msg.id, tex);
         }
     }
+}
 
+/// Encode a decoded image to PNG bytes (the format the catalog stores covers in,
+/// and the only format `tag::write_to_file` embeds). `None` on an encode failure.
+pub(crate) fn encode_png(img: &image::DynamicImage) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .ok()?;
+    Some(buf)
+}
 
+/// "Artist — Title", with the same Unknown/Untitled fallbacks the rest of the GUI
+/// uses, for a track being labelled in the cover-drop modal.
+pub(crate) fn track_display_label(artist: Option<&str>, title: Option<&str>) -> String {
+    let artist = artist.map(str::trim).filter(|s| !s.is_empty());
+    let title = title.map(str::trim).filter(|s| !s.is_empty());
+    format!(
+        "{} — {}",
+        artist.unwrap_or("Unknown"),
+        title.unwrap_or("Untitled")
+    )
+}
+
+/// Whether `path`'s extension is one of the image formats Ordnung can decode for
+/// a dropped cover. Used to route an image drop to the cover flow instead of the
+/// audio importer.
+pub(crate) fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Best-effort guess of whether the currently-hovering drag carries an image, from
+/// the hovered files' mime types and (when available) path extensions. macOS often
+/// withholds the path until drop, so the mime check is the primary signal.
+pub(crate) fn hovered_looks_like_image(ctx: &egui::Context) -> bool {
+    ctx.input(|i| {
+        i.raw.hovered_files.iter().any(|f| {
+            f.mime.starts_with("image/")
+                || f.path.as_deref().map(is_image_path).unwrap_or(false)
+        })
+    })
 }
 
 /// Decode one candidate thumbnail PNG into an egui texture (or `None` on failure).
@@ -121,7 +319,6 @@ pub(crate) fn decode_thumb(
         egui::TextureOptions::LINEAR,
     ))
 }
-
 
 /// Load and decode the best available cover for `id` into egui pixels. Runs on
 /// a background thread (the decode of a multi-megapixel source is the expensive
@@ -149,7 +346,9 @@ pub(crate) fn load_full_cover_bytes(db: &Path, id: Id, source_path: &str) -> Opt
         .unwrap_or(false);
     let embedded_file = || scan::read_front_cover_png(source_path).ok().flatten();
     let external_full = || {
-        catalog.as_ref().and_then(|c| c.get_external_artwork_full(id).ok().flatten())
+        catalog
+            .as_ref()
+            .and_then(|c| c.get_external_artwork_full(id).ok().flatten())
     };
     let fallbacks = || {
         catalog.as_ref().and_then(|c| {
@@ -166,15 +365,20 @@ pub(crate) fn load_full_cover_bytes(db: &Path, id: Id, source_path: &str) -> Opt
     }
 }
 
-
-pub(crate) fn load_full_cover_image(db: &Path, id: Id, source_path: &str) -> Option<egui::ColorImage> {
+pub(crate) fn load_full_cover_image(
+    db: &Path,
+    id: Id,
+    source_path: &str,
+) -> Option<egui::ColorImage> {
     let bytes = load_full_cover_bytes(db, id, source_path)?;
     let img = image::load_from_memory(&bytes).ok()?;
     let rgba = img.to_rgba8();
     let size = [rgba.width() as usize, rgba.height() as usize];
-    Some(egui::ColorImage::from_rgba_unmultiplied(size, &rgba.into_raw()))
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        &rgba.into_raw(),
+    ))
 }
-
 
 /// Resolve the now-playing track's cover into a `file://` URL the OS media panel
 /// can load: the cover bytes are written to a stable per-track temp file. Falls
@@ -192,7 +396,6 @@ pub(crate) fn now_playing_cover_url(db: &Path, id: Id, source_path: &str) -> Opt
     now_playing_logo_url()
 }
 
-
 /// Write the embedded app logo to a stable temp file (once) and return its
 /// `file://` URL, used as the Now Playing cover for tracks without artwork.
 pub(crate) fn now_playing_logo_url() -> Option<String> {
@@ -204,7 +407,6 @@ pub(crate) fn now_playing_logo_url() -> Option<String> {
     }
     Some(format!("file://{}", path.to_string_lossy()))
 }
-
 
 /// Spawn the persistent thumbnail loader. It opens the catalog once and then
 /// serves load requests over `req_rx` forever, reading + decoding each cover off
@@ -232,7 +434,6 @@ pub(crate) fn spawn_thumb_loader(
     });
 }
 
-
 /// Persistent loader for vinyl-collection cover art: one long-lived catalog
 /// connection decodes each record's cached cover PNG off the UI thread, keyed by
 /// Discogs `instance_id` (carried in `CoverLoaded::id`).
@@ -258,14 +459,19 @@ pub(crate) fn spawn_vinyl_cover_loader(
                     let size = [rgba.width() as usize, rgba.height() as usize];
                     egui::ColorImage::from_rgba_unmultiplied(size, &rgba.into_raw())
                 });
-            if tx.send(CoverLoaded { id: instance_id, image }).is_err() {
+            if tx
+                .send(CoverLoaded {
+                    id: instance_id,
+                    image,
+                })
+                .is_err()
+            {
                 break;
             }
             ctx.request_repaint();
         }
     });
 }
-
 
 /// Read and decode a track's small table thumbnail using an already-open catalog
 /// connection. Embedded art (captured at scan time) wins, except when the user
@@ -282,7 +488,8 @@ pub(crate) fn load_thumb_image(catalog: &Catalog, id: Id) -> Option<egui::ColorI
     let img = image::load_from_memory(&bytes).ok()?;
     let rgba = img.to_rgba8();
     let size = [rgba.width() as usize, rgba.height() as usize];
-    Some(egui::ColorImage::from_rgba_unmultiplied(size, &rgba.into_raw()))
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        &rgba.into_raw(),
+    ))
 }
-
-

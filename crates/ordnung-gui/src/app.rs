@@ -3,10 +3,11 @@ use super::*;
 
 impl App {
     pub(crate) fn new(db_path: PathBuf, egui_ctx: egui::Context) -> Self {
-        // Swap egui's Latin-only default face for a broad-Unicode one before any
-        // text is laid out, so accented / Cyrillic / Greek / symbol characters in
-        // track metadata render instead of tofu boxes.
-        install_fonts(&egui_ctx);
+        // Install the Inter font stack and push the design tokens into egui's
+        // global style before any text is laid out, so every stock widget already
+        // matches the Ordnung visual language (see `ui::theme`). DejaVu Sans stays
+        // in the fallback chain for the wide-Unicode glyphs Inter lacks.
+        crate::ui::theme::install(&egui_ctx);
         let (cover_tx, cover_rx) = mpsc::channel();
         let (art_save_tx, art_save_rx) = mpsc::channel();
         let (preview_tx, preview_rx) = mpsc::channel();
@@ -20,7 +21,12 @@ impl App {
         // Discogs instance_id (reusing the `CoverLoaded` carrier).
         let (vinyl_cover_req_tx, vinyl_cover_req_rx) = mpsc::channel::<u64>();
         let (vinyl_cover_tx, vinyl_cover_rx) = mpsc::channel();
-        spawn_vinyl_cover_loader(db_path.clone(), egui_ctx.clone(), vinyl_cover_req_rx, vinyl_cover_tx);
+        spawn_vinyl_cover_loader(
+            db_path.clone(),
+            egui_ctx.clone(),
+            vinyl_cover_req_rx,
+            vinyl_cover_tx,
+        );
         // Resolves the now-playing cover to a temp file off-thread (see
         // `now_playing_cover_url`) so the OS Now Playing panel can show artwork
         // without blocking the UI on a catalog read when a track starts.
@@ -54,14 +60,18 @@ impl App {
             vinyl_cover_rx,
             vinyl_links: HashMap::new(),
             scroll_to_track: None,
+            row_screen_rects: Vec::new(),
+            cover_drop: None,
             show_inspector: false,
             job_cancel: None,
             artwork_queue: VecDeque::new(),
             artwork_enrich: false,
             artwork_overwrite: false,
+            artwork_set_cover: true,
             artwork_apply_album: true,
             artwork_album_overwrite: false,
             artwork_album_count: None,
+            artwork_album_siblings: None,
             artwork_selected: 0,
             artwork_previews: None,
             artwork_saving: false,
@@ -91,6 +101,8 @@ impl App {
             tag_edit_saved: TagEdit::default(),
             edited_count: 0,
             missing_count: 0,
+            recent_count: 0,
+            recent_pinned: HashSet::new(),
             missing_labels: Vec::new(),
             confirm_bulk_write: false,
             confirm_delete: None,
@@ -120,7 +132,6 @@ impl App {
         app
     }
 
-
     /// The Discogs token to use: the saved config value wins; if unset, fall
     /// back to the `DISCOGS_TOKEN` environment variable (so existing setups keep
     /// working). Returns an empty string when neither is set.
@@ -133,7 +144,6 @@ impl App {
         }
     }
 
-
     pub(crate) fn reload(&mut self) {
         // Refresh the sidebar's playlist tree first. If the viewed playlist was
         // deleted (or turned out to be a folder), fall back to the Library so the
@@ -142,15 +152,12 @@ impl App {
             .and_then(|c| c.list_playlists())
             .unwrap_or_default();
         if let LibraryView::Playlist(id) = self.view {
-            let still_valid = self
-                .playlists
-                .iter()
-                .any(|p| p.id == id && !p.is_folder);
+            let still_valid = self.playlists.iter().any(|p| p.id == id && !p.is_folder);
             if !still_valid {
                 self.view = LibraryView::Library;
             }
         }
-        match load_rows(&self.db_path, &self.filter, &self.view) {
+        match load_rows(&self.db_path, &self.filter, &self.view, &self.recent_pinned) {
             Ok(rows) => {
                 // Narrow to the rows passing every active per-column filter before
                 // computing the live set, so the selection/cover bookkeeping below
@@ -172,6 +179,14 @@ impl App {
                 self.rows = rows;
                 self.apply_sort();
                 self.load_error = None;
+                // Pin whatever Recent currently shows so a track that finishes
+                // (analyzed + fetched) on the next reload stays put instead of
+                // disappearing mid-glance. Entering/leaving the tab resets this
+                // (see the view-change handler), which is what eventually expires
+                // the completed tracks.
+                if self.view == LibraryView::RecentlyAdded {
+                    self.recent_pinned = self.rows.iter().map(|r| r.id).collect();
+                }
             }
             Err(e) => {
                 self.rows.clear();
@@ -188,6 +203,14 @@ impl App {
         // whole catalog. A failure here just leaves the button hidden.
         self.edited_count = Catalog::open(&self.db_path)
             .and_then(|c| c.count_edited())
+            .unwrap_or(0);
+
+        // The "recently added" inbox count drives the sidebar badge. It's a cheap
+        // count (no Track building) and view-independent, so refresh it on every
+        // reload — that's what makes tracks visibly drop off as they're analyzed
+        // and fetched. A failure just hides the badge.
+        self.recent_count = Catalog::open(&self.db_path)
+            .and_then(|c| c.count_recently_added(ANALYZER_VERSION))
             .unwrap_or(0);
 
         // The duplicate finder is a full-catalog scan (the acoustic pass decodes and
@@ -352,7 +375,7 @@ impl eframe::App for App {
                     let add = egui::menu::menu_custom_button(ui, add_btn, |ui| {
                         if ui
                             .button("🎵  Choose files…")
-                            .on_hover_text("Pick one or more audio files to add")
+                            .on_hover_note("Pick one or more audio files to add")
                             .clicked()
                         {
                             let picked = rfd::FileDialog::new()
@@ -370,7 +393,7 @@ impl eframe::App for App {
                         }
                         if ui
                             .button("📁  Choose folder…")
-                            .on_hover_text("Scan a whole folder of music (subfolders included)")
+                            .on_hover_note("Scan a whole folder of music (subfolders included)")
                             .clicked()
                         {
                             if let Some(dir) = rfd::FileDialog::new().pick_folder() {
@@ -379,7 +402,7 @@ impl eframe::App for App {
                             ui.close_menu();
                         }
                     });
-                    add.response.on_hover_text(
+                    add.response.on_hover_note(
                         "Add music to the catalog (your master library) — pick individual \
                          files or a whole folder. Source files are never moved or modified.",
                     );
@@ -404,7 +427,7 @@ impl eframe::App for App {
                     };
                     if ui
                         .button(analyze_label)
-                        .on_hover_text(
+                        .on_hover_note(
                             "Detect BPM, key, beatgrid, and transcode quality for these \
                              tracks (skips ones already analyzed at the current version)",
                         )
@@ -424,7 +447,7 @@ impl eframe::App for App {
                         };
                         if ui
                             .button(reanalyze_label)
-                            .on_hover_text("Re-run analysis even for tracks already analyzed")
+                            .on_hover_note("Re-run analysis even for tracks already analyzed")
                             .clicked()
                         {
                             if sel_ids.is_empty() {
@@ -436,7 +459,7 @@ impl eframe::App for App {
                         }
                         if ui
                             .button("Fetch song data…")
-                            .on_hover_text(
+                            .on_hover_note(
                                 "Query Discogs and, for the release you pick, cache the \
                                  cover and fill in the track's missing fields (genre/style, \
                                  label, catalog #, year, country, album, date). Only fills \
@@ -452,14 +475,14 @@ impl eframe::App for App {
                         }
                     });
                     more.response
-                        .on_hover_text("More analysis & metadata actions");
+                        .on_hover_note("More analysis & metadata actions");
                     // Batch convert: enabled whenever tracks are selected. Opens a
                     // dialog to pick one target format for all of them.
                     if !self.selection.is_empty() {
                         let n = self.selection.len();
                         if ui
                             .button(format!("Convert {n}…"))
-                            .on_hover_text(
+                            .on_hover_note(
                                 "Convert all selected tracks to one target format. \
                                  New files keep the full catalog metadata + cover.",
                             )
@@ -473,7 +496,7 @@ impl eframe::App for App {
                                 .collect();
                             self.batch_convert = Some(BatchConvert {
                                 ids,
-                                target: Format::Mp3,
+                                target: Format::Aiff,
                                 bitrate_kbps: String::new(),
                                 out_dir: None,
                                 in_place: true,
@@ -487,6 +510,7 @@ impl eframe::App for App {
                     let playlist_view = match &self.view {
                         LibraryView::Playlist(pid) => Some(*pid),
                         LibraryView::Library
+                        | LibraryView::RecentlyAdded
                         | LibraryView::Duplicates
                         | LibraryView::Missing
                         | LibraryView::Vinyl => None,
@@ -496,7 +520,7 @@ impl eframe::App for App {
                             let n = self.selection.len();
                             if ui
                                 .button(format!("Remove {n} from playlist"))
-                                .on_hover_text(
+                                .on_hover_note(
                                     "Remove the selected track(s) from this playlist. \
                                      They stay in the catalog.",
                                 )
@@ -529,7 +553,7 @@ impl eframe::App for App {
                         .fill(egui::Color32::from_rgb(70, 110, 70));
                         if ui
                             .add(btn)
-                            .on_hover_text(
+                            .on_hover_note(
                                 "Write the edited tags of every changed track into its \
                                  source file on disk, then mark them as synced.",
                             )
@@ -554,19 +578,28 @@ impl eframe::App for App {
                             .add(btn)
                             .on_hover_ui(|ui| {
                                 ui.set_max_width(420.0);
-                                ui.strong(format!(
-                                    "{count} track(s) point at a file that's gone"
-                                ));
+                                ui.label(
+                                    crate::ui::hover::note(format!(
+                                        "{count} track(s) point at a file that's gone"
+                                    ))
+                                    .strong(),
+                                );
                                 ui.separator();
                                 // Cap the list so a huge backlog can't grow the
                                 // tooltip off-screen; note the overflow instead.
                                 const MAX: usize = 20;
                                 for label in labels.iter().take(MAX) {
-                                    ui.label(label);
+                                    ui.label(crate::ui::hover::note(label.as_str()));
                                 }
                                 if labels.len() > MAX {
                                     ui.add_space(2.0);
-                                    ui.weak(format!("…and {} more", labels.len() - MAX));
+                                    ui.label(
+                                        crate::ui::hover::note(format!(
+                                            "…and {} more",
+                                            labels.len() - MAX
+                                        ))
+                                        .weak(),
+                                    );
                                 }
                                 ui.separator();
                                 ui.weak(
@@ -585,43 +618,11 @@ impl eframe::App for App {
                     }
                 });
                 ui.separator();
-                ui.label("Filter:");
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut self.filter)
-                        .hint_text("artist / title / album / genre")
-                        .desired_width(260.0),
-                );
-                if resp.changed() {
-                    self.reload();
-                }
-                if !self.filter.is_empty() && ui.small_button("×").clicked() {
-                    self.filter.clear();
-                    self.reload();
-                }
-                // A prominent "clear all filters" button, shown only while a
-                // filter is actually hiding rows. This rescues the case where a
-                // forgotten column filter leaves the table looking empty.
-                let active_col_filters = self
-                    .col_filters
-                    .values()
-                    .filter(|v| !v.is_empty())
-                    .count();
-                if active_col_filters > 0 || !self.filter.is_empty() {
-                    let label = if active_col_filters > 0 {
-                        format!("⊘ Clear filters ({active_col_filters})")
-                    } else {
-                        "⊘ Clear filters".to_string()
-                    };
-                    if ui
-                        .button(label)
-                        .on_hover_text("Clear the search and all column filters")
-                        .clicked()
-                    {
-                        self.filter.clear();
-                        self.col_filters.clear();
-                        self.reload();
-                    }
-                }
+                // Number of active column filters drives both the "Clear filters"
+                // label and whether that button (and the inline ×) show at all.
+                let active_col_filters =
+                    self.col_filters.values().filter(|v| !v.is_empty()).count();
+                let has_filters = active_col_filters > 0 || !self.filter.is_empty();
                 // Live counts: total visible tracks, plus selection and missing
                 // when they apply, so the toolbar always reflects current state.
                 let mut counts = format!("{} tracks", self.rows.len());
@@ -633,17 +634,20 @@ impl eframe::App for App {
                 }
                 // Right-aligned utility group: counts and the non-workflow actions
                 // (Refresh, Settings) live away from the left-edge library actions
-                // so the toolbar reads "do work … status & config". Added
-                // right-to-left, so the visual order is counts · Refresh · Settings · Info.
+                // so the toolbar reads "do work … status & config". Laying this out
+                // right-to-left FIRST reserves its width, so the left-aligned filter
+                // group nested inside shrinks to fit instead of overdrawing the
+                // counts when the window is narrow. Visual order on the right:
+                // counts · Refresh · Settings · Info.
                 let busy = self.is_busy();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.toggle_value(&mut self.show_inspector, "Info")
-                        .on_hover_text("Show/hide the track info panel");
+                        .on_hover_note("Show/hide the track info panel");
                     ui.separator();
                     // Settings stays reachable even while a job runs.
                     if ui
                         .button("⚙ Settings")
-                        .on_hover_text("Set your Discogs token (saved to ~/.ordnung/config.toml)")
+                        .on_hover_note("Set your Discogs token (saved to ~/.ordnung/config.toml)")
                         .clicked()
                     {
                         self.token_input = self.config.discogs_token.clone();
@@ -651,7 +655,7 @@ impl eframe::App for App {
                     }
                     if ui
                         .add_enabled(!busy, egui::Button::new("↻ Refresh"))
-                        .on_hover_text("Reload the table from the catalog")
+                        .on_hover_note("Reload the table from the catalog")
                         .clicked()
                     {
                         self.reload();
@@ -659,6 +663,55 @@ impl eframe::App for App {
                     }
                     ui.separator();
                     ui.label(counts);
+                    ui.separator();
+                    // The filter group fills whatever horizontal space the utility
+                    // group left over. Rendered left-to-right inside the reserved
+                    // remainder so it can never collide with the counts.
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.label("Filter:");
+                        // Reserve room for the inline × and the Clear-filters button
+                        // so the text field shrinks rather than pushing them past
+                        // the edge of this remainder.
+                        let mut reserved = 0.0;
+                        if !self.filter.is_empty() {
+                            reserved += 28.0;
+                        }
+                        if has_filters {
+                            reserved += 140.0;
+                        }
+                        let w = (ui.available_width() - reserved).clamp(120.0, 320.0);
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.filter)
+                                .hint_text("artist / title / album / genre")
+                                .desired_width(w),
+                        );
+                        if resp.changed() {
+                            self.reload();
+                        }
+                        if !self.filter.is_empty() && ui.small_button("×").clicked() {
+                            self.filter.clear();
+                            self.reload();
+                        }
+                        // A prominent "clear all filters" button, shown only while a
+                        // filter is actually hiding rows. This rescues the case where
+                        // a forgotten column filter leaves the table looking empty.
+                        if has_filters {
+                            let label = if active_col_filters > 0 {
+                                format!("⊘ Clear filters ({active_col_filters})")
+                            } else {
+                                "⊘ Clear filters".to_string()
+                            };
+                            if ui
+                                .button(label)
+                                .on_hover_note("Clear the search and all column filters")
+                                .clicked()
+                            {
+                                self.filter.clear();
+                                self.col_filters.clear();
+                                self.reload();
+                            }
+                        }
+                    });
                 });
             });
             ui.add_space(4.0);
@@ -687,7 +740,7 @@ impl eframe::App for App {
                 if self.job_cancel.is_some()
                     && ui
                         .button("Abort")
-                        .on_hover_text(
+                        .on_hover_note(
                             "Stop the running scan / artwork fetch after the current item.",
                         )
                         .clicked()
@@ -767,27 +820,63 @@ impl eframe::App for App {
                     .show_separator_line(false)
                     .show_inside(ui, |ui| {
                         ui.add_space(8.0);
-                        if nav_button(
-                            ui,
-                            "♪  All songs",
-                            self.view == LibraryView::Library,
-                            46.0,
-                            17.0,
-                        )
-                        .on_hover_text("Every track in the catalog")
-                        .clicked()
-                        {
-                            self.view = LibraryView::Library;
-                        }
+                        // "All songs" is the home base — the big tile — paired on the
+                        // same row with a smaller "Recent" tile: the self-clearing
+                        // inbox of fresh imports still awaiting analysis + a Discogs
+                        // fetch. Recent gets a fixed, narrower width; All songs flexes
+                        // to fill the rest so the pair always spans the sidebar.
+                        ui.horizontal(|ui| {
+                            const RECENT_W: f32 = 76.0;
+                            let gap = ui.spacing().item_spacing.x;
+                            let all_w = (ui.available_width() - RECENT_W - gap).max(60.0);
+                            if nav_button_sized(
+                                ui,
+                                "♪  All songs",
+                                self.view == LibraryView::Library,
+                                all_w,
+                                46.0,
+                                17.0,
+                            )
+                            .on_hover_note("Every track in the catalog")
+                            .clicked()
+                            {
+                                self.view = LibraryView::Library;
+                            }
+                            let recent_label = if self.recent_count > 0 {
+                                format!("✦ {}", self.recent_count)
+                            } else {
+                                "✦".to_string()
+                            };
+                            if nav_button_sized(
+                                ui,
+                                &recent_label,
+                                self.view == LibraryView::RecentlyAdded,
+                                RECENT_W,
+                                46.0,
+                                17.0,
+                            )
+                            .on_hover_note(
+                                "Recently added — fresh imports that still need analysis \
+                                 and/or a Discogs song-data fetch. Tracks drop off this \
+                                 list automatically once they're both analyzed and fetched.",
+                            )
+                            .clicked()
+                            {
+                                self.view = LibraryView::RecentlyAdded;
+                            }
+                        });
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
                             section_caption(ui, "PLAYLISTS");
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
+                                    // Hold the button off the panel's right clip
+                                    // edge so its hover outline isn't cut off.
+                                    ui.add_space(3.0);
                                     if ui
                                         .small_button("+")
-                                        .on_hover_text("New playlist")
+                                        .on_hover_note("New playlist")
                                         .clicked()
                                     {
                                         sidebar_action = Some(SidebarAction::NewPlaylist(None));
@@ -817,7 +906,7 @@ impl eframe::App for App {
                             34.0,
                             14.0,
                         )
-                        .on_hover_text("Find identical imports and same-song format variants")
+                        .on_hover_note("Find identical imports and same-song format variants")
                         .clicked()
                         {
                             self.view = LibraryView::Duplicates;
@@ -835,7 +924,7 @@ impl eframe::App for App {
                             34.0,
                             14.0,
                         )
-                        .on_hover_text(
+                        .on_hover_note(
                             "Tracks whose source file is no longer on disk — relocate or remove them",
                         )
                         .clicked()
@@ -855,7 +944,7 @@ impl eframe::App for App {
                             34.0,
                             14.0,
                         )
-                        .on_hover_text("Your Discogs vinyl collection — refresh to sync new records")
+                        .on_hover_note("Your Discogs vinyl collection — refresh to sync new records")
                         .clicked()
                         {
                             self.view = LibraryView::Vinyl;
@@ -927,6 +1016,12 @@ impl eframe::App for App {
             None => {}
         }
         if self.view != prev_view {
+            // Switching tabs resets the Recent pin: a fresh entry starts from the
+            // live inbox (nothing pinned), and leaving drops the pin so finished
+            // tracks expire. `reload` then re-pins whatever Recent shows.
+            if prev_view == LibraryView::RecentlyAdded || self.view == LibraryView::RecentlyAdded {
+                self.recent_pinned.clear();
+            }
             self.reload();
         }
         // Kick off / adopt the off-thread duplicate scan after the view switch is
@@ -937,82 +1032,106 @@ impl eframe::App for App {
         // Source files for a ⌥-drag started this frame inside the table (see
         // `draw_table`); the native drag-out is begun after the panel closes.
         let mut native_drag: Option<Vec<PathBuf>> = None;
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if self.view == LibraryView::Duplicates {
-                self.draw_duplicates(ui);
-            } else if self.view == LibraryView::Missing {
-                self.draw_missing(ui);
-            } else if self.view == LibraryView::Vinyl {
-                self.draw_vinyl(ui, ctx);
-            } else if self.rows.is_empty()
-                && self.load_error.is_none()
-                && (!self.filter.trim().is_empty()
-                    || self.col_filters.values().any(|v| !v.trim().is_empty()))
-            {
-                // A filter — the global search or a per-column header filter —
-                // hid every row. The per-column filter UI lives in the table
-                // header, which isn't drawn when there are no rows, so without an
-                // escape hatch here the user is trapped: they can't reach a header
-                // to clear the filter, and the "catalog is empty" screen below
-                // would wrongly imply their library is gone. Offer a one-click
-                // clear of every active filter.
-                ui.centered_and_justified(|ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.heading("No tracks match the active filter");
-                        ui.add_space(6.0);
-                        ui.label("Clear the filter to see your full catalog again.");
-                        ui.add_space(14.0);
-                        if ui
-                            .add(egui::Button::new(
-                                egui::RichText::new("  Clear filters  ").size(15.0),
-                            ))
-                            .clicked()
-                        {
-                            self.filter.clear();
-                            self.col_filters.clear();
-                            self.reload();
-                        }
-                    });
-                });
-            } else if self.rows.is_empty() && self.load_error.is_none() {
-                let in_playlist = matches!(self.view, LibraryView::Playlist(_));
-                ui.centered_and_justified(|ui| {
-                    ui.vertical_centered(|ui| {
-                        if in_playlist {
-                            ui.heading("Empty playlist");
+        // The songs/content area sits a shade lighter than its default panel fill
+        // so it reads as raised above the nav sidebar and the top/bottom bars
+        // (which keep the darker `BG`). Otherwise this is the default central frame.
+        let content_frame =
+            egui::Frame::central_panel(&ctx.style()).fill(crate::ui::tokens::color::CONTENT_BG);
+        egui::CentralPanel::default()
+            .frame(content_frame)
+            .show(ctx, |ui| {
+                if self.view == LibraryView::Duplicates {
+                    self.draw_duplicates(ui);
+                } else if self.view == LibraryView::Missing {
+                    self.draw_missing(ui);
+                } else if self.view == LibraryView::Vinyl {
+                    self.draw_vinyl(ui, ctx);
+                } else if self.rows.is_empty()
+                    && self.load_error.is_none()
+                    && (!self.filter.trim().is_empty()
+                        || self.col_filters.values().any(|v| !v.trim().is_empty()))
+                {
+                    // A filter — the global search or a per-column header filter —
+                    // hid every row. The per-column filter UI lives in the table
+                    // header, which isn't drawn when there are no rows, so without an
+                    // escape hatch here the user is trapped: they can't reach a header
+                    // to clear the filter, and the "catalog is empty" screen below
+                    // would wrongly imply their library is gone. Offer a one-click
+                    // clear of every active filter.
+                    ui.centered_and_justified(|ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.heading("No tracks match the active filter");
                             ui.add_space(6.0);
-                            ui.label("Drag tracks here from “All songs” to add them.");
-                            ui.label(
-                                "Hold ⌥ Option while dragging to drop straight into rekordbox.",
-                            );
-                        } else {
-                            ui.heading("Your catalog is empty");
-                            ui.add_space(6.0);
-                            ui.label("Drag a folder of music anywhere onto this window,");
-                            ui.label("or pick one to scan into your catalog.");
-                            ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new("Source files are never moved or modified.")
-                                    .weak(),
-                            );
+                            ui.label("Clear the filter to see your full catalog again.");
                             ui.add_space(14.0);
                             if ui
                                 .add(egui::Button::new(
-                                    egui::RichText::new("  Add songs…  ").size(15.0),
+                                    egui::RichText::new("  Clear filters  ").size(15.0),
                                 ))
                                 .clicked()
                             {
-                                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                    self.spawn_scan(ctx.clone(), dir);
+                                self.filter.clear();
+                                self.col_filters.clear();
+                                self.reload();
+                            }
+                        });
+                    });
+                } else if self.rows.is_empty() && self.load_error.is_none() {
+                    let in_playlist = matches!(self.view, LibraryView::Playlist(_));
+                    let is_recent = self.view == LibraryView::RecentlyAdded;
+                    ui.centered_and_justified(|ui| {
+                        ui.vertical_centered(|ui| {
+                            if is_recent {
+                                ui.heading("All caught up");
+                                ui.add_space(6.0);
+                                ui.label(
+                                    "New imports show here until they're analyzed and \
+                                 song-data fetched.",
+                                );
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Add some songs, then analyze and fetch their data — \
+                                     they'll appear here and clear themselves as you go.",
+                                    )
+                                    .weak(),
+                                );
+                            } else if in_playlist {
+                                ui.heading("Empty playlist");
+                                ui.add_space(6.0);
+                                ui.label("Drag tracks here from “All songs” to add them.");
+                                ui.label(
+                                    "Hold ⌥ Option while dragging to drop straight into rekordbox.",
+                                );
+                            } else {
+                                ui.heading("Your catalog is empty");
+                                ui.add_space(6.0);
+                                ui.label("Drag a folder of music anywhere onto this window,");
+                                ui.label("or pick one to scan into your catalog.");
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Source files are never moved or modified.",
+                                    )
+                                    .weak(),
+                                );
+                                ui.add_space(14.0);
+                                if ui
+                                    .add(egui::Button::new(
+                                        egui::RichText::new("  Add songs…  ").size(15.0),
+                                    ))
+                                    .clicked()
+                                {
+                                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                        self.spawn_scan(ctx.clone(), dir);
+                                    }
                                 }
                             }
-                        }
+                        });
                     });
-                });
-            } else {
-                native_drag = self.draw_table(ui);
-            }
-        });
+                } else {
+                    native_drag = self.draw_table(ui);
+                }
+            });
 
         // Native drag-out to rekordbox/Finder. A ⌥-drag begun in the table this
         // frame (`draw_table` returned its files) starts an `NSDraggingSession`
@@ -1043,7 +1162,8 @@ impl eframe::App for App {
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(ctx.screen_rect().center())
                 .show(ctx, |ui| {
                     ui.set_min_width(500.0);
                     ui.label(egui::RichText::new(&modal.track_label).strong());
@@ -1092,11 +1212,9 @@ impl eframe::App for App {
                             ui.colored_label(color, msg);
                         } else {
                             ui.label(
-                                egui::RichText::new(
-                                    "Catalog-only — source file is not touched.",
-                                )
-                                .small()
-                                .weak(),
+                                egui::RichText::new("Catalog-only — source file is not touched.")
+                                    .small()
+                                    .weak(),
                             );
                         }
                     });
@@ -1124,11 +1242,7 @@ impl eframe::App for App {
                                         Format::Wav,
                                         Format::Aiff,
                                     ] {
-                                        ui.selectable_value(
-                                            &mut modal.target,
-                                            f,
-                                            format_label(f),
-                                        );
+                                        ui.selectable_value(&mut modal.target, f, format_label(f));
                                     }
                                 });
                             ui.end_row();
@@ -1238,6 +1352,7 @@ impl eframe::App for App {
             self.convert_modal = None;
         }
 
+        self.draw_cover_drop(ctx);
         self.draw_batch_convert(ctx);
         self.draw_artwork_review(ctx);
         self.draw_settings(ctx);
@@ -1252,5 +1367,4 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
     }
-
 }

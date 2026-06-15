@@ -2,6 +2,150 @@
 use super::*;
 
 impl App {
+    /// The cover-drop confirmation popup: shown after an image is dropped onto a
+    /// track row. Previews the image, asks whether to set it as that track's
+    /// cover, and — when the track has album-mates — offers a per-song selector to
+    /// apply the same cover across the album. Nothing is written until "Set cover".
+    pub(crate) fn draw_cover_drop(&mut self, ctx: &egui::Context) {
+        if self.cover_drop.is_none() {
+            return;
+        }
+        let mut open = true;
+        let mut apply = false;
+        let mut cancel = false;
+        if let Some(d) = self.cover_drop.as_mut() {
+            egui::Window::new("Set album art")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(ctx.screen_rect().center())
+                .show(ctx, |ui| {
+                    ui.set_min_width(420.0);
+                    // Image preview, centred.
+                    if let Some(tex) = &d.preview {
+                        ui.vertical_centered(|ui| {
+                            ui.add(
+                                egui::Image::new(tex)
+                                    .maintain_aspect_ratio(true)
+                                    .fit_to_exact_size(egui::vec2(140.0, 140.0)),
+                            );
+                        });
+                        ui.add_space(4.0);
+                    }
+                    ui.label(egui::RichText::new("Set this image as the cover for").strong());
+                    ui.label(egui::RichText::new(&d.track_label).strong());
+                    if let Some(name) = d.image_path.file_name() {
+                        ui.label(
+                            egui::RichText::new(name.to_string_lossy())
+                                .small()
+                                .weak(),
+                        );
+                    }
+
+                    // Album-mate selector — only when this track shares its album
+                    // with others. Lets the user dress the whole album in one go.
+                    if !d.siblings.is_empty() {
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new("Also apply to other tracks on this album")
+                                .strong(),
+                        );
+                        if !d.album.trim().is_empty() {
+                            ui.label(egui::RichText::new(&d.album).small().weak());
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Select all").clicked() {
+                                for s in &mut d.siblings {
+                                    s.selected = true;
+                                }
+                            }
+                            if ui.small_button("None").clicked() {
+                                for s in &mut d.siblings {
+                                    s.selected = false;
+                                }
+                            }
+                            ui.label(
+                                egui::RichText::new(
+                                    "Tracks that already have a cover start unchecked.",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                        });
+                        ui.add_space(2.0);
+                        // Cap the list height so a big album can't push the buttons
+                        // off-screen; it scrolls past that.
+                        egui::ScrollArea::vertical()
+                            .max_height(200.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for s in &mut d.siblings {
+                                    ui.horizontal(|ui| {
+                                        ui.checkbox(&mut s.selected, &s.label);
+                                        if s.has_art {
+                                            ui.label(
+                                                egui::RichText::new("· has cover")
+                                                    .small()
+                                                    .weak(),
+                                            );
+                                        }
+                                    });
+                                }
+                            });
+                        let n = d.siblings.iter().filter(|s| s.selected).count();
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{n} of {} album track(s) selected",
+                                d.siblings.len()
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let n = d.siblings.iter().filter(|s| s.selected).count();
+                        let label = if n > 0 {
+                            format!("Set cover ({} track(s))", n + 1)
+                        } else {
+                            "Set cover".to_string()
+                        };
+                        let btn = egui::Button::new(
+                            egui::RichText::new(label).color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(64, 110, 180));
+                        if ui.add(btn).clicked() {
+                            apply = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.label(
+                                    egui::RichText::new("Catalog only — your files aren't touched.")
+                                        .small()
+                                        .weak(),
+                                );
+                            },
+                        );
+                    });
+                });
+        }
+        if apply {
+            if let Some(d) = self.cover_drop.take() {
+                self.apply_cover_drop(d);
+            }
+        } else if cancel || !open {
+            self.cover_drop = None;
+        }
+    }
+
     /// The batch-convert dialog: one set of options applied to every selected
     /// track. Mirrors the single convert modal's options (minus name editing).
     pub(crate) fn draw_batch_convert(&mut self, ctx: &egui::Context) {
@@ -13,7 +157,8 @@ impl App {
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(ctx.screen_rect().center())
                 .show(ctx, |ui| {
                     ui.set_min_width(460.0);
                     ui.label(
@@ -114,8 +259,14 @@ impl App {
                 let bitrate = m.bitrate_kbps.clone();
                 let out_dir = m.out_dir.clone();
                 let in_place = m.in_place;
-                match self.spawn_batch_convert(ctx.clone(), ids, target, &bitrate, out_dir, in_place)
-                {
+                match self.spawn_batch_convert(
+                    ctx.clone(),
+                    ids,
+                    target,
+                    &bitrate,
+                    out_dir,
+                    in_place,
+                ) {
                     Ok(()) => close = true,
                     Err(e) => {
                         if let Some(cur) = self.batch_convert.as_mut() {
@@ -143,7 +294,8 @@ impl App {
             .open(&mut window_open)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_min_width(440.0);
                 ui.label(egui::RichText::new("Discogs token").strong());
@@ -173,11 +325,7 @@ impl App {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(p) = config::config_path() {
-                            ui.label(
-                                egui::RichText::new(p.display().to_string())
-                                    .small()
-                                    .weak(),
-                            );
+                            ui.label(egui::RichText::new(p.display().to_string()).small().weak());
                         }
                     });
                 });
@@ -225,7 +373,6 @@ impl App {
         }
     }
 
-
     /// "Are you sure?" popup for clearing the whole catalog. Drawn on top of
     /// Settings. Confirming wipes every track (analysis + fetched artwork
     /// cascade) and reloads the now-empty table.
@@ -239,7 +386,8 @@ impl App {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_min_width(380.0);
                 let n = self.rows.len();
@@ -298,7 +446,6 @@ impl App {
         }
     }
 
-
     /// Report popup listing every item a background job skipped or errored on,
     /// with the reason. Auto-opens after a job that had any failures (scan, write
     /// edits, analyze, relocate) so the user knows exactly what didn't go through.
@@ -320,7 +467,8 @@ impl App {
             .resizable(true)
             .max_width(win_w)
             .default_width(win_w)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_max_width(win_w);
                 ui.label(
@@ -369,7 +517,6 @@ impl App {
         }
     }
 
-
     /// "Write all edited tracks to their source files?" confirmation. Source
     /// files are mutated and the analysis cache for those tracks is invalidated
     /// (their mtimes change), so this is an explicit, gated action. Confirming
@@ -385,7 +532,8 @@ impl App {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_min_width(400.0);
                 ui.label(
@@ -433,7 +581,6 @@ impl App {
         }
     }
 
-
     /// "Delete N tracks from the catalog?" confirmation. Catalog rows (and their
     /// playlist links + analysis cache) are removed; source files are left on
     /// disk untouched. Destructive and not undoable, so it's an explicit gate.
@@ -448,7 +595,8 @@ impl App {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_min_width(400.0);
                 ui.label(
@@ -503,7 +651,6 @@ impl App {
         }
     }
 
-
     /// Modal picker: shows every Discogs release candidate found for the front
     /// track and lets the user choose one (or skip). Nothing is written to the
     /// catalog until Save; the full-resolution image for the chosen release is
@@ -512,8 +659,7 @@ impl App {
         // Decode (or refresh) preview thumbnails for the front track's candidates.
         match self.artwork_queue.front() {
             Some(choices) => {
-                let stale =
-                    self.artwork_previews.as_ref().map(|(id, _)| *id) != Some(choices.id);
+                let stale = self.artwork_previews.as_ref().map(|(id, _)| *id) != Some(choices.id);
                 if stale {
                     let texs = choices
                         .candidates
@@ -537,15 +683,36 @@ impl App {
         if let Some(choices) = self.artwork_queue.front() {
             let front = choices.id;
             if self.artwork_album_count.map(|(id, _, _)| id) != Some(front) {
-                let (missing, total) = Catalog::open(&self.db_path)
-                    .and_then(|c| {
-                        Ok((
-                            c.album_siblings_missing_art(front)?.len(),
-                            c.album_siblings(front)?.len(),
-                        ))
-                    })
-                    .unwrap_or((0, 0));
+                // One detailed query gives both the counts and the per-song labels
+                // so the picker can show *which* tracks share the chosen cover.
+                let details = Catalog::open(&self.db_path)
+                    .and_then(|c| c.album_siblings_detailed(front))
+                    .unwrap_or_default();
+                let total = details.len();
+                let missing = details.iter().filter(|s| !s.has_art).count();
                 self.artwork_album_count = Some((front, missing, total));
+                self.artwork_album_siblings = Some((
+                    front,
+                    details
+                        .iter()
+                        .map(|s| {
+                            (
+                                s.id,
+                                track_display_label(s.artist.as_deref(), s.title.as_deref()),
+                                s.has_art,
+                            )
+                        })
+                        .collect(),
+                ));
+                // Default the "set cover" toggle per track: leave an existing
+                // cover alone (off), offer to add one when the track has none (on).
+                // Only relevant to the song-data run — the artwork run ignores it.
+                if self.artwork_enrich {
+                    let has_art = Catalog::open(&self.db_path)
+                        .and_then(|c| c.track_has_art(front))
+                        .unwrap_or(false);
+                    self.artwork_set_cover = !has_art;
+                }
             }
         }
 
@@ -560,6 +727,8 @@ impl App {
         let saving = self.artwork_saving;
         let enrich = self.artwork_enrich;
         let mut overwrite = self.artwork_overwrite;
+        // Song-data run only: whether picking a release also writes its cover.
+        let mut set_cover = self.artwork_set_cover;
         // Album-mate counts and the "also apply to them" toggles.
         let (album_missing, album_total) = self
             .artwork_album_count
@@ -567,6 +736,14 @@ impl App {
             .unwrap_or((0, 0));
         let mut apply_album = self.artwork_apply_album;
         let mut album_overwrite = self.artwork_album_overwrite;
+        // The album-mates' song names (with whether each already has a cover),
+        // cloned out so the window closure can list which tracks share the cover
+        // without borrowing `self`. Empty when this track has no album-mates.
+        let album_mate_labels: Vec<(String, bool)> = self
+            .artwork_album_siblings
+            .as_ref()
+            .map(|(_, v)| v.iter().map(|(_, l, h)| (l.clone(), *h)).collect())
+            .unwrap_or_default();
         let remaining = self.artwork_queue.len();
         let choices = self.artwork_queue.front().expect("front checked above");
         let previews = self.artwork_previews.as_ref().map(|(_, t)| t);
@@ -577,14 +754,24 @@ impl App {
         // highlighted release (computed last frame; refreshed below). Keyed by
         // the overwrite flag too, so toggling it shows the right field set. Owned
         // clones so the window closure doesn't borrow `self`.
-        let cur_release = choices.candidates.get(selected).map(|c| c.release_id.clone());
-        let preview_rows: Option<Vec<(String, String)>> = cur_release
-            .as_ref()
-            .and_then(|r| self.preview_cache.get(&(choices.id, r.clone(), overwrite)).cloned());
-        let preview_loading = cur_release
-            .as_ref()
-            .is_some_and(|r| self.preview_inflight.contains(&(choices.id, r.clone(), overwrite)));
-        let picker_title = if enrich { "Pick release" } else { "Pick artwork" };
+        let cur_release = choices
+            .candidates
+            .get(selected)
+            .map(|c| c.release_id.clone());
+        let preview_rows: Option<Vec<(String, String)>> = cur_release.as_ref().and_then(|r| {
+            self.preview_cache
+                .get(&(choices.id, r.clone(), overwrite))
+                .cloned()
+        });
+        let preview_loading = cur_release.as_ref().is_some_and(|r| {
+            self.preview_inflight
+                .contains(&(choices.id, r.clone(), overwrite))
+        });
+        let picker_title = if enrich {
+            "Pick release"
+        } else {
+            "Pick artwork"
+        };
         // Keep the window inside the screen: cap its height to the available
         // area and let the candidate list (the part that grows with the number
         // of releases) take whatever vertical space is left, scrolling the rest.
@@ -601,8 +788,13 @@ impl App {
             .default_width(460.0)
             .max_width(max_w)
             .max_height(max_h)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
+                // Hard-cap the content width so a long, non-wrapping field value
+                // (e.g. a release with dozens of styles) can't stretch the window
+                // past the screen and shove the action buttons out of reach.
+                ui.set_max_width(max_w);
                 ui.label(egui::RichText::new(&choices.label).strong());
                 ui.label(
                     egui::RichText::new(format!(
@@ -624,92 +816,94 @@ impl App {
                 }
                 ui.separator();
 
-                egui::ScrollArea::vertical().max_height(list_h).show(ui, |ui| {
-                    for (i, c) in choices.candidates.iter().enumerate() {
-                        let is_sel = i == selected;
-                        let resp = ui
-                            .horizontal(|ui| {
-                                match previews.and_then(|t| t.get(i)).and_then(|t| t.as_ref()) {
-                                    Some(tex) => {
-                                        ui.add(
-                                            egui::Image::new(tex)
-                                                .fit_to_exact_size(egui::vec2(64.0, 64.0)),
-                                        );
+                egui::ScrollArea::vertical()
+                    .max_height(list_h)
+                    .show(ui, |ui| {
+                        for (i, c) in choices.candidates.iter().enumerate() {
+                            let is_sel = i == selected;
+                            let resp = ui
+                                .horizontal(|ui| {
+                                    match previews.and_then(|t| t.get(i)).and_then(|t| t.as_ref()) {
+                                        Some(tex) => {
+                                            ui.add(
+                                                egui::Image::new(tex)
+                                                    .fit_to_exact_size(egui::vec2(64.0, 64.0)),
+                                            );
+                                        }
+                                        None => {
+                                            let (rect, _) = ui.allocate_exact_size(
+                                                egui::vec2(64.0, 64.0),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter().rect_filled(
+                                                rect,
+                                                egui::Rounding::same(3.0),
+                                                egui::Color32::from_gray(40),
+                                            );
+                                        }
                                     }
-                                    None => {
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(64.0, 64.0),
-                                            egui::Sense::hover(),
-                                        );
-                                        ui.painter().rect_filled(
-                                            rect,
-                                            egui::Rounding::same(3.0),
-                                            egui::Color32::from_gray(40),
-                                        );
-                                    }
-                                }
-                                ui.vertical(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(short(&c.title, "Untitled release"))
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(short(
+                                                &c.title,
+                                                "Untitled release",
+                                            ))
                                             .strong(),
-                                    );
-                                    let meta = [
-                                        c.year.as_str(),
-                                        c.label.as_str(),
-                                        c.country.as_str(),
-                                        c.format.as_str(),
-                                    ]
-                                    .iter()
-                                    .filter(|s| !s.is_empty())
-                                    .cloned()
-                                    .collect::<Vec<&str>>()
-                                    .join(" · ");
-                                    if !meta.is_empty() {
-                                        ui.label(egui::RichText::new(meta).small().weak());
-                                    }
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "Discogs release {}",
-                                            c.release_id
-                                        ))
-                                        .small()
-                                        .weak(),
-                                    );
-                                });
-                            })
-                            .response;
-                        let row = ui.interact(
-                            resp.rect,
-                            egui::Id::new(("art-cand", choices.id, i)),
-                            egui::Sense::click(),
-                        );
-                        if is_sel {
-                            ui.painter().rect_stroke(
+                                        );
+                                        let meta = [
+                                            c.year.as_str(),
+                                            c.label.as_str(),
+                                            c.country.as_str(),
+                                            c.format.as_str(),
+                                        ]
+                                        .iter()
+                                        .filter(|s| !s.is_empty())
+                                        .cloned()
+                                        .collect::<Vec<&str>>()
+                                        .join(" · ");
+                                        if !meta.is_empty() {
+                                            ui.label(egui::RichText::new(meta).small().weak());
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Discogs release {}",
+                                                c.release_id
+                                            ))
+                                            .small()
+                                            .weak(),
+                                        );
+                                    });
+                                })
+                                .response;
+                            let row = ui.interact(
                                 resp.rect,
-                                egui::Rounding::same(4.0),
-                                egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                                egui::Id::new(("art-cand", choices.id, i)),
+                                egui::Sense::click(),
                             );
+                            if is_sel {
+                                ui.painter().rect_stroke(
+                                    resp.rect,
+                                    egui::Rounding::same(4.0),
+                                    egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                                );
+                            }
+                            if row.clicked() {
+                                selected = i;
+                            }
+                            ui.separator();
                         }
-                        if row.clicked() {
-                            selected = i;
-                        }
-                        ui.separator();
-                    }
-                });
+                    });
 
                 // Song-data mode: show exactly which fields the highlighted
                 // release would write (and their values) before the user commits.
                 if enrich {
                     ui.add_space(6.0);
-                    ui.checkbox(
-                        &mut overwrite,
-                        "Overwrite existing fields",
-                    )
-                    .on_hover_text(
-                        "Off: fill only empty fields (non-destructive). On: replace \
+                    ui.checkbox(&mut overwrite, "Overwrite existing fields")
+                        .on_hover_note(
+                            "Off: fill only empty fields (non-destructive). On: replace \
                          the track's existing values with this release's too. \
                          Catalog only — your source files are never touched.",
-                    );
+                        );
                     ui.label(
                         egui::RichText::new(if overwrite {
                             "Will write to this track (replacing existing values)"
@@ -737,7 +931,11 @@ impl App {
                                                     ui.label(
                                                         egui::RichText::new(field.as_str()).weak(),
                                                     );
-                                                    ui.label(value.as_str());
+                                                    // Wrap long values (genre/style
+                                                    // lists run very long) so they
+                                                    // flow downward instead of
+                                                    // widening the modal.
+                                                    ui.add(egui::Label::new(value.as_str()).wrap());
                                                     ui.end_row();
                                                 }
                                             });
@@ -771,18 +969,62 @@ impl App {
                         });
                 }
 
+                // Song-data run: setting the cover is optional and separate from
+                // the tag fill, so enriching a track that already has artwork
+                // doesn't silently replace it. Defaulted off when the track has a
+                // cover, on when it doesn't (see the front-track refresh above).
+                if enrich {
+                    ui.add_space(6.0);
+                    ui.checkbox(&mut set_cover, "Set the album cover from this release")
+                        .on_hover_note(
+                            "Off: keep the track's current cover and only fill its \
+                             tag fields. On: also replace the cover with this \
+                             release's art. Catalog only — your source files are \
+                             never touched.",
+                        );
+                }
+
                 // Offer to dress the rest of the album in one go: copy the chosen
                 // cover to its album-mates. By default only the cover-less ones;
                 // an opt-in sub-toggle also overwrites mates that already have art
                 // so the whole album matches exactly. Shown only when album-mates
-                // exist and no save is in flight.
-                if album_total > 0 && !saving {
+                // exist, a cover is actually being written, and no save is in flight.
+                if album_total > 0 && (set_cover || !enrich) && !saving {
                     ui.add_space(6.0);
-                    ui.checkbox(&mut apply_album, "Also apply this cover to other tracks on this album")
-                        .on_hover_text(
-                            "Copies the selected artwork to the other tracks on this \
+                    ui.checkbox(
+                        &mut apply_album,
+                        "Also apply this cover to other tracks on this album",
+                    )
+                    .on_hover_note(
+                        "Copies the selected artwork to the other tracks on this \
                              album in the catalog.",
-                        );
+                    );
+                    // Spell out exactly which tracks share this album, so the user
+                    // knows what "apply to album" (and the overwrite toggle) touches.
+                    if !album_mate_labels.is_empty() {
+                        egui::CollapsingHeader::new(format!(
+                            "{} other track(s) on this album",
+                            album_mate_labels.len()
+                        ))
+                        .id_salt(("album-mate-list", choices.id))
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                                for (label, has) in &album_mate_labels {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(label).small());
+                                        if *has {
+                                            ui.label(
+                                                egui::RichText::new("· has cover")
+                                                    .small()
+                                                    .weak(),
+                                            );
+                                        }
+                                    });
+                                }
+                            });
+                        });
+                    }
                     if apply_album {
                         ui.indent("apply_album_opts", |ui| {
                             ui.add_enabled_ui(album_total > album_missing, |ui| {
@@ -790,22 +1032,31 @@ impl App {
                                     &mut album_overwrite,
                                     "Replace covers they already have (match the whole album)",
                                 )
-                                .on_hover_text(
+                                .on_hover_note(
                                     "On: every track on the album gets this cover, \
                                      replacing any it already has. Off: only tracks \
                                      with no cover are filled in.",
                                 );
                             });
                             // Spell out exactly how many tracks will be touched.
-                            let n = if album_overwrite { album_total } else { album_missing };
+                            let n = if album_overwrite {
+                                album_total
+                            } else {
+                                album_missing
+                            };
                             let detail = if album_overwrite {
-                                format!("Applies to all {album_total} other track(s) on this album.")
+                                format!(
+                                    "Applies to all {album_total} other track(s) on this album."
+                                )
                             } else if album_missing == 0 {
                                 "No cover-less tracks on this album — enable replace to \
                                  cover them all."
                                     .to_string()
                             } else {
-                                format!("Applies to {n} cover-less track(s); {} already have art.", album_total - album_missing)
+                                format!(
+                                    "Applies to {n} cover-less track(s); {} already have art.",
+                                    album_total - album_missing
+                                )
                             };
                             ui.label(egui::RichText::new(detail).small().weak());
                         });
@@ -819,7 +1070,9 @@ impl App {
                         // a spinner in place of Save and lock the other controls
                         // so the front track can't change mid-save.
                         ui.add(egui::Spinner::new());
-                        ui.label(egui::RichText::new(if enrich { "Filling…" } else { "Saving…" }).weak());
+                        ui.label(
+                            egui::RichText::new(if enrich { "Filling…" } else { "Saving…" }).weak(),
+                        );
                     } else {
                         // Picking a release commits both its tags and its cover, so
                         // it's available whenever a candidate exists — even if the
@@ -854,6 +1107,7 @@ impl App {
 
         self.artwork_selected = selected;
         self.artwork_overwrite = overwrite;
+        self.artwork_set_cover = set_cover;
         self.artwork_apply_album = apply_album;
         self.artwork_album_overwrite = album_overwrite;
 
@@ -862,11 +1116,11 @@ impl App {
         // user just clicked (or a toggle of `overwrite`), without borrowing
         // `self` inside the window closure.
         if enrich && !save && !skip && !skip_all {
-            if let Some((tid, rid)) = self
-                .artwork_queue
-                .front()
-                .and_then(|ch| ch.candidates.get(selected).map(|c| (ch.id, c.release_id.clone())))
-            {
+            if let Some((tid, rid)) = self.artwork_queue.front().and_then(|ch| {
+                ch.candidates
+                    .get(selected)
+                    .map(|c| (ch.id, c.release_id.clone()))
+            }) {
                 self.ensure_metadata_preview(tid, &rid, overwrite, ctx);
             }
         }
@@ -888,7 +1142,6 @@ impl App {
             self.artwork_selected = 0;
         }
     }
-
 
     /// Ensure a field preview for `(track_id, release_id)` is loading or loaded.
     /// Spawns a background lookup (fetch the release detail, diff it against the
@@ -915,16 +1168,17 @@ impl App {
         let tx = self.preview_tx.clone();
         let ctx = ctx.clone();
         thread::spawn(move || {
-            let client = discogs::Client::new(
-                token,
-                "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
-            );
+            let client =
+                discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
             // Open the catalog first so the fetch can go cache-first (reusing a
             // release already pulled, sparing a rate-limited round trip).
             let resolved = Catalog::open(&db_path).and_then(|catalog| {
                 let detail =
                     catalog.release_cached_or(&release_id, || client.fetch_release(&release_id))?;
-                let tags = catalog.get_track(track_id).map(|t| t.tags).unwrap_or_default();
+                let tags = catalog
+                    .get_track(track_id)
+                    .map(|t| t.tags)
+                    .unwrap_or_default();
                 Ok((detail, tags))
             });
             let (fills, detail) = match resolved {
@@ -949,7 +1203,6 @@ impl App {
         });
     }
 
-
     /// Drain finished field previews into the caches.
     pub(crate) fn poll_metadata_preview(&mut self) {
         while let Ok(msg) = self.preview_rx.try_recv() {
@@ -961,7 +1214,6 @@ impl App {
             self.preview_cache.insert(key, msg.fills);
         }
     }
-
 
     /// Kick off the save for the chosen candidate on a background thread: it
     /// downloads the full-resolution image from the Discogs CDN (the slow part,
@@ -1001,6 +1253,9 @@ impl App {
         let album_overwrite = self.artwork_album_overwrite;
         // Whether the song-data write replaces existing values or only fills empties.
         let overwrite = self.artwork_overwrite;
+        // Song-data run: whether to also write the cover. The artwork run always
+        // writes it (that's its whole purpose); only enrich makes it optional.
+        let set_cover = !enrich || self.artwork_set_cover;
 
         self.artwork_saving = true;
         thread::spawn(move || {
@@ -1018,54 +1273,64 @@ impl App {
                 ))
             };
 
-            // Resolve the full-resolution image.
-            let full = client.as_ref().and_then(|c| {
-                let url = if cover_image_url.is_empty() {
-                    &thumb_url
-                } else {
-                    &cover_image_url
-                };
-                c.fetch_full(url)
-            });
-            let full_bytes = full.unwrap_or_else(|| thumb_png.clone());
+            // Resolve the full-resolution image — skipped entirely when the cover
+            // isn't being written (a song-data run that's leaving the existing art
+            // in place), so we don't spend a rate-limited request on bytes we drop.
+            let full_bytes = if set_cover {
+                let full = client.as_ref().and_then(|c| {
+                    let url = if cover_image_url.is_empty() {
+                        &thumb_url
+                    } else {
+                        &cover_image_url
+                    };
+                    c.fetch_full(url)
+                });
+                Some(full.unwrap_or_else(|| thumb_png.clone()))
+            } else {
+                None
+            };
 
             if let Ok(catalog) = Catalog::open(&db_path) {
-                let _ = catalog.set_external_artwork(
-                    track_id,
-                    "discogs",
-                    Some(&release_id),
-                    Some(&thumb_url),
-                    Some(&thumb_png),
-                    Some(&full_bytes),
-                );
+                // Write the cover only when asked. In a song-data run the user may
+                // be enriching tags on a track that already has art they want kept.
+                if let Some(full_bytes) = &full_bytes {
+                    let _ = catalog.set_external_artwork(
+                        track_id,
+                        "discogs",
+                        Some(&release_id),
+                        Some(&thumb_url),
+                        Some(&thumb_png),
+                        Some(full_bytes),
+                    );
 
-                // Dress the rest of the album: give the same cover to its
-                // album-mates. In "overwrite" mode every mate is targeted and the
-                // fetched art is flagged to supersede any embedded cover (so it
-                // shows and exports); otherwise only cover-less mates are filled.
-                // Either way they point at the same release, so a later re-fetch
-                // still works. The touched ids ride back so the UI can refresh them.
-                if apply_album {
-                    let siblings = if album_overwrite {
-                        catalog.album_siblings(track_id)
-                    } else {
-                        catalog.album_siblings_missing_art(track_id)
-                    };
-                    if let Ok(siblings) = siblings {
-                        for &sib in &siblings {
-                            let _ = catalog.set_external_artwork(
-                                sib,
-                                "discogs",
-                                Some(&release_id),
-                                Some(&thumb_url),
-                                Some(&thumb_png),
-                                Some(&full_bytes),
-                            );
-                            // Make the fetched art win over any embedded cover only
-                            // when the user asked to replace existing ones.
-                            let _ = catalog.set_prefer_external_artwork(sib, album_overwrite);
+                    // Dress the rest of the album: give the same cover to its
+                    // album-mates. In "overwrite" mode every mate is targeted and the
+                    // fetched art is flagged to supersede any embedded cover (so it
+                    // shows and exports); otherwise only cover-less mates are filled.
+                    // Either way they point at the same release, so a later re-fetch
+                    // still works. The touched ids ride back so the UI can refresh them.
+                    if apply_album {
+                        let siblings = if album_overwrite {
+                            catalog.album_siblings(track_id)
+                        } else {
+                            catalog.album_siblings_missing_art(track_id)
+                        };
+                        if let Ok(siblings) = siblings {
+                            for &sib in &siblings {
+                                let _ = catalog.set_external_artwork(
+                                    sib,
+                                    "discogs",
+                                    Some(&release_id),
+                                    Some(&thumb_url),
+                                    Some(&thumb_png),
+                                    Some(full_bytes),
+                                );
+                                // Make the fetched art win over any embedded cover only
+                                // when the user asked to replace existing ones.
+                                let _ = catalog.set_prefer_external_artwork(sib, album_overwrite);
+                            }
+                            also = siblings;
                         }
-                        also = siblings;
                     }
                 }
 
@@ -1078,7 +1343,8 @@ impl App {
                 if let (true, Some(client)) = (enrich, &client) {
                     // Cache-first so committing several tracks from the same release
                     // (or a re-edit) doesn't re-fetch its immutable detail each time.
-                    let rel = catalog.release_cached_or(&release_id, || client.fetch_release(&release_id));
+                    let rel = catalog
+                        .release_cached_or(&release_id, || client.fetch_release(&release_id));
                     if let (Ok(rel), Ok(track)) = (rel, catalog.get_track(track_id)) {
                         let mut tags = track.tags;
                         if rel.apply_to_tags(&mut tags, overwrite) > 0 {
@@ -1095,7 +1361,6 @@ impl App {
             ctx.request_repaint();
         });
     }
-
 
     /// Drain finished background artwork saves. For each, advance past the saved
     /// track (it's the front of the queue — the picker is locked while saving),
@@ -1120,7 +1385,4 @@ impl App {
             self.reload();
         }
     }
-
-
 }
-

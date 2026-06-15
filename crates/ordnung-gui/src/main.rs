@@ -7,27 +7,24 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app;
 mod audio;
 mod config;
-mod macos_drag;
-mod app;
 mod covers;
-mod player;
-mod table;
 mod inspector;
-mod views;
-mod sidebar;
 mod jobs;
+mod macos_drag;
 mod modals;
+mod player;
+mod sidebar;
+mod table;
+mod ui;
 mod util;
+mod views;
 
 use audio::{fmt_time, AudioEngine, PlayState};
 use config::Config;
 use covers::*;
-use player::*;
-use table::*;
-use sidebar::*;
-use util::*;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use ordnung_core::analysis::{self, AnalysisParams, ANALYZER_VERSION};
@@ -38,7 +35,9 @@ use ordnung_core::model::{
     Analysis, Format, Id, Playlist, Tags, Track, TranscodeVerdict, VinylRecord,
 };
 use ordnung_core::{best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind};
+use player::*;
 use rayon::prelude::*;
+use sidebar::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -46,6 +45,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use table::*;
+use ui::hover::HoverNoteExt;
+use util::*;
 
 fn main() -> eframe::Result<()> {
     let db_path = default_db_path().unwrap_or_else(|| PathBuf::from("ordnung.db"));
@@ -177,6 +179,11 @@ enum ThumbState {
 #[derive(Clone, PartialEq, Eq)]
 enum LibraryView {
     Library,
+    /// The "recently added" inbox — fresh imports that still need analysis and/or
+    /// a Discogs song-data fetch. A track expires out of this view automatically
+    /// once it's both analyzed (at the current analyzer version) and fetched, so
+    /// it reads as a self-clearing to-do list. Backed by the flat track table.
+    RecentlyAdded,
     Playlist(Id),
     /// The duplicate finder — rendered as grouped blocks, not the flat table.
     Duplicates,
@@ -286,7 +293,9 @@ impl TableColumn {
     /// Parse a persisted key back into a column, ignoring anything unknown (a key
     /// from a newer build, or a typo'd hand-edited config).
     fn from_key(s: &str) -> Option<TableColumn> {
-        TableColumn::DEFAULT_ORDER.into_iter().find(|c| c.key() == s)
+        TableColumn::DEFAULT_ORDER
+            .into_iter()
+            .find(|c| c.key() == s)
     }
 
     /// Display name: the header text, and the row label in the reorder menu. The
@@ -462,6 +471,39 @@ struct ArtworkChoices {
     candidates: Vec<ArtworkChoice>,
 }
 
+/// An image file dropped onto a track row, awaiting the user's confirmation to
+/// set it as that track's cover. Drives the cover-drop modal (a popup that asks
+/// before writing anything). The image is decoded and re-encoded to PNG up front
+/// so both the modal preview and the stored cover use validated bytes.
+struct CoverDrop {
+    /// The track the image was dropped on (the primary target).
+    track_id: Id,
+    /// "Artist — Title" of the target track, for the modal header.
+    track_label: String,
+    /// Album name of the target track, shown when offering to apply to mates.
+    album: String,
+    /// Source path of the dropped image (shown small in the modal).
+    image_path: PathBuf,
+    /// Re-encoded PNG of the full image — stored as the cover and embeddable.
+    full_png: Vec<u8>,
+    /// Re-encoded, downscaled PNG used as the table thumbnail.
+    thumb_png: Vec<u8>,
+    /// Decoded preview texture for the modal (built lazily on first draw).
+    preview: Option<egui::TextureHandle>,
+    /// Other tracks on the same album, each with a checkbox to also receive the
+    /// cover. Cover-less mates are pre-checked; mates that already have art start
+    /// unchecked so an existing cover isn't clobbered without an explicit tick.
+    siblings: Vec<CoverSibling>,
+}
+
+/// One album-mate row in the cover-drop modal's "apply to these too" selector.
+struct CoverSibling {
+    id: Id,
+    label: String,
+    has_art: bool,
+    selected: bool,
+}
+
 /// Result of a finished background artwork save: the picked track (`id`) and the
 /// album-mates the same cover was copied onto (`also`, empty when not propagated).
 /// The UI uses `also` to drop the stale cached thumbnails of overwritten siblings.
@@ -475,7 +517,10 @@ enum JobMsg {
     Status(String),
     /// Determinate progress for the running job: `done` of `total` items
     /// finished. Drives the status-bar progress bar.
-    Progress { done: usize, total: usize },
+    Progress {
+        done: usize,
+        total: usize,
+    },
     Done(String),
     Failed(String),
     /// Per-item failures from a background job: `(item name, reason)`, with a
@@ -592,6 +637,13 @@ struct App {
     /// A track the table should scroll to and reveal on the next frame, set when
     /// jumping into the catalog from the vinyl grid. Cleared once honoured.
     scroll_to_track: Option<Id>,
+    /// Screen-space rect of each visible table row this frame, with its track id.
+    /// Filled in `draw_table` and read by `handle_file_drop` to map a dropped
+    /// image onto the row under the cursor. Rebuilt every frame.
+    row_screen_rects: Vec<(Id, egui::Rect)>,
+    /// An image dropped onto a track row, awaiting confirmation to set it as that
+    /// track's cover. `Some` shows the cover-drop modal. See [`CoverDrop`].
+    cover_drop: Option<CoverDrop>,
     show_inspector: bool,
     /// Set while a cancellable job (scan / artwork fetch) is running; the worker
     /// polls it and stops early. `None` when idle or running a non-cancellable job.
@@ -608,6 +660,13 @@ struct App {
     /// checkbox in the picker; read when a candidate is saved and woven into the
     /// field preview so what's shown matches what gets written.
     artwork_overwrite: bool,
+    /// In a song-data run, whether committing the chosen release also sets the
+    /// track's cover from it. Defaulted per front track when the picker advances:
+    /// off when the track already has art (so enriching tags never clobbers an
+    /// existing cover), on when it has none. Toggled by a checkbox in the picker;
+    /// read when a candidate is saved. The "Fetch artwork" run ignores this — there
+    /// the cover *is* the point and is always written.
+    artwork_set_cover: bool,
     /// Whether saving the chosen cover should also copy it to the front track's
     /// album-mates. One lookup then dresses a whole album. Toggled by a checkbox in
     /// the picker that only appears when album-mates exist; read when a candidate
@@ -622,6 +681,11 @@ struct App {
     /// DB is queried once per track, not every frame. Drives the checkbox labels
     /// and which controls appear.
     artwork_album_count: Option<(Id, usize, usize)>,
+    /// Cached album-mate details for the front track of the artwork picker —
+    /// `(id, [(id, label, has_art)])`. Computed once per front track (alongside
+    /// `artwork_album_count`) so the picker can list *which* songs share the
+    /// chosen cover by name, not just a count.
+    artwork_album_siblings: Option<(Id, Vec<(Id, String, bool)>)>,
     /// Index of the currently highlighted candidate for the front track.
     artwork_selected: usize,
     /// Decoded preview thumbnails for the front track's candidates, keyed by
@@ -714,6 +778,18 @@ struct App {
     /// doesn't change with the filter). Drives the toolbar's "relocate missing"
     /// button, which only appears when this is non-zero.
     missing_count: u64,
+    /// How many tracks sit in the "recently added" inbox — fresh imports not yet
+    /// both analyzed and song-data fetched. Refreshed on every `reload` (it's a
+    /// cheap count) so the sidebar's Recent badge stays live as tracks expire out
+    /// of the view. See [`LibraryView::RecentlyAdded`].
+    recent_count: u64,
+    /// Track ids currently pinned into the [`LibraryView::RecentlyAdded`] table:
+    /// the rows shown the last time it was loaded while the tab was open. A track
+    /// that finishes (analyzed + fetched) while you're looking at Recent stays
+    /// here so it doesn't vanish mid-glance; the set is cleared when you leave the
+    /// tab, so re-entering recomputes the live inbox and the finished track drops
+    /// off. Empty whenever the Recent tab isn't the active view.
+    recent_pinned: HashSet<Id>,
     /// "Artist — Title" labels for the missing tracks, refreshed alongside
     /// `missing_count`. Drives the relocate button's hover list so it works from
     /// any view (unlike `missing_list`, which only fills in the Missing view).
@@ -811,9 +887,6 @@ struct Renaming {
     needs_focus: bool,
 }
 
-
-
-
 /// A catalog-mutating request raised by the left sidebar, applied after the
 /// panel closure ends so it doesn't borrow `self` while the tree is rendering.
 enum SidebarAction {
@@ -873,33 +946,9 @@ enum TrackMenuAction {
     FetchSongDetails(Vec<Id>),
 }
 
-/// Install a broad-coverage Unicode font as the primary UI face. egui's bundled
-/// default (Ubuntu-Light) covers little beyond basic Latin, so accented, Cyrillic,
-/// Greek and many symbol characters common in DJ track metadata render as tofu.
-/// DejaVu Sans (already shipped in `assets/fonts/`) has far wider coverage; we put
-/// it at the front of both the proportional and monospace chains and keep egui's
-/// defaults behind it as per-glyph fallbacks (so emoji and egui's own icon glyphs
-/// still resolve for anything DejaVu lacks).
-fn install_fonts(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "DejaVuSans".to_owned(),
-        egui::FontData::from_static(include_bytes!("../assets/fonts/DejaVuSans.ttf")),
-    );
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(family)
-            .or_default()
-            .insert(0, "DejaVuSans".to_owned());
-    }
-    ctx.set_fonts(fonts);
-}
-
 fn default_db_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let dir = PathBuf::from(home).join(".ordnung");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("catalog.db"))
 }
-

@@ -6,7 +6,6 @@ impl App {
         self.job_rx.is_some()
     }
 
-
     /// Drain any pending worker messages. Returns true if we should reload rows.
     pub(crate) fn poll_worker(&mut self) -> bool {
         let Some(rx) = &self.job_rx else { return false };
@@ -68,7 +67,6 @@ impl App {
         reload
     }
 
-
     pub(crate) fn spawn_scan(&mut self, ctx: egui::Context, dir: PathBuf) {
         let (tx, rx) = mpsc::channel();
         self.job_rx = Some(rx);
@@ -78,7 +76,6 @@ impl App {
         let db = self.db_path.clone();
         thread::spawn(move || run_scan(db, dir, cancel, tx, ctx));
     }
-
 
     /// Import paths dropped onto the window from Finder (folders are walked,
     /// individual audio files taken as-is). Behaves exactly like "Add songs…".
@@ -92,31 +89,61 @@ impl App {
         thread::spawn(move || run_import(db, paths, cancel, tx, ctx));
     }
 
-
-    /// Drop-to-import: shade the window while audio files hover over it, and scan
-    /// anything dropped. Ignored while a job is already running so a drop can't
-    /// stomp an in-flight scan/analyze.
+    /// Drop-to-import: shade the window while files hover over it, and scan
+    /// anything dropped. A single image dropped directly onto a track row is
+    /// instead routed to the cover-art flow (a confirm popup), so it never gets
+    /// fed to the importer. Ignored while a job is already running, or while the
+    /// cover-drop popup is already open, so a drop can't stomp either.
     pub(crate) fn handle_file_drop(&mut self, ctx: &egui::Context) {
-        if self.is_busy() {
+        if self.is_busy() || self.cover_drop.is_some() {
             return;
         }
+        // The row under the cursor right now (used both for the hover hint and to
+        // route a dropped image to that track). `None` when the pointer is off any
+        // row or outside the table.
+        let row_under_cursor = ctx
+            .input(|i| i.pointer.latest_pos())
+            .and_then(|p| self.row_at(p));
+
         // Paths in `hovered_files` aren't always populated until the drop lands,
-        // so any hovering file shows the hint; the import itself filters to audio.
+        // so any hovering file shows a hint. When we can tell it's an image and
+        // it's over a row, the hint becomes "set as cover" instead.
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         if hovering {
+            let cover_target = row_under_cursor.is_some() && hovered_looks_like_image(ctx);
             let screen = ctx.screen_rect();
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 egui::Id::new("drop-overlay"),
             ));
-            painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
-            painter.text(
-                screen.center(),
-                egui::Align2::CENTER_CENTER,
-                "Drop music to add it to your catalog",
-                egui::FontId::proportional(22.0),
-                egui::Color32::WHITE,
-            );
+            // Highlight the targeted row so it's obvious which track gets the cover.
+            if cover_target {
+                if let Some((_, rect)) = self
+                    .row_screen_rects
+                    .iter()
+                    .find(|(id, _)| Some(*id) == row_under_cursor)
+                {
+                    painter.rect_filled(
+                        rect.expand(1.0),
+                        3.0,
+                        egui::Color32::from_rgba_unmultiplied(64, 110, 180, 90),
+                    );
+                    painter.rect_stroke(
+                        rect.expand(1.0),
+                        3.0,
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 170, 240)),
+                    );
+                }
+            } else {
+                painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
+                painter.text(
+                    screen.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Drop music to add it to your catalog",
+                    egui::FontId::proportional(22.0),
+                    egui::Color32::WHITE,
+                );
+            }
         }
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
@@ -125,11 +152,31 @@ impl App {
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
-        if !dropped.is_empty() {
-            self.spawn_import(ctx.clone(), dropped);
+        if dropped.is_empty() {
+            return;
         }
+        // A single image dropped onto a track row → offer to set it as that
+        // track's cover (with the option to apply across the album), rather than
+        // importing. Anything else falls through to the normal import.
+        let images: Vec<&PathBuf> = dropped.iter().filter(|p| is_image_path(p)).collect();
+        if images.len() == 1 {
+            if let Some(track_id) = row_under_cursor {
+                let image = images[0].clone();
+                self.open_cover_drop(ctx, track_id, image);
+                return;
+            }
+        }
+        self.spawn_import(ctx.clone(), dropped);
     }
 
+    /// The track id of the visible row whose screen rect contains `pos`, if any.
+    /// Reads the row rects recorded by `draw_table` this frame.
+    pub(crate) fn row_at(&self, pos: egui::Pos2) -> Option<Id> {
+        self.row_screen_rects
+            .iter()
+            .find(|(_, rect)| rect.contains(pos))
+            .map(|(id, _)| *id)
+    }
 
     /// Search `dir` recursively for the source files of every track gone
     /// missing and repoint the catalog at the ones it confidently locates.
@@ -142,7 +189,6 @@ impl App {
         let db = self.db_path.clone();
         thread::spawn(move || run_relocate(db, dir, tx, ctx));
     }
-
 
     pub(crate) fn spawn_analyze(&mut self, ctx: egui::Context, force: bool) {
         let (tx, rx) = mpsc::channel();
@@ -158,7 +204,6 @@ impl App {
         thread::spawn(move || run_analyze(db, AnalyzeTargets::Query(query), force, tx, ctx));
     }
 
-
     /// Analyze a specific set of tracks (the context-menu selection) rather than
     /// the whole filtered view. Skips tracks already analyzed at the current
     /// version unless `force`.
@@ -170,7 +215,6 @@ impl App {
         let db = self.db_path.clone();
         thread::spawn(move || run_analyze(db, AnalyzeTargets::Ids(ids), force, tx, ctx));
     }
-
 
     /// Sync the local vinyl-collection cache from Discogs: pull the user's whole
     /// collection (folder 0), upsert metadata, prune records they've removed, and
@@ -192,7 +236,6 @@ impl App {
         let db = self.db_path.clone();
         thread::spawn(move || run_refresh_vinyl(db, token, tx, ctx));
     }
-
 
     /// Walk every track that has no embedded *and* no external cover, ask
     /// Discogs for a thumbnail, and cache the result in the catalog. Token
@@ -225,7 +268,6 @@ impl App {
         thread::spawn(move || run_fetch_artwork(db, token, cancel, tx, ctx, enrich));
     }
 
-
     /// Re-open the release picker for a single track (the "Edit release…" menu
     /// action): search Discogs for just this track and queue its candidates, in
     /// song-data mode so committing applies the chosen release's cover + tags.
@@ -246,9 +288,9 @@ impl App {
         self.job_cancel = Some(cancel.clone());
         self.status = "Searching Discogs for releases…".into();
         let db = self.db_path.clone();
-        thread::spawn(move || run_fetch_tracks(db, token, vec![track_id], cancel, tx, ctx));
+        // Always a song-data re-pick, so a no-match marks the track done.
+        thread::spawn(move || run_fetch_tracks(db, token, vec![track_id], cancel, tx, ctx, true));
     }
-
 
     /// Fetch from Discogs for an explicit set of tracks (the right-click menu
     /// actions). `enrich = false` caches cover art only ("Fetch artwork");
@@ -279,11 +321,14 @@ impl App {
             "Searching Discogs for artwork…".into()
         };
         let db = self.db_path.clone();
-        thread::spawn(move || run_fetch_tracks(db, token, ids, cancel, tx, ctx));
+        thread::spawn(move || run_fetch_tracks(db, token, ids, cancel, tx, ctx, enrich));
     }
 
-
-    pub(crate) fn spawn_convert(&mut self, ctx: egui::Context, modal: &ConvertModal) -> Result<(), String> {
+    pub(crate) fn spawn_convert(
+        &mut self,
+        ctx: egui::Context,
+        modal: &ConvertModal,
+    ) -> Result<(), String> {
         let bitrate_kbps = match modal.target {
             Format::Mp3 | Format::Aac => {
                 let s = modal.bitrate_kbps.trim();
@@ -319,7 +364,6 @@ impl App {
         Ok(())
     }
 
-
     /// Start a background batch conversion of `ids` to `target`. Validates the
     /// bitrate and creates the output folder up front so a bad value surfaces in
     /// the dialog rather than mid-run.
@@ -349,7 +393,10 @@ impl App {
         if let Some(dir) = &out_dir {
             std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         }
-        let spec = ConvertSpec { target, bitrate_kbps };
+        let spec = ConvertSpec {
+            target,
+            bitrate_kbps,
+        };
 
         let (tx, rx) = mpsc::channel();
         self.job_rx = Some(rx);
@@ -358,12 +405,9 @@ impl App {
         self.status = format!("Converting {} track(s)…", ids.len());
 
         let db = self.db_path.clone();
-        thread::spawn(move || {
-            run_batch_convert(db, ids, spec, out_dir, in_place, cancel, tx, ctx)
-        });
+        thread::spawn(move || run_batch_convert(db, ids, spec, out_dir, in_place, cancel, tx, ctx));
         Ok(())
     }
-
 
     /// Background job: write every `user_edited` track's tags into its source
     /// file, clearing the flag as each succeeds. Cancellable; reports progress
@@ -396,7 +440,13 @@ impl App {
     }
 }
 
-pub(crate) fn run_scan(db: PathBuf, dir: PathBuf, cancel: Arc<AtomicBool>, tx: Sender<JobMsg>, ctx: egui::Context) {
+pub(crate) fn run_scan(
+    db: PathBuf,
+    dir: PathBuf,
+    cancel: Arc<AtomicBool>,
+    tx: Sender<JobMsg>,
+    ctx: egui::Context,
+) {
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
@@ -417,11 +467,16 @@ pub(crate) fn run_scan(db: PathBuf, dir: PathBuf, cancel: Arc<AtomicBool>, tx: S
     import_files(&catalog, &files, &cancel, &tx, &ctx);
 }
 
-
 /// Import a drag-and-drop of paths from Finder: directories are walked for audio
 /// files, individual audio files are taken as-is, and anything else is ignored.
 /// Shares the scan loop with `run_scan`, so drops behave exactly like "Add songs…".
-pub(crate) fn run_import(db: PathBuf, paths: Vec<PathBuf>, cancel: Arc<AtomicBool>, tx: Sender<JobMsg>, ctx: egui::Context) {
+pub(crate) fn run_import(
+    db: PathBuf,
+    paths: Vec<PathBuf>,
+    cancel: Arc<AtomicBool>,
+    tx: Sender<JobMsg>,
+    ctx: egui::Context,
+) {
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
@@ -449,7 +504,6 @@ pub(crate) fn run_import(db: PathBuf, paths: Vec<PathBuf>, cancel: Arc<AtomicBoo
     }
     import_files(&catalog, &files, &cancel, &tx, &ctx);
 }
-
 
 /// Scan `files` into the catalog one by one, reporting determinate progress.
 /// Honours `cancel`. Shared by "Add songs…" (`run_scan`) and drop-import
@@ -542,7 +596,6 @@ pub(crate) fn import_files(
     ctx.request_repaint();
 }
 
-
 /// Locate moved source files and repoint the catalog at them. Reads the missing
 /// tracks, searches `dir` by filename (content-fingerprint to break ties), and
 /// relinks each confident match. The relink is a catalog row update — files are
@@ -600,7 +653,10 @@ pub(crate) fn run_relocate(db: PathBuf, dir: PathBuf, tx: Sender<JobMsg>, ctx: e
             }
             Err(e) => {
                 failed += 1;
-                fails.push((name_of(&r.new_path), format!("couldn't read located file: {e}")));
+                fails.push((
+                    name_of(&r.new_path),
+                    format!("couldn't read located file: {e}"),
+                ));
             }
         }
     }
@@ -623,8 +679,12 @@ pub(crate) fn run_relocate(db: PathBuf, dir: PathBuf, tx: Sender<JobMsg>, ctx: e
     ctx.request_repaint();
 }
 
-
-pub(crate) fn run_write_edits(db: PathBuf, cancel: Arc<AtomicBool>, tx: Sender<JobMsg>, ctx: egui::Context) {
+pub(crate) fn run_write_edits(
+    db: PathBuf,
+    cancel: Arc<AtomicBool>,
+    tx: Sender<JobMsg>,
+    ctx: egui::Context,
+) {
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
@@ -803,14 +863,12 @@ pub(crate) fn run_trash_marked(
     ctx.request_repaint();
 }
 
-
 /// What `run_analyze` should operate on: the current filtered view (`Query`) or
 /// an explicit set of track ids (`Ids`, from the right-click selection).
 pub(crate) enum AnalyzeTargets {
     Query(Option<String>),
     Ids(Vec<Id>),
 }
-
 
 pub(crate) fn run_analyze(
     db: PathBuf,
@@ -931,13 +989,17 @@ pub(crate) fn run_analyze(
     ctx.request_repaint();
 }
 
-
 /// Sync the local vinyl-collection cache from the user's Discogs collection.
 /// Fetches the full collection (paced by the Discogs client), upserts every
 /// record, prunes any the user removed since the last sync, then downloads
 /// covers for records that don't have one cached yet. Covers stream in with
 /// determinate progress so the grid fills as the run proceeds.
-pub(crate) fn run_refresh_vinyl(db: PathBuf, token: String, tx: Sender<JobMsg>, ctx: egui::Context) {
+pub(crate) fn run_refresh_vinyl(
+    db: PathBuf,
+    token: String,
+    tx: Sender<JobMsg>,
+    ctx: egui::Context,
+) {
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
@@ -1012,7 +1074,6 @@ pub(crate) fn run_refresh_vinyl(db: PathBuf, token: String, tx: Sender<JobMsg>, 
     ctx.request_repaint();
 }
 
-
 /// Discogs artwork lookup for every track that has neither an embedded cover
 /// nor a prior Discogs attempt on file. Paced at one request per ~1.1 s to
 /// stay comfortably under the 60/min authenticated rate limit. Candidate
@@ -1031,6 +1092,7 @@ pub(crate) fn run_fetch_tracks(
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
+    enrich: bool,
 ) {
     const MAX_CANDIDATES: usize = 6;
     let catalog = match Catalog::open(&db) {
@@ -1041,10 +1103,7 @@ pub(crate) fn run_fetch_tracks(
             return;
         }
     };
-    let client = discogs::Client::new(
-        token,
-        "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
-    );
+    let client = discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
     let total = ids.len();
     let (mut queued, mut none, mut skipped, mut errored) = (0u64, 0u64, 0u64, 0u64);
     let mut fails: Vec<(String, String)> = Vec::new();
@@ -1060,7 +1119,13 @@ pub(crate) fn run_fetch_tracks(
                 continue;
             }
         };
-        let artist = track.tags.artist.as_deref().unwrap_or("").trim().to_string();
+        let artist = track
+            .tags
+            .artist
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let title = track
             .tags
             .title
@@ -1077,7 +1142,11 @@ pub(crate) fn run_fetch_tracks(
             .map(str::to_string);
         let label = format!(
             "{} — {}",
-            if artist.is_empty() { "Unknown" } else { &artist },
+            if artist.is_empty() {
+                "Unknown"
+            } else {
+                &artist
+            },
             title.as_deref().unwrap_or("Untitled"),
         );
         if artist.is_empty() && title.is_none() && album.is_none() {
@@ -1115,7 +1184,17 @@ pub(crate) fn run_fetch_tracks(
                 }));
                 queued += 1;
             }
-            Ok(_) => none += 1,
+            Ok(_) => {
+                none += 1;
+                // On a song-data run, a no-match means Discogs has nothing for
+                // this track — mark it fetched so it leaves the "recently added"
+                // inbox instead of lingering forever with nothing to populate it.
+                // Mirrors the bulk path in `run_fetch_artwork`. (Artwork-only runs
+                // leave the marker alone.) Re-runnable via "Edit release…".
+                if enrich {
+                    let _ = catalog.mark_metadata_fetched(track_id);
+                }
+            }
             Err(e) => {
                 errored += 1;
                 fails.push((label, format!("Discogs search failed: {e}")));
@@ -1151,7 +1230,6 @@ pub(crate) fn run_fetch_tracks(
     ctx.request_repaint();
 }
 
-
 pub(crate) fn run_fetch_artwork(
     db: PathBuf,
     token: String,
@@ -1185,20 +1263,15 @@ pub(crate) fn run_fetch_artwork(
         }
     };
     if pending.is_empty() {
-        let _ = tx.send(JobMsg::Done(
-            if enrich {
-                "Every track already has the album-level fields Discogs can fill.".into()
-            } else {
-                "All tracks already have artwork (or a prior Discogs attempt on file).".to_string()
-            },
-        ));
+        let _ = tx.send(JobMsg::Done(if enrich {
+            "Every track already has the album-level fields Discogs can fill.".into()
+        } else {
+            "All tracks already have artwork (or a prior Discogs attempt on file).".to_string()
+        }));
         ctx.request_repaint();
         return;
     }
-    let client = discogs::Client::new(
-        token,
-        "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
-    );
+    let client = discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
     let total = pending.len();
     let (mut matched, mut none, mut skipped, mut errored) = (0u64, 0u64, 0u64, 0u64);
     let mut fails: Vec<(String, String)> = Vec::new();
@@ -1239,11 +1312,19 @@ pub(crate) fn run_fetch_artwork(
         }
         let label = format!(
             "{} — {}",
-            if artist.is_empty() { "Unknown" } else { &artist },
+            if artist.is_empty() {
+                "Unknown"
+            } else {
+                &artist
+            },
             title.as_deref().unwrap_or("Untitled"),
         );
         if cancel.load(Ordering::Relaxed) {
-            let what = if enrich { "Song-data fetch" } else { "Artwork fetch" };
+            let what = if enrich {
+                "Song-data fetch"
+            } else {
+                "Artwork fetch"
+            };
             if !fails.is_empty() {
                 let _ = tx.send(JobMsg::Failures {
                     title: what.into(),
@@ -1307,7 +1388,11 @@ pub(crate) fn run_fetch_artwork(
 
         let _ = tx.send(JobMsg::Status(format!(
             "{} ({}/{}) {}",
-            if enrich { "Fetching song data" } else { "Fetching artwork" },
+            if enrich {
+                "Fetching song data"
+            } else {
+                "Fetching artwork"
+            },
             i + 1,
             total,
             label
@@ -1363,7 +1448,12 @@ pub(crate) fn run_fetch_artwork(
     }
     if !fails.is_empty() {
         let _ = tx.send(JobMsg::Failures {
-            title: if enrich { "Song-data fetch" } else { "Artwork fetch" }.into(),
+            title: if enrich {
+                "Song-data fetch"
+            } else {
+                "Artwork fetch"
+            }
+            .into(),
             items: fails,
         });
     }
@@ -1373,7 +1463,6 @@ pub(crate) fn run_fetch_artwork(
     )));
     ctx.request_repaint();
 }
-
 
 /// Convert one cataloged track to `dest` and rehydrate the new file from the
 /// catalog: the FULL tag set (original scan + every edit) plus cover art (the
@@ -1388,16 +1477,13 @@ pub(crate) fn run_fetch_artwork(
 /// file (see [`unique_dest`]).
 pub(crate) fn convert_dest_for(track: &Track, target: Format, out_dir: Option<&Path>) -> PathBuf {
     let src = Path::new(&track.source_path);
-    let base = match convert::metadata_stem(
-        track.tags.artist.as_deref(),
-        track.tags.title.as_deref(),
-    ) {
-        Some(stem) => convert::output_path_with_stem(src, &stem, target, out_dir),
-        None => convert::output_path_for(src, target, out_dir),
-    };
+    let base =
+        match convert::metadata_stem(track.tags.artist.as_deref(), track.tags.title.as_deref()) {
+            Some(stem) => convert::output_path_with_stem(src, &stem, target, out_dir),
+            None => convert::output_path_for(src, target, out_dir),
+        };
     unique_dest(base, src)
 }
-
 
 /// Return `base` if it's free (or is the source file itself, which a convert may
 /// legitimately replace); otherwise append " (1)", " (2)", … until a free path is
@@ -1430,7 +1516,6 @@ pub(crate) fn unique_dest(base: PathBuf, src: &Path) -> PathBuf {
         n += 1;
     }
 }
-
 
 pub(crate) fn convert_track(
     catalog: &Catalog,
@@ -1476,7 +1561,6 @@ pub(crate) fn convert_track(
     Ok((outcome.output_path, embedded))
 }
 
-
 pub(crate) fn run_convert(
     db: PathBuf,
     track_id: Id,
@@ -1517,7 +1601,6 @@ pub(crate) fn run_convert(
     }
     ctx.request_repaint();
 }
-
 
 /// Convert a whole selection to one target format, one track at a time, on a
 /// background thread. Reports per-track progress, is cancellable between tracks,
@@ -1571,7 +1654,10 @@ pub(crate) fn run_batch_convert(
             .title
             .clone()
             .unwrap_or_else(|| format!("track {id}"));
-        let _ = tx.send(JobMsg::Status(format!("Converting {}/{total}: {label}…", i + 1)));
+        let _ = tx.send(JobMsg::Status(format!(
+            "Converting {}/{total}: {label}…",
+            i + 1
+        )));
         let _ = tx.send(JobMsg::Progress { done: i, total });
         ctx.request_repaint();
         match convert_track(&catalog, &track, &spec, out_dir.as_deref(), in_place) {
@@ -1611,7 +1697,6 @@ pub(crate) fn run_batch_convert(
     ctx.request_repaint();
 }
 
-
 pub(crate) fn file_stamp(path: &str) -> (u64, i64) {
     match std::fs::metadata(path) {
         Ok(m) => {
@@ -1626,5 +1711,3 @@ pub(crate) fn file_stamp(path: &str) -> (u64, i64) {
         Err(_) => (0, 0),
     }
 }
-
-
