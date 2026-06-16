@@ -50,6 +50,12 @@ use ui::hover::HoverNoteExt;
 use util::*;
 
 fn main() -> eframe::Result<()> {
+    // Pull a repo-root `.env` into the process environment before anything reads
+    // it, so a local `DISCOGS_TOKEN=…` line works for `cargo run`/`make run`
+    // without exporting it in the shell. Absent file → no-op (Finder launches
+    // fall back to the token saved in ~/.ordnung/config.toml); we never override
+    // a variable already set in the real environment.
+    let _ = dotenvy::dotenv();
     let db_path = default_db_path().unwrap_or_else(|| PathBuf::from("ordnung.db"));
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1100.0, 680.0])

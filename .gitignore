@@ -15,6 +15,12 @@ Cargo.lock.orig
 # Built app bundle — regenerate with tools/build-app.sh
 /Ordnung.app/
 
+# Local secrets — Discogs token etc. The committed .env.example is the template.
+/.env
+/.env.*
+!/.env.example
+
 # Local-only Claude Code state
+/CLAUDE.md
 /.claude/settings.local.json
 /.claude/scheduled_tasks.lock

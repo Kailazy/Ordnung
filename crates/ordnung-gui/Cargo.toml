@@ -44,6 +44,11 @@ souvlaki = "0.8"
 # restarts and Finder launches that inherit no shell environment.
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
+# Load a repo-root `.env` (gitignored) on startup so `DISCOGS_TOKEN` can live in
+# a local file for `cargo run`/`make run` dev launches instead of being exported
+# in the shell. No-op when the file is absent (e.g. Finder launches, which use
+# the token saved in ~/.ordnung/config.toml instead). See src/main.rs.
+dotenvy = "0.15"
 # Delete a duplicate copy by moving its source file to the OS Trash rather than
 # hard-unlinking it — a deleted master must stay recoverable. Used only by the
 # Duplicates view's per-copy delete action.
