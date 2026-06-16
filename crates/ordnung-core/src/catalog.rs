@@ -2524,16 +2524,45 @@ fn strip_prefix_boundary(path: &str, prefix: &str) -> Option<String> {
     }
 }
 
-/// Normalize a title/album/artist for fuzzy linking: lowercase, then split on any
-/// non-alphanumeric run and rejoin with single spaces. Collapses punctuation and
-/// spacing differences so "Guardwatcher Pt. 1" == "guardwatcher pt 1", while
-/// keeping word boundaries (so unrelated strings don't accidentally merge).
+/// Normalize a title/album/artist for fuzzy linking: lowercase, split on any
+/// non-alphanumeric run, canonicalize each token, and rejoin with single spaces.
+/// Collapses punctuation and spacing differences so "Guardwatcher Pt. 1" ==
+/// "guardwatcher pt 1", while keeping word boundaries (so unrelated strings don't
+/// accidentally merge). Token canonicalization also bridges the abbreviation and
+/// numeral spellings common in compilation titles, so a downloaded "Club Styling
+/// Vol. 2" links to the Discogs release "Club Styling Volume Two".
 fn norm_match(s: &str) -> String {
     s.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|p| !p.is_empty())
+        .map(canon_token)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Canonicalize a single normalized token to a common form so that equivalent
+/// spellings compare equal: expand the abbreviations that show up in release
+/// titles ("volume"→"vol", "part"→"pt") and fold the small number words used for
+/// volumes/parts to their digit ("two"→"2"). Anything else passes through.
+fn canon_token(t: &str) -> String {
+    match t {
+        "volume" => "vol".to_string(),
+        "part" => "pt".to_string(),
+        "zero" => "0".to_string(),
+        "one" => "1".to_string(),
+        "two" => "2".to_string(),
+        "three" => "3".to_string(),
+        "four" => "4".to_string(),
+        "five" => "5".to_string(),
+        "six" => "6".to_string(),
+        "seven" => "7".to_string(),
+        "eight" => "8".to_string(),
+        "nine" => "9".to_string(),
+        "ten" => "10".to_string(),
+        "eleven" => "11".to_string(),
+        "twelve" => "12".to_string(),
+        _ => t.to_string(),
+    }
 }
 
 /// Whether two already-normalized artist strings plausibly refer to the same act:
@@ -3551,6 +3580,13 @@ mod tests {
         assert_eq!(norm_match("guardwatcher pt 1"), "guardwatcher pt 1");
         assert_eq!(norm_match("  Ø  [Phase] "), "ø phase");
         assert_eq!(norm_match("A&B - C"), "a b c");
+        // Abbreviation + numeral spellings canonicalize together so a downloaded
+        // "Club Styling Vol. 2" links to the release "Club Styling Volume Two".
+        assert_eq!(
+            norm_match("Club Styling Vol. 2"),
+            norm_match("Club Styling Volume Two")
+        );
+        assert_eq!(norm_match("Greatest Hits Part Three"), "greatest hits pt 3");
     }
 
     #[test]
