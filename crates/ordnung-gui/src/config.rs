@@ -8,7 +8,7 @@ use std::path::PathBuf;
 /// User settings that must survive across launches — including launches from
 /// Finder/Dock, which inherit none of the shell environment. Currently just the
 /// Discogs token; extend in place as more settings appear.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Discogs personal access token. Empty means "not set" — callers then fall
     /// back to the `DISCOGS_TOKEN` environment variable.
@@ -27,6 +27,27 @@ pub struct Config {
     /// Track-table columns the user has hidden, as stable column keys.
     #[serde(default)]
     pub hidden_columns: Vec<String>,
+    /// Run analysis (BPM, key, waveform) automatically on each track as it's
+    /// imported, instead of waiting for the explicit "Analyze" action. On by
+    /// default; defaults to on for older configs that predate the field too.
+    #[serde(default = "default_true")]
+    pub auto_analyze: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            discogs_token: String::new(),
+            discogs_username: String::new(),
+            column_order: Vec::new(),
+            hidden_columns: Vec::new(),
+            auto_analyze: true,
+        }
+    }
 }
 
 impl Config {

@@ -74,7 +74,8 @@ impl App {
         self.job_cancel = Some(cancel.clone());
         self.status = format!("Scanning {}…", dir.display());
         let db = self.db_path.clone();
-        thread::spawn(move || run_scan(db, dir, cancel, tx, ctx));
+        let auto_analyze = self.config.auto_analyze;
+        thread::spawn(move || run_scan(db, dir, cancel, tx, ctx, auto_analyze));
     }
 
     /// Import paths dropped onto the window from Finder (folders are walked,
@@ -86,7 +87,8 @@ impl App {
         self.job_cancel = Some(cancel.clone());
         self.status = format!("Importing {} dropped item(s)…", paths.len());
         let db = self.db_path.clone();
-        thread::spawn(move || run_import(db, paths, cancel, tx, ctx));
+        let auto_analyze = self.config.auto_analyze;
+        thread::spawn(move || run_import(db, paths, cancel, tx, ctx, auto_analyze));
     }
 
     /// Drop-to-import: shade the window while files hover over it, and scan
@@ -446,6 +448,7 @@ pub(crate) fn run_scan(
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
+    auto_analyze: bool,
 ) {
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
@@ -464,7 +467,8 @@ pub(crate) fn run_scan(
         ctx.request_repaint();
         return;
     }
-    import_files(&catalog, &files, &cancel, &tx, &ctx);
+    let outcome = import_files(&catalog, &files, &cancel, &tx, &ctx);
+    finish_import(&catalog, outcome, auto_analyze, &tx, &ctx);
 }
 
 /// Import a drag-and-drop of paths from Finder: directories are walked for audio
@@ -476,6 +480,7 @@ pub(crate) fn run_import(
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
+    auto_analyze: bool,
 ) {
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
@@ -502,21 +507,38 @@ pub(crate) fn run_import(
         ctx.request_repaint();
         return;
     }
-    import_files(&catalog, &files, &cancel, &tx, &ctx);
+    let outcome = import_files(&catalog, &files, &cancel, &tx, &ctx);
+    finish_import(&catalog, outcome, auto_analyze, &tx, &ctx);
+}
+
+/// What an import run touched, so the caller can report it and (optionally)
+/// chain straight into analysis of the freshly added tracks.
+pub(crate) struct ImportOutcome {
+    /// Catalog ids of every track added or updated this run — the set handed to
+    /// the auto-analysis pass. Excludes tracks skipped as unchanged.
+    pub touched: Vec<Id>,
+    /// Human-readable tally for the status line / final `Done` message.
+    pub summary: String,
+    /// True if the user cancelled mid-scan; suppresses the analysis chain.
+    pub cancelled: bool,
 }
 
 /// Scan `files` into the catalog one by one, reporting determinate progress.
 /// Honours `cancel`. Shared by "Add songs…" (`run_scan`) and drop-import
-/// (`run_import`) so both paths behave identically.
+/// (`run_import`) so both paths behave identically. Returns the touched ids and
+/// a summary without sending a terminal `Done` — `finish_import` owns that, so
+/// it can chain analysis onto the same job first.
 pub(crate) fn import_files(
     catalog: &Catalog,
     files: &[PathBuf],
     cancel: &AtomicBool,
     tx: &Sender<JobMsg>,
     ctx: &egui::Context,
-) {
+) -> ImportOutcome {
     let total = files.len();
     let (mut added, mut updated, mut failed, mut unchanged) = (0u64, 0u64, 0u64, 0u64);
+    // Ids of tracks added or updated this run, fed to auto-analysis afterward.
+    let mut touched: Vec<Id> = Vec::new();
     // Per-file failures, with the reason, so the UI can report exactly what was
     // skipped instead of just a count.
     let mut skips: Vec<(String, String)> = Vec::new();
@@ -533,12 +555,14 @@ pub(crate) fn import_files(
                     items: skips,
                 });
             }
-            let _ = tx.send(JobMsg::Done(format!(
-                "Scan cancelled after {i}/{total}: {added} added, {updated} updated, \
-                 {unchanged} unchanged, {failed} skipped."
-            )));
-            ctx.request_repaint();
-            return;
+            return ImportOutcome {
+                touched,
+                summary: format!(
+                    "Scan cancelled after {i}/{total}: {added} added, {updated} updated, \
+                     {unchanged} unchanged, {failed} skipped."
+                ),
+                cancelled: true,
+            };
         }
         // Skip files already in the catalog and unchanged on disk (same size +
         // mtime) — the expensive part is reading/decoding the file, so this makes
@@ -565,8 +589,14 @@ pub(crate) fn import_files(
         ctx.request_repaint();
         match scan::scan_file(path) {
             Ok(s) => match catalog.upsert_scanned(&s) {
-                Ok((_, true)) => added += 1,
-                Ok((_, false)) => updated += 1,
+                Ok((id, true)) => {
+                    added += 1;
+                    touched.push(id);
+                }
+                Ok((id, false)) => {
+                    updated += 1;
+                    touched.push(id);
+                }
                 Err(e) => {
                     failed += 1;
                     skips.push((name_of(path), format!("catalog write failed: {e}")));
@@ -590,10 +620,47 @@ pub(crate) fn import_files(
     } else {
         String::new()
     };
-    let _ = tx.send(JobMsg::Done(format!(
-        "Scanned {total} file(s): {added} added, {updated} updated{unchanged_note}, {failed} skipped."
-    )));
-    ctx.request_repaint();
+    ImportOutcome {
+        touched,
+        summary: format!(
+            "Scanned {total} file(s): {added} added, {updated} updated{unchanged_note}, {failed} skipped."
+        ),
+        cancelled: false,
+    }
+}
+
+/// Close out an import: either report the tally, or — when auto-analysis is on
+/// and tracks were added/updated — chain straight into analyzing them on this
+/// same job thread (so it stays one progress flow with one terminal `Done`).
+/// Auto-analysis is GUI policy, mirroring the explicit "Analyze" action; core
+/// stays explicit-only.
+fn finish_import(
+    catalog: &Catalog,
+    outcome: ImportOutcome,
+    auto_analyze: bool,
+    tx: &Sender<JobMsg>,
+    ctx: &egui::Context,
+) {
+    if outcome.cancelled || !auto_analyze || outcome.touched.is_empty() {
+        let _ = tx.send(JobMsg::Done(outcome.summary));
+        ctx.request_repaint();
+        return;
+    }
+    // Resolve the touched ids to tracks; skip any that vanished since the scan.
+    let tracks: Vec<Track> = outcome
+        .touched
+        .iter()
+        .filter_map(|&id| catalog.get_track(id).ok())
+        .collect();
+    if tracks.is_empty() {
+        let _ = tx.send(JobMsg::Done(outcome.summary));
+        ctx.request_repaint();
+        return;
+    }
+    // Lead the analysis tally with what was imported, so the one combined Done
+    // reads e.g. "Scanned 5 file(s): … Analyzed 5 track(s), 0 failed."
+    let lead = format!("{} ", outcome.summary);
+    analyze_tracks(catalog, tracks, false, &lead, tx, ctx);
 }
 
 /// Locate moved source files and repoint the catalog at them. Reads the missing
@@ -905,6 +972,22 @@ pub(crate) fn run_analyze(
         ctx.request_repaint();
         return;
     }
+    analyze_tracks(&catalog, tracks, force, "", &tx, &ctx);
+}
+
+/// Analyze `tracks` in parallel, skipping any already current at this analyzer
+/// version (unless `force`), then save each result. Sends progress and exactly
+/// one terminal `Done`, whose message is prefixed with `lead` (empty for a
+/// standalone analyze; the import tally when chained after a scan). Shared by
+/// the explicit "Analyze" action and auto-analysis-on-import.
+fn analyze_tracks(
+    catalog: &Catalog,
+    tracks: Vec<Track>,
+    force: bool,
+    lead: &str,
+    tx: &Sender<JobMsg>,
+    ctx: &egui::Context,
+) {
     let mut pending = Vec::new();
     for t in &tracks {
         let (size, mtime) = file_stamp(&t.source_path);
@@ -916,7 +999,7 @@ pub(crate) fn run_analyze(
     }
     if pending.is_empty() {
         let _ = tx.send(JobMsg::Done(format!(
-            "All {} track(s) already analyzed.",
+            "{lead}All {} track(s) already analyzed.",
             tracks.len()
         )));
         ctx.request_repaint();
@@ -984,7 +1067,7 @@ pub(crate) fn run_analyze(
         });
     }
     let _ = tx.send(JobMsg::Done(format!(
-        "Analyzed {ok} track(s), {failed} failed."
+        "{lead}Analyzed {ok} track(s), {failed} failed."
     )));
     ctx.request_repaint();
 }

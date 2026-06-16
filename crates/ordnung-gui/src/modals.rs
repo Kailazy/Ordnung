@@ -333,6 +333,26 @@ impl App {
                 ui.add_space(14.0);
                 ui.separator();
                 ui.add_space(6.0);
+                ui.label(egui::RichText::new("Analysis").strong());
+                if ui
+                    .checkbox(
+                        &mut self.config.auto_analyze,
+                        "Analyze tracks automatically when added",
+                    )
+                    .on_hover_text(
+                        "Run BPM, key, and waveform analysis on each track as it's imported. \
+                         Turn this off to analyze on demand with the Analyze button instead.",
+                    )
+                    .changed()
+                {
+                    if let Err(e) = self.config.save() {
+                        self.status = format!("Couldn't save settings: {e}");
+                    }
+                }
+
+                ui.add_space(14.0);
+                ui.separator();
+                ui.add_space(6.0);
                 ui.label(egui::RichText::new("Danger zone").strong());
                 ui.label(
                     egui::RichText::new(
