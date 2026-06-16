@@ -353,6 +353,110 @@ impl App {
                 ui.add_space(14.0);
                 ui.separator();
                 ui.add_space(6.0);
+                ui.label(egui::RichText::new("Conversion").strong());
+                ui.label(
+                    egui::RichText::new(
+                        "Defaults used when you open a Convert dialog. You can still \
+                         change them per conversion.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(4.0);
+                let mut convert_dirty = false;
+                let mut target =
+                    format_from_key(&self.config.convert_format).unwrap_or(Format::Aiff);
+                egui::Grid::new("settings_convert_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Default format:");
+                        let before = target;
+                        egui::ComboBox::from_id_salt("settings_convert_format")
+                            .selected_text(format_label(target))
+                            .show_ui(ui, |ui| {
+                                for &f in &[
+                                    Format::Mp3,
+                                    Format::Aac,
+                                    Format::Flac,
+                                    Format::Wav,
+                                    Format::Aiff,
+                                ] {
+                                    ui.selectable_value(&mut target, f, format_label(f));
+                                }
+                            });
+                        if target != before {
+                            self.config.convert_format = format_key(target).to_string();
+                            convert_dirty = true;
+                        }
+                        ui.end_row();
+
+                        ui.label("Default bitrate (kbps):");
+                        let lossy = matches!(target, Format::Mp3 | Format::Aac);
+                        let resp = ui.add_enabled(
+                            lossy,
+                            egui::TextEdit::singleline(&mut self.config.convert_bitrate_kbps)
+                                .hint_text(default_bitrate_hint(target))
+                                .desired_width(80.0),
+                        );
+                        if resp.lost_focus() {
+                            convert_dirty = true;
+                        }
+                        ui.end_row();
+
+                        ui.label("Default output folder:");
+                        ui.horizontal(|ui| {
+                            let text = match &self.config.convert_out_dir {
+                                Some(p) => p.display().to_string(),
+                                None => "(alongside each source)".into(),
+                            };
+                            ui.label(egui::RichText::new(text).monospace());
+                            if ui.small_button("Pick…").clicked() {
+                                if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                                    self.config.convert_out_dir = Some(d);
+                                    convert_dirty = true;
+                                }
+                            }
+                            if self.config.convert_out_dir.is_some()
+                                && ui.small_button("Clear").clicked()
+                            {
+                                self.config.convert_out_dir = None;
+                                convert_dirty = true;
+                            }
+                        });
+                        ui.end_row();
+
+                        ui.label("In-place by default:");
+                        if ui
+                            .checkbox(
+                                &mut self.config.convert_in_place,
+                                "Replace each source file",
+                            )
+                            .on_hover_text(
+                                "When on, conversions replace the original file instead of \
+                                 writing a new one. The catalog is repointed automatically.",
+                            )
+                            .changed()
+                        {
+                            convert_dirty = true;
+                        }
+                        ui.end_row();
+                    });
+                if self.config.convert_in_place {
+                    ui.colored_label(
+                        egui::Color32::LIGHT_YELLOW,
+                        "In-place removes the original file on each conversion.",
+                    );
+                }
+                if convert_dirty {
+                    if let Err(e) = self.config.save() {
+                        self.status = format!("Couldn't save settings: {e}");
+                    }
+                }
+
+                ui.add_space(14.0);
+                ui.separator();
+                ui.add_space(6.0);
                 ui.label(egui::RichText::new("Danger zone").strong());
                 ui.label(
                     egui::RichText::new(

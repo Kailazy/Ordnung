@@ -29,10 +29,42 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     format!("{}…", kept.trim_end())
 }
 
-/// Sensible default: convert to a different format than the source (mp3 → flac,
-/// flac → mp3, anything else → mp3).
-pub(crate) fn default_target_for(_src: Format) -> Format {
-    Format::Aiff
+/// The convert-dialog seed values from the user's saved preferences: the target
+/// format (falling back to AIFF for an empty/unknown key), the prefilled bitrate
+/// text, the default output folder, and the in-place flag. One place so every
+/// convert entry point (single, batch, toolbar) opens with the same defaults.
+pub(crate) fn convert_defaults(cfg: &Config) -> (Format, String, Option<PathBuf>, bool) {
+    (
+        format_from_key(&cfg.convert_format).unwrap_or(Format::Aiff),
+        cfg.convert_bitrate_kbps.clone(),
+        cfg.convert_out_dir.clone(),
+        cfg.convert_in_place,
+    )
+}
+
+/// Stable lowercase key for a convertible target format, used to persist the
+/// user's default convert format in `Config`. `Other` has no key (empty string).
+pub(crate) fn format_key(f: Format) -> &'static str {
+    match f {
+        Format::Mp3 => "mp3",
+        Format::Aac => "aac",
+        Format::Wav => "wav",
+        Format::Aiff => "aiff",
+        Format::Flac => "flac",
+        Format::Other => "",
+    }
+}
+
+/// Parse a persisted config format key back to a `Format`; unknown/empty → `None`.
+pub(crate) fn format_from_key(k: &str) -> Option<Format> {
+    match k {
+        "mp3" => Some(Format::Mp3),
+        "aac" => Some(Format::Aac),
+        "wav" => Some(Format::Wav),
+        "aiff" => Some(Format::Aiff),
+        "flac" => Some(Format::Flac),
+        _ => None,
+    }
 }
 
 pub(crate) fn format_label(f: Format) -> &'static str {

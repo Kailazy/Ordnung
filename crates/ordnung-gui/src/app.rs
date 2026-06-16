@@ -494,12 +494,14 @@ impl eframe::App for App {
                                 .filter(|r| self.selection.contains(&r.id))
                                 .map(|r| r.id)
                                 .collect();
+                            let (target, bitrate_kbps, out_dir, in_place) =
+                                convert_defaults(&self.config);
                             self.batch_convert = Some(BatchConvert {
                                 ids,
-                                target: Format::Aiff,
-                                bitrate_kbps: String::new(),
-                                out_dir: None,
-                                in_place: true,
+                                target,
+                                bitrate_kbps,
+                                out_dir,
+                                in_place,
                                 error: None,
                             });
                         }

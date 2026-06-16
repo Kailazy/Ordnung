@@ -32,10 +32,31 @@ pub struct Config {
     /// default; defaults to on for older configs that predate the field too.
     #[serde(default = "default_true")]
     pub auto_analyze: bool,
+    /// Default target format pre-selected in the convert dialogs, as a stable
+    /// lowercase key (`mp3`/`aac`/`flac`/`wav`/`aiff`; see `util::format_key`).
+    /// Empty or unknown falls back to AIFF, the prior hard-coded default.
+    #[serde(default = "default_convert_format")]
+    pub convert_format: String,
+    /// Bitrate (kbps) prefilled for lossy convert targets (MP3/AAC), as the text
+    /// shown in the field. Empty means "use the per-format hint" (320 / 256).
+    #[serde(default)]
+    pub convert_bitrate_kbps: String,
+    /// Default output folder for conversions. `None` (the default) means
+    /// "alongside each source file".
+    #[serde(default)]
+    pub convert_out_dir: Option<PathBuf>,
+    /// Whether the convert dialogs default to replacing the source file in place.
+    /// On by default, preserving the prior hard-coded behavior.
+    #[serde(default = "default_true")]
+    pub convert_in_place: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_convert_format() -> String {
+    "aiff".to_string()
 }
 
 impl Default for Config {
@@ -46,6 +67,10 @@ impl Default for Config {
             column_order: Vec::new(),
             hidden_columns: Vec::new(),
             auto_analyze: true,
+            convert_format: default_convert_format(),
+            convert_bitrate_kbps: String::new(),
+            convert_out_dir: None,
+            convert_in_place: true,
         }
     }
 }

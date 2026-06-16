@@ -1434,12 +1434,13 @@ impl App {
             Some(TrackMenuAction::Preview(id, path)) => self.play_track(id, path),
             Some(TrackMenuAction::Convert(id)) => open_convert_for = Some(id),
             Some(TrackMenuAction::ConvertSelected(ids)) => {
+                let (target, bitrate_kbps, out_dir, in_place) = convert_defaults(&self.config);
                 self.batch_convert = Some(BatchConvert {
                     ids,
-                    target: Format::Mp3,
-                    bitrate_kbps: String::new(),
-                    out_dir: None,
-                    in_place: true,
+                    target,
+                    bitrate_kbps,
+                    out_dir,
+                    in_place,
                     error: None,
                 });
             }
@@ -1519,6 +1520,7 @@ impl App {
         }
         if let Some(id) = open_convert_for {
             if let Some(r) = self.rows.iter().find(|r| r.id == id) {
+                let (target, bitrate_kbps, out_dir, in_place) = convert_defaults(&self.config);
                 self.convert_modal = Some(ConvertModal {
                     track_id: r.id,
                     track_label: format!(
@@ -1533,10 +1535,10 @@ impl App {
                     edit_album: r.album.clone(),
                     name_status: None,
                     name_is_error: false,
-                    target: default_target_for(r.format),
-                    bitrate_kbps: String::new(),
-                    out_dir: None,
-                    in_place: true,
+                    target,
+                    bitrate_kbps,
+                    out_dir,
+                    in_place,
                     error: None,
                 });
             }
