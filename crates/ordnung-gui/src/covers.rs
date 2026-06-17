@@ -286,14 +286,16 @@ pub(crate) fn is_image_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Best-effort guess of whether the currently-hovering drag carries an image, from
-/// the hovered files' mime types and (when available) path extensions. macOS often
-/// withholds the path until drop, so the mime check is the primary signal.
-pub(crate) fn hovered_looks_like_image(ctx: &egui::Context) -> bool {
+/// Best-effort guess of whether the currently-hovering drag carries audio. Used to
+/// keep the full-screen "drop to import" overlay for an obvious music drag while
+/// letting an unknown/image drag over a row fall through to the per-track cover-art
+/// hint. macOS usually withholds the path until drop, so this only fires when the
+/// metadata is actually present (the over-a-row default handles the unknown case).
+pub(crate) fn hovered_looks_like_audio(ctx: &egui::Context) -> bool {
     ctx.input(|i| {
         i.raw.hovered_files.iter().any(|f| {
-            f.mime.starts_with("image/")
-                || f.path.as_deref().map(is_image_path).unwrap_or(false)
+            f.mime.starts_with("audio/")
+                || f.path.as_deref().map(scan::is_audio_file).unwrap_or(false)
         })
     })
 }

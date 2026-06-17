@@ -108,11 +108,17 @@ impl App {
             .and_then(|p| self.row_at(p));
 
         // Paths in `hovered_files` aren't always populated until the drop lands,
-        // so any hovering file shows a hint. When we can tell it's an image and
-        // it's over a row, the hint becomes "set as cover" instead.
+        // so any hovering file shows a hint. When the pointer is over a track row
+        // we treat it as a cover drop (highlight just that row) *unless* the drag
+        // is clearly audio — that's the one case we keep the full-screen import
+        // overlay. macOS usually withholds the path on hover, so the type often
+        // reads as "unknown"; defaulting an over-a-row hover to the cover hint
+        // means dragging an image onto a song highlights the song instead of
+        // darkening the whole window. The actual action on drop is still decided
+        // by the dropped file's real path (image-on-row → cover, else import).
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         if hovering {
-            let cover_target = row_under_cursor.is_some() && hovered_looks_like_image(ctx);
+            let cover_target = row_under_cursor.is_some() && !hovered_looks_like_audio(ctx);
             let screen = ctx.screen_rect();
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
@@ -134,6 +140,15 @@ impl App {
                         rect.expand(1.0),
                         3.0,
                         egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 170, 240)),
+                    );
+                    // A right-aligned hint inside the row so the gesture reads as
+                    // "set this track's cover" rather than a catalog import.
+                    painter.text(
+                        rect.right_center() - egui::vec2(8.0, 0.0),
+                        egui::Align2::RIGHT_CENTER,
+                        "Set as cover",
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::from_rgb(120, 170, 240),
                     );
                 }
             } else {
