@@ -59,9 +59,10 @@ mod imp {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     /// Read the current mouse location from the window and convert it to egui
-    /// points (top-left origin). AppKit window/view coordinates are bottom-left
-    /// origin and already in logical points (matching egui's point space), so the
-    /// only conversion needed is flipping Y against the content view's height.
+    /// points. The `NSWindow` base coordinate system is bottom-left origin, but
+    /// winit's content view overrides `isFlipped` to return true, so converting
+    /// the point *into* that view yields a top-left-origin point in logical
+    /// points — exactly egui's coordinate space, no Y-flip needed.
     pub fn pointer_pos(frame: &eframe::Frame) -> Option<egui::Pos2> {
         let handle = frame.window_handle().ok()?;
         let RawWindowHandle::AppKit(h) = handle.as_raw() else {
@@ -71,16 +72,13 @@ mod imp {
             unsafe { Retained::retain(h.ns_view.as_ptr() as *mut NSView)? };
         let window = view.window()?;
 
-        // Mouse location in the window's base (bottom-left) coordinate system,
-        // available even while no events flow (i.e. during an OS drag).
+        // Mouse location in the window's base coordinate system, available even
+        // while no events flow (i.e. during an OS drag).
         let win_pt = unsafe { window.mouseLocationOutsideOfEventStream() };
         // Window base → content-view coordinates (passing None means "from window").
+        // The view is flipped, so this is already top-left origin.
         let view_pt = view.convertPoint_fromView(win_pt, None);
-        let bounds = view.bounds();
-        Some(egui::pos2(
-            view_pt.x as f32,
-            (bounds.size.height - view_pt.y) as f32,
-        ))
+        Some(egui::pos2(view_pt.x as f32, view_pt.y as f32))
     }
 
     pub fn begin_file_drag(frame: &eframe::Frame, paths: &[&Path]) -> bool {

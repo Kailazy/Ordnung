@@ -194,12 +194,44 @@ impl App {
         self.spawn_import(ctx.clone(), dropped);
     }
 
-    /// The track id of the visible row whose screen rect contains `pos`, if any.
-    /// Reads the row rects recorded by `draw_table` this frame.
+    /// The track id of the visible row at `pos`. Reads the row rects recorded by
+    /// `draw_table` this frame. Tolerant of the small gaps between rows: a `pos`
+    /// inside the list's horizontal span and vertical extent but landing in
+    /// inter-row padding snaps to the nearest row, so dragging a cover image down
+    /// the list highlights a song continuously instead of flickering to the
+    /// full-window import overlay between every row. `None` only when `pos` is
+    /// outside the list area entirely.
     pub(crate) fn row_at(&self, pos: egui::Pos2) -> Option<Id> {
-        self.row_screen_rects
+        if let Some((id, _)) = self
+            .row_screen_rects
             .iter()
             .find(|(_, rect)| rect.contains(pos))
+        {
+            return Some(*id);
+        }
+        // No exact hit: snap to the nearest row, but only while the pointer is
+        // within the list's horizontal span and vertical extent (so the toolbar,
+        // sidebar, and the empty area below the last row still read as "import").
+        let mut left = f32::INFINITY;
+        let mut right = f32::NEG_INFINITY;
+        let mut top = f32::INFINITY;
+        let mut bottom = f32::NEG_INFINITY;
+        for (_, rect) in &self.row_screen_rects {
+            left = left.min(rect.left());
+            right = right.max(rect.right());
+            top = top.min(rect.top());
+            bottom = bottom.max(rect.bottom());
+        }
+        if pos.x < left || pos.x > right || pos.y < top || pos.y > bottom {
+            return None;
+        }
+        self.row_screen_rects
+            .iter()
+            .min_by(|(_, a), (_, b)| {
+                let da = (a.center().y - pos.y).abs();
+                let db = (b.center().y - pos.y).abs();
+                da.total_cmp(&db)
+            })
             .map(|(id, _)| *id)
     }
 
