@@ -1152,7 +1152,7 @@ impl eframe::App for App {
         }
 
         // Drop a folder / audio files from Finder anywhere on the window to import.
-        self.handle_file_drop(ctx);
+        self.handle_file_drop(ctx, frame);
 
         // Modal-style window — draw last so it floats on top.
         let mut open = self.convert_modal.is_some();

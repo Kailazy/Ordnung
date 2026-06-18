@@ -96,16 +96,20 @@ impl App {
     /// instead routed to the cover-art flow (a confirm popup), so it never gets
     /// fed to the importer. Ignored while a job is already running, or while the
     /// cover-drop popup is already open, so a drop can't stomp either.
-    pub(crate) fn handle_file_drop(&mut self, ctx: &egui::Context) {
+    pub(crate) fn handle_file_drop(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         if self.is_busy() || self.cover_drop.is_some() {
             return;
         }
         // The row under the cursor right now (used both for the hover hint and to
         // route a dropped image to that track). `None` when the pointer is off any
         // row or outside the table.
-        let row_under_cursor = ctx
-            .input(|i| i.pointer.latest_pos())
-            .and_then(|p| self.row_at(p));
+        //
+        // egui's own `latest_pos()` goes stale during an OS file drag (winit gets
+        // no cursor events while a file hovers), so on macOS we poll the live mouse
+        // location from AppKit instead and fall back to egui elsewhere.
+        let pointer_pos = macos_drag::pointer_pos(frame)
+            .or_else(|| ctx.input(|i| i.pointer.latest_pos()));
+        let row_under_cursor = pointer_pos.and_then(|p| self.row_at(p));
 
         // Paths in `hovered_files` aren't always populated until the drop lands,
         // so any hovering file shows a hint. When the pointer is over a track row
@@ -118,6 +122,10 @@ impl App {
         // by the dropped file's real path (image-on-row → cover, else import).
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         if hovering {
+            // winit fires no events while a file hovers (no `draggingUpdated:`), so
+            // keep repainting ourselves — otherwise the frame loop stalls and the
+            // highlight freezes at wherever the cursor first entered the window.
+            ctx.request_repaint();
             let cover_target = row_under_cursor.is_some() && !hovered_looks_like_audio(ctx);
             let screen = ctx.screen_rect();
             let painter = ctx.layer_painter(egui::LayerId::new(
