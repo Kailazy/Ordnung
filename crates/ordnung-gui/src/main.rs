@@ -393,6 +393,7 @@ struct TagEdit {
     genre: String,
     label: String,
     year: String,
+    comment: String,
 }
 
 impl TagEdit {
@@ -405,6 +406,7 @@ impl TagEdit {
             genre: t.genre.clone().unwrap_or_default(),
             label: t.label.clone().unwrap_or_default(),
             year: t.year.map(|y| y.to_string()).unwrap_or_default(),
+            comment: t.comment.clone().unwrap_or_default(),
         }
     }
 }

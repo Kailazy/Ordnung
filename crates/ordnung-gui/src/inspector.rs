@@ -6,7 +6,7 @@ impl App {
     /// `write_file` is given — also write them into the source file via the core
     /// `tag` engine (the GUI counterpart to the CLI's `tag` vs `tag --write`).
     /// Other tag fields are preserved: we fetch the full row, mutate only the
-    /// seven editable fields, and write the whole thing back. `update_tags` marks
+    /// editable fields, and write the whole thing back. `update_tags` marks
     /// the row `user_edited` so a later rescan won't clobber these edits.
     pub(crate) fn save_tags(&mut self, id: Id, write_file: Option<PathBuf>) {
         // Year: empty clears it; otherwise it must parse as an integer.
@@ -44,6 +44,7 @@ impl App {
         track.tags.genre = non_empty(&self.tag_edit.genre);
         track.tags.label = non_empty(&self.tag_edit.label);
         track.tags.year = year;
+        track.tags.comment = non_empty(&self.tag_edit.comment);
 
         if let Err(e) = catalog.update_tags(id, &track.tags) {
             self.status = format!("Save failed: {e}");
@@ -216,7 +217,8 @@ impl App {
         ui.separator();
 
         // --- Editable Core tags ------------------------------------------
-        // The seven fields a user most often fixes or fills (e.g. from Discogs).
+        // The fields a user most often fixes or fills (e.g. from Discogs), plus
+        // free-form Notes (the comment tag).
         // Edits live in `self.tag_edit`; "Save" commits them to the catalog,
         // "Write to source file" also writes them into the original file. Both
         // are disabled until something actually changes.
@@ -233,6 +235,7 @@ impl App {
                     edit_row(ui, "Genre", &mut self.tag_edit.genre);
                     edit_row(ui, "Label", &mut self.tag_edit.label);
                     edit_row(ui, "Year", &mut self.tag_edit.year);
+                    edit_row_multiline(ui, "Notes", &mut self.tag_edit.comment);
                 });
 
             ui.add_space(6.0);
@@ -456,12 +459,8 @@ impl App {
                     if let (Some(n), Some(t)) = (g.movement_number, g.movement_total) {
                         inspector_row(ui, "Movement #", &format!("{n} of {t}"));
                     }
-                    if let Some(c) = &g.comment {
-                        if !c.is_empty() {
-                            ui.label(egui::RichText::new("Comment").weak());
-                            ui.label(c);
-                        }
-                    }
+                    // Comment is shown/edited as "Notes" in the Edit tags section
+                    // above, so it's intentionally not repeated here.
                     if let Some(lyr) = &g.lyrics {
                         if !lyr.is_empty() {
                             ui.label(egui::RichText::new("Lyrics").weak());
@@ -678,6 +677,19 @@ pub(crate) fn edit_row(ui: &mut egui::Ui, label: &str, value: &mut String) {
     ui.add(
         egui::TextEdit::singleline(value)
             .hint_text("—")
+            .desired_width(f32::INFINITY),
+    );
+    ui.end_row();
+}
+
+/// Like [`edit_row`] but a wrapping, multi-line box — for free-form text such as
+/// the comment/notes field, which is often longer than one line.
+pub(crate) fn edit_row_multiline(ui: &mut egui::Ui, label: &str, value: &mut String) {
+    ui.label(egui::RichText::new(label).weak().small());
+    ui.add(
+        egui::TextEdit::multiline(value)
+            .hint_text("—")
+            .desired_rows(2)
             .desired_width(f32::INFINITY),
     );
     ui.end_row();
