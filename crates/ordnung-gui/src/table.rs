@@ -700,7 +700,8 @@ impl App {
                                                     "{}{arrow}{filt}",
                                                     col.label()
                                                 ))
-                                                .strong(),
+                                                .strong()
+                                                .color(crate::ui::tokens::color::LABEL_2),
                                             )
                                             .selectable(false),
                                         );
