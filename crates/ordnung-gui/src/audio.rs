@@ -16,7 +16,7 @@
 //! This is playback-only: it never touches the catalog or the source file beyond
 //! reading it to decode.
 
-use ordnung_core::analysis::decode::decode_mono;
+use ordnung_core::analysis::decode::decode_interleaved;
 use ordnung_core::model::Id;
 use rodio::source::Source;
 use rodio::{OutputStream, OutputStreamHandle, Sink};
@@ -45,6 +45,7 @@ enum DecodeMsg {
     Ready {
         id: Id,
         sample_rate: u32,
+        channels: u16,
         samples: Vec<f32>,
     },
     Failed {
@@ -53,13 +54,15 @@ enum DecodeMsg {
     },
 }
 
-/// A rodio source that streams mono f32 samples straight out of a shared buffer,
-/// keeping only a read cursor. Seeking makes a fresh cursor at the target sample;
-/// the (potentially large) decoded audio is never copied.
+/// A rodio source that streams interleaved f32 samples straight out of a shared
+/// buffer, keeping only a read cursor. Seeking makes a fresh cursor at the target
+/// sample; the (potentially large) decoded audio is never copied. `samples` are
+/// interleaved frames (L,R,… per frame) so the native channel layout is preserved.
 struct BufferSource {
     samples: Arc<Vec<f32>>,
     pos: usize,
     sample_rate: u32,
+    channels: u16,
 }
 
 impl Iterator for BufferSource {
@@ -76,15 +79,14 @@ impl Source for BufferSource {
         None
     }
     fn channels(&self) -> u16 {
-        1
+        self.channels
     }
     fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
     fn total_duration(&self) -> Option<Duration> {
-        Some(Duration::from_secs_f32(
-            self.samples.len() as f32 / self.sample_rate.max(1) as f32,
-        ))
+        let frames = self.samples.len() as f32 / self.channels.max(1) as f32;
+        Some(Duration::from_secs_f32(frames / self.sample_rate.max(1) as f32))
     }
 }
 
@@ -112,6 +114,8 @@ pub struct AudioEngine {
     /// seek can spin up a new cursor without re-decoding or copying.
     samples: Option<Arc<Vec<f32>>>,
     sample_rate: u32,
+    /// Channel count of the loaded track (interleaved in `samples`).
+    channels: u16,
     duration: f32,
     /// Playback position (seconds) captured the last time the sink (re)started.
     base_secs: f32,
@@ -159,6 +163,7 @@ impl AudioEngine {
             loading: None,
             samples: None,
             sample_rate: 0,
+            channels: 1,
             duration: 0.0,
             base_secs: 0.0,
             started_at: None,
@@ -236,10 +241,11 @@ impl AudioEngine {
         self.last_error = None;
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let msg = match decode_mono(&path) {
+            let msg = match decode_interleaved(&path) {
                 Ok(audio) => DecodeMsg::Ready {
                     id,
                     sample_rate: audio.sample_rate,
+                    channels: audio.channels,
                     samples: audio.samples,
                 },
                 Err(e) => DecodeMsg::Failed {
@@ -301,11 +307,16 @@ impl AudioEngine {
         }
         match Sink::try_new(&self.handle) {
             Ok(sink) => {
-                let pos = ((secs * self.sample_rate as f32) as usize).min(samples.len());
+                let ch = self.channels.max(1) as usize;
+                // Convert seconds → sample index, snapped to a frame boundary so
+                // interleaved channels stay aligned (an odd offset would swap L/R).
+                let frame = (secs * self.sample_rate as f32) as usize;
+                let pos = (frame * ch).min(samples.len());
                 sink.append(BufferSource {
                     samples,
                     pos,
                     sample_rate: self.sample_rate,
+                    channels: self.channels.max(1),
                 });
                 sink.play();
                 self.sink = Some(sink);
@@ -440,6 +451,7 @@ impl AudioEngine {
                 DecodeMsg::Ready {
                     id,
                     sample_rate,
+                    channels,
                     samples,
                 } => {
                     // A newer click may have superseded this decode; ignore stale ones.
@@ -452,7 +464,9 @@ impl AudioEngine {
                         continue;
                     }
                     self.sample_rate = sample_rate.max(1);
-                    self.duration = samples.len() as f32 / self.sample_rate as f32;
+                    self.channels = channels.max(1);
+                    let frames = samples.len() as f32 / self.channels as f32;
+                    self.duration = frames / self.sample_rate as f32;
                     self.samples = Some(Arc::new(samples));
                     self.current = Some(id);
                     self.base_secs = 0.0;
@@ -549,10 +563,21 @@ mod tests {
             samples: Arc::new(vec![0.0; 100]),
             pos: 0,
             sample_rate: 50,
+            channels: 1,
         };
         assert_eq!(src.sample_rate(), 50);
         assert_eq!(src.channels(), 1);
         assert_eq!(src.total_duration(), Some(Duration::from_secs_f32(2.0)));
         assert_eq!(src.count(), 100);
+
+        // Stereo: 100 interleaved samples = 50 frames at 50 Hz = 1 s.
+        let stereo = BufferSource {
+            samples: Arc::new(vec![0.0; 100]),
+            pos: 0,
+            sample_rate: 50,
+            channels: 2,
+        };
+        assert_eq!(stereo.channels(), 2);
+        assert_eq!(stereo.total_duration(), Some(Duration::from_secs_f32(1.0)));
     }
 }
