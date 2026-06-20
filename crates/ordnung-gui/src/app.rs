@@ -335,6 +335,21 @@ impl eframe::App for App {
         self.poll_artwork_save();
         self.poll_metadata_preview();
 
+        // Cmd/Ctrl+A selects every visible row in the current view or playlist
+        // (`self.rows` is already narrowed to the active tab and column filters).
+        // Skip it while a text field — search, per-column filter — owns the
+        // keyboard so the shortcut keeps its in-field "select all text" meaning.
+        if !ctx.wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A))
+        {
+            self.selection = self.rows.iter().map(|r| r.id).collect();
+            if self.selected.is_none() {
+                if let Some(first) = self.rows.first().map(|r| r.id) {
+                    self.set_primary(Some(first));
+                }
+            }
+        }
+
         // Drive the snippet-preview engine: pick up finished decodes, notice when
         // a clip ends, and keep animating the button while audio is active.
         if let Some(a) = &mut self.audio {
@@ -344,6 +359,25 @@ impl eframe::App for App {
             }
             if a.is_active() {
                 ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
+
+        // Space bar = play/pause. Toggle the loaded track if one is in the bar;
+        // otherwise start the selected row. Skipped while a text field has focus so
+        // typing a space in the filter/edit fields doesn't hijack playback.
+        if !ctx.wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
+        {
+            if self.now_playing.is_some() {
+                if let Some(a) = &mut self.audio {
+                    a.toggle_pause();
+                }
+            } else if let Some(id) = self.selected {
+                if let Some(path) =
+                    self.rows.iter().find(|r| r.id == id).map(|r| r.source_path.clone())
+                {
+                    self.play_track(id, path);
+                }
             }
         }
 
