@@ -616,24 +616,23 @@ impl App {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let mut builder = TableBuilder::new(ui)
-                    // Stable id so the persisted per-column widths (saved via egui
-                    // memory by eframe's `persistence` feature) survive restarts and
-                    // don't drift if the surrounding layout path changes. Playlist
-                    // views carry an extra leading index column, so they get their own
-                    // id_salt — otherwise the saved widths would shift by one column
-                    // each time the user switches between the library and a playlist.
-                    .id_salt(if show_index {
-                        "songs_table_playlist"
-                    } else {
-                        "songs_table"
-                    })
+                    // One stable id for EVERY view (library and all playlists) so the
+                    // persisted per-column widths (saved via egui memory by eframe's
+                    // `persistence` feature) are shared globally: resize a column in
+                    // one playlist and the same widths apply everywhere. The leading
+                    // index gutter is always present as the first column (zero-width
+                    // outside playlist views, see below) so the data columns keep the
+                    // same positional indices in every view and the stored widths never
+                    // shift by one when switching between the library and a playlist.
+                    .id_salt("songs_table")
                     .striped(false)
                     .resizable(true)
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-                // Leading fixed-width gutter for the playlist order index.
-                if show_index {
-                    builder = builder.column(Column::exact(index_w));
-                }
+                // Leading fixed-width gutter for the playlist order index. Always the
+                // first column so data-column positions (and their stored widths) line
+                // up across every view; collapsed to zero width when there's no index
+                // to show, so the library reads as if the gutter weren't there.
+                builder = builder.column(Column::exact(if show_index { index_w } else { 0.0 }));
                 // Steer a pending jump (from the vinyl grid) to its row. Done at the
                 // builder level because the body is virtualized — an off-screen row's
                 // closure never runs, so an in-row `scroll_to_me` couldn't reach it.
@@ -654,14 +653,17 @@ impl App {
                         // still a valid right-click target. The file path is
                         // intentionally not a column — it lives in the Info panel and
                         // the right-click menu.
-                        if show_index {
-                            header.col(|ui| {
+                        // The index gutter header is always emitted to match the
+                        // always-present first column; it's empty (and zero-width) when
+                        // not a playlist view.
+                        header.col(|ui| {
+                            if show_index {
                                 ui.add(
                                     egui::Label::new(egui::RichText::new("#").weak())
                                         .selectable(false),
                                 );
-                            });
-                        }
+                            }
+                        });
                         for &col in &order {
                             header.col(|ui| {
                                 let resp = match col.sort_column() {
@@ -803,8 +805,11 @@ impl App {
                             // number. Drawn first so it sits at the far left, and its
                             // cell rect is recorded as this row's vertical band for the
                             // reorder hit-test after the table.
-                            if show_index {
-                                let (rect, _) = row.col(|ui| {
+                            // Always emit the leading gutter cell to match the
+                            // always-present first column; it draws the row number only
+                            // in playlist views (and is zero-width otherwise).
+                            let (rect, _) = row.col(|ui| {
+                                if show_index {
                                     let r = ui.max_rect();
                                     ui.painter().text(
                                         egui::pos2(r.right() - 5.0, r.center().y),
@@ -813,10 +818,10 @@ impl App {
                                         egui::FontId::proportional(11.0),
                                         ui.visuals().weak_text_color(),
                                     );
-                                });
-                                if reorderable {
-                                    row_spans.push((idx, rect.top(), rect.bottom()));
                                 }
+                            });
+                            if show_index && reorderable {
+                                row_spans.push((idx, rect.top(), rect.bottom()));
                             }
 
                             // Draw each visible column in the user's chosen order. Each
