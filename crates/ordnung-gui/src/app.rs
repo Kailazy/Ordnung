@@ -910,8 +910,14 @@ impl eframe::App for App {
                                     // Hold the button off the panel's right clip
                                     // edge so its hover outline isn't cut off.
                                     ui.add_space(3.0);
+                                    // Compact square button — without an explicit
+                                    // min_size the "+" reads as a stretched pill.
                                     if ui
-                                        .small_button("+")
+                                        .add(
+                                            egui::Button::new("+")
+                                                .min_size(egui::vec2(22.0, 22.0))
+                                                .rounding(egui::Rounding::same(6.0)),
+                                        )
                                         .on_hover_note("New playlist")
                                         .clicked()
                                     {

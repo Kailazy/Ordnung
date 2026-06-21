@@ -227,11 +227,22 @@ pub(crate) fn draw_inline_rename(
     } else {
         "New playlist"
     };
-    let resp = ui.add(
-        egui::TextEdit::singleline(&mut state.buf)
-            .hint_text(hint)
-            .desired_width(f32::INFINITY),
-    );
+    // Inset the editor a few px on each side so its rounded focus ring sits inside
+    // the panel's clip boundary — at full width the blue outline lands on the edge
+    // and gets clipped, leaving the "cut off" look. The inner margin gives the text
+    // tile-like padding and lifts the box to roughly the height of a nav row.
+    let avail = ui.available_width();
+    let resp = ui
+        .horizontal(|ui| {
+            ui.add_space(3.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut state.buf)
+                    .hint_text(hint)
+                    .desired_width(avail - 6.0)
+                    .margin(egui::Margin::symmetric(10.0, 7.0)),
+            )
+        })
+        .inner;
     // Grab focus only on the first frame the box appears. Re-requesting it every
     // frame would pin focus to the box and make clicking away impossible.
     if state.needs_focus {
