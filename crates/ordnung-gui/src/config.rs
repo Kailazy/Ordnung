@@ -27,6 +27,16 @@ pub struct Config {
     /// Track-table columns the user has hidden, as stable column keys.
     #[serde(default)]
     pub hidden_columns: Vec<String>,
+    /// Sort applied to the track table on launch, as a stable column key (see
+    /// `TableColumn::key`). Empty (the default) means "natural order" — catalog
+    /// or playlist order, the prior behavior. Unknown or unsortable keys also
+    /// fall back to natural order.
+    #[serde(default)]
+    pub default_sort: String,
+    /// Direction for `default_sort` (`true` = ascending). Ignored when
+    /// `default_sort` is empty.
+    #[serde(default = "default_true")]
+    pub default_sort_ascending: bool,
     /// Run analysis (BPM, key, waveform) automatically on each track as it's
     /// imported, instead of waiting for the explicit "Analyze" action. On by
     /// default; defaults to on for older configs that predate the field too.
@@ -66,6 +76,8 @@ impl Default for Config {
             discogs_username: String::new(),
             column_order: Vec::new(),
             hidden_columns: Vec::new(),
+            default_sort: String::new(),
+            default_sort_ascending: true,
             auto_analyze: true,
             convert_format: default_convert_format(),
             convert_bitrate_kbps: String::new(),

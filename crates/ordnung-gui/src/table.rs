@@ -154,6 +154,19 @@ impl App {
         });
     }
 
+    /// The default sort to seed `self.sort` with on launch, resolved from the
+    /// saved config. `None` (the shipped default) leaves the natural
+    /// catalog/playlist order untouched; an unknown or unsortable saved key
+    /// falls back to `None` too.
+    pub(crate) fn default_sort(&self) -> Option<(SortColumn, bool)> {
+        let key = self.config.default_sort.trim();
+        if key.is_empty() {
+            return None;
+        }
+        let col = TableColumn::from_key(key)?.sort_column()?;
+        Some((col, self.config.default_sort_ascending))
+    }
+
     /// Handle a click on a sortable header: the same column cycles
     /// ascending → descending → unsorted; a different column starts ascending.
     /// Re-sorts the current rows without hitting the catalog.

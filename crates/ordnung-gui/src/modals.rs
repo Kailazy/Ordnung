@@ -353,6 +353,115 @@ impl App {
                 ui.add_space(14.0);
                 ui.separator();
                 ui.add_space(6.0);
+                ui.label(egui::RichText::new("Sorting").strong());
+                ui.label(
+                    egui::RichText::new(
+                        "How the track table is sorted when the app launches. You can \
+                         still click any column header to re-sort during a session.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(4.0);
+                let mut sort_dirty = false;
+                // Sortable columns, in display order, plus a "Natural order"
+                // sentinel (empty key) that keeps catalog/playlist order.
+                let selected_label = if self.config.default_sort.trim().is_empty() {
+                    "Natural order".to_string()
+                } else {
+                    TableColumn::from_key(&self.config.default_sort)
+                        .map(|c| c.label().to_string())
+                        .unwrap_or_else(|| "Natural order".to_string())
+                };
+                egui::Grid::new("settings_sort_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Default sort:");
+                        egui::ComboBox::from_id_salt("settings_default_sort")
+                            .selected_text(selected_label)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        self.config.default_sort.trim().is_empty(),
+                                        "Natural order",
+                                    )
+                                    .clicked()
+                                    && !self.config.default_sort.is_empty()
+                                {
+                                    self.config.default_sort.clear();
+                                    sort_dirty = true;
+                                }
+                                for col in TableColumn::DEFAULT_ORDER {
+                                    if col.sort_column().is_none() {
+                                        continue;
+                                    }
+                                    let key = col.key();
+                                    if ui
+                                        .selectable_label(
+                                            self.config.default_sort == key,
+                                            col.label(),
+                                        )
+                                        .clicked()
+                                        && self.config.default_sort != key
+                                    {
+                                        self.config.default_sort = key.to_string();
+                                        sort_dirty = true;
+                                    }
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Direction:");
+                        let has_sort = !self.config.default_sort.trim().is_empty();
+                        let dir_text = if self.config.default_sort_ascending {
+                            "Ascending (A→Z, oldest first)"
+                        } else {
+                            "Descending (Z→A, newest first)"
+                        };
+                        ui.add_enabled_ui(has_sort, |ui| {
+                            egui::ComboBox::from_id_salt("settings_default_sort_dir")
+                                .selected_text(dir_text)
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(
+                                            self.config.default_sort_ascending,
+                                            "Ascending (A→Z, oldest first)",
+                                        )
+                                        .clicked()
+                                        && !self.config.default_sort_ascending
+                                    {
+                                        self.config.default_sort_ascending = true;
+                                        sort_dirty = true;
+                                    }
+                                    if ui
+                                        .selectable_label(
+                                            !self.config.default_sort_ascending,
+                                            "Descending (Z→A, newest first)",
+                                        )
+                                        .clicked()
+                                        && self.config.default_sort_ascending
+                                    {
+                                        self.config.default_sort_ascending = false;
+                                        sort_dirty = true;
+                                    }
+                                });
+                        });
+                        ui.end_row();
+                    });
+                if sort_dirty {
+                    if let Err(e) = self.config.save() {
+                        self.status = format!("Couldn't save settings: {e}");
+                    }
+                    // Apply the new default to the live view immediately so the
+                    // change is visible without relaunching.
+                    self.sort = self.default_sort();
+                    self.reload();
+                }
+
+                ui.add_space(14.0);
+                ui.separator();
+                ui.add_space(6.0);
                 ui.label(egui::RichText::new("Conversion").strong());
                 ui.label(
                     egui::RichText::new(

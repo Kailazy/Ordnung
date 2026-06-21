@@ -127,6 +127,9 @@ impl App {
         app.token_input = config.discogs_token.clone();
         app.config = config;
         app.load_column_layout();
+        // Seed the initial sort from the user's saved default (e.g. "Added,
+        // newest first") before the first load so it's applied on launch.
+        app.sort = app.default_sort();
         app.reload();
         app.recount_missing();
         app
