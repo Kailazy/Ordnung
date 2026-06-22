@@ -177,6 +177,12 @@ pub struct RelinkReport {
 const METADATA_COMPLETE_SQL: &str =
     "TRIM(COALESCE(album, '')) <> '' AND TRIM(COALESCE(genre, '')) <> '' AND year IS NOT NULL";
 
+/// How long a freshly scanned track stays in the "recently added" inbox: one
+/// day (in seconds). Past this, it drops out of the view and its sidebar badge
+/// count regardless of whether analysis/fetch finished, keeping the inbox a
+/// short list of genuinely fresh imports. See [`Catalog::list_recently_added`].
+const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
+
 impl Catalog {
     /// Open (creating if needed) a catalog at `path` and ensure the schema exists.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -1386,11 +1392,18 @@ impl Catalog {
     /// view automatically. So it's a self-clearing to-do list of fresh imports:
     /// analyze + fetch a track and it leaves on the next reload. `query` filters
     /// the same fields as [`Catalog::list_tracks`].
+    ///
+    /// It's also time-bounded: a track only counts as "recent" while it was
+    /// added within the last [`RECENTLY_ADDED_WINDOW_SECS`] (one day). After
+    /// that it drops out regardless of whether the finishing work happened, so
+    /// the inbox stays a short, fresh list rather than accumulating stale imports
+    /// the user never got around to.
     pub fn list_recently_added(&self, query: Option<&str>, version: u32) -> Result<Vec<Track>> {
         let (filter_sql, filter_params) = search_filter(query, "");
         let sql = format!(
             "SELECT {SELECT_COLS} FROM tracks
               WHERE ({filter_sql})
+                AND (unixepoch() - added_at) < {RECENTLY_ADDED_WINDOW_SECS}
                 AND (
                   discogs_meta_fetched_at IS NULL
                   OR id NOT IN (SELECT track_id FROM analysis WHERE analyzer_version >= ?)
@@ -1443,9 +1456,12 @@ impl Catalog {
     pub fn count_recently_added(&self, version: u32) -> Result<u64> {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM tracks
-              WHERE discogs_meta_fetched_at IS NULL
-                 OR id NOT IN (SELECT track_id FROM analysis WHERE analyzer_version >= ?1)",
-            params![version as i64],
+              WHERE (unixepoch() - added_at) < ?1
+                AND (
+                  discogs_meta_fetched_at IS NULL
+                  OR id NOT IN (SELECT track_id FROM analysis WHERE analyzer_version >= ?2)
+                )",
+            params![RECENTLY_ADDED_WINDOW_SECS, version as i64],
             |r| r.get(0),
         )?;
         Ok(n as u64)

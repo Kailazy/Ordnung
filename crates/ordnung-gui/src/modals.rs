@@ -952,6 +952,10 @@ impl App {
         let mut save = false;
         let mut skip = false;
         let mut skip_all = false;
+        // "None of these" — the user reviewed the candidates and none is the
+        // right release. Marks the track fetched so it drops out of the Recently
+        // Added inbox and won't be re-offered, without writing any cover/tags.
+        let mut no_match = false;
         // Esc closes the picker — cancels the whole review queue (but never
         // interrupts an in-flight save, so the worker isn't left dangling).
         if !self.artwork_saving && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1321,8 +1325,31 @@ impl App {
                         {
                             save = true;
                         }
-                        if ui.button("Skip track").clicked() {
+                        if ui
+                            .button("Skip track")
+                            .on_hover_note(
+                                "Decide later — leaves the track in Recently Added so the next \
+                                 fetch offers it again.",
+                            )
+                            .clicked()
+                        {
                             skip = true;
+                        }
+                        // Song-data run only: a definitive "none of these is right"
+                        // that retires the track from the inbox (vs. Skip, which
+                        // keeps it re-fetchable). Wrong matches are a song-details
+                        // problem; the artwork-only run has no inbox to clear.
+                        if enrich
+                            && ui
+                                .button("None of these")
+                                .on_hover_note(
+                                    "No candidate matches this song. Marks it done so it leaves \
+                                     Recently Added and isn't offered again. Re-run later with \
+                                     \"Edit release…\" if you change your mind.",
+                                )
+                                .clicked()
+                        {
+                            no_match = true;
                         }
                         if remaining > 1 && ui.button(format!("Skip all ({remaining})")).clicked() {
                             skip_all = true;
@@ -1348,7 +1375,7 @@ impl App {
         // loading/loaded (no-op once cached). Done here so it picks up a row the
         // user just clicked (or a toggle of `overwrite`), without borrowing
         // `self` inside the window closure.
-        if enrich && !save && !skip && !skip_all {
+        if enrich && !save && !skip && !skip_all && !no_match {
             if let Some((tid, rid)) = self.artwork_queue.front().and_then(|ch| {
                 ch.candidates
                     .get(selected)
@@ -1369,6 +1396,21 @@ impl App {
             // this is a song-data run) also fill the track's empty tag fields from
             // that same release. `enrich` is read inside `save_selected_artwork`.
             self.save_selected_artwork(ctx, selected);
+        } else if no_match {
+            // Retire the track from the inbox: mark it fetched (no cover/tags
+            // written) so it leaves Recently Added and isn't re-offered, then
+            // advance. Reload so the badge/inbox update right away.
+            if let Some(choices) = self.artwork_queue.front() {
+                let id = choices.id;
+                match Catalog::open(&self.db_path).and_then(|c| c.mark_metadata_fetched(id)) {
+                    Ok(()) => self.status = "Marked as no match — removed from Recently Added.".into(),
+                    Err(e) => self.status = format!("Couldn't mark as no match: {e}"),
+                }
+            }
+            self.artwork_queue.pop_front();
+            self.artwork_previews = None;
+            self.artwork_selected = 0;
+            self.reload();
         } else if skip {
             self.artwork_queue.pop_front();
             self.artwork_previews = None;
