@@ -1402,8 +1402,22 @@ impl App {
             // advance. Reload so the badge/inbox update right away.
             if let Some(choices) = self.artwork_queue.front() {
                 let id = choices.id;
+                // Note whether it was in the inbox *before* marking, so the
+                // message only claims removal when the track actually left it.
+                let was_recent = Catalog::open(&self.db_path)
+                    .and_then(|c| c.is_recently_added(id, ANALYZER_VERSION))
+                    .unwrap_or(false);
                 match Catalog::open(&self.db_path).and_then(|c| c.mark_metadata_fetched(id)) {
-                    Ok(()) => self.status = "Marked as no match — removed from Recently Added.".into(),
+                    Ok(()) => {
+                        let still_recent = Catalog::open(&self.db_path)
+                            .and_then(|c| c.is_recently_added(id, ANALYZER_VERSION))
+                            .unwrap_or(false);
+                        self.status = if was_recent && !still_recent {
+                            "Marked as no match — removed from Recently Added.".into()
+                        } else {
+                            "Marked as no match.".into()
+                        };
+                    }
                     Err(e) => self.status = format!("Couldn't mark as no match: {e}"),
                 }
             }

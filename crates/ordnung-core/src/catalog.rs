@@ -1467,6 +1467,25 @@ impl Catalog {
         Ok(n as u64)
     }
 
+    /// Whether `id` is currently in the "recently added" inbox — the same
+    /// predicate as [`Catalog::list_recently_added`], scoped to one track. Lets
+    /// callers tailor messaging (e.g. only say "removed from Recently Added"
+    /// when the track was actually there).
+    pub fn is_recently_added(&self, id: Id, version: u32) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tracks
+              WHERE id = ?1
+                AND (unixepoch() - added_at) < ?2
+                AND (
+                  discogs_meta_fetched_at IS NULL
+                  OR id NOT IN (SELECT track_id FROM analysis WHERE analyzer_version >= ?3)
+                )",
+            params![id as i64, RECENTLY_ADDED_WINDOW_SECS, version as i64],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     /// Tracks whose recorded `source_path` no longer exists on disk — the file
     /// was moved, renamed, or deleted out from under the catalog. The rows (and
     /// their cues/analysis/playlist links) are intact; only the locator is stale.
