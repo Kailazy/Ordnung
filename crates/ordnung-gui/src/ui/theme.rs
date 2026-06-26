@@ -43,20 +43,23 @@ fn install_fonts(ctx: &egui::Context) {
             "../../assets/fonts/SourceSerif4-Regular.ttf"
         )),
     );
-    // Neither Inter nor DejaVu covers CJK, so Japanese / Chinese / Korean track
-    // and release titles (common in DJ metadata) render as tofu boxes. Pull a
-    // broad-coverage system font off disk at runtime and sit it at the back of
-    // the chain — loaded this way it costs nothing in the binary, and it only
-    // gets consulted for glyphs the nicer faces ahead of it lack.
-    let cjk = load_system_cjk_font(&mut fonts);
+    // Inter and DejaVu only reach Latin / Cyrillic / Greek, so titles in CJK,
+    // Arabic, Hebrew, Thai, the Indic scripts, etc. — all common in DJ metadata
+    // — render as tofu boxes. Pull broad-coverage system fonts off disk at
+    // runtime and sit them at the back of the chain: loaded this way they cost
+    // nothing in the binary, and each is only consulted for glyphs the faces
+    // ahead of it lack.
+    let fallbacks = load_system_fallback_fonts(&mut fonts);
 
     for family in [FontFamily::Proportional, FontFamily::Monospace] {
         let chain = fonts.families.entry(family).or_default();
         chain.insert(0, "DejaVuSans".to_owned());
         chain.insert(0, "Inter".to_owned());
-        if let Some(name) = &cjk {
-            // After DejaVu, before egui's own fallbacks.
-            chain.insert(2, name.clone());
+        // After DejaVu, before egui's own fallbacks. Broadest faces first, so a
+        // glyph is served by the widest font that has it; script-specific faces
+        // behind them fill in anything the broad ones miss.
+        for (i, name) in fallbacks.iter().enumerate() {
+            chain.insert(2 + i, name.clone());
         }
     }
     fonts.families.insert(
@@ -66,36 +69,115 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Load the first available broad-coverage system font (CJK + the rest of the
-/// BMP) and register it under the returned key. Returns `None` if none of the
-/// candidate paths exist, in which case the chain is simply left as-is.
+/// Register broad-coverage system fonts for the world's major scripts and return
+/// their keys, in chain order. Each group lists candidate paths per platform
+/// (broadest coverage first); the first path that exists is loaded and the rest
+/// of that group skipped, so we register at most one face per script. Groups
+/// with no available font are silently dropped.
 ///
-/// We read the font from disk rather than bundling one: a full CJK face is
-/// 15–25 MB, which we'd rather not bake into every binary for metadata that's
-/// usually Latin. Candidates are listed per-platform, broadest coverage first.
-fn load_system_cjk_font(fonts: &mut FontDefinitions) -> Option<String> {
-    const CANDIDATES: &[&str] = &[
-        // macOS — single-face .ttf, covers CJK + Cyrillic + Greek + symbols.
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/System/Library/Fonts/Hiragino Sans GB.ttc",
-        // Linux — Noto Sans CJK (Debian/Ubuntu, Fedora).
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
-        // Windows.
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/YuGothR.ttc",
+/// We read these off disk rather than bundling them: a single full-coverage CJK
+/// face is 15–25 MB, and the complete set would dwarf the binary — for metadata
+/// that's usually Latin, that's not a trade worth making. The broad Unicode
+/// font first covers most non-Latin titles outright; the per-script faces behind
+/// it fill in anything it misses and cover platforms where it's absent.
+fn load_system_fallback_fonts(fonts: &mut FontDefinitions) -> Vec<String> {
+    // (registration key, candidate paths in priority order).
+    const GROUPS: &[(&str, &[&str])] = &[
+        // Broadest single faces — CJK + most of the BMP in one file.
+        (
+            "fallback-unicode",
+            &[
+                // macOS: single-face .ttf covering CJK, Cyrillic, Greek, Arabic,
+                // Hebrew, Thai, Devanagari, and more.
+                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+                // Linux: Noto Sans CJK (Debian/Ubuntu, Fedora).
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+                // Windows.
+                "C:/Windows/Fonts/msyh.ttc",  // Microsoft YaHei (CJK)
+                "C:/Windows/Fonts/arialuni.ttf",
+            ],
+        ),
+        // Korean Hangul (Arial Unicode covers it, but Noto-less Linux may not).
+        (
+            "fallback-korean",
+            &[
+                "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "C:/Windows/Fonts/malgun.ttf",
+            ],
+        ),
+        // Arabic.
+        (
+            "fallback-arabic",
+            &[
+                "/System/Library/Fonts/SFArabic.ttf",
+                "/System/Library/Fonts/GeezaPro.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+                "C:/Windows/Fonts/arial.ttf",
+            ],
+        ),
+        // Hebrew.
+        (
+            "fallback-hebrew",
+            &[
+                "/System/Library/Fonts/SFHebrew.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
+                "C:/Windows/Fonts/david.ttf",
+            ],
+        ),
+        // Thai.
+        (
+            "fallback-thai",
+            &[
+                "/System/Library/Fonts/Supplemental/Thonburi.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+                "C:/Windows/Fonts/tahoma.ttf",
+            ],
+        ),
+        // Devanagari (Hindi, Marathi, Nepali).
+        (
+            "fallback-devanagari",
+            &[
+                "/System/Library/Fonts/Kohinoor.ttc",
+                "/System/Library/Fonts/Supplemental/DevanagariMT.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+                "C:/Windows/Fonts/Nirmala.ttf",
+            ],
+        ),
+        // Bengali.
+        (
+            "fallback-bengali",
+            &[
+                "/System/Library/Fonts/KohinoorBangla.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf",
+                "C:/Windows/Fonts/Nirmala.ttf",
+            ],
+        ),
+        // Tamil.
+        (
+            "fallback-tamil",
+            &[
+                "/System/Library/Fonts/Supplemental/Tamil Sangam MN.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansTamil-Regular.ttf",
+                "C:/Windows/Fonts/Nirmala.ttf",
+            ],
+        ),
     ];
 
-    for path in CANDIDATES {
-        if let Ok(bytes) = std::fs::read(path) {
-            const KEY: &str = "SystemCJK";
-            fonts
-                .font_data
-                .insert(KEY.to_owned(), FontData::from_owned(bytes));
-            return Some(KEY.to_owned());
+    let mut keys = Vec::new();
+    for (key, candidates) in GROUPS {
+        for path in *candidates {
+            if let Ok(bytes) = std::fs::read(path) {
+                fonts
+                    .font_data
+                    .insert((*key).to_owned(), FontData::from_owned(bytes));
+                keys.push((*key).to_owned());
+                break;
+            }
         }
     }
-    None
+    keys
 }
 
 /// Build the global [`egui::Style`] from the design tokens.
