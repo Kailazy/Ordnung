@@ -517,8 +517,9 @@ impl eframe::App for App {
                     // dialog to pick one target format for all of them.
                     if !self.selection.is_empty() {
                         let n = self.selection.len();
+                        let noun = if n == 1 { "track" } else { "tracks" };
                         if ui
-                            .button(format!("Convert {n}…"))
+                            .button(format!("Convert {n} {noun}…"))
                             .on_hover_note(
                                 "Convert all selected tracks to one target format. \
                                  New files keep the full catalog metadata + cover.",
