@@ -792,12 +792,8 @@ impl eframe::App for App {
                 }
                 if let Some(err) = &self.load_error {
                     ui.colored_label(egui::Color32::LIGHT_RED, format!("catalog error: {err}"));
-                } else {
-                    ui.label(if self.status.is_empty() {
-                        format!("catalog: {}", self.db_path.display())
-                    } else {
-                        self.status.clone()
-                    });
+                } else if !self.status.is_empty() {
+                    ui.label(self.status.clone());
                 }
             });
             if do_abort {
