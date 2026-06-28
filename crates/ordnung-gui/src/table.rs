@@ -77,6 +77,27 @@ impl App {
         }
     }
 
+    /// Drop the whole selection and the inspector's primary row. Called when the
+    /// user clicks the empty space below the rows or presses Escape, so nothing
+    /// stays perma-highlighted once they click away from the songs.
+    pub(crate) fn clear_selection(&mut self) {
+        self.selection.clear();
+        self.select_anchor = None;
+        self.set_primary(None);
+    }
+
+    /// True when an open popup or modal should own the Escape key this frame, so
+    /// the table doesn't steal it to clear the selection out from under them.
+    fn escape_consumed_elsewhere(&self) -> bool {
+        self.column_menu.is_some()
+            || self.col_filter_open.is_some()
+            || self.convert_modal.is_some()
+            || self.batch_convert.is_some()
+            || self.confirm_delete.is_some()
+            || self.settings_open
+            || !self.artwork_queue.is_empty()
+    }
+
     /// Keep only the rows passing every active per-column filter. Each filter is
     /// a case-insensitive substring match against that column's displayed text
     /// (`TrackRow::filter_text`); multiple active columns are AND-ed. No active
@@ -1337,6 +1358,37 @@ impl App {
 
         // Publish this frame's visible row rects for the dropped-cover hit-test.
         self.row_screen_rects = row_rects;
+
+        // Clicking the empty space below the rows clears the selection, so clicking
+        // away from the songs deselects them. Row rects span the full table width,
+        // so "not on any row" means the click landed in the blank area beneath the
+        // last row. We skip clicks the header, a row, a drag, or a context menu
+        // already owns this frame.
+        if clicked_id.is_none()
+            && menu_action.is_none()
+            && !ctx_clone.is_context_menu_open()
+            && (!self.selection.is_empty() || self.selected.is_some())
+            && ctx_clone.input(|i| i.pointer.primary_clicked())
+        {
+            let viewport = scroll_out.inner_rect;
+            if let Some(p) = ctx_clone.pointer_interact_pos() {
+                let below_header = p.y > viewport.top() + 22.0;
+                let on_row = self.row_screen_rects.iter().any(|(_, rect)| rect.contains(p));
+                if viewport.contains(p) && below_header && !on_row {
+                    self.clear_selection();
+                }
+            }
+        }
+        // Escape also clears the selection so the perma-highlight goes away.
+        // Skipped while a text field has focus (Escape there cancels the edit) or
+        // while a popup/modal is up (it handles its own Escape).
+        if (!self.selection.is_empty() || self.selected.is_some())
+            && !ctx_clone.wants_keyboard_input()
+            && !self.escape_consumed_elsewhere()
+            && ctx_clone.input(|i| i.key_pressed(egui::Key::Escape))
+        {
+            self.clear_selection();
+        }
 
         // Drag-to-reorder within a playlist: while an in-app track drag hovers the
         // table, paint an insertion line at the nearest row gap and, on release,
