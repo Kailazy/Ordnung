@@ -3,6 +3,7 @@
 //! `ordnung-architecture`; `ordnung-core` stays pure.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// User settings that must survive across launches — including launches from
@@ -27,6 +28,13 @@ pub struct Config {
     /// Track-table columns the user has hidden, as stable column keys.
     #[serde(default)]
     pub hidden_columns: Vec<String>,
+    /// Track-table column widths in points, keyed by stable column key (see
+    /// `TableColumn::key`). Shared across every view (library and all playlists)
+    /// and durable across rebuilds — unlike egui's own per-layout width memory,
+    /// whose id shifts when the surrounding UI changes. Missing keys fall back to
+    /// the per-column default width. A `BTreeMap` so the saved TOML is stable.
+    #[serde(default)]
+    pub column_widths: BTreeMap<String, f32>,
     /// Sort applied to the track table on launch, as a stable column key (see
     /// `TableColumn::key`). Empty (the default) means "natural order" — catalog
     /// or playlist order, the prior behavior. Unknown or unsortable keys also
@@ -76,6 +84,7 @@ impl Default for Config {
             discogs_username: String::new(),
             column_order: Vec::new(),
             hidden_columns: Vec::new(),
+            column_widths: BTreeMap::new(),
             default_sort: String::new(),
             default_sort_ascending: true,
             auto_analyze: true,

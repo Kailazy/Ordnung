@@ -226,6 +226,24 @@ impl App {
             .iter()
             .filter_map(|k| TableColumn::from_key(k))
             .collect();
+        self.column_widths = self
+            .config
+            .column_widths
+            .iter()
+            .filter_map(|(k, &w)| TableColumn::from_key(k).map(|c| (c, w)))
+            .collect();
+    }
+
+    /// Persist the user's track-table column widths to config. Called after a
+    /// resize settles (the drag ended), so a single drag writes the TOML once
+    /// rather than every frame. Save failure is non-fatal.
+    pub(crate) fn save_column_widths(&mut self) {
+        self.config.column_widths = self
+            .column_widths
+            .iter()
+            .map(|(c, &w)| (c.key().to_string(), w))
+            .collect();
+        let _ = self.config.save();
     }
 
     /// Persist the current column layout to config after a reorder or show/hide.
@@ -352,6 +370,13 @@ impl App {
             order = TableColumn::DEFAULT_ORDER.to_vec();
             hidden.clear();
             changed = true;
+            // Also drop any saved widths so reset restores the default sizing;
+            // the table clears egui_extras' live state next frame so the change
+            // shows immediately rather than after a rebuild.
+            self.column_widths.clear();
+            self.column_widths_dirty = false;
+            self.reset_column_widths = true;
+            self.save_column_widths();
         }
         if changed {
             self.column_order = order;
@@ -641,6 +666,15 @@ impl App {
         // `handle_file_drop`). Assigned to `self.row_screen_rects` after the table.
         let mut row_rects: Vec<(Id, egui::Rect)> = Vec::new();
 
+        // Each data column's rendered width this frame, read from its header cell
+        // rect and reconciled with `self.column_widths` after the table so a
+        // user resize is captured and persisted (see below). Cover is fixed-size
+        // and excluded.
+        let mut observed_widths: Vec<(TableColumn, f32)> = Vec::new();
+        // One-shot "Reset to default" signal: clears egui_extras' live widths so
+        // the cleared defaults apply this frame (see the builder below).
+        let reset_widths = std::mem::take(&mut self.reset_column_widths);
+
         // Wrap the table in a horizontal scroll area so a wide column layout
         // (or a narrow window) can be scrolled left/right. The trailing
         // `remainder` spacer fills slack when the window is wide, so the
@@ -676,9 +710,14 @@ impl App {
                 // One column per visible entry, in the user's chosen order, then a
                 // trailing remainder spacer so the striped rows span the full width.
                 for &col in &order {
-                    builder = builder.column(col.spec(COVER_PX));
+                    builder = builder.column(col.spec(COVER_PX, self.column_widths.get(&col).copied()));
                 }
                 builder = builder.column(Column::remainder());
+                // After "Reset to default", drop egui_extras' own stored widths so
+                // the columns fall back to the (now-cleared) defaults this frame.
+                if reset_widths {
+                    builder.reset();
+                }
                 builder
                     .header(22.0, |mut header| {
                         // Each header is clickable to sort by that column (the cover
@@ -700,6 +739,12 @@ impl App {
                         });
                         for &col in &order {
                             header.col(|ui| {
+                                // Record the column's actual width (egui_extras
+                                // sizes each header cell to its column) so a
+                                // resize can be captured and persisted globally.
+                                if col != TableColumn::Cover {
+                                    observed_widths.push((col, ui.max_rect().width()));
+                                }
                                 let resp = match col.sort_column() {
                                     // Cover: no label, but the whole cell still opens
                                     // the reorder menu on right-click.
@@ -1358,6 +1403,28 @@ impl App {
 
         // Publish this frame's visible row rects for the dropped-cover hit-test.
         self.row_screen_rects = row_rects;
+
+        // Reconcile the columns' rendered widths with the saved set. egui_extras
+        // owns the live width (so a drag updates smoothly within the session under
+        // a single shared id); we mirror it into `self.column_widths` and persist
+        // to config so the widths are shared across every view and survive
+        // rebuilds — where egui's own layout-keyed memory would reset. The flush
+        // is deferred until the drag ends (pointer up) so one resize writes the
+        // TOML once, not every frame.
+        for (col, w) in observed_widths {
+            let changed = self
+                .column_widths
+                .get(&col)
+                .map_or(true, |prev| (prev - w).abs() > 0.5);
+            if changed {
+                self.column_widths.insert(col, w);
+                self.column_widths_dirty = true;
+            }
+        }
+        if self.column_widths_dirty && !ctx_clone.input(|i| i.pointer.any_down()) {
+            self.save_column_widths();
+            self.column_widths_dirty = false;
+        }
 
         // Clicking the empty space below the rows clears the selection, so clicking
         // away from the songs deselects them. Row rects span the full table width,

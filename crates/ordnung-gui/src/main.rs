@@ -346,21 +346,25 @@ impl TableColumn {
 
     /// This column's egui_extras width spec (the same sizes the table used when
     /// columns were hard-coded). `cover_px` is the thumbnail edge length.
-    fn spec(self, cover_px: f32) -> Column {
+    /// `width` overrides the initial width with the user's saved value (see
+    /// `App::column_widths`); `None` uses the per-column default. The Cover column
+    /// is a fixed size and ignores the override.
+    fn spec(self, cover_px: f32, width: Option<f32>) -> Column {
+        let w = |default: f32| width.unwrap_or(default);
         match self {
             TableColumn::Cover => Column::exact(cover_px + 6.0),
-            TableColumn::Artist => Column::initial(180.0).at_least(80.0).clip(true),
-            TableColumn::Title => Column::initial(260.0).at_least(80.0).clip(true),
-            TableColumn::Album => Column::initial(180.0).at_least(60.0).clip(true),
-            TableColumn::Genre => Column::initial(110.0).at_least(60.0).clip(true),
-            TableColumn::Duration => Column::initial(60.0).at_least(40.0),
-            TableColumn::Bpm => Column::initial(55.0).at_least(40.0),
-            TableColumn::Key => Column::initial(55.0).at_least(40.0),
-            TableColumn::Format => Column::initial(60.0).at_least(50.0),
-            TableColumn::Bitrate => Column::initial(70.0).at_least(50.0),
-            TableColumn::Quality => Column::initial(66.0).at_least(48.0),
-            TableColumn::Notes => Column::initial(200.0).at_least(80.0).clip(true),
-            TableColumn::Added => Column::initial(90.0).at_least(60.0),
+            TableColumn::Artist => Column::initial(w(180.0)).at_least(80.0).clip(true),
+            TableColumn::Title => Column::initial(w(260.0)).at_least(80.0).clip(true),
+            TableColumn::Album => Column::initial(w(180.0)).at_least(60.0).clip(true),
+            TableColumn::Genre => Column::initial(w(110.0)).at_least(60.0).clip(true),
+            TableColumn::Duration => Column::initial(w(60.0)).at_least(40.0),
+            TableColumn::Bpm => Column::initial(w(55.0)).at_least(40.0),
+            TableColumn::Key => Column::initial(w(55.0)).at_least(40.0),
+            TableColumn::Format => Column::initial(w(60.0)).at_least(50.0),
+            TableColumn::Bitrate => Column::initial(w(70.0)).at_least(50.0),
+            TableColumn::Quality => Column::initial(w(66.0)).at_least(48.0),
+            TableColumn::Notes => Column::initial(w(200.0)).at_least(80.0).clip(true),
+            TableColumn::Added => Column::initial(w(90.0)).at_least(60.0),
         }
     }
 }
@@ -738,6 +742,20 @@ struct App {
     /// Columns hidden via the reorder menu — not drawn, but still listed in the
     /// menu so they can be brought back.
     hidden_columns: HashSet<TableColumn>,
+    /// User-resized track-table column widths (points), keyed by column. Shared
+    /// across every view and persisted to config so a resize in one playlist
+    /// applies everywhere and survives rebuilds. Absent columns use their default
+    /// width. Mirrors `config.column_widths`; the table reads it to seed each
+    /// column and writes observed widths back after a resize.
+    column_widths: HashMap<TableColumn, f32>,
+    /// Set when `column_widths` changed this frame from a live resize; the new
+    /// widths are flushed to config once the drag ends (pointer released) so a
+    /// drag doesn't rewrite the TOML on every frame.
+    column_widths_dirty: bool,
+    /// Set by "Reset to default" in the column menu; consumed by the next table
+    /// build to also clear egui_extras' own stored widths (which otherwise
+    /// override the freshly-cleared defaults until a rebuild).
+    reset_column_widths: bool,
     /// When `Some`, the column reorder popup is open, anchored at this screen
     /// position (where the header was right-clicked).
     column_menu: Option<egui::Pos2>,
