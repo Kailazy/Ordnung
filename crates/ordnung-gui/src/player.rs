@@ -469,16 +469,27 @@ pub(crate) fn draw_waveform(
                     // Envelope = loudest band; colour = K-weighted loudness.
                     let env = agg[0].max(agg[1]).max(agg[2]) as f32 / 255.0;
                     let loud = agg[3] as f32 / 255.0;
-                    bar(painter, (env * half).max(0.5), energy_color(loud));
+                    bar(painter, (env * half).max(0.5), energy_color(energy_curve(loud)));
                 }
             }
         } else if n > 0 {
             // No band data: peak envelope on a height ramp.
             let i = ((frac * n as f32) as usize).min(n - 1);
             let amp = waveform[i] as f32 / 255.0;
-            bar(painter, (amp * half).max(1.0), energy_color(amp));
+            bar(painter, (amp * half).max(1.0), energy_color(energy_curve(amp)));
         }
     }
+}
+
+/// Raise the threshold for reading as "high energy". The loudness byte is
+/// normalized per-track over a wide (45 dB) window below the track's own peak,
+/// so compressed music — which lives within a few dB of its peak — would
+/// otherwise map almost entirely to the hot (amber/red) end and show no
+/// contrast. This gamma curve pushes the bulk down into the cool/mid range so
+/// only sections genuinely near the track's loudest moment read hot, giving the
+/// waveform usable structure (intro/breakdown cool, drops hot).
+fn energy_curve(t: f32) -> f32 {
+    t.clamp(0.0, 1.0).powf(3.0)
 }
 
 /// Cool→hot gradient for the energy color mode: deep blue (quiet) → teal → green
