@@ -403,6 +403,13 @@ fn wave_height(v: f32) -> f32 {
     v.clamp(0.0, 1.0).powf(HEIGHT_EXP)
 }
 
+/// Per-band visual height gain for spectrum mode `[low, mid, high]`. The low
+/// (bass) band carries the most energy and visually swamps the others, so trim
+/// it and lift mid/high so a synth stab or hi-hat still reads as its own spike.
+/// Applied after [`wave_height`] and clamped to full height, so the loudest
+/// moments still cap rather than overshoot.
+const BAND_GAIN: [f32; 3] = [0.78, 1.2, 1.35];
+
 /// Per-band colors for the spectrum (multiband) waveform: low→red, mid→green,
 /// high→light blue (the Serato/rekordbox convention).
 const BAND_COLORS: [egui::Color32; 3] = [
@@ -472,13 +479,13 @@ pub(crate) fn draw_waveform(
                     // Draw the three bands tallest-first so the shortest ends up
                     // on top, visible in the centre of the taller ones.
                     let mut layers = [
-                        (agg[0] as f32 / 255.0, BAND_COLORS[0]),
-                        (agg[1] as f32 / 255.0, BAND_COLORS[1]),
-                        (agg[2] as f32 / 255.0, BAND_COLORS[2]),
+                        (wave_height(agg[0] as f32 / 255.0) * BAND_GAIN[0], BAND_COLORS[0]),
+                        (wave_height(agg[1] as f32 / 255.0) * BAND_GAIN[1], BAND_COLORS[1]),
+                        (wave_height(agg[2] as f32 / 255.0) * BAND_GAIN[2], BAND_COLORS[2]),
                     ];
                     layers.sort_by(|a, c| c.0.total_cmp(&a.0));
-                    for (v, col) in layers {
-                        bar(painter, (wave_height(v) * half).max(0.4), col);
+                    for (h, col) in layers {
+                        bar(painter, (h.min(1.0) * half).max(0.4), col);
                     }
                 }
                 config::WaveformColorMode::Energy => {
