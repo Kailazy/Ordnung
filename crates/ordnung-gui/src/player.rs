@@ -141,21 +141,37 @@ impl App {
                     }
                     ui.add_space(12.0);
 
-                    // Title / artist.
-                    ui.vertical(|ui| {
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new(truncate(&title, 40))
-                                .strong()
-                                .size(14.0),
-                        );
-                        ui.add_space(2.0);
-                        ui.label(
-                            egui::RichText::new(truncate(&artist, 44))
-                                .size(12.0)
-                                .color(egui::Color32::from_gray(165)),
-                        );
-                    });
+                    // Title / artist — a fixed-width column so the title's
+                    // length never shifts the waveform that follows it. Titles
+                    // wider than the column slow-scroll horizontally like
+                    // Spotify; shorter ones sit left-aligned.
+                    const LABEL_W: f32 = 220.0;
+                    let (block, _) = ui.allocate_exact_size(
+                        egui::vec2(LABEL_W, 56.0),
+                        egui::Sense::hover(),
+                    );
+                    let now = ui.input(|i| i.time);
+                    let mut animating = draw_scrolling_line(
+                        ui,
+                        egui::pos2(block.left(), block.top() + 8.0),
+                        LABEL_W,
+                        &title,
+                        egui::FontId::proportional(14.0),
+                        egui::Color32::from_gray(240),
+                        now,
+                    );
+                    animating |= draw_scrolling_line(
+                        ui,
+                        egui::pos2(block.left(), block.top() + 32.0),
+                        LABEL_W,
+                        &artist,
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::from_gray(165),
+                        now,
+                    );
+                    if animating {
+                        ui.ctx().request_repaint();
+                    }
                     ui.add_space(16.0);
 
                     // Play / pause button — a white disc with a hand-drawn glyph so
@@ -317,6 +333,47 @@ impl App {
     }
 }
 
+/// Paint one line of text left-aligned within `width`, clipped to it. If the
+/// text is wider than `width`, scroll it horizontally Spotify-style: hold at the
+/// start, glide left to reveal the tail, hold at the end, then loop. Returns
+/// `true` while the line is animating so the caller can request a repaint.
+fn draw_scrolling_line(
+    ui: &egui::Ui,
+    top_left: egui::Pos2,
+    width: f32,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+    time: f64,
+) -> bool {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, color);
+    let size = galley.size();
+    let clip = egui::Rect::from_min_size(top_left, egui::vec2(width, size.y));
+    let painter = ui.painter_at(clip);
+    if size.x <= width {
+        painter.galley(top_left, galley, color);
+        return false;
+    }
+    // Overflowing: hold, scroll left at a constant pace, hold, then repeat.
+    const SPEED: f64 = 28.0; // px/s
+    const HOLD: f64 = 2.0; // s paused at each end
+    let overflow = (size.x - width) as f64;
+    let scroll_t = overflow / SPEED;
+    let cycle = HOLD + scroll_t + HOLD;
+    let t = time % cycle;
+    let offset = if t < HOLD {
+        0.0
+    } else if t < HOLD + scroll_t {
+        (t - HOLD) * SPEED
+    } else {
+        overflow
+    };
+    painter.galley(top_left - egui::vec2(offset as f32, 0.0), galley, color);
+    true
+}
+
 pub(crate) fn fmt_duration(ms: u64) -> String {
     let secs = ms / 1000;
     format!("{}:{:02}", secs / 60, secs % 60)
@@ -337,24 +394,18 @@ pub(crate) fn draw_waveform(
     mode: config::WaveformColorMode,
     played_frac: Option<f32>,
 ) {
+    // Bands are `[low, mid, high, loudness]` per bin (see core `color_bands`).
+    const STRIDE: usize = 4;
     let n = waveform.len();
-    let has_bands = bands.len() >= 3 * n && n > 0;
+    let has_bands = bands.len() >= STRIDE * n && n > 0;
+    // Spectral balance (hue) for a bin.
     let triple = |i: usize| -> (f32, f32, f32) {
-        let b = &bands[3 * i..3 * i + 3];
+        let b = &bands[STRIDE * i..STRIDE * i + 3];
         (b[0] as f32, b[1] as f32, b[2] as f32)
     };
-    // Normalize energy across the track so the gradient uses its full range.
-    let max_energy = if has_bands {
-        (0..n)
-            .map(|i| {
-                let (l, m, h) = triple(i);
-                l + m + h
-            })
-            .fold(0.0f32, f32::max)
-            .max(1.0)
-    } else {
-        1.0
-    };
+    // Perceptual (K-weighted) loudness for a bin, already dB-normalized 0..1 at
+    // analysis time — drives the energy gradient.
+    let loudness = |i: usize| bands[STRIDE * i + 3] as f32 / 255.0;
 
     let y = rect.center().y;
     let (x0, x1) = (rect.left(), rect.right());
@@ -380,10 +431,7 @@ pub(crate) fn draw_waveform(
                     (hi / mx * 255.0) as u8,
                 )
             }
-            config::WaveformColorMode::Energy if has_bands => {
-                let (l, m, hi) = triple(i);
-                energy_color(((l + m + hi) / max_energy).clamp(0.0, 1.0))
-            }
+            config::WaveformColorMode::Energy if has_bands => energy_color(loudness(i)),
             // No band data: fall back to a height-driven energy ramp.
             _ => energy_color(amp),
         };

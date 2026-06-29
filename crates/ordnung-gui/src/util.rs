@@ -18,17 +18,6 @@ pub(crate) fn short<'a>(s: &'a str, fallback: &'a str) -> &'a str {
     }
 }
 
-/// Clip `s` to at most `max` characters, appending an ellipsis when cut. Counts
-/// chars (not bytes) so it never splits a multibyte glyph. Used by the player
-/// bar's title/artist labels, which have a fixed width.
-pub(crate) fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let kept: String = s.chars().take(max.saturating_sub(1)).collect();
-    format!("{}…", kept.trim_end())
-}
-
 /// The convert-dialog seed values from the user's saved preferences: the target
 /// format (falling back to AIFF for an empty/unknown key), the prefilled bitrate
 /// text, the default output folder, and the in-place flag. One place so every

@@ -33,7 +33,11 @@ use std::path::Path;
 ///     43%→50% harmonically-compatible on the 79-track labelled set (KEY_CHECK.md).
 /// v10: colored-waveform band energy — per-bin low/mid/high spectral energy
 ///     (`waveform_bands`) for the GUI's energy/spectrum waveform colouring.
-pub const ANALYZER_VERSION: u32 = 10;
+/// v11: colored-waveform loudness — `waveform_bands` now carries 4 bytes/bin
+///     `[low, mid, high, loudness]`; loudness is K-weighted (BS.1770) RMS in dB,
+///     so the energy mode tracks *perceived* loudness instead of raw, bass-
+///     dominated, linear magnitude.
+pub const ANALYZER_VERSION: u32 = 11;
 
 /// How much audio to feed the analyzers. Steady-tempo material needs only a
 /// representative window, which keeps decoding fast.

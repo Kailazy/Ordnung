@@ -173,14 +173,15 @@ pub struct Analysis {
     pub cues: Vec<Cue>,
     /// Low-resolution waveform preview bins (CDJ overview).
     pub waveform_preview: Vec<u8>,
-    /// Per-bin three-band spectral energy for the colored waveform: `[low, mid,
-    /// high]` triples, one triple per `waveform_preview` bin (so length is
-    /// `3 × waveform_preview.len()`, time-aligned with it). Each byte is that
-    /// band's energy globally normalized to 0–255 across the track, so a bin's
-    /// RGB ratio recovers its spectral balance (hue) and the triple's sum
-    /// recovers its energy. Drives the GUI's colored waveform (energy-gradient
-    /// and spectrum modes) and feeds rekordbox color waveforms on export. Empty
-    /// until (re)analyzed under analyzer v10+.
+    /// Per-bin colored-waveform data: `[low, mid, high, loudness]` quads, one per
+    /// `waveform_preview` bin (length `4 × waveform_preview.len()`, time-aligned).
+    /// `low`/`mid`/`high` are K-weighted band magnitude (globally normalized
+    /// 0–255) — the RGB ratio is the bin's spectral balance, driving the spectrum
+    /// color mode. `loudness` is K-weighted (ITU-R BS.1770) RMS in dB, normalized
+    /// over a fixed window below the track's loudest bin — driving the energy
+    /// color mode so it tracks *perceived* loudness. See `analysis::waveform`.
+    /// Empty until (re)analyzed under analyzer v11+ (v10 stored 3 bytes/bin with
+    /// no loudness; the GUI treats the wrong stride as "no band data").
     pub waveform_bands: Vec<u8>,
     pub peak: Option<f32>,
     pub integrated_loudness_lufs: Option<f32>,
