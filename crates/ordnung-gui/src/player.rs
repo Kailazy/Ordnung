@@ -137,7 +137,10 @@ impl App {
         // High-res bands for the zoom lane; fall back to the coarse preview until
         // the PCM has been analyzed (or for tracks the engine never decoded).
         let hires = np.hires_bands.clone().unwrap_or_default();
-        let wave_style = WaveformStyle::from_config(&self.config);
+        let mut wave_style = WaveformStyle::from_config(&self.config);
+        // The smoothing amount lives on app state (driven by the lane slider), not
+        // config, so fold it in after building the style from the saved settings.
+        wave_style.smoothing = self.wave_smoothing.clamp(0.0, 1.0);
 
         const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
         let mut toggle = false;
@@ -434,6 +437,28 @@ impl App {
         let lane_h = self.wave_lane_h.clamp(MIN_LANE_H, MAX_LANE_H);
         let lane_w = (ui.available_width() - 2.0 * MARGIN).max(60.0);
 
+        // Smoothing slider, sitting on the waveform itself (not buried in Settings)
+        // so it's adjustable while watching the lane. Higher values blend each
+        // sample bar into its neighbors — a rekordbox-style continuous envelope
+        // instead of showing every dip between bins. Drives `self.wave_smoothing`,
+        // which the caller folds into `WaveformStyle::smoothing` next frame.
+        ui.horizontal(|ui| {
+            ui.add_space(MARGIN);
+            ui.label(
+                egui::RichText::new("Smoothing")
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(150)),
+            );
+            let mut sm = self.wave_smoothing;
+            if ui
+                .add(egui::Slider::new(&mut sm, 0.0..=1.0).show_value(false))
+                .changed()
+            {
+                self.wave_smoothing = sm.clamp(0.0, 1.0);
+                ui.ctx().request_repaint();
+            }
+        });
+
         // Grip handle above the lane: drag it up to grow the lane (and the panel),
         // down to shrink. A short centered pill, brightening on hover/drag.
         let grip_w = 48.0;
@@ -611,6 +636,11 @@ pub(crate) struct WaveformStyle {
     pub band_colors: [egui::Color32; 3],
     /// The five cool→hot gradient stops for energy mode (quiet → loudest).
     pub energy_colors: [egui::Color32; 5],
+    /// Bar smoothing `[0, 1]`: blends each bar's height with its neighbors so the
+    /// envelope reads as a continuous curve (rekordbox-style) instead of showing
+    /// every dip between adjacent bins. `0` = raw bars. Not from config — set per
+    /// frame from the live slider above the zoom lane.
+    pub smoothing: f32,
 }
 
 impl WaveformStyle {
@@ -634,6 +664,8 @@ impl WaveformStyle {
                 rgb(cfg.waveform_energy_colors[3]),
                 rgb(cfg.waveform_energy_colors[4]),
             ],
+            // Live runtime value; the caller overwrites it from the lane slider.
+            smoothing: DEFAULT_SMOOTHING,
         }
     }
 }
@@ -649,6 +681,43 @@ impl WaveformStyle {
 /// compressed, rekordbox-like).
 fn wave_height(v: f32, height_exp: f32) -> f32 {
     v.clamp(0.0, 1.0).powf(height_exp)
+}
+
+/// Convert a `[0, 1]` smoothing amount to a moving-average half-window in bars.
+/// `0` disables smoothing; otherwise it scales up to [`MAX_SMOOTH_BARS`].
+fn smooth_radius(smoothing: f32) -> usize {
+    (smoothing.clamp(0.0, 1.0) * MAX_SMOOTH_BARS).round() as usize
+}
+
+/// Box-blur a sequence of per-bar band aggregates `[low, mid, high, loudness]` so
+/// neighboring bars blend into a continuous envelope (the rekordbox "no jagged dip
+/// between every bin" look) rather than each bar standing alone. `radius` is the
+/// moving-average half-window in bars; `0` returns the input as `f32` unchanged.
+/// Runs per channel with a prefix sum, so it stays O(n) regardless of radius. A
+/// single loud transient spreads gently into its neighbors instead of spiking.
+fn smooth_aggs(aggs: &[[u8; 4]], radius: usize) -> Vec<[f32; 4]> {
+    let n = aggs.len();
+    let mut out = vec![[0f32; 4]; n];
+    if radius == 0 {
+        for (o, a) in out.iter_mut().zip(aggs) {
+            for k in 0..4 {
+                o[k] = a[k] as f32;
+            }
+        }
+        return out;
+    }
+    let mut prefix = vec![0f32; n + 1];
+    for k in 0..4 {
+        for i in 0..n {
+            prefix[i + 1] = prefix[i] + aggs[i][k] as f32;
+        }
+        for i in 0..n {
+            let lo = i.saturating_sub(radius);
+            let hi = (i + radius + 1).min(n);
+            out[i][k] = (prefix[hi] - prefix[lo]) / (hi - lo) as f32;
+        }
+    }
+    out
 }
 
 /// Default span (seconds) shown in the zoomed detail lane.
@@ -668,9 +737,17 @@ const MIN_LANE_H: f32 = 46.0;
 /// Tallest the lane can be dragged (keeps the lane from swallowing the screen).
 const MAX_LANE_H: f32 = 460.0;
 /// Base height of the player panel excluding the resizable lane (artwork/controls
-/// row, the spacing around the lane, and the grip handle above it). Panel height =
-/// this + the lane height.
-const PANEL_BASE_H: f32 = 113.0;
+/// row, the spacing around the lane, the grip handle, and the smoothing-slider row
+/// above the lane). Panel height = this + the lane height.
+const PANEL_BASE_H: f32 = 135.0;
+
+/// Default waveform bar smoothing `[0, 1]`. A modest amount so the lane reads as a
+/// rekordbox-style envelope out of the box without erasing transient detail.
+pub(crate) const DEFAULT_SMOOTHING: f32 = 0.3;
+/// Largest moving-average half-window (in bars) the smoothing slider maps to at
+/// `1.0`. The radius is `round(smoothing * this)`, so `0` disables smoothing and
+/// the top of the range blends each bar with ~this-many neighbors on each side.
+const MAX_SMOOTH_BARS: f32 = 10.0;
 
 /// Buckets per second for the high-res zoom envelope. ~100× the stored preview's
 /// ~20/sec — well past rekordbox's detailed waveform, so even the tightest
@@ -829,11 +906,14 @@ pub(crate) fn draw_waveform(
         );
     };
 
+    // First pass: reduce each pixel column to its band aggregate (or, without band
+    // data, its peak amplitude packed into channel 0). The second pass blurs that
+    // bar sequence by the smoothing radius and draws — so the slider blends each
+    // bar with its neighbors (rekordbox's continuous envelope) without changing how
+    // any single column is sampled.
+    let mut col_agg: Vec<[u8; 4]> = Vec::with_capacity(cols);
     for cx in 0..cols {
         let frac = (w0 + (cx as f32 + 0.5) / cols as f32 * wspan).clamp(0.0, 1.0);
-        let played = played_frac.map_or(true, |p| frac <= p);
-        let x = x0 + cx as f32;
-
         if has_bands {
             // Map this pixel column to its span of band bins. Zoomed out we take the
             // per-band MAX across the span (peak-preserving — fine transients show as
@@ -866,12 +946,42 @@ pub(crate) fn draw_waveform(
                 }
                 agg
             };
+            col_agg.push(agg);
+        } else if n > 0 {
+            // No band data: peak envelope on a height ramp. Lerp between samples when
+            // zoomed in so it tapers smoothly instead of stepping. Pack the amplitude
+            // byte into channel 0 so it rides through the same smoothing pass.
+            let amp = if smooth {
+                let fpos = (frac * n as f32 - 0.5).clamp(0.0, (n - 1) as f32);
+                let i0 = fpos.floor() as usize;
+                let i1 = (i0 + 1).min(n - 1);
+                let t = fpos - i0 as f32;
+                waveform[i0] as f32 + (waveform[i1] as f32 - waveform[i0] as f32) * t
+            } else {
+                let i = ((frac * n as f32) as usize).min(n - 1);
+                waveform[i] as f32
+            };
+            col_agg.push([amp.round().clamp(0.0, 255.0) as u8, 0, 0, 0]);
+        } else {
+            col_agg.push([0; 4]);
+        }
+    }
+
+    let smoothed = smooth_aggs(&col_agg, smooth_radius(style.smoothing));
+
+    for cx in 0..cols {
+        let frac = (w0 + (cx as f32 + 0.5) / cols as f32 * wspan).clamp(0.0, 1.0);
+        let played = played_frac.map_or(true, |p| frac <= p);
+        let x = x0 + cx as f32;
+        let agg = smoothed[cx];
+
+        if has_bands {
             match style.mode {
                 config::WaveformColorMode::Spectrum => {
                     // Draw the three bands tallest-first so the shortest ends up
                     // on top, visible in the centre of the taller ones.
-                    let h = |v: u8, b: usize| {
-                        wave_height(v as f32 / 255.0, style.height_exp) * style.band_gain[b]
+                    let h = |v: f32, b: usize| {
+                        wave_height(v / 255.0, style.height_exp) * style.band_gain[b]
                     };
                     let mut layers = [
                         (h(agg[0], 0), style.band_colors[0]),
@@ -885,8 +995,8 @@ pub(crate) fn draw_waveform(
                 }
                 config::WaveformColorMode::Energy => {
                     // Envelope = loudest band; colour = K-weighted loudness.
-                    let env = agg[0].max(agg[1]).max(agg[2]) as f32 / 255.0;
-                    let loud = agg[3] as f32 / 255.0;
+                    let env = agg[0].max(agg[1]).max(agg[2]) / 255.0;
+                    let loud = agg[3] / 255.0;
                     bar(
                         &mut mesh,
                         x,
@@ -898,18 +1008,7 @@ pub(crate) fn draw_waveform(
                 }
             }
         } else if n > 0 {
-            // No band data: peak envelope on a height ramp. Lerp between samples when
-            // zoomed in so it tapers smoothly instead of stepping.
-            let amp = if smooth {
-                let fpos = (frac * n as f32 - 0.5).clamp(0.0, (n - 1) as f32);
-                let i0 = fpos.floor() as usize;
-                let i1 = (i0 + 1).min(n - 1);
-                let t = fpos - i0 as f32;
-                (waveform[i0] as f32 + (waveform[i1] as f32 - waveform[i0] as f32) * t) / 255.0
-            } else {
-                let i = ((frac * n as f32) as usize).min(n - 1);
-                waveform[i] as f32 / 255.0
-            };
+            let amp = agg[0] / 255.0;
             bar(
                 &mut mesh,
                 x,
@@ -977,11 +1076,16 @@ fn draw_waveform_scrolling(
         );
     };
 
-    // Walk the absolute bin grid from the group at/just before the left edge to
-    // just past the right edge.
+    // First pass: walk the absolute bin grid from the group at/just before the
+    // left edge to just past the right edge, reducing each group to one bar
+    // (geometry + band aggregate). The bars come out uniformly spaced along x, so
+    // the second pass can blur the aggregate sequence by the smoothing radius —
+    // blending each bar with its neighbors into a continuous envelope — before
+    // drawing, without disturbing the scroll-stable bin grid.
     let bf0 = (w0 * nb as f32) as i64;
     let mut gb = bf0 - bf0.rem_euclid(group);
     let stop = w1 * nb as f32 + gf;
+    let mut bars: Vec<(f32, f32, bool, [u8; 4])> = Vec::new();
     while (gb as f32) < stop {
         let b0 = gb.clamp(0, nb as i64) as usize;
         let b1 = (gb + group).clamp(0, nb as i64) as usize;
@@ -1002,36 +1106,43 @@ fn draw_waveform_scrolling(
             } else {
                 (x_left + bin_w_px * 0.225, (bin_w_px * 0.55).max(0.6))
             };
-            match style.mode {
-                config::WaveformColorMode::Spectrum => {
-                    let h = |v: u8, b: usize| {
-                        wave_height(v as f32 / 255.0, style.height_exp) * style.band_gain[b]
-                    };
-                    let mut layers = [
-                        (h(agg[0], 0), style.band_colors[0]),
-                        (h(agg[1], 1), style.band_colors[1]),
-                        (h(agg[2], 2), style.band_colors[2]),
-                    ];
-                    layers.sort_by(|a, c| c.0.total_cmp(&a.0));
-                    for (h, col) in layers {
-                        add(bx, bw, (h.min(1.0) * half).max(0.4), played, col);
-                    }
-                }
-                config::WaveformColorMode::Energy => {
-                    let env = agg[0].max(agg[1]).max(agg[2]) as f32 / 255.0;
-                    let loud = agg[3] as f32 / 255.0;
-                    add(
-                        bx,
-                        bw,
-                        ((wave_height(env, style.height_exp) * style.energy_gain).min(1.0) * half)
-                            .max(0.5),
-                        played,
-                        energy_color(energy_curve(loud), &style.energy_colors),
-                    );
-                }
-            }
+            bars.push((bx, bw, played, agg));
         }
         gb += group;
+    }
+
+    let aggs: Vec<[u8; 4]> = bars.iter().map(|b| b.3).collect();
+    let smoothed = smooth_aggs(&aggs, smooth_radius(style.smoothing));
+
+    for (&(bx, bw, played, _), agg) in bars.iter().zip(&smoothed) {
+        match style.mode {
+            config::WaveformColorMode::Spectrum => {
+                let h = |v: f32, b: usize| {
+                    wave_height(v / 255.0, style.height_exp) * style.band_gain[b]
+                };
+                let mut layers = [
+                    (h(agg[0], 0), style.band_colors[0]),
+                    (h(agg[1], 1), style.band_colors[1]),
+                    (h(agg[2], 2), style.band_colors[2]),
+                ];
+                layers.sort_by(|a, c| c.0.total_cmp(&a.0));
+                for (h, col) in layers {
+                    add(bx, bw, (h.min(1.0) * half).max(0.4), played, col);
+                }
+            }
+            config::WaveformColorMode::Energy => {
+                let env = agg[0].max(agg[1]).max(agg[2]) / 255.0;
+                let loud = agg[3] / 255.0;
+                add(
+                    bx,
+                    bw,
+                    ((wave_height(env, style.height_exp) * style.energy_gain).min(1.0) * half)
+                        .max(0.5),
+                    played,
+                    energy_color(energy_curve(loud), &style.energy_colors),
+                );
+            }
+        }
     }
 
     if !mesh.is_empty() {

@@ -90,7 +90,12 @@ impl App {
     /// album-mates so the modal can offer to apply the cover across the album, and
     /// builds a small preview texture. Reports through the status line and opens
     /// nothing if the file isn't a decodable image.
-    pub(crate) fn open_cover_drop(&mut self, ctx: &egui::Context, track_id: Id, image_path: PathBuf) {
+    pub(crate) fn open_cover_drop(
+        &mut self,
+        ctx: &egui::Context,
+        track_id: Id,
+        image_path: PathBuf,
+    ) {
         let bytes = match std::fs::read(&image_path) {
             Ok(b) => b,
             Err(e) => {

@@ -107,8 +107,8 @@ impl App {
         // egui's own `latest_pos()` goes stale during an OS file drag (winit gets
         // no cursor events while a file hovers), so on macOS we poll the live mouse
         // location from AppKit instead and fall back to egui elsewhere.
-        let pointer_pos = macos_drag::pointer_pos(frame)
-            .or_else(|| ctx.input(|i| i.pointer.latest_pos()));
+        let pointer_pos =
+            macos_drag::pointer_pos(frame).or_else(|| ctx.input(|i| i.pointer.latest_pos()));
         let row_under_cursor = pointer_pos.and_then(|p| self.row_at(p));
 
         // Paths in `hovered_files` aren't always populated until the drop lands,

@@ -94,7 +94,7 @@ fn load_system_fallback_fonts(fonts: &mut FontDefinitions) -> Vec<String> {
                 "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
                 "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
                 // Windows.
-                "C:/Windows/Fonts/msyh.ttc",  // Microsoft YaHei (CJK)
+                "C:/Windows/Fonts/msyh.ttc", // Microsoft YaHei (CJK)
                 "C:/Windows/Fonts/arialuni.ttf",
             ],
         ),
