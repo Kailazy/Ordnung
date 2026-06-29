@@ -303,11 +303,17 @@ impl App {
                     });
                     ui.separator();
                     // Right: the active tab's controls.
+                    // Let the scroll viewport grow to (nearly) the screen height so
+                    // tall tabs — the Waveform tab runs ~760px — show every control
+                    // and the window auto-sizes to fit. A fixed cap clipped the last
+                    // controls (e.g. the High band-color swatch) below the fold even
+                    // when the screen had room. Still scrolls on short displays.
+                    let max_scroll_h = (ctx.screen_rect().height() - 160.0).clamp(360.0, 900.0);
                     ui.vertical(|ui| {
                         ui.set_min_width(360.0);
                         ui.set_max_width(360.0);
                         egui::ScrollArea::vertical()
-                            .max_height(460.0)
+                            .max_height(max_scroll_h)
                             .auto_shrink([false, true])
                             .show(ui, |ui| {
                         match self.settings_tab {
