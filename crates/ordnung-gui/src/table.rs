@@ -636,7 +636,7 @@ impl App {
             .map(|x| x.id)
             .collect();
         const ROW_H: f32 = 28.0;
-        const COVER_PX: f32 = 22.0;
+        const COVER_PX: f32 = 24.0;
         // Color mode for the inline Waveform column, read once per frame (Copy, so
         // capturing it in the row closures doesn't borrow `self`).
         let waveform_color_mode =
@@ -762,18 +762,13 @@ impl App {
                                     observed_widths.push((col, ui.max_rect().width()));
                                 }
                                 let resp = if col == TableColumn::Waveform {
-                                    // The Waveform header carries no sort/title.
-                                    // Instead it hosts a small toggle that flips the
-                                    // inline waveform's colouring between energy
-                                    // (loudness) and frequency (spectrum). A full-cell
-                                    // interact underneath keeps right-click → reorder
-                                    // working; the button is painted on top for the
-                                    // click and shows the *current* mode's glyph.
-                                    let resp = ui.interact(
-                                        ui.max_rect(),
-                                        ui.id().with(("hdr", col)),
-                                        egui::Sense::click(),
-                                    );
+                                    // The Waveform header *is* the energy/frequency
+                                    // toggle: the whole header cell is clickable and
+                                    // flips the inline waveform's colouring between
+                                    // energy (loudness) and frequency (spectrum). The
+                                    // current mode's glyph is painted full-width and
+                                    // centred, matching the other header cells; right-
+                                    // click still opens the reorder menu.
                                     let (glyph, tip) = match waveform_color_mode {
                                         config::WaveformColorMode::Energy => (
                                             "⚡",
@@ -784,23 +779,33 @@ impl App {
                                             "Frequency waveform (spectrum) · click for energy",
                                         ),
                                     };
-                                    // Let the header's left_to_right(Center) layout place
-                                    // and vertically centre the button; a hand-positioned
-                                    // rect sat slightly high in the 22px header.
-                                    let btn = ui
-                                        .add(
-                                            egui::Button::new(glyph)
-                                                .small()
-                                                .min_size(egui::vec2(40.0, 0.0)),
-                                        )
-                                        .on_hover_text(tip);
-                                    if btn.hovered() {
+                                    let resp = ui.interact(
+                                        ui.max_rect(),
+                                        ui.id().with(("hdr", col)),
+                                        egui::Sense::click(),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::centered_and_justified(
+                                            egui::Direction::LeftToRight,
+                                        ),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(glyph).strong().color(
+                                                        crate::ui::tokens::color::LABEL_2,
+                                                    ),
+                                                )
+                                                .selectable(false),
+                                            );
+                                        },
+                                    );
+                                    if resp.hovered() {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                     }
-                                    if btn.clicked() {
+                                    if resp.clicked() {
                                         toggle_waveform_mode = true;
                                     }
-                                    resp
+                                    resp.on_hover_text(tip)
                                 } else {
                                     match col.sort_column() {
                                         // Cover: no label, but the whole cell still opens
@@ -977,41 +982,51 @@ impl App {
                                             }
                                             _ => None,
                                         };
-                                        let resp = match tex {
-                                            Some(handle) => ui.add(
-                                                egui::Image::new(&handle)
-                                                    .fit_to_exact_size(egui::vec2(
-                                                        COVER_PX, COVER_PX,
-                                                    ))
-                                                    .sense(egui::Sense::click_and_drag()),
-                                            ),
-                                            None => {
-                                                if !self.cover_cache.contains_key(&r.id)
-                                                    && has_any_cover
-                                                {
-                                                    needs_cover_load.push(r.id);
-                                                }
-                                                let (rect, resp) = ui.allocate_exact_size(
-                                                    egui::vec2(COVER_PX, COVER_PX),
-                                                    egui::Sense::click_and_drag(),
-                                                );
-                                                ui.painter().rect_filled(
-                                                    rect,
-                                                    egui::Rounding::same(3.0),
-                                                    egui::Color32::from_gray(40),
-                                                );
-                                                if has_any_cover {
-                                                    ui.painter().text(
-                                                        rect.center(),
-                                                        egui::Align2::CENTER_CENTER,
-                                                        "…",
-                                                        egui::FontId::proportional(14.0),
-                                                        egui::Color32::from_gray(120),
-                                                    );
-                                                }
-                                                resp
-                                            }
-                                        };
+                                        // Centre the thumbnail (or its placeholder)
+                                        // horizontally and vertically within the fixed
+                                        // cover column so it sits squarely in the cell.
+                                        let resp = ui
+                                            .with_layout(
+                                                egui::Layout::centered_and_justified(
+                                                    egui::Direction::LeftToRight,
+                                                ),
+                                                |ui| match tex {
+                                                    Some(handle) => ui.add(
+                                                        egui::Image::new(&handle)
+                                                            .fit_to_exact_size(egui::vec2(
+                                                                COVER_PX, COVER_PX,
+                                                            ))
+                                                            .sense(egui::Sense::click_and_drag()),
+                                                    ),
+                                                    None => {
+                                                        if !self.cover_cache.contains_key(&r.id)
+                                                            && has_any_cover
+                                                        {
+                                                            needs_cover_load.push(r.id);
+                                                        }
+                                                        let (rect, resp) = ui.allocate_exact_size(
+                                                            egui::vec2(COVER_PX, COVER_PX),
+                                                            egui::Sense::click_and_drag(),
+                                                        );
+                                                        ui.painter().rect_filled(
+                                                            rect,
+                                                            egui::Rounding::same(3.0),
+                                                            egui::Color32::from_gray(40),
+                                                        );
+                                                        if has_any_cover {
+                                                            ui.painter().text(
+                                                                rect.center(),
+                                                                egui::Align2::CENTER_CENTER,
+                                                                "…",
+                                                                egui::FontId::proportional(14.0),
+                                                                egui::Color32::from_gray(120),
+                                                            );
+                                                        }
+                                                        resp
+                                                    }
+                                                },
+                                            )
+                                            .inner;
                                         // Play overlay: a play/pause disc centred on the cover.
                                         // Clicking it loads the track into the bottom now-playing
                                         // bar (or pauses it if it's already current). Kept hidden
