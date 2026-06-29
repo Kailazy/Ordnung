@@ -820,8 +820,16 @@ impl eframe::App for App {
                 }
                 if let Some(err) = &self.load_error {
                     ui.colored_label(egui::Color32::LIGHT_RED, format!("catalog error: {err}"));
-                } else if !self.status.is_empty() {
-                    ui.label(self.status.clone());
+                } else {
+                    // Always render a label, falling back to a blank space when
+                    // there's no message, so the status bar keeps a constant
+                    // height — only the text changes, the layout never shifts.
+                    let text = if self.status.is_empty() {
+                        " ".to_string()
+                    } else {
+                        self.status.clone()
+                    };
+                    ui.label(text);
                 }
             });
             if do_abort {
