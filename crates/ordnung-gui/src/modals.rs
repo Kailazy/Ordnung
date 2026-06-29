@@ -288,7 +288,6 @@ impl App {
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
-                ui.set_min_width(640.0);
                 ui.horizontal_top(|ui| {
                     // Left rail: selectable category tabs (Ableton-style).
                     ui.vertical(|ui| {
@@ -305,7 +304,12 @@ impl App {
                     ui.separator();
                     // Right: the active tab's controls.
                     ui.vertical(|ui| {
-                        ui.set_min_width(460.0);
+                        ui.set_min_width(360.0);
+                        ui.set_max_width(360.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(460.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
                         match self.settings_tab {
                             SettingsTab::General => {
                                 ui.label(egui::RichText::new("Discogs token").strong());
@@ -800,6 +804,7 @@ impl App {
                                 }
                             }
                         }
+                            });
                     });
                 });
             });
