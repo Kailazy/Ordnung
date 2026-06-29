@@ -952,6 +952,10 @@ struct App {
     /// actual seek fires on release so we rebuild the audio sink once, not per
     /// frame; `None` when not scrubbing.
     scrub: Option<f32>,
+    /// Seconds of audio visible in the zoomed detail lane above the overview
+    /// strip. Adjusted by scrolling the wheel over the lane; the window centers on
+    /// the playhead and scrolls under it during playback. See [`player`].
+    wave_zoom_secs: f32,
 }
 
 /// What the bottom player bar needs to render the current track.

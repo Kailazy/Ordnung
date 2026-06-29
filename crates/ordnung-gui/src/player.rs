@@ -116,10 +116,36 @@ impl App {
         let mut close = false;
         let mut seek_to: Option<f32> = None;
 
+        // Fraction the bar reflects: the live position, or the in-progress scrub
+        // before release. Shared by the zoom lane and the overview strip so both
+        // track the same playhead. Computed once up front (the panel closure below
+        // mutably borrows `self.scrub`).
+        let shown_frac = self
+            .scrub
+            .unwrap_or(if dur > 0.0 { pos / dur } else { 0.0 })
+            .clamp(0.0, 1.0);
+
         egui::TopBottomPanel::bottom("player")
-            .exact_height(92.0)
+            .exact_height(150.0)
             .show(ctx, |ui| {
                 ui.add_space(8.0);
+
+                // Zoomed detail lane — a window of `wave_zoom_secs` centered on the
+                // playhead, scrolling under it during playback. Wheel to zoom,
+                // click/drag to seek. Skipped for unanalyzed tracks (no waveform).
+                if !waveform.is_empty() {
+                    self.draw_zoom_lane(
+                        ui,
+                        &waveform,
+                        &bands,
+                        &wave_style,
+                        shown_frac,
+                        dur,
+                        &mut seek_to,
+                    );
+                    ui.add_space(8.0);
+                }
+
                 ui.horizontal(|ui| {
                     ui.add_space(10.0);
 
@@ -234,10 +260,6 @@ impl App {
                     // Elapsed time. Fixed-width so the digits changing during a
                     // scrub (e.g. "0:05" → "0:00", or crossing "10:00") can't shift
                     // the waveform that follows it — that shift was the scrub jitter.
-                    let shown_frac = self
-                        .scrub
-                        .unwrap_or(if dur > 0.0 { pos / dur } else { 0.0 })
-                        .clamp(0.0, 1.0);
                     ui.add_sized(
                         egui::vec2(46.0, 18.0),
                         egui::Label::new(
@@ -277,6 +299,7 @@ impl App {
                             &bands,
                             &wave_style,
                             Some(shown_frac),
+                            (0.0, 1.0),
                         );
                     }
                     let knob_r = if resp.hovered() || self.scrub.is_some() {
@@ -341,6 +364,111 @@ impl App {
             self.now_playing = None;
             self.scrub = None;
         }
+
+        // Drive the playhead: while audio is rolling, keep repainting so the zoom
+        // lane scrolls and the knob advances between user input.
+        if playing {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Draw the zoomed detail lane: a `wave_zoom_secs`-wide window of the track,
+    /// centered on the playhead and scrolling under it during playback. The window
+    /// is clamped to the track bounds, so near the ends the playhead drifts off
+    /// center rather than the lane showing empty runway. Wheel over the lane zooms;
+    /// click/drag seeks (writing `seek_to` on release, like the overview strip).
+    fn draw_zoom_lane(
+        &mut self,
+        ui: &mut egui::Ui,
+        waveform: &[u8],
+        bands: &[u8],
+        wave_style: &WaveformStyle,
+        shown_frac: f32,
+        dur: f32,
+        seek_to: &mut Option<f32>,
+    ) {
+        const MARGIN: f32 = 10.0;
+        let zoom = self
+            .wave_zoom_secs
+            .clamp(MIN_ZOOM_SECS, MAX_ZOOM_SECS);
+        let lane_w = (ui.available_width() - 2.0 * MARGIN).max(60.0);
+        ui.horizontal(|ui| {
+            ui.add_space(MARGIN);
+            let (rect, resp) = ui.allocate_exact_size(
+                egui::vec2(lane_w, 46.0),
+                egui::Sense::click_and_drag(),
+            );
+
+            // Visible window in track-fraction, width `zoom` seconds, slid to stay
+            // inside `[0, 1]`.
+            let span = if dur > 0.0 {
+                (zoom / dur).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let w0 = (shown_frac - span / 2.0).clamp(0.0, (1.0 - span).max(0.0));
+            let w1 = w0 + span;
+
+            let painter = ui.painter();
+            painter.rect_filled(
+                rect,
+                egui::Rounding::same(4.0),
+                egui::Color32::from_gray(22),
+            );
+            draw_waveform(
+                painter,
+                rect.shrink2(egui::vec2(3.0, 4.0)),
+                waveform,
+                bands,
+                wave_style,
+                Some(shown_frac),
+                (w0, w1),
+            );
+
+            // Fixed playhead line at the window's mapping of the live position.
+            let play_x =
+                rect.left() + ((shown_frac - w0) / span.max(f32::EPSILON)) * rect.width();
+            painter.line_segment(
+                [
+                    egui::pos2(play_x, rect.top()),
+                    egui::pos2(play_x, rect.bottom()),
+                ],
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 80, 80)),
+            );
+
+            // Wheel to zoom (multiplicative, so each notch is a constant ratio).
+            if resp.hovered() {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll != 0.0 {
+                    self.wave_zoom_secs =
+                        (zoom * (-scroll * 0.004).exp()).clamp(MIN_ZOOM_SECS, MAX_ZOOM_SECS);
+                    ui.ctx().request_repaint();
+                }
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+
+            // Click/drag to seek — map pointer x back through the window.
+            let frac_at = |p: egui::Pos2| {
+                (w0 + ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * span)
+                    .clamp(0.0, 1.0)
+            };
+            if (resp.dragged() || resp.drag_started()) && dur > 0.0 {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    self.scrub = Some(frac_at(p));
+                }
+            }
+            if resp.drag_stopped() {
+                if let Some(f) = self.scrub.take() {
+                    *seek_to = Some(f * dur);
+                }
+            }
+            if resp.clicked() && dur > 0.0 {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    *seek_to = Some(frac_at(p) * dur);
+                }
+                self.scrub = None;
+            }
+        });
     }
 }
 
@@ -446,10 +574,25 @@ fn wave_height(v: f32, height_exp: f32) -> f32 {
     v.clamp(0.0, 1.0).powf(height_exp)
 }
 
+/// Default span (seconds) shown in the zoomed detail lane.
+pub(crate) const DEFAULT_ZOOM_SECS: f32 = 16.0;
+/// Tightest zoom. Below this the 20 bins/sec source data (see core `waveform`)
+/// is stretched past ~1 bin/pixel and just blocks up, so there's no detail to
+/// gain from going further.
+const MIN_ZOOM_SECS: f32 = 6.0;
+/// Widest zoom before the lane is essentially the full-track overview again.
+const MAX_ZOOM_SECS: f32 = 90.0;
+
 /// Paint a colored waveform: one vertical bar per screen column. With
 /// `played_frac = Some(f)` the portion left of `f` is full brightness and the
 /// rest is dimmed (the player's playhead); `None` paints every bar full
 /// brightness (table cells, no playhead).
+///
+/// `window` is the visible span in track-fraction `(start, end)`: `(0.0, 1.0)`
+/// fills `rect` with the whole track (overview strip and table cells); a narrow
+/// window like `(0.40, 0.55)` zooms into that slice, so the same `rect` shows
+/// fewer bins stretched wider — the zoomed detail lane. `played_frac` stays in
+/// whole-track fraction regardless of the window.
 ///
 /// In **spectrum** mode each of the three bands (`[low, mid, high]`, RMS heights
 /// from core `color_bands`) is drawn as its own waveform, overlaid tallest-first
@@ -464,6 +607,7 @@ pub(crate) fn draw_waveform(
     bands: &[u8],
     style: &WaveformStyle,
     played_frac: Option<f32>,
+    window: (f32, f32),
 ) {
     // Bands are `[low, mid, high, loudness]` per bin (see core `color_bands`).
     const STRIDE: usize = 4;
@@ -492,8 +636,15 @@ pub(crate) fn draw_waveform(
         );
     };
 
+    // Visible track-fraction span. `(0, 1)` is the whole track; a narrower window
+    // stretches its slice across `rect` (the zoom lane). The column→track-fraction
+    // map below routes through it, so the bin sampling and the played/dimmed split
+    // both follow the zoom with no other changes.
+    let (w0, w1) = window;
+    let wspan = (w1 - w0).max(f32::EPSILON);
+
     for cx in 0..cols {
-        let frac = (cx as f32 + 0.5) / cols as f32;
+        let frac = (w0 + (cx as f32 + 0.5) / cols as f32 * wspan).clamp(0.0, 1.0);
         let played = played_frac.map_or(true, |p| frac <= p);
         let x = x0 + cx as f32;
 
@@ -502,9 +653,10 @@ pub(crate) fn draw_waveform(
             // MAX across them (peak-preserving). With far more bins than pixels the
             // fine transients then show as thin spikes instead of being sampled
             // away; when zoomed past 1 bin/pixel it degrades to a point sample.
-            let b0 = ((cx as f32 / cols as f32 * nb as f32) as usize).min(nb - 1);
-            let b1 =
-                (((cx + 1) as f32 / cols as f32 * nb as f32).ceil() as usize).clamp(b0 + 1, nb);
+            let tf_lo = (w0 + (cx as f32 / cols as f32) * wspan).clamp(0.0, 1.0);
+            let tf_hi = (w0 + ((cx + 1) as f32 / cols as f32) * wspan).clamp(0.0, 1.0);
+            let b0 = ((tf_lo * nb as f32) as usize).min(nb - 1);
+            let b1 = ((tf_hi * nb as f32).ceil() as usize).clamp(b0 + 1, nb);
             let mut agg = [0u8; 4];
             for j in b0..b1 {
                 let q = &bands[STRIDE * j..STRIDE * j + 4];

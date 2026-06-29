@@ -1192,6 +1192,7 @@ impl App {
                                                 &r.waveform_bands,
                                                 &waveform_style,
                                                 None,
+                                                (0.0, 1.0),
                                             );
                                         }
                                     } else {
