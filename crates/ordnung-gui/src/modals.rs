@@ -353,6 +353,46 @@ impl App {
                 ui.add_space(14.0);
                 ui.separator();
                 ui.add_space(6.0);
+                ui.label(egui::RichText::new("Waveform").strong());
+                ui.label(
+                    egui::RichText::new(
+                        "How the player's waveform is colored. Energy shades each \
+                         section by its loudness (cool → hot); Spectrum colors by \
+                         frequency content (low = red, mid = green, high = blue).",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(4.0);
+                let current = config::WaveformColorMode::from_key(&self.config.waveform_color_mode);
+                let mut picked = current;
+                egui::ComboBox::from_id_salt("settings_waveform_color")
+                    .selected_text(match current {
+                        config::WaveformColorMode::Energy => "Energy (loudness)",
+                        config::WaveformColorMode::Spectrum => "Spectrum (frequency)",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut picked,
+                            config::WaveformColorMode::Energy,
+                            "Energy (loudness)",
+                        );
+                        ui.selectable_value(
+                            &mut picked,
+                            config::WaveformColorMode::Spectrum,
+                            "Spectrum (frequency)",
+                        );
+                    });
+                if picked != current {
+                    self.config.waveform_color_mode = picked.key().to_string();
+                    if let Err(e) = self.config.save() {
+                        self.status = format!("Couldn't save settings: {e}");
+                    }
+                }
+
+                ui.add_space(14.0);
+                ui.separator();
+                ui.add_space(6.0);
                 ui.label(egui::RichText::new("Sorting").strong());
                 ui.label(
                     egui::RichText::new(

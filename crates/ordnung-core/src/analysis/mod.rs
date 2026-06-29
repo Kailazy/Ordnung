@@ -31,7 +31,9 @@ use std::path::Path;
 /// v9: key accuracy — lower chroma band to 90 Hz (admits bass-root fundamentals),
 ///     per-track tuning correction, minor mode bias 1.05→1.20. 21%→34% exact,
 ///     43%→50% harmonically-compatible on the 79-track labelled set (KEY_CHECK.md).
-pub const ANALYZER_VERSION: u32 = 9;
+/// v10: colored-waveform band energy — per-bin low/mid/high spectral energy
+///     (`waveform_bands`) for the GUI's energy/spectrum waveform colouring.
+pub const ANALYZER_VERSION: u32 = 10;
 
 /// How much audio to feed the analyzers. Steady-tempo material needs only a
 /// representative window, which keeps decoding fast.
@@ -60,6 +62,7 @@ pub fn analyze_file(path: impl AsRef<Path>, params: AnalysisParams) -> Result<An
     let detected_key = key::detect(&spec);
     let quality = quality::detect(&spec);
     let lv = waveform::levels(&audio.samples);
+    let waveform_bands = waveform::color_bands(&spec);
 
     let beatgrid = Beatgrid { beats: Vec::new() };
 
@@ -69,6 +72,7 @@ pub fn analyze_file(path: impl AsRef<Path>, params: AnalysisParams) -> Result<An
         beatgrid,
         cues: Vec::new(),
         waveform_preview: lv.waveform_preview,
+        waveform_bands,
         peak: Some(lv.peak),
         integrated_loudness_lufs: Some(lv.rms_dbfs), // RMS dBFS approximation for now
         content_hash: Some(content_hash(&audio.samples)),

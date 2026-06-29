@@ -306,6 +306,7 @@ impl Catalog {
                 peak             REAL,
                 loudness         REAL,
                 waveform         BLOB,
+                waveform_bands   BLOB,     -- per-bin low/mid/high energy for colored waveform (analyzer v10+)
                 content_hash     TEXT,
                 audio_fingerprint BLOB,    -- perceptual fingerprint (see analysis::fingerprint)
                 lowpass_hz       REAL,     -- detected low-pass cutoff; flags lossy transcodes
@@ -525,6 +526,11 @@ impl Catalog {
         // version bump invalidates the cache so the next `analyze` fills them.
         self.add_column_if_missing("analysis", "lowpass_hz", "REAL")?;
         self.add_column_if_missing("analysis", "lowpass_edge", "REAL")?;
+
+        // Per-bin low/mid/high spectral energy for the colored waveform, added in
+        // analyzer v10. Empty on older catalogs until re-analyzed; the version
+        // bump invalidates the cache so the next `analyze` fills it.
+        self.add_column_if_missing("analysis", "waveform_bands", "BLOB")?;
 
         // One-time data migration (user_version 0 → 1): adopt the "decide once,
         // at add time" model for the Discogs picker. Songs that were already
@@ -1993,13 +1999,15 @@ impl Catalog {
         self.conn.execute(
             "INSERT INTO analysis (track_id, bpm, key_tonic, key_mode, beat_offset_ms,
                  peak, loudness, waveform, content_hash, audio_fingerprint,
-                 lowpass_hz, lowpass_edge, analyzer_version, src_size, src_mtime)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                 lowpass_hz, lowpass_edge, analyzer_version, src_size, src_mtime,
+                 waveform_bands)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
              ON CONFLICT(track_id) DO UPDATE SET
                  bpm=?2, key_tonic=?3, key_mode=?4, beat_offset_ms=?5, peak=?6,
                  loudness=?7, waveform=?8, content_hash=?9, audio_fingerprint=?10,
                  lowpass_hz=?11, lowpass_edge=?12, analyzer_version=?13,
-                 src_size=?14, src_mtime=?15, analyzed_at=unixepoch()",
+                 src_size=?14, src_mtime=?15, waveform_bands=?16,
+                 analyzed_at=unixepoch()",
             params![
                 id as i64,
                 a.bpm,
@@ -2016,6 +2024,7 @@ impl Catalog {
                 a.analyzer_version,
                 src_size as i64,
                 src_mtime,
+                a.waveform_bands,
             ],
         )?;
         Ok(())
@@ -2028,7 +2037,7 @@ impl Catalog {
             .query_row(
                 "SELECT bpm, key_tonic, key_mode, beat_offset_ms, peak, loudness,
                      waveform, content_hash, analyzer_version, audio_fingerprint,
-                     lowpass_hz, lowpass_edge
+                     lowpass_hz, lowpass_edge, waveform_bands
                  FROM analysis WHERE track_id=?1",
                 params![id as i64],
                 |r| {
@@ -2059,6 +2068,7 @@ impl Catalog {
                         audio_fingerprint: r.get::<_, Option<Vec<u8>>>(9)?,
                         lowpass_hz: r.get::<_, Option<f64>>(10)?.map(|v| v as f32),
                         lowpass_edge_db_per_khz: r.get::<_, Option<f64>>(11)?.map(|v| v as f32),
+                        waveform_bands: r.get::<_, Option<Vec<u8>>>(12)?.unwrap_or_default(),
                     })
                 },
             )

@@ -901,6 +901,12 @@ struct NowPlaying {
     artist: String,
     title: String,
     source_path: String,
+    /// Per-bin peak envelope (`Analysis::waveform_preview`), drives bar heights.
+    /// Empty when the track isn't analyzed yet — the bar falls back to a line.
+    waveform: Vec<u8>,
+    /// Per-bin `[low, mid, high]` band energy (`Analysis::waveform_bands`), drives
+    /// the colour. Empty for pre-v10 analyses; colouring then degrades gracefully.
+    waveform_bands: Vec<u8>,
 }
 
 /// State for the inline text box that names a sidebar playlist.

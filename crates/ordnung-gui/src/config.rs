@@ -67,6 +67,12 @@ pub struct Config {
     /// On by default, preserving the prior hard-coded behavior.
     #[serde(default = "default_true")]
     pub convert_in_place: bool,
+    /// How the player's waveform is colored: `"energy"` (cool→hot gradient by the
+    /// loudness of each section) or `"spectrum"` (additive RGB from the low/mid/
+    /// high band balance, like rekordbox/Serato). Unknown values fall back to
+    /// `"energy"`. See `WaveformColorMode`.
+    #[serde(default = "default_waveform_color_mode")]
+    pub waveform_color_mode: String,
 }
 
 fn default_true() -> bool {
@@ -75,6 +81,38 @@ fn default_true() -> bool {
 
 fn default_convert_format() -> String {
     "aiff".to_string()
+}
+
+fn default_waveform_color_mode() -> String {
+    "energy".to_string()
+}
+
+/// How the player waveform is colored. Parsed from `Config::waveform_color_mode`;
+/// presentation policy, so it lives in the GUI boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaveformColorMode {
+    /// Cool→hot gradient driven by each section's total energy.
+    Energy,
+    /// Additive RGB from the low/mid/high band balance (rekordbox/Serato style).
+    Spectrum,
+}
+
+impl WaveformColorMode {
+    /// Parse a config string; anything unrecognized falls back to `Energy`.
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "spectrum" => WaveformColorMode::Spectrum,
+            _ => WaveformColorMode::Energy,
+        }
+    }
+
+    /// Stable lowercase key stored in the config TOML.
+    pub fn key(self) -> &'static str {
+        match self {
+            WaveformColorMode::Energy => "energy",
+            WaveformColorMode::Spectrum => "spectrum",
+        }
+    }
 }
 
 impl Default for Config {
@@ -92,6 +130,7 @@ impl Default for Config {
             convert_bitrate_kbps: String::new(),
             convert_out_dir: None,
             convert_in_place: true,
+            waveform_color_mode: default_waveform_color_mode(),
         }
     }
 }

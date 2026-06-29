@@ -41,11 +41,22 @@ impl App {
                 let url = now_playing_cover_url(&db, id, &cover_src);
                 let _ = cover_tx.send((id, url));
             });
+            // Load the waveform for the bar. One small catalog row read, like the
+            // other inline reads in the GUI; cover art is the only thing worth
+            // offloading. Empty vecs (unanalyzed track) just render a flat line.
+            let (waveform, waveform_bands) = Catalog::open(&self.db_path)
+                .and_then(|c| c.get_analysis(id))
+                .ok()
+                .flatten()
+                .map(|a| (a.waveform_preview, a.waveform_bands))
+                .unwrap_or_default();
             self.now_playing = Some(NowPlaying {
                 id,
                 artist,
                 title,
                 source_path,
+                waveform,
+                waveform_bands,
             });
             self.scrub = None;
         }
@@ -86,6 +97,11 @@ impl App {
             np.title.clone()
         };
         let artist = np.artist.clone();
+        // Clone the waveform out so the panel closure (which mutably borrows
+        // `self.scrub`) doesn't also need to borrow `self.now_playing`.
+        let waveform = np.waveform.clone();
+        let bands = np.waveform_bands.clone();
+        let color_mode = config::WaveformColorMode::from_key(&self.config.waveform_color_mode);
 
         const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
         let mut toggle = false;
@@ -93,7 +109,7 @@ impl App {
         let mut seek_to: Option<f32> = None;
 
         egui::TopBottomPanel::bottom("player")
-            .exact_height(76.0)
+            .exact_height(92.0)
             .show(ctx, |ui| {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -209,20 +225,28 @@ impl App {
                     // and close button.
                     let track_w = (ui.available_width() - 86.0).max(60.0);
                     let (rect, resp) = ui.allocate_exact_size(
-                        egui::vec2(track_w, 18.0),
+                        egui::vec2(track_w, 40.0),
                         egui::Sense::click_and_drag(),
                     );
                     let y = rect.center().y;
                     let (x0, x1) = (rect.left(), rect.right());
                     let knob_x = x0 + shown_frac * (x1 - x0);
-                    ui.painter().line_segment(
-                        [egui::pos2(x0, y), egui::pos2(x1, y)],
-                        egui::Stroke::new(4.0, egui::Color32::from_gray(70)),
-                    );
-                    ui.painter().line_segment(
-                        [egui::pos2(x0, y), egui::pos2(knob_x, y)],
-                        egui::Stroke::new(4.0, ACCENT),
-                    );
+                    let painter = ui.painter();
+                    if waveform.is_empty() {
+                        // Unanalyzed track: keep the original flat progress line.
+                        painter.line_segment(
+                            [egui::pos2(x0, y), egui::pos2(x1, y)],
+                            egui::Stroke::new(4.0, egui::Color32::from_gray(70)),
+                        );
+                        painter.line_segment(
+                            [egui::pos2(x0, y), egui::pos2(knob_x, y)],
+                            egui::Stroke::new(4.0, ACCENT),
+                        );
+                    } else {
+                        draw_waveform(
+                            painter, rect, &waveform, &bands, color_mode, shown_frac,
+                        );
+                    }
                     let knob_r = if resp.hovered() || self.scrub.is_some() {
                         6.5
                     } else {
@@ -291,4 +315,115 @@ impl App {
 pub(crate) fn fmt_duration(ms: u64) -> String {
     let secs = ms / 1000;
     format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+/// Paint the player waveform: one vertical bar per screen column, height from the
+/// peak envelope (`waveform`), color from `mode`. The played portion (left of
+/// `played_frac`) is full brightness; the rest is dimmed. Bands (`[low, mid,
+/// high]` per bin) drive both color modes; if absent, both degrade to a height
+/// ramp so an unanalyzed-under-v10 track still shows a sane waveform.
+fn draw_waveform(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    waveform: &[u8],
+    bands: &[u8],
+    mode: config::WaveformColorMode,
+    played_frac: f32,
+) {
+    let n = waveform.len();
+    let has_bands = bands.len() >= 3 * n && n > 0;
+    let triple = |i: usize| -> (f32, f32, f32) {
+        let b = &bands[3 * i..3 * i + 3];
+        (b[0] as f32, b[1] as f32, b[2] as f32)
+    };
+    // Normalize energy across the track so the gradient uses its full range.
+    let max_energy = if has_bands {
+        (0..n)
+            .map(|i| {
+                let (l, m, h) = triple(i);
+                l + m + h
+            })
+            .fold(0.0f32, f32::max)
+            .max(1.0)
+    } else {
+        1.0
+    };
+
+    let y = rect.center().y;
+    let (x0, x1) = (rect.left(), rect.right());
+    let half = rect.height() / 2.0 - 1.0;
+    let cols = (x1 - x0).floor().max(1.0) as usize;
+    for cx in 0..cols {
+        let frac = (cx as f32 + 0.5) / cols as f32;
+        let i = ((frac * n as f32) as usize).min(n - 1);
+        let amp = waveform[i] as f32 / 255.0;
+        let h = (amp * half).max(1.0);
+        let played = frac <= played_frac;
+
+        let base = match mode {
+            config::WaveformColorMode::Spectrum if has_bands => {
+                let (l, m, hi) = triple(i);
+                // Additive RGB from the band balance: low→red, mid→green, high→
+                // blue. Normalize to the strongest band so the hue stays vivid
+                // regardless of absolute loudness (amplitude is already in `h`).
+                let mx = l.max(m).max(hi).max(1.0);
+                egui::Color32::from_rgb(
+                    (l / mx * 255.0) as u8,
+                    (m / mx * 255.0) as u8,
+                    (hi / mx * 255.0) as u8,
+                )
+            }
+            config::WaveformColorMode::Energy if has_bands => {
+                let (l, m, hi) = triple(i);
+                energy_color(((l + m + hi) / max_energy).clamp(0.0, 1.0))
+            }
+            // No band data: fall back to a height-driven energy ramp.
+            _ => energy_color(amp),
+        };
+        let color = if played { base } else { dim(base, 0.4) };
+        let x = x0 + cx as f32;
+        painter.line_segment(
+            [egui::pos2(x, y - h), egui::pos2(x, y + h)],
+            egui::Stroke::new(1.0, color),
+        );
+    }
+}
+
+/// Cool→hot gradient for the energy color mode: deep blue (quiet) → teal → green
+/// → amber → red (loudest). `t` is clamped to `[0, 1]`.
+fn energy_color(t: f32) -> egui::Color32 {
+    const STOPS: [(f32, (f32, f32, f32)); 5] = [
+        (0.0, (45.0, 80.0, 150.0)),
+        (0.3, (40.0, 160.0, 170.0)),
+        (0.55, (70.0, 190.0, 110.0)),
+        (0.8, (235.0, 195.0, 70.0)),
+        (1.0, (225.0, 75.0, 55.0)),
+    ];
+    let t = t.clamp(0.0, 1.0);
+    let mut lo = &STOPS[0];
+    let mut hi = &STOPS[STOPS.len() - 1];
+    for pair in STOPS.windows(2) {
+        if t >= pair[0].0 && t <= pair[1].0 {
+            lo = &pair[0];
+            hi = &pair[1];
+            break;
+        }
+    }
+    let span = (hi.0 - lo.0).max(1e-6);
+    let f = ((t - lo.0) / span).clamp(0.0, 1.0);
+    let lerp = |a: f32, b: f32| a + (b - a) * f;
+    egui::Color32::from_rgb(
+        lerp(lo.1 .0, hi.1 .0) as u8,
+        lerp(lo.1 .1, hi.1 .1) as u8,
+        lerp(lo.1 .2, hi.1 .2) as u8,
+    )
+}
+
+/// Scale a color toward black by `f` (used to dim the not-yet-played portion).
+fn dim(c: egui::Color32, f: f32) -> egui::Color32 {
+    egui::Color32::from_rgb(
+        (c.r() as f32 * f) as u8,
+        (c.g() as f32 * f) as u8,
+        (c.b() as f32 * f) as u8,
+    )
 }
