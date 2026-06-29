@@ -27,7 +27,7 @@ use config::Config;
 use covers::*;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
-use ordnung_core::analysis::{self, AnalysisParams, ANALYZER_VERSION};
+use ordnung_core::analysis::{self, AnalysisParams, ANALYZER_VERSION, WAVEFORM_FULLTRACK_VERSION};
 use ordnung_core::convert::{self, ConvertSpec};
 use ordnung_core::discogs;
 use ordnung_core::model::key::Camelot;

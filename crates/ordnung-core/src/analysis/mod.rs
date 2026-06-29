@@ -46,6 +46,14 @@ use std::path::Path;
 ///     fine transients resolve as thin spikes.
 pub const ANALYZER_VERSION: u32 = 13;
 
+/// First analyzer version whose `waveform_preview`/`waveform_bands` span the
+/// **full track**. Earlier versions only covered the first 150 s (the key
+/// window), so their bins are time-incompatible with the player's full-track
+/// playhead (`pos / full_duration`) — drawing them stretches ~150 s of audio
+/// across the whole bar, putting the wrong section under the cursor. The GUI
+/// must treat pre-`v13` waveform data as absent until the track is re-analyzed.
+pub const WAVEFORM_FULLTRACK_VERSION: u32 = 13;
+
 /// How much audio to feed the analyzers. Steady-tempo material needs only a
 /// representative window, which keeps decoding fast.
 #[derive(Debug, Clone, Copy)]

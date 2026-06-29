@@ -1924,16 +1924,20 @@ pub(crate) fn load_rows(
                 .map(|&ts| fmt_added(ts, now))
                 .unwrap_or_default(),
             added_at: added_at.get(&t.id).copied().unwrap_or(0),
+            // Only show waveform data that spans the full track (v13+). Earlier
+            // versions covered just the first 150 s, so the renderer — which maps
+            // the bar across the whole track — would stretch ~150 s across it and
+            // put the wrong section under the playhead. Treat stale data as absent
+            // (cells draw flat) until `needs_analysis` re-analyzes to the current
+            // version. This also subsumes the old v11 4-byte-stride guard.
             waveform: analysis
                 .as_ref()
+                .filter(|a| a.analyzer_version >= WAVEFORM_FULLTRACK_VERSION)
                 .map(|a| a.waveform_preview.clone())
                 .unwrap_or_default(),
-            // Only the v11+ layout is the 4-byte `[low, mid, high, loudness]`
-            // stride the renderer expects; older data had a different stride and
-            // would be misread, so treat it as absent (the cell falls back).
             waveform_bands: analysis
                 .as_ref()
-                .filter(|a| a.analyzer_version >= 11)
+                .filter(|a| a.analyzer_version >= WAVEFORM_FULLTRACK_VERSION)
                 .map(|a| a.waveform_bands.clone())
                 .unwrap_or_default(),
             source_path: PathBuf::from(t.source_path),
