@@ -437,16 +437,28 @@ pub(crate) fn draw_waveform(
         };
 
         if has_bands {
-            let bi = ((frac * nb as f32) as usize).min(nb - 1);
-            let b = &bands[STRIDE * bi..STRIDE * bi + 4];
+            // Map this pixel column to its span of band bins and take the per-band
+            // MAX across them (peak-preserving). With far more bins than pixels the
+            // fine transients then show as thin spikes instead of being sampled
+            // away; when zoomed past 1 bin/pixel it degrades to a point sample.
+            let b0 = ((cx as f32 / cols as f32 * nb as f32) as usize).min(nb - 1);
+            let b1 = (((cx + 1) as f32 / cols as f32 * nb as f32).ceil() as usize)
+                .clamp(b0 + 1, nb);
+            let mut agg = [0u8; 4];
+            for j in b0..b1 {
+                let q = &bands[STRIDE * j..STRIDE * j + 4];
+                for t in 0..4 {
+                    agg[t] = agg[t].max(q[t]);
+                }
+            }
             match mode {
                 config::WaveformColorMode::Spectrum => {
                     // Draw the three bands tallest-first so the shortest ends up
                     // on top, visible in the centre of the taller ones.
                     let mut layers = [
-                        (b[0] as f32 / 255.0, BAND_COLORS[0]),
-                        (b[1] as f32 / 255.0, BAND_COLORS[1]),
-                        (b[2] as f32 / 255.0, BAND_COLORS[2]),
+                        (agg[0] as f32 / 255.0, BAND_COLORS[0]),
+                        (agg[1] as f32 / 255.0, BAND_COLORS[1]),
+                        (agg[2] as f32 / 255.0, BAND_COLORS[2]),
                     ];
                     layers.sort_by(|a, c| c.0.total_cmp(&a.0));
                     for (v, col) in layers {
@@ -455,8 +467,8 @@ pub(crate) fn draw_waveform(
                 }
                 config::WaveformColorMode::Energy => {
                     // Envelope = loudest band; colour = K-weighted loudness.
-                    let env = (b[0].max(b[1]).max(b[2])) as f32 / 255.0;
-                    let loud = b[3] as f32 / 255.0;
+                    let env = agg[0].max(agg[1]).max(agg[2]) as f32 / 255.0;
+                    let loud = agg[3] as f32 / 255.0;
                     bar(painter, (env * half).max(0.5), energy_color(loud));
                 }
             }

@@ -45,10 +45,11 @@ pub fn levels(samples: &[f32]) -> Levels {
 
 /// Bytes per output bin in [`color_bands`]: `[low, mid, high, loudness]`.
 pub const COLOR_STRIDE: usize = 4;
-/// Time resolution of the colored-waveform data — higher than `PREVIEW_BINS` so
-/// the player's wide waveform shows real dynamics rather than coarse blocks; the
-/// inline table thumbnail just downsamples it.
-pub const WAVE_COLOR_BINS: usize = 1000;
+/// Time resolution of the colored-waveform data — far higher than `PREVIEW_BINS`
+/// so the player's wide waveform resolves fine transients (the renderer takes the
+/// per-pixel max over the bins it spans, so detail shows as thin spikes); the
+/// inline table thumbnail just downsamples it. At ~4 KB/track this is cheap.
+pub const WAVE_COLOR_BINS: usize = 4000;
 /// dB window below the track's loudest bin that the loudness byte spans. Anything
 /// quieter than `max - LOUDNESS_RANGE_DB` clamps to 0 (coolest). ~45 dB covers a
 /// track's musical dynamic range without wasting resolution on the noise floor.

@@ -40,7 +40,9 @@ use std::path::Path;
 /// v12: multiband colored waveform — band bytes are now *raw* RMS amplitude
 ///     (sqrt-companded) at higher time resolution (`WAVE_COLOR_BINS`), drawn as
 ///     three overlaid per-band waveforms; loudness byte stays K-weighted.
-pub const ANALYZER_VERSION: u32 = 12;
+/// v13: finer colored-waveform detail — `WAVE_COLOR_BINS` raised to 4000, drawn
+///     peak-preserving (per-pixel max), so the waveform resolves thin transients.
+pub const ANALYZER_VERSION: u32 = 13;
 
 /// How much audio to feed the analyzers. Steady-tempo material needs only a
 /// representative window, which keeps decoding fast.
