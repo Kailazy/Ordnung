@@ -45,19 +45,28 @@ pub fn levels(samples: &[f32]) -> Levels {
 
 /// Bytes per output bin in [`color_bands`]: `[low, mid, high, loudness]`.
 pub const COLOR_STRIDE: usize = 4;
-/// Time resolution of the colored-waveform data — far higher than `PREVIEW_BINS`
-/// so the player's wide waveform resolves fine transients (the renderer takes the
-/// per-pixel max over the bins it spans, so detail shows as thin spikes); the
-/// inline table thumbnail just downsamples it. At ~4 KB/track this is cheap.
-pub const WAVE_COLOR_BINS: usize = 4000;
+/// Colored-waveform time resolution, in bins per second of audio. The bin count
+/// scales with track length so a 10-min track is as detailed *per second* as a
+/// 3-min one (the renderer takes the per-pixel max over the bins it spans, so the
+/// detail shows as thin spikes). Clamped to `[MIN_COLOR_BINS, MAX_COLOR_BINS]`.
+const COLOR_BINS_PER_SEC: f32 = 20.0;
+const MIN_COLOR_BINS: usize = 400;
+const MAX_COLOR_BINS: usize = 24_000;
 /// dB window below the track's loudest bin that the loudness byte spans. Anything
 /// quieter than `max - LOUDNESS_RANGE_DB` clamps to 0 (coolest). ~45 dB covers a
 /// track's musical dynamic range without wasting resolution on the noise floor.
 const LOUDNESS_RANGE_DB: f64 = 45.0;
 
-/// Per-bin colored-waveform data, derived from the shared spectrogram so we pay
-/// for no extra FFT. Returns `COLOR_STRIDE * WAVE_COLOR_BINS` bytes —
-/// `[low, mid, high, loudness]` per time bin:
+/// Number of color time-bins for a track of `n_samples` (see `COLOR_BINS_PER_SEC`).
+fn color_bin_count(n_samples: usize, sample_rate: u32) -> usize {
+    let secs = n_samples as f32 / sample_rate.max(1) as f32;
+    ((secs * COLOR_BINS_PER_SEC).round() as usize).clamp(MIN_COLOR_BINS, MAX_COLOR_BINS)
+}
+
+/// Per-bin colored-waveform data, streamed over the **full track** (a fresh STFT
+/// via `dsp::for_each_frame`, so no full spectrogram is held). Returns
+/// `COLOR_STRIDE * bins` bytes — `[low, mid, high, loudness]` per time bin, where
+/// `bins` scales with duration (`color_bin_count`):
 ///
 /// * `low`/`mid`/`high` — **raw** band RMS amplitude (split at 200 Hz / 2 kHz),
 ///   sqrt-companded then globally normalized to 0–255. These are the per-band
@@ -68,13 +77,16 @@ const LOUDNESS_RANGE_DB: f64 = 45.0;
 ///   weighting), normalized over a `LOUDNESS_RANGE_DB` window below the track's
 ///   loudest bin. Drives the energy color mode so colour tracks *perceived*
 ///   loudness rather than raw, bass-dominated magnitude.
-pub fn color_bands(spec: &dsp::Spectrogram) -> Vec<u8> {
-    let out_len = COLOR_STRIDE * WAVE_COLOR_BINS;
-    let n = spec.frames.len();
-    if n == 0 || spec.frames[0].is_empty() {
+pub fn color_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+    let total_frames = dsp::frame_count(samples.len());
+    // Cap bins to the frame count so every bin gets at least one frame (no comb
+    // gaps on very short clips).
+    let bins = color_bin_count(samples.len(), sample_rate).min(total_frames.max(1));
+    let out_len = COLOR_STRIDE * bins;
+    if total_frames == 0 {
         return vec![0; out_len];
     }
-    let n_bins = spec.frames[0].len();
+    let n_bins = dsp::WINDOW / 2 + 1;
 
     // K-weighting (ITU-R BS.1770) as a per-FFT-bin *power* gain, used only for the
     // loudness byte: the product of the two stage biquads' magnitude responses.
@@ -98,36 +110,45 @@ pub fn color_bands(spec: &dsp::Spectrogram) -> Vec<u8> {
         .collect();
 
     let hz_to_bin = |hz: f32| {
-        ((hz * dsp::WINDOW as f32 / spec.sample_rate as f32).round() as usize).min(n_bins)
+        ((hz * dsp::WINDOW as f32 / sample_rate as f32).round() as usize).min(n_bins)
     };
     let lo_hi = hz_to_bin(200.0);
     let mid_hi = hz_to_bin(2000.0).max(lo_hi);
 
-    // Per time bin: mean raw power per band, and mean K-weighted power (loudness),
-    // averaged over the frames the bin spans.
-    let mut band_pow = vec![[0.0f64; 3]; WAVE_COLOR_BINS];
-    let mut kw_pow = vec![0.0f64; WAVE_COLOR_BINS];
-    for k in 0..WAVE_COLOR_BINS {
-        let start = k * n / WAVE_COLOR_BINS;
-        let end = (((k + 1) * n / WAVE_COLOR_BINS).max(start + 1)).min(n);
-        let mut acc = [0.0f64; 3];
-        let mut kacc = 0.0f64;
-        for frame in &spec.frames[start..end] {
-            for (i, &m) in frame.iter().enumerate() {
-                let p = (m * m) as f64;
-                kacc += (kgain[i] * m * m) as f64;
-                if i < lo_hi {
-                    acc[0] += p;
-                } else if i < mid_hi {
-                    acc[1] += p;
-                } else {
-                    acc[2] += p;
-                }
+    // Accumulate raw band power + K-weighted power per time bin, streaming the
+    // STFT frame-by-frame and assigning each frame to its bin by position.
+    let mut band_pow = vec![[0.0f64; 3]; bins];
+    let mut kw_pow = vec![0.0f64; bins];
+    let mut counts = vec![0u32; bins];
+    let mut t = 0usize;
+    dsp::for_each_frame(samples, |frame| {
+        let k = (t * bins / total_frames).min(bins - 1);
+        let (mut lo, mut mid, mut hi, mut kw) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for (i, &m) in frame.iter().enumerate() {
+            let p = (m * m) as f64;
+            kw += (kgain[i] * m * m) as f64;
+            if i < lo_hi {
+                lo += p;
+            } else if i < mid_hi {
+                mid += p;
+            } else {
+                hi += p;
             }
         }
-        let span = (end - start).max(1) as f64;
-        band_pow[k] = [acc[0] / span, acc[1] / span, acc[2] / span];
-        kw_pow[k] = kacc / span;
+        band_pow[k][0] += lo;
+        band_pow[k][1] += mid;
+        band_pow[k][2] += hi;
+        kw_pow[k] += kw;
+        counts[k] += 1;
+        t += 1;
+    });
+    // Mean power per bin.
+    for k in 0..bins {
+        let c = counts[k].max(1) as f64;
+        band_pow[k][0] /= c;
+        band_pow[k][1] /= c;
+        band_pow[k][2] /= c;
+        kw_pow[k] /= c;
     }
 
     // Band heights: RMS magnitude, globally normalized (so bass stays tallest),
@@ -145,7 +166,7 @@ pub fn color_bands(spec: &dsp::Spectrogram) -> Vec<u8> {
     let floor_db = max_db - LOUDNESS_RANGE_DB;
 
     let mut out = Vec::with_capacity(out_len);
-    for k in 0..WAVE_COLOR_BINS {
+    for k in 0..bins {
         let q = |p: f64| {
             let mag = p.max(0.0).sqrt();
             ((mag / max_rms).clamp(0.0, 1.0).sqrt() * 255.0).round() as u8

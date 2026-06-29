@@ -40,8 +40,10 @@ use std::path::Path;
 /// v12: multiband colored waveform — band bytes are now *raw* RMS amplitude
 ///     (sqrt-companded) at higher time resolution (`WAVE_COLOR_BINS`), drawn as
 ///     three overlaid per-band waveforms; loudness byte stays K-weighted.
-/// v13: finer colored-waveform detail — `WAVE_COLOR_BINS` raised to 4000, drawn
-///     peak-preserving (per-pixel max), so the waveform resolves thin transients.
+/// v13: full-track colored waveform — the waveform/preview now span the whole
+///     track (decoded up to a ceiling) instead of the 150 s key window, and the
+///     color bins scale with duration (streamed STFT), drawn peak-preserving so
+///     fine transients resolve as thin spikes.
 pub const ANALYZER_VERSION: u32 = 13;
 
 /// How much audio to feed the analyzers. Steady-tempo material needs only a
@@ -57,21 +59,35 @@ impl Default for AnalysisParams {
     }
 }
 
+/// Generous ceiling on how much audio we decode, so the colored waveform can span
+/// the whole track without an hour-long file blowing up memory. ~20 min covers
+/// essentially every DJ track; longer files have their waveform truncated here.
+const DECODE_CEILING_SECS: usize = 20 * 60;
+
 /// Decode and analyze one file into an `Analysis` (BPM, key, beatgrid anchor,
 /// waveform preview, peak/loudness, and a content hash for caching).
 pub fn analyze_file(path: impl AsRef<Path>, params: AnalysisParams) -> Result<Analysis> {
-    let cap = (params.max_seconds as usize)
-        .saturating_mul(48_000) // upper-bound rate; trimmed precisely below
+    // Decode the whole track (capped at a sane ceiling) so the waveform spans the
+    // full song. Key/BPM/quality only need a representative window, taken as a
+    // slice of the decoded audio below — they don't pay for the full length.
+    let ceiling = DECODE_CEILING_SECS
+        .saturating_mul(48_000) // upper-bound rate; exact rate known after decode
         .max(1);
-    let audio = decode_mono_capped(path, Some(cap))?;
+    let audio = decode_mono_capped(path, Some(ceiling))?;
 
-    let spec = dsp::spectrogram(&audio.samples, audio.sample_rate);
+    // Window for key/quality/fingerprint: the first `max_seconds` of the decode.
+    let key_cap = (params.max_seconds as usize)
+        .saturating_mul(audio.sample_rate as usize)
+        .max(1);
+    let key_slice = &audio.samples[..audio.samples.len().min(key_cap)];
+    let spec = dsp::spectrogram(key_slice, audio.sample_rate);
     // BPM/tempo detection is disabled for now. Leave `bpm` empty and the beatgrid
     // anchorless until it's re-enabled. See `tempo::detect`.
     let detected_key = key::detect(&spec);
     let quality = quality::detect(&spec);
+    // Waveform + levels span the full decoded track (not just the key window).
     let lv = waveform::levels(&audio.samples);
-    let waveform_bands = waveform::color_bands(&spec);
+    let waveform_bands = waveform::color_bands(&audio.samples, audio.sample_rate);
 
     let beatgrid = Beatgrid { beats: Vec::new() };
 
