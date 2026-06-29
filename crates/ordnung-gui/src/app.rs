@@ -47,6 +47,8 @@ impl App {
             batch_convert: None,
             job_rx: None,
             status: String::new(),
+            status_last: String::new(),
+            status_shown_at: 0.0,
             progress: None,
             load_error: None,
             cover_cache: HashMap::new(),
@@ -346,6 +348,26 @@ impl eframe::App for App {
         self.poll_vinyl_covers(ctx);
         self.poll_artwork_save();
         self.poll_metadata_preview();
+
+        // Fade an idle status message out of the bottom-left bar after a short
+        // while, so a one-off "Synced…/Done…" note doesn't linger forever. We
+        // never expire it mid-job (the running status is live state); the timer
+        // restarts whenever the message text changes. A repaint is scheduled so
+        // the bar clears on its own even when the app is otherwise idle.
+        const STATUS_TTL: f64 = 15.0;
+        if self.status != self.status_last {
+            self.status_last = self.status.clone();
+            self.status_shown_at = ctx.input(|i| i.time);
+        }
+        if !self.status.is_empty() && !self.is_busy() {
+            let age = ctx.input(|i| i.time) - self.status_shown_at;
+            if age >= STATUS_TTL {
+                self.status.clear();
+                self.status_last.clear();
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(STATUS_TTL - age));
+            }
+        }
 
         // Cmd/Ctrl+A selects every visible row in the current view or playlist
         // (`self.rows` is already narrowed to the active tab and column filters).

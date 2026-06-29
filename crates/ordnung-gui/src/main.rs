@@ -599,6 +599,11 @@ struct App {
     batch_convert: Option<BatchConvert>,
     job_rx: Option<Receiver<JobMsg>>,
     status: String,
+    /// Last status string we saw and the egui time (seconds) it appeared, used
+    /// to fade an idle status message out of the bottom-left bar after a few
+    /// seconds. Only idle messages expire; while a job runs the status stays.
+    status_last: String,
+    status_shown_at: f64,
     /// Determinate progress of the running job (`done`, `total`), or `None` when
     /// idle or running a job that doesn't report item counts. Drives the
     /// status-bar progress bar; cleared when the job finishes.
