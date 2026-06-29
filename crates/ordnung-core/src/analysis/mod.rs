@@ -40,19 +40,27 @@ use std::path::Path;
 /// v12: multiband colored waveform — band bytes are now *raw* RMS amplitude
 ///     (sqrt-companded) at higher time resolution (`WAVE_COLOR_BINS`), drawn as
 ///     three overlaid per-band waveforms; loudness byte stays K-weighted.
-/// v13: full-track colored waveform — the waveform/preview now span the whole
+/// v13: finer colored-waveform detail — `WAVE_COLOR_BINS` raised to 4000, drawn
+///     peak-preserving so fine transients resolve as thin spikes. (Still the
+///     150 s key window — the full-track span change below shipped *without*
+///     bumping the version, so v13 ambiguously covers both 150 s and full-track
+///     waveforms. v14 exists to disambiguate.)
+/// v14: full-track colored waveform — the waveform/preview now span the whole
 ///     track (decoded up to a ceiling) instead of the 150 s key window, and the
-///     color bins scale with duration (streamed STFT), drawn peak-preserving so
-///     fine transients resolve as thin spikes.
-pub const ANALYZER_VERSION: u32 = 13;
+///     color bins scale with duration (streamed STFT). The span change itself
+///     landed under v13 but forgot to bump the version, so v13 caches may hold
+///     either span; this bump forces re-analysis so every cached waveform is
+///     unambiguously full-track and lines up with the player's playhead.
+pub const ANALYZER_VERSION: u32 = 14;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key
 /// window), so their bins are time-incompatible with the player's full-track
 /// playhead (`pos / full_duration`) — drawing them stretches ~150 s of audio
-/// across the whole bar, putting the wrong section under the cursor. The GUI
-/// must treat pre-`v13` waveform data as absent until the track is re-analyzed.
-pub const WAVEFORM_FULLTRACK_VERSION: u32 = 13;
+/// across the whole bar, putting the wrong section under the cursor. v13 is
+/// ambiguous (the span change shipped without a version bump), so the floor is
+/// v14. The GUI must treat pre-`v14` waveform data as absent until re-analyzed.
+pub const WAVEFORM_FULLTRACK_VERSION: u32 = 14;
 
 /// How much audio to feed the analyzers. Steady-tempo material needs only a
 /// representative window, which keeps decoding fast.
