@@ -400,6 +400,8 @@ pub(crate) struct WaveformStyle {
     pub height_exp: f32,
     /// Per-band height gain `[low, mid, high]`, spectrum mode only.
     pub band_gain: [f32; 3],
+    /// Envelope height gain for energy mode (the spectrum `band_gain` analogue).
+    pub energy_gain: f32,
     /// Per-band colors `[low, mid, high]` for spectrum mode.
     pub band_colors: [egui::Color32; 3],
     /// The five cool→hot gradient stops for energy mode (quiet → loudest).
@@ -414,6 +416,7 @@ impl WaveformStyle {
             mode: config::WaveformColorMode::from_key(&cfg.waveform_color_mode),
             height_exp: cfg.waveform_height_exp,
             band_gain: cfg.waveform_band_gain,
+            energy_gain: cfg.waveform_energy_gain,
             band_colors: [
                 rgb(cfg.waveform_band_colors[0]),
                 rgb(cfg.waveform_band_colors[1]),
@@ -522,7 +525,8 @@ pub(crate) fn draw_waveform(
                     let loud = agg[3] as f32 / 255.0;
                     bar(
                         painter,
-                        (wave_height(env, style.height_exp) * half).max(0.5),
+                        ((wave_height(env, style.height_exp) * style.energy_gain).min(1.0) * half)
+                            .max(0.5),
                         energy_color(energy_curve(loud), &style.energy_colors),
                     );
                 }
@@ -533,7 +537,7 @@ pub(crate) fn draw_waveform(
             let amp = waveform[i] as f32 / 255.0;
             bar(
                 painter,
-                (amp * half).max(1.0),
+                ((amp * style.energy_gain).min(1.0) * half).max(1.0),
                 energy_color(energy_curve(amp), &style.energy_colors),
             );
         }

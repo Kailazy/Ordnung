@@ -446,6 +446,25 @@ impl App {
                         }
                                         ui.end_row();
 
+                                        ui.label("Energy gain:");
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut self.config.waveform_energy_gain,
+                                                    0.0..=2.0,
+                                                )
+                                                .fixed_decimals(2),
+                                            )
+                                            .on_hover_text(
+                                                "Height of the envelope in Energy mode (the \
+                                                 spectrum band-gain equivalent).",
+                                            )
+                                            .changed()
+                                        {
+                                            wave_dirty = true;
+                                        }
+                                        ui.end_row();
+
                                         for (i, name, tip) in [
                                             (
                                                 0usize,
@@ -547,6 +566,8 @@ impl App {
                                         config::default_waveform_height_exp();
                                     self.config.waveform_band_gain =
                                         config::default_waveform_band_gain();
+                                    self.config.waveform_energy_gain =
+                                        config::default_waveform_energy_gain();
                                     self.config.waveform_band_colors =
                                         config::default_waveform_band_colors();
                                     self.config.waveform_energy_colors =

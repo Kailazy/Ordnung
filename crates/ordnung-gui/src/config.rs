@@ -82,6 +82,11 @@ pub struct Config {
     /// band swamps the others, so the default trims it and lifts mid/high.
     #[serde(default = "default_waveform_band_gain")]
     pub waveform_band_gain: [f32; 3],
+    /// Visual height gain for the single envelope in energy mode. `1.0` keeps the
+    /// stored amplitude; lower trims, higher lifts. The spectrum-mode equivalent
+    /// is `waveform_band_gain`.
+    #[serde(default = "default_waveform_energy_gain")]
+    pub waveform_energy_gain: f32,
     /// RGB colors for the three spectrum bands `[low, mid, high]`. Defaults to the
     /// Serato/rekordbox convention (low = red, mid = green, high = light blue).
     #[serde(default = "default_waveform_band_colors")]
@@ -109,6 +114,10 @@ pub(crate) fn default_waveform_height_exp() -> f32 {
 
 pub(crate) fn default_waveform_band_gain() -> [f32; 3] {
     [0.78, 1.2, 1.35]
+}
+
+pub(crate) fn default_waveform_energy_gain() -> f32 {
+    1.0
 }
 
 pub(crate) fn default_waveform_band_colors() -> [[u8; 3]; 3] {
@@ -171,6 +180,7 @@ impl Default for Config {
             waveform_color_mode: default_waveform_color_mode(),
             waveform_height_exp: default_waveform_height_exp(),
             waveform_band_gain: default_waveform_band_gain(),
+            waveform_energy_gain: default_waveform_energy_gain(),
             waveform_band_colors: default_waveform_band_colors(),
             waveform_energy_colors: default_waveform_energy_colors(),
         }
