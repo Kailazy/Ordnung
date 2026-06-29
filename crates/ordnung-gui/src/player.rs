@@ -153,8 +153,17 @@ impl App {
             .unwrap_or(if dur > 0.0 { pos / dur } else { 0.0 })
             .clamp(0.0, 1.0);
 
+        let lane_h = self.wave_lane_h.clamp(MIN_LANE_H, MAX_LANE_H);
+        // The panel grows with the (resizable) lane; the controls row below is a
+        // fixed base. Only reserve the lane's extra height when there's a waveform
+        // to show — unanalyzed tracks have no lane.
+        let panel_h = if waveform.is_empty() {
+            150.0
+        } else {
+            PANEL_BASE_H + lane_h
+        };
         egui::TopBottomPanel::bottom("player")
-            .exact_height(150.0)
+            .exact_height(panel_h)
             .show(ctx, |ui| {
                 ui.add_space(8.0);
 
@@ -422,11 +431,41 @@ impl App {
         let zoom = self
             .wave_zoom_secs
             .clamp(MIN_ZOOM_SECS, MAX_ZOOM_SECS);
+        let lane_h = self.wave_lane_h.clamp(MIN_LANE_H, MAX_LANE_H);
         let lane_w = (ui.available_width() - 2.0 * MARGIN).max(60.0);
+
+        // Grip handle above the lane: drag it up to grow the lane (and the panel),
+        // down to shrink. A short centered pill, brightening on hover/drag.
+        let grip_w = 48.0;
+        let (grip_rect, grip) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 9.0),
+            egui::Sense::drag(),
+        );
+        if grip.dragged() {
+            // Dragging up is negative dy; growing the lane means subtracting it.
+            self.wave_lane_h =
+                (lane_h - grip.drag_delta().y).clamp(MIN_LANE_H, MAX_LANE_H);
+            ui.ctx().request_repaint();
+        }
+        if grip.hovered() || grip.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        let grip_color = if grip.hovered() || grip.dragged() {
+            egui::Color32::from_gray(150)
+        } else {
+            egui::Color32::from_gray(80)
+        };
+        let pill = egui::Rect::from_center_size(
+            grip_rect.center(),
+            egui::vec2(grip_w, 4.0),
+        );
+        ui.painter()
+            .rect_filled(pill, egui::Rounding::same(2.0), grip_color);
+
         ui.horizontal(|ui| {
             ui.add_space(MARGIN);
             let (rect, resp) = ui.allocate_exact_size(
-                egui::vec2(lane_w, 46.0),
+                egui::vec2(lane_w, lane_h),
                 egui::Sense::click_and_drag(),
             );
 
@@ -446,15 +485,22 @@ impl App {
                 egui::Rounding::same(4.0),
                 egui::Color32::from_gray(22),
             );
-            draw_waveform(
-                painter,
-                rect.shrink2(egui::vec2(3.0, 4.0)),
-                waveform,
-                bands,
-                wave_style,
-                Some(shown_frac),
-                (w0, w1),
-            );
+            let draw_rect = rect.shrink2(egui::vec2(3.0, 4.0));
+            if bands.is_empty() {
+                // No band data (unanalyzed / pre-v11): coarse envelope, no scroll
+                // smoothing to apply anyway.
+                draw_waveform(
+                    painter,
+                    draw_rect,
+                    waveform,
+                    bands,
+                    wave_style,
+                    Some(shown_frac),
+                    (w0, w1),
+                );
+            } else {
+                draw_waveform_scrolling(painter, draw_rect, bands, wave_style, shown_frac, (w0, w1));
+            }
 
             // Fixed playhead line at the window's mapping of the live position.
             let play_x =
@@ -614,6 +660,17 @@ pub(crate) const DEFAULT_ZOOM_SECS: f32 = 16.0;
 const MIN_ZOOM_SECS: f32 = 0.5;
 /// Widest zoom before the lane is essentially the full-track overview again.
 const MAX_ZOOM_SECS: f32 = 90.0;
+
+/// Default pixel height of the moving zoomed detail lane.
+pub(crate) const DEFAULT_LANE_H: f32 = 46.0;
+/// Shortest the lane can be dragged.
+const MIN_LANE_H: f32 = 46.0;
+/// Tallest the lane can be dragged (keeps the lane from swallowing the screen).
+const MAX_LANE_H: f32 = 460.0;
+/// Base height of the player panel excluding the resizable lane (artwork/controls
+/// row, the spacing around the lane, and the grip handle above it). Panel height =
+/// this + the lane height.
+const PANEL_BASE_H: f32 = 113.0;
 
 /// Buckets per second for the high-res zoom envelope. ~100× the stored preview's
 /// ~20/sec — well past rekordbox's detailed waveform, so even the tightest
@@ -865,6 +922,121 @@ pub(crate) fn draw_waveform(
 
     if !mesh.is_empty() {
         painter.add(egui::Shape::mesh(mesh));
+    }
+}
+
+/// Like [`draw_waveform`] but for the *moving* zoom lane: each bar is anchored to
+/// its absolute position in the track and placed at a sub-pixel x, so as the
+/// window scrolls under the playhead the whole waveform glides continuously
+/// instead of snapping a whole bin at a time. (`draw_waveform` samples fixed pixel
+/// columns tied to the window's left edge — right for the static overview/table,
+/// but it stair-steps the content while scrolling, which reads as choppy even at
+/// full frame rate.) Spectrum/energy drawing matches `draw_waveform`; callers fall
+/// back to it when only the coarse envelope (no band data) is available.
+fn draw_waveform_scrolling(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    bands: &[u8],
+    style: &WaveformStyle,
+    played_frac: f32,
+    window: (f32, f32),
+) {
+    const STRIDE: usize = 4;
+    let nb = bands.len() / STRIDE;
+    if nb == 0 || bands.len() % STRIDE != 0 {
+        return;
+    }
+    let y = rect.center().y;
+    let x0 = rect.left();
+    let half = rect.height() / 2.0 - 1.0;
+    let width = rect.width().max(1.0);
+    let (w0, w1) = window;
+    let wspan = (w1 - w0).max(f32::EPSILON);
+
+    // Visible span measured in bins, and how many screen pixels one bin spans.
+    let vis_bins = wspan * nb as f32;
+    let px_per_bin = width / vis_bins.max(f32::EPSILON);
+
+    // Group bins into bars ~1.4 px apart when zoomed out (one bar per bin once a
+    // bin is wider than that). The groups sit on a fixed absolute bin grid, so a
+    // given bar keeps its identity and just translates left as the window scrolls
+    // — that's what makes the motion continuous rather than stepped. Solid fill
+    // when a bin is at least a pixel wide (zoomed in → smooth envelope); thin
+    // separated bars otherwise (the rekordbox band look).
+    let group = (1.4 / px_per_bin).ceil().max(1.0) as i64;
+    let gf = group as f32;
+    let bin_w_px = gf * px_per_bin;
+    let solid = px_per_bin >= 1.0;
+
+    let mut mesh = egui::epaint::Mesh::default();
+    let mut add = |x: f32, w: f32, h: f32, played: bool, c: egui::Color32| {
+        let c = if played { c } else { dim(c, 0.4) };
+        mesh.add_colored_rect(
+            egui::Rect::from_min_max(egui::pos2(x, y - h), egui::pos2(x + w, y + h)),
+            c,
+        );
+    };
+
+    // Walk the absolute bin grid from the group at/just before the left edge to
+    // just past the right edge.
+    let bf0 = (w0 * nb as f32) as i64;
+    let mut gb = bf0 - bf0.rem_euclid(group);
+    let stop = w1 * nb as f32 + gf;
+    while (gb as f32) < stop {
+        let b0 = gb.clamp(0, nb as i64) as usize;
+        let b1 = (gb + group).clamp(0, nb as i64) as usize;
+        if b1 > b0 {
+            let mut agg = [0u8; 4];
+            for j in b0..b1 {
+                let q = &bands[STRIDE * j..STRIDE * j + 4];
+                for t in 0..4 {
+                    agg[t] = agg[t].max(q[t]);
+                }
+            }
+            let left_frac = gb as f32 / nb as f32;
+            let center_frac = (gb as f32 + gf * 0.5) / nb as f32;
+            let x_left = x0 + (left_frac - w0) / wspan * width;
+            let played = center_frac <= played_frac;
+            let (bx, bw) = if solid {
+                (x_left - 0.25, bin_w_px + 0.5) // touch neighbors → no seams
+            } else {
+                (x_left + bin_w_px * 0.225, (bin_w_px * 0.55).max(0.6))
+            };
+            match style.mode {
+                config::WaveformColorMode::Spectrum => {
+                    let h = |v: u8, b: usize| {
+                        wave_height(v as f32 / 255.0, style.height_exp) * style.band_gain[b]
+                    };
+                    let mut layers = [
+                        (h(agg[0], 0), style.band_colors[0]),
+                        (h(agg[1], 1), style.band_colors[1]),
+                        (h(agg[2], 2), style.band_colors[2]),
+                    ];
+                    layers.sort_by(|a, c| c.0.total_cmp(&a.0));
+                    for (h, col) in layers {
+                        add(bx, bw, (h.min(1.0) * half).max(0.4), played, col);
+                    }
+                }
+                config::WaveformColorMode::Energy => {
+                    let env = agg[0].max(agg[1]).max(agg[2]) as f32 / 255.0;
+                    let loud = agg[3] as f32 / 255.0;
+                    add(
+                        bx,
+                        bw,
+                        ((wave_height(env, style.height_exp) * style.energy_gain).min(1.0) * half)
+                            .max(0.5),
+                        played,
+                        energy_color(energy_curve(loud), &style.energy_colors),
+                    );
+                }
+            }
+        }
+        gb += group;
+    }
+
+    if !mesh.is_empty() {
+        // Clip to the lane: the grid overshoots both edges by up to one group.
+        painter.with_clip_rect(rect).add(egui::Shape::mesh(mesh));
     }
 }
 

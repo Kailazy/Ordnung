@@ -961,6 +961,10 @@ struct App {
     /// strip. Adjusted by scrolling the wheel over the lane; the window centers on
     /// the playhead and scrolls under it during playback. See [`player`].
     wave_zoom_secs: f32,
+    /// Pixel height of the moving zoomed detail lane. Dragged taller via the grip
+    /// handle above the lane; the bottom player panel grows to match. See
+    /// [`player`].
+    wave_lane_h: f32,
 }
 
 /// What the bottom player bar needs to render the current track.

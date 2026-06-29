@@ -135,6 +135,7 @@ impl App {
             now_playing: None,
             scrub: None,
             wave_zoom_secs: crate::player::DEFAULT_ZOOM_SECS,
+            wave_lane_h: crate::player::DEFAULT_LANE_H,
         };
         let config = Config::load();
         app.token_input = config.discogs_token.clone();
