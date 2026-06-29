@@ -741,19 +741,6 @@ pub(crate) fn draw_waveform(
     // Each column is 1px wide; draw the bar a touch narrower and centered so a thin
     // gap separates neighboring bars (the rekordbox "individual sample bands" look)
     // instead of a solid fill.
-    const BAR_W: f32 = 0.55;
-    let pad = (1.0 - BAR_W) / 2.0;
-    let bar = |mesh: &mut egui::epaint::Mesh, x: f32, h: f32, played: bool, c: egui::Color32| {
-        let c = if played { c } else { dim(c, 0.4) };
-        mesh.add_colored_rect(
-            egui::Rect::from_min_max(
-                egui::pos2(x + pad, y - h),
-                egui::pos2(x + pad + BAR_W, y + h),
-            ),
-            c,
-        );
-    };
-
     // Visible track-fraction span. `(0, 1)` is the whole track; a narrower window
     // stretches its slice across `rect` (the zoom lane). The column→track-fraction
     // map below routes through it, so the bin sampling and the played/dimmed split
@@ -761,27 +748,65 @@ pub(crate) fn draw_waveform(
     let (w0, w1) = window;
     let wspan = (w1 - w0).max(f32::EPSILON);
 
+    // How many stored bins fall under one pixel column. Below 1 a single bin is
+    // stretched across multiple pixels (zoomed in past the stored resolution):
+    // point-sampling stair-steps and the thin-bar gaps read as a hard comb. In
+    // that regime we interpolate between adjacent bins and fill each column solid
+    // so the lane reads as a smooth continuous envelope (rekordbox's zoomed-in
+    // look). When more bins than pixels (zoomed out / overview / table cells) we
+    // keep the peak-preserving MAX and the thin separated bars.
+    let src_bins = if has_bands { nb } else { n };
+    let bins_per_col = src_bins as f32 * wspan / cols as f32;
+    let smooth = bins_per_col < 1.0;
+    let (bar_pad, bar_w) = if smooth { (0.0, 1.0) } else { (0.225, 0.55) };
+    let bar = |mesh: &mut egui::epaint::Mesh, x: f32, h: f32, played: bool, c: egui::Color32| {
+        let c = if played { c } else { dim(c, 0.4) };
+        mesh.add_colored_rect(
+            egui::Rect::from_min_max(
+                egui::pos2(x + bar_pad, y - h),
+                egui::pos2(x + bar_pad + bar_w, y + h),
+            ),
+            c,
+        );
+    };
+
     for cx in 0..cols {
         let frac = (w0 + (cx as f32 + 0.5) / cols as f32 * wspan).clamp(0.0, 1.0);
         let played = played_frac.map_or(true, |p| frac <= p);
         let x = x0 + cx as f32;
 
         if has_bands {
-            // Map this pixel column to its span of band bins and take the per-band
-            // MAX across them (peak-preserving). With far more bins than pixels the
-            // fine transients then show as thin spikes instead of being sampled
-            // away; when zoomed past 1 bin/pixel it degrades to a point sample.
-            let tf_lo = (w0 + (cx as f32 / cols as f32) * wspan).clamp(0.0, 1.0);
-            let tf_hi = (w0 + ((cx + 1) as f32 / cols as f32) * wspan).clamp(0.0, 1.0);
-            let b0 = ((tf_lo * nb as f32) as usize).min(nb - 1);
-            let b1 = ((tf_hi * nb as f32).ceil() as usize).clamp(b0 + 1, nb);
-            let mut agg = [0u8; 4];
-            for j in b0..b1 {
-                let q = &bands[STRIDE * j..STRIDE * j + 4];
-                for t in 0..4 {
-                    agg[t] = agg[t].max(q[t]);
+            // Map this pixel column to its span of band bins. Zoomed out we take the
+            // per-band MAX across the span (peak-preserving — fine transients show as
+            // thin spikes instead of being sampled away). Zoomed in (one bin spread
+            // over several pixels) we instead lerp between the two nearest bins so the
+            // envelope ramps smoothly between samples rather than stair-stepping.
+            let agg = if smooth {
+                let fpos = (frac * nb as f32 - 0.5).clamp(0.0, (nb - 1) as f32);
+                let i0 = fpos.floor() as usize;
+                let i1 = (i0 + 1).min(nb - 1);
+                let t = fpos - i0 as f32;
+                let q0 = &bands[STRIDE * i0..STRIDE * i0 + 4];
+                let q1 = &bands[STRIDE * i1..STRIDE * i1 + 4];
+                let mut agg = [0u8; 4];
+                for k in 0..4 {
+                    agg[k] = (q0[k] as f32 + (q1[k] as f32 - q0[k] as f32) * t).round() as u8;
                 }
-            }
+                agg
+            } else {
+                let tf_lo = (w0 + (cx as f32 / cols as f32) * wspan).clamp(0.0, 1.0);
+                let tf_hi = (w0 + ((cx + 1) as f32 / cols as f32) * wspan).clamp(0.0, 1.0);
+                let b0 = ((tf_lo * nb as f32) as usize).min(nb - 1);
+                let b1 = ((tf_hi * nb as f32).ceil() as usize).clamp(b0 + 1, nb);
+                let mut agg = [0u8; 4];
+                for j in b0..b1 {
+                    let q = &bands[STRIDE * j..STRIDE * j + 4];
+                    for t in 0..4 {
+                        agg[t] = agg[t].max(q[t]);
+                    }
+                }
+                agg
+            };
             match style.mode {
                 config::WaveformColorMode::Spectrum => {
                     // Draw the three bands tallest-first so the shortest ends up
@@ -814,9 +839,18 @@ pub(crate) fn draw_waveform(
                 }
             }
         } else if n > 0 {
-            // No band data: peak envelope on a height ramp.
-            let i = ((frac * n as f32) as usize).min(n - 1);
-            let amp = waveform[i] as f32 / 255.0;
+            // No band data: peak envelope on a height ramp. Lerp between samples when
+            // zoomed in so it tapers smoothly instead of stepping.
+            let amp = if smooth {
+                let fpos = (frac * n as f32 - 0.5).clamp(0.0, (n - 1) as f32);
+                let i0 = fpos.floor() as usize;
+                let i1 = (i0 + 1).min(n - 1);
+                let t = fpos - i0 as f32;
+                (waveform[i0] as f32 + (waveform[i1] as f32 - waveform[i0] as f32) * t) / 255.0
+            } else {
+                let i = ((frac * n as f32) as usize).min(n - 1);
+                waveform[i] as f32 / 255.0
+            };
             bar(
                 &mut mesh,
                 x,
