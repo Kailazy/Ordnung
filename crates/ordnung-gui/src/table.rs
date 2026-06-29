@@ -767,7 +767,7 @@ impl App {
                                     );
                                     let (glyph, tip) = match waveform_color_mode {
                                         config::WaveformColorMode::Energy => (
-                                            "▮",
+                                            "⚡",
                                             "Energy waveform (loudness) · click for frequency",
                                         ),
                                         config::WaveformColorMode::Spectrum => (
@@ -775,13 +775,11 @@ impl App {
                                             "Frequency waveform (spectrum) · click for energy",
                                         ),
                                     };
-                                    let cell = ui.max_rect();
-                                    let btn_rect = egui::Rect::from_min_size(
-                                        egui::pos2(cell.left() + 2.0, cell.center().y - 9.0),
-                                        egui::vec2(22.0, 18.0),
-                                    );
+                                    // Let the header's left_to_right(Center) layout place
+                                    // and vertically centre the button; a hand-positioned
+                                    // rect sat slightly high in the 22px header.
                                     let btn = ui
-                                        .put(btn_rect, egui::Button::new(glyph).small())
+                                        .add(egui::Button::new(glyph).small())
                                         .on_hover_text(tip);
                                     if btn.hovered() {
                                         ui.ctx()
