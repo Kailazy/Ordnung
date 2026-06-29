@@ -852,6 +852,7 @@ impl App {
                                         }
                                         resp
                                     }
+                                    }
                                 };
                                 // The Quality header is self-documenting: hovering it
                                 // shows the chip legend (what clean / ~320? / lossy / ltd
@@ -1586,6 +1587,19 @@ impl App {
         // A clicked column header cycles its sort (asc → desc → off) and re-sorts.
         if let Some(col) = header_clicked {
             self.toggle_sort(col);
+        }
+
+        // The Waveform header toggle flips the inline waveform colouring between
+        // energy and frequency; persist it so the player bar and next launch match.
+        if toggle_waveform_mode {
+            let next = match config::WaveformColorMode::from_key(&self.config.waveform_color_mode) {
+                config::WaveformColorMode::Energy => config::WaveformColorMode::Spectrum,
+                config::WaveformColorMode::Spectrum => config::WaveformColorMode::Energy,
+            };
+            self.config.waveform_color_mode = next.key().to_string();
+            if let Err(e) = self.config.save() {
+                self.status = format!("Couldn't save settings: {e}");
+            }
         }
 
         // A right-clicked header opens (or re-anchors) the column reorder popup.
