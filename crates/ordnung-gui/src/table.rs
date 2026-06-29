@@ -710,7 +710,12 @@ impl App {
                 // first column so data-column positions (and their stored widths) line
                 // up across every view; collapsed to zero width when there's no index
                 // to show, so the library reads as if the gutter weren't there.
-                builder = builder.column(Column::exact(if show_index { index_w } else { 0.0 }));
+                // Non-resizable so egui_extras doesn't paint a resize-separator
+                // hairline at its right edge — in the library view the gutter is
+                // zero-width, which would otherwise drop a stray vertical line right
+                // on the first data column's (the Waveform's) left edge.
+                builder = builder
+                    .column(Column::exact(if show_index { index_w } else { 0.0 }).resizable(false));
                 // Steer a pending jump (from the vinyl grid) to its row. Done at the
                 // builder level because the body is virtualized — an off-screen row's
                 // closure never runs, so an in-row `scroll_to_me` couldn't reach it.
@@ -782,8 +787,13 @@ impl App {
                                     // Let the header's left_to_right(Center) layout place
                                     // and vertically centre the button; a hand-positioned
                                     // rect sat slightly high in the 22px header.
-                                    let btn =
-                                        ui.add(egui::Button::new(glyph).small()).on_hover_text(tip);
+                                    let btn = ui
+                                        .add(
+                                            egui::Button::new(glyph)
+                                                .small()
+                                                .min_size(egui::vec2(40.0, 0.0)),
+                                        )
+                                        .on_hover_text(tip);
                                     if btn.hovered() {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                     }
