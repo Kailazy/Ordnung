@@ -8,6 +8,9 @@ impl App {
         // matches the Ordnung visual language (see `ui::theme`). DejaVu Sans stays
         // in the fallback chain for the wide-Unicode glyphs Inter lacks.
         crate::ui::theme::install(&egui_ctx);
+        // Clone the context before it's moved into the audio engine below, so we
+        // can hand it to the startup background refresh once the app is built.
+        let startup_ctx = egui_ctx.clone();
         let (cover_tx, cover_rx) = mpsc::channel();
         let (art_save_tx, art_save_rx) = mpsc::channel();
         let (preview_tx, preview_rx) = mpsc::channel();
@@ -135,6 +138,9 @@ impl App {
         app.sort = app.default_sort();
         app.reload();
         app.recount_missing();
+        // Refresh anything we always want current (Discogs vinyl collection)
+        // in the background as soon as the catalog is loaded.
+        app.spawn_startup_refresh(startup_ctx);
         app
     }
 

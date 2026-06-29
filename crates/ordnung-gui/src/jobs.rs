@@ -275,6 +275,19 @@ impl App {
 
     /// Sync the local vinyl-collection cache from Discogs: pull the user's whole
     /// collection (folder 0), upsert metadata, prune records they've removed, and
+    /// Kick off the background refreshes we always want current at launch. The
+    /// single home for "keep this fresh on startup" work — today that's the
+    /// Discogs vinyl collection (new records + any missing covers); add future
+    /// always-up-to-date syncs here. Unlike an explicit Sync click, this
+    /// silently no-ops when no Discogs token is configured, so a tokenless
+    /// launch is never nagged with the Settings modal.
+    pub(crate) fn spawn_startup_refresh(&mut self, ctx: egui::Context) {
+        if self.discogs_token().trim().is_empty() {
+            return;
+        }
+        self.spawn_refresh_vinyl(ctx);
+    }
+
     /// download covers we don't already have. Token resolution is policy and lives
     /// here; the worker only talks to Discogs and the catalog.
     pub(crate) fn spawn_refresh_vinyl(&mut self, ctx: egui::Context) {
