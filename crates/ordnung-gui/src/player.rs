@@ -899,7 +899,7 @@ pub(crate) fn draw_waveform(
     // Widen the bars toward a solid fill as smoothing rises (closing the gaps that
     // shimmer while the lane scrolls); see `draw_waveform_scrolling`. Already solid
     // when zoomed in past the stored resolution.
-    let fill = (0.55 + 0.9 * style.smoothing.clamp(0.0, 1.0)).min(1.0);
+    let fill = (0.75 + 0.5 * style.smoothing.clamp(0.0, 1.0)).min(1.0);
     let (bar_pad, bar_w) = if smooth {
         (0.0, 1.0)
     } else {
@@ -1082,9 +1082,10 @@ fn draw_waveform_scrolling(
     // boundaries at sub-pixel positions — the bars' anti-aliased edges flicker
     // frame to frame (the "shimmer" between bands). Widening the fill toward 1.0
     // closes the gaps so the lane becomes a continuous shape with no flickering
-    // seams. Tied to the smoothing slider (full fill by ~0.5) so one control takes
-    // the lane from crisp bands → solid rekordbox envelope.
-    let fill = (0.55 + 0.9 * style.smoothing.clamp(0.0, 1.0)).min(1.0);
+    // seams. Even at smoothing 0 the bars stay mostly filled (0.75) so the gaps
+    // never get wide enough to shimmer badly; the slider closes them the rest of
+    // the way (full fill by ~0.5) → solid rekordbox envelope.
+    let fill = (0.75 + 0.5 * style.smoothing.clamp(0.0, 1.0)).min(1.0);
 
     let mut mesh = egui::epaint::Mesh::default();
     let mut add = |x: f32, w: f32, h: f32, played: bool, c: egui::Color32| {
