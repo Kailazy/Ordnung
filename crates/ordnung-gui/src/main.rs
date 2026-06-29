@@ -853,6 +853,11 @@ struct App {
     /// show artwork. Tagged with the track `Id` to ignore stale results.
     media_cover_tx: Sender<(Id, Option<String>)>,
     media_cover_rx: Receiver<(Id, Option<String>)>,
+    /// Carries the high-res zoom-waveform envelope (`[low,mid,high,loud]` bytes)
+    /// back from the off-thread analysis of the playing track's PCM, tagged with
+    /// the track `Id` so stale results are dropped. See [`player::compute_hires_bands`].
+    hires_tx: Sender<(Id, Vec<u8>)>,
+    hires_rx: Receiver<(Id, Vec<u8>)>,
     /// Live edit buffers for the inspector's editable Core fields (current
     /// selection). Repopulated whenever the selection changes or a save lands.
     tag_edit: TagEdit,
@@ -970,6 +975,14 @@ struct NowPlaying {
     /// Per-bin `[low, mid, high]` band energy (`Analysis::waveform_bands`), drives
     /// the colour. Empty for pre-v10 analyses; colouring then degrades gracefully.
     waveform_bands: Vec<u8>,
+    /// High-resolution `[low, mid, high, loudness]` bands (same 4-byte stride as
+    /// `waveform_bands`) computed once from the decoded PCM the engine holds — far
+    /// finer than the stored ~20/sec preview, so the zoom lane shows rekordbox-level
+    /// transient detail. `None` until the samples are available (still decoding).
+    hires_bands: Option<Vec<u8>>,
+    /// Set once the off-thread hi-res analysis has been kicked off, so we don't
+    /// respawn it every frame while it runs (or the PCM is still decoding).
+    hires_requested: bool,
 }
 
 /// State for the inline text box that names a sidebar playlist.

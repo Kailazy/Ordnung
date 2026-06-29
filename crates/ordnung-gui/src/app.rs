@@ -34,6 +34,7 @@ impl App {
         // `now_playing_cover_url`) so the OS Now Playing panel can show artwork
         // without blocking the UI on a catalog read when a track starts.
         let (media_cover_tx, media_cover_rx) = mpsc::channel::<(Id, Option<String>)>();
+        let (hires_tx, hires_rx) = mpsc::channel::<(Id, Vec<u8>)>();
         let mut app = App {
             db_path,
             rows: Vec::new(),
@@ -106,6 +107,8 @@ impl App {
             audio: AudioEngine::new(egui_ctx),
             media_cover_tx,
             media_cover_rx,
+            hires_tx,
+            hires_rx,
             tag_edit: TagEdit::default(),
             tag_edit_saved: TagEdit::default(),
             edited_count: 0,
@@ -426,6 +429,16 @@ impl eframe::App for App {
             if let Some(a) = &mut self.audio {
                 if a.current() == Some(id) {
                     a.set_now_playing_cover(url);
+                }
+            }
+        }
+
+        // Attach the off-thread hi-res zoom envelope to the now-playing track,
+        // dropping results for a track the user has since moved on from.
+        while let Ok((id, hires)) = self.hires_rx.try_recv() {
+            if let Some(n) = self.now_playing.as_mut() {
+                if n.id == id {
+                    n.hires_bands = Some(hires);
                 }
             }
         }

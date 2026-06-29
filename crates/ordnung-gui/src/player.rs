@@ -65,6 +65,8 @@ impl App {
                 source_path,
                 waveform,
                 waveform_bands,
+                hires_bands: None,
+                hires_requested: false,
             });
             self.scrub = None;
         }
@@ -98,6 +100,29 @@ impl App {
                 a.state_for(np_id) == PlayState::Playing,
             )
         };
+
+        // Kick off the high-res zoom envelope once, the first frame the decoded PCM
+        // is available. This is full-resolution sample analysis of the actual audio
+        // (every sample, peak-preserving) — the zoom lane's "rekordbox-level" detail.
+        // It runs off-thread (a long track is millions of samples) and comes back
+        // over `hires_rx`; until then the lane falls back to the coarse preview.
+        if self
+            .now_playing
+            .as_ref()
+            .map_or(false, |n| !n.hires_requested && n.hires_bands.is_none())
+        {
+            if let Some((samples, ch, sr)) = self.audio.as_ref().and_then(|a| a.pcm()) {
+                self.now_playing.as_mut().unwrap().hires_requested = true;
+                let tx = self.hires_tx.clone();
+                let ctx = ctx.clone();
+                thread::spawn(move || {
+                    let hires = compute_hires_bands(&samples, ch, sr);
+                    let _ = tx.send((np_id, hires));
+                    ctx.request_repaint();
+                });
+            }
+        }
+
         let np = self.now_playing.as_ref().unwrap();
         let title = if np.title.trim().is_empty() {
             "Unknown title".to_string()
@@ -109,6 +134,9 @@ impl App {
         // `self.scrub`) doesn't also need to borrow `self.now_playing`.
         let waveform = np.waveform.clone();
         let bands = np.waveform_bands.clone();
+        // High-res bands for the zoom lane; fall back to the coarse preview until
+        // the PCM has been analyzed (or for tracks the engine never decoded).
+        let hires = np.hires_bands.clone().unwrap_or_default();
         let wave_style = WaveformStyle::from_config(&self.config);
 
         const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
@@ -134,10 +162,13 @@ impl App {
                 // playhead, scrolling under it during playback. Wheel to zoom,
                 // click/drag to seek. Skipped for unanalyzed tracks (no waveform).
                 if !waveform.is_empty() {
+                    // Prefer the high-res envelope; fall back to the coarse preview
+                    // bands while the PCM is still decoding.
+                    let detail = if hires.is_empty() { &bands } else { &hires };
                     self.draw_zoom_lane(
                         ui,
                         &waveform,
-                        &bands,
+                        detail,
                         &wave_style,
                         shown_frac,
                         dur,
@@ -582,6 +613,84 @@ pub(crate) const DEFAULT_ZOOM_SECS: f32 = 16.0;
 const MIN_ZOOM_SECS: f32 = 6.0;
 /// Widest zoom before the lane is essentially the full-track overview again.
 const MAX_ZOOM_SECS: f32 = 90.0;
+
+/// Buckets per second for the high-res zoom envelope. ~10× the stored preview's
+/// ~20/sec, in the ballpark of rekordbox's detailed-waveform density — fine
+/// enough that a tight zoom resolves individual kicks/hats.
+const HIRES_BINS_PER_SEC: f32 = 200.0;
+
+/// Build a high-resolution `[low, mid, high, loudness]` band envelope (4 bytes per
+/// bucket — the same layout as core `color_bands`/`waveform_bands`, so the normal
+/// [`draw_waveform`] renders it unchanged) directly from the decoded PCM. One
+/// streaming pass mixes to mono, splits it into three bands with one-pole filters,
+/// and records each bucket's per-band peak plus its RMS loudness. At
+/// [`HIRES_BINS_PER_SEC`] the zoom lane resolves individual transients; the column
+/// view keeps scaling down the coarse stored preview (it's only a few px tall).
+pub(crate) fn compute_hires_bands(samples: &[f32], channels: u16, sample_rate: u32) -> Vec<u8> {
+    let ch = channels.max(1) as usize;
+    let total_frames = samples.len() / ch;
+    if total_frames == 0 || sample_rate == 0 {
+        return Vec::new();
+    }
+    let sr = sample_rate as f32;
+    let secs = total_frames as f32 / sr;
+    let bins = ((secs * HIRES_BINS_PER_SEC).ceil() as usize)
+        .max(1)
+        .min(total_frames);
+
+    // One-pole low-pass coefficients (a = 1 - e^{-2π fc/sr}). The 250 Hz pole peels
+    // off the lows; the 2.5 kHz pole peels off everything below the highs; the gap
+    // between the two poles is the mid band.
+    let a_low = 1.0 - (-std::f32::consts::TAU * 250.0 / sr).exp();
+    let a_mid = 1.0 - (-std::f32::consts::TAU * 2500.0 / sr).exp();
+
+    let mut peak_lo = vec![0f32; bins];
+    let mut peak_md = vec![0f32; bins];
+    let mut peak_hi = vec![0f32; bins];
+    let mut sumsq = vec![0f32; bins];
+    let mut count = vec![0u32; bins];
+
+    let (mut lp_low, mut lp_mid) = (0f32, 0f32);
+    for f in 0..total_frames {
+        let base = f * ch;
+        let mut s = 0.0;
+        for c in 0..ch {
+            s += samples[base + c];
+        }
+        s /= ch as f32;
+
+        lp_low += a_low * (s - lp_low);
+        lp_mid += a_mid * (s - lp_mid);
+        let lo = lp_low;
+        let md = lp_mid - lp_low;
+        let hi = s - lp_mid;
+
+        let b = (((f as u64) * bins as u64) / total_frames as u64) as usize;
+        let b = b.min(bins - 1);
+        peak_lo[b] = peak_lo[b].max(lo.abs());
+        peak_md[b] = peak_md[b].max(md.abs());
+        peak_hi[b] = peak_hi[b].max(hi.abs());
+        sumsq[b] += s * s;
+        count[b] += 1;
+    }
+
+    // Quantize to bytes with sqrt companding — lifts the quiet detail off the floor
+    // the same way core's preview does, so the existing render gains look right.
+    let q = |v: f32| (v.clamp(0.0, 1.0).sqrt() * 255.0) as u8;
+    let mut out = vec![0u8; bins * 4];
+    for i in 0..bins {
+        let rms = if count[i] > 0 {
+            (sumsq[i] / count[i] as f32).sqrt()
+        } else {
+            0.0
+        };
+        out[i * 4] = q(peak_lo[i]);
+        out[i * 4 + 1] = q(peak_md[i]);
+        out[i * 4 + 2] = q(peak_hi[i]);
+        out[i * 4 + 3] = q(rms);
+    }
+    out
+}
 
 /// Paint a colored waveform: one vertical bar per screen column. With
 /// `played_frac = Some(f)` the portion left of `f` is full brightness and the

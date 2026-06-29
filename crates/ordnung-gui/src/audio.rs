@@ -86,7 +86,9 @@ impl Source for BufferSource {
     }
     fn total_duration(&self) -> Option<Duration> {
         let frames = self.samples.len() as f32 / self.channels.max(1) as f32;
-        Some(Duration::from_secs_f32(frames / self.sample_rate.max(1) as f32))
+        Some(Duration::from_secs_f32(
+            frames / self.sample_rate.max(1) as f32,
+        ))
     }
 }
 
@@ -222,6 +224,14 @@ impl AudioEngine {
     /// Length of the loaded track in seconds (0 when nothing is loaded).
     pub fn duration(&self) -> f32 {
         self.duration
+    }
+
+    /// The loaded track's decoded PCM for high-resolution rendering: interleaved
+    /// `f32` samples, channel count, and sample rate. `None` while idle or still
+    /// decoding. The samples are shared (`Arc`), so cloning the handle is cheap and
+    /// never copies the audio.
+    pub fn pcm(&self) -> Option<(Arc<Vec<f32>>, u16, u32)> {
+        Some((self.samples.clone()?, self.channels, self.sample_rate))
     }
 
     /// Play control click for a row: start `id` from the top, or — if it's already
