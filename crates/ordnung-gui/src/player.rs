@@ -609,16 +609,18 @@ fn wave_height(v: f32, height_exp: f32) -> f32 {
 pub(crate) const DEFAULT_ZOOM_SECS: f32 = 16.0;
 /// Tightest zoom. The zoom lane draws the [`HIRES_BINS_PER_SEC`] envelope, so this
 /// is the point where its bins stretch past ~1 per pixel and there's no more
-/// detail to reveal — a couple of seconds is already a very tight, per-beat view.
-const MIN_ZOOM_SECS: f32 = 2.0;
+/// detail to reveal — half a second is roughly a single beat, transients spread
+/// right across the lane.
+const MIN_ZOOM_SECS: f32 = 0.5;
 /// Widest zoom before the lane is essentially the full-track overview again.
 const MAX_ZOOM_SECS: f32 = 90.0;
 
-/// Buckets per second for the high-res zoom envelope. ~25× the stored preview's
-/// ~20/sec — denser than rekordbox's detailed waveform, so even the tightest
+/// Buckets per second for the high-res zoom envelope. ~100× the stored preview's
+/// ~20/sec — well past rekordbox's detailed waveform, so even the tightest
 /// [`MIN_ZOOM_SECS`] view stays ~1 bin/pixel and resolves individual transients.
-/// Cost is a one-off pass over the PCM; memory is ~`secs * this * 4` bytes/track.
-const HIRES_BINS_PER_SEC: f32 = 500.0;
+/// Cost is a one-off pass over the PCM; memory is ~`secs * this * 4` bytes/track
+/// (~5 MB for a 10-min track), freed when the track changes.
+const HIRES_BINS_PER_SEC: f32 = 2000.0;
 
 /// Build a high-resolution `[low, mid, high, loudness]` band envelope (4 bytes per
 /// bucket — the same layout as core `color_bands`/`waveform_bands`, so the normal
