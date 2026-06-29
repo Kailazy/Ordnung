@@ -607,17 +607,18 @@ fn wave_height(v: f32, height_exp: f32) -> f32 {
 
 /// Default span (seconds) shown in the zoomed detail lane.
 pub(crate) const DEFAULT_ZOOM_SECS: f32 = 16.0;
-/// Tightest zoom. Below this the 20 bins/sec source data (see core `waveform`)
-/// is stretched past ~1 bin/pixel and just blocks up, so there's no detail to
-/// gain from going further.
-const MIN_ZOOM_SECS: f32 = 6.0;
+/// Tightest zoom. The zoom lane draws the [`HIRES_BINS_PER_SEC`] envelope, so this
+/// is the point where its bins stretch past ~1 per pixel and there's no more
+/// detail to reveal — a couple of seconds is already a very tight, per-beat view.
+const MIN_ZOOM_SECS: f32 = 2.0;
 /// Widest zoom before the lane is essentially the full-track overview again.
 const MAX_ZOOM_SECS: f32 = 90.0;
 
-/// Buckets per second for the high-res zoom envelope. ~10× the stored preview's
-/// ~20/sec, in the ballpark of rekordbox's detailed-waveform density — fine
-/// enough that a tight zoom resolves individual kicks/hats.
-const HIRES_BINS_PER_SEC: f32 = 200.0;
+/// Buckets per second for the high-res zoom envelope. ~25× the stored preview's
+/// ~20/sec — denser than rekordbox's detailed waveform, so even the tightest
+/// [`MIN_ZOOM_SECS`] view stays ~1 bin/pixel and resolves individual transients.
+/// Cost is a one-off pass over the PCM; memory is ~`secs * this * 4` bytes/track.
+const HIRES_BINS_PER_SEC: f32 = 500.0;
 
 /// Build a high-resolution `[low, mid, high, loudness]` band envelope (4 bytes per
 /// bucket — the same layout as core `color_bands`/`waveform_bands`, so the normal
@@ -740,7 +741,7 @@ pub(crate) fn draw_waveform(
     // Each column is 1px wide; draw the bar a touch narrower and centered so a thin
     // gap separates neighboring bars (the rekordbox "individual sample bands" look)
     // instead of a solid fill.
-    const BAR_W: f32 = 0.6;
+    const BAR_W: f32 = 0.45;
     let pad = (1.0 - BAR_W) / 2.0;
     let bar = |mesh: &mut egui::epaint::Mesh, x: f32, h: f32, played: bool, c: egui::Color32| {
         let c = if played { c } else { dim(c, 0.4) };
