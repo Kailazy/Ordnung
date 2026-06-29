@@ -758,6 +758,43 @@ const MAX_SMOOTH_BARS: f32 = 10.0;
 /// (~5 MB for a 10-min track), freed when the track changes.
 const HIRES_BINS_PER_SEC: f32 = 2000.0;
 
+/// Transient sharpening strength for the hi-res envelope (see [`sharpen_peaks`]).
+/// A percussive hit's decay bleeds into the bins after the attack, so a kick or
+/// snare reads as a rounded hump. An unsharp mask pushes each band's peak up where
+/// it stands above its local neighbors and eases the shoulders down, so the attack
+/// rises to a sharper point. `0` disables; higher is pointier.
+const TRANSIENT_SHARPEN: f32 = 0.85;
+/// Half-window (in hi-res bins) of the unsharp-mask reference blur. At
+/// [`HIRES_BINS_PER_SEC`] this spans ~3 ms each side — the timescale of a
+/// percussive attack's shoulders, so the blur tracks the hump the peak sits on
+/// without reaching across to neighboring hits.
+const SHARPEN_RADIUS: usize = 6;
+
+/// Sharpen a band's per-bin peak track in place with an unsharp mask:
+/// `out = peak + amount·(peak − local_mean)`, clamped at 0. Where a bin stands
+/// above the local mean (a transient attack) it's pushed higher and its lower
+/// shoulders are pulled down, so the peak narrows to a point; flat sustained
+/// sections (peak ≈ mean) are left essentially unchanged. The reference mean is an
+/// O(n) prefix-sum moving average of half-window `radius`.
+fn sharpen_peaks(peaks: &mut [f32], radius: usize, amount: f32) {
+    let n = peaks.len();
+    if n == 0 || radius == 0 || amount <= 0.0 {
+        return;
+    }
+    let mut prefix = vec![0f32; n + 1];
+    for i in 0..n {
+        prefix[i + 1] = prefix[i] + peaks[i];
+    }
+    let mut out = vec![0f32; n];
+    for i in 0..n {
+        let lo = i.saturating_sub(radius);
+        let hi = (i + radius + 1).min(n);
+        let mean = (prefix[hi] - prefix[lo]) / (hi - lo) as f32;
+        out[i] = (peaks[i] + amount * (peaks[i] - mean)).max(0.0);
+    }
+    peaks.copy_from_slice(&out);
+}
+
 /// Build a high-resolution `[low, mid, high, loudness]` band envelope (4 bytes per
 /// bucket — the same layout as core `color_bands`/`waveform_bands`, so the normal
 /// [`draw_waveform`] renders it unchanged) directly from the decoded PCM. One
@@ -812,6 +849,12 @@ pub(crate) fn compute_hires_bands(samples: &[f32], channels: u16, sample_rate: u
         sumsq[b] += s * s;
         count[b] += 1;
     }
+
+    // Sharpen each band's peak track so percussive attacks read as pointed spikes
+    // rather than the rounded humps their decay would otherwise smear them into.
+    sharpen_peaks(&mut peak_lo, SHARPEN_RADIUS, TRANSIENT_SHARPEN);
+    sharpen_peaks(&mut peak_md, SHARPEN_RADIUS, TRANSIENT_SHARPEN);
+    sharpen_peaks(&mut peak_hi, SHARPEN_RADIUS, TRANSIENT_SHARPEN);
 
     // Quantize to bytes with sqrt companding — lifts the quiet detail off the floor
     // the same way core's preview does, so the existing render gains look right.
