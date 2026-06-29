@@ -475,17 +475,27 @@ pub(crate) fn draw_waveform(
     let (x0, x1) = (rect.left(), rect.right());
     let half = rect.height() / 2.0 - 1.0;
     let cols = (x1 - x0).floor().max(1.0) as usize;
+
+    // Accumulate every bar into a single mesh and emit one draw call. Painting
+    // each column (×3 bands in Spectrum mode) as its own `line_segment` shape
+    // tessellates and anti-alias-feathers thousands of separate shapes every
+    // frame — the dominant per-frame cost, felt as choppy framerate whenever the
+    // whole UI repaints (e.g. scrolling the Settings window over the player bar).
+    // One mesh of axis-aligned colored rects is a single primitive, already
+    // triangulated, with no per-shape overhead.
+    let mut mesh = egui::epaint::Mesh::default();
+    let bar = |mesh: &mut egui::epaint::Mesh, x: f32, h: f32, played: bool, c: egui::Color32| {
+        let c = if played { c } else { dim(c, 0.4) };
+        mesh.add_colored_rect(
+            egui::Rect::from_min_max(egui::pos2(x, y - h), egui::pos2(x + 1.0, y + h)),
+            c,
+        );
+    };
+
     for cx in 0..cols {
         let frac = (cx as f32 + 0.5) / cols as f32;
         let played = played_frac.map_or(true, |p| frac <= p);
         let x = x0 + cx as f32;
-        let bar = |painter: &egui::Painter, h: f32, c: egui::Color32| {
-            let c = if played { c } else { dim(c, 0.4) };
-            painter.line_segment(
-                [egui::pos2(x, y - h), egui::pos2(x, y + h)],
-                egui::Stroke::new(1.0, c),
-            );
-        };
 
         if has_bands {
             // Map this pixel column to its span of band bins and take the per-band
@@ -516,7 +526,7 @@ pub(crate) fn draw_waveform(
                     ];
                     layers.sort_by(|a, c| c.0.total_cmp(&a.0));
                     for (h, col) in layers {
-                        bar(painter, (h.min(1.0) * half).max(0.4), col);
+                        bar(&mut mesh, x, (h.min(1.0) * half).max(0.4), played, col);
                     }
                 }
                 config::WaveformColorMode::Energy => {
@@ -524,9 +534,11 @@ pub(crate) fn draw_waveform(
                     let env = agg[0].max(agg[1]).max(agg[2]) as f32 / 255.0;
                     let loud = agg[3] as f32 / 255.0;
                     bar(
-                        painter,
+                        &mut mesh,
+                        x,
                         ((wave_height(env, style.height_exp) * style.energy_gain).min(1.0) * half)
                             .max(0.5),
+                        played,
                         energy_color(energy_curve(loud), &style.energy_colors),
                     );
                 }
@@ -536,11 +548,17 @@ pub(crate) fn draw_waveform(
             let i = ((frac * n as f32) as usize).min(n - 1);
             let amp = waveform[i] as f32 / 255.0;
             bar(
-                painter,
+                &mut mesh,
+                x,
                 ((amp * style.energy_gain).min(1.0) * half).max(1.0),
+                played,
                 energy_color(energy_curve(amp), &style.energy_colors),
             );
         }
+    }
+
+    if !mesh.is_empty() {
+        painter.add(egui::Shape::mesh(mesh));
     }
 }
 
