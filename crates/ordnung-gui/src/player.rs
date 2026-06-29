@@ -387,6 +387,22 @@ pub(crate) fn fmt_duration(ms: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
+/// Render-time height companding for the band waveforms. The stored band byte is
+/// already sqrt-companded amplitude (`color_bands` lifts quiet detail toward the
+/// top), so loud sections slam the ceiling and lose internal contrast. Raising
+/// the normalized height by this exponent (>1) walks it back toward linear
+/// amplitude: the bulk of the waveform drops off the ceiling and regains
+/// dynamics (rekordbox-style), while the single loudest moment still reaches
+/// full height. 1.0 = stored sqrt as-is (most compressed); 2.0 exactly cancels
+/// the sqrt → linear amplitude (least compressed, rekordbox-like).
+const HEIGHT_EXP: f32 = 2.0;
+
+/// Shape a normalized band height `[0,1]` by [`HEIGHT_EXP`] so loud sections
+/// don't max out.
+fn wave_height(v: f32) -> f32 {
+    v.clamp(0.0, 1.0).powf(HEIGHT_EXP)
+}
+
 /// Per-band colors for the spectrum (multiband) waveform: low→red, mid→green,
 /// high→light blue (the Serato/rekordbox convention).
 const BAND_COLORS: [egui::Color32; 3] = [
@@ -462,14 +478,14 @@ pub(crate) fn draw_waveform(
                     ];
                     layers.sort_by(|a, c| c.0.total_cmp(&a.0));
                     for (v, col) in layers {
-                        bar(painter, (v * half).max(0.4), col);
+                        bar(painter, (wave_height(v) * half).max(0.4), col);
                     }
                 }
                 config::WaveformColorMode::Energy => {
                     // Envelope = loudest band; colour = K-weighted loudness.
                     let env = agg[0].max(agg[1]).max(agg[2]) as f32 / 255.0;
                     let loud = agg[3] as f32 / 255.0;
-                    bar(painter, (env * half).max(0.5), energy_color(energy_curve(loud)));
+                    bar(painter, (wave_height(env) * half).max(0.5), energy_color(energy_curve(loud)));
                 }
             }
         } else if n > 0 {
