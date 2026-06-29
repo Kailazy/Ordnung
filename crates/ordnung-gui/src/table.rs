@@ -634,6 +634,10 @@ impl App {
             .collect();
         const ROW_H: f32 = 28.0;
         const COVER_PX: f32 = 22.0;
+        // Color mode for the inline Waveform column, read once per frame (Copy, so
+        // capturing it in the row closures doesn't borrow `self`).
+        let waveform_color_mode =
+            config::WaveformColorMode::from_key(&self.config.waveform_color_mode);
 
         // Playlist views show a leading order-index gutter and support
         // drag-to-reorder. The index column is structural in every playlist view
@@ -1105,6 +1109,35 @@ impl App {
                                             ui.add(egui::Label::new(
                                                 egui::RichText::new("—").weak(),
                                             ));
+                                        }
+                                    } else if col == TableColumn::Waveform {
+                                        // Inline colored waveform, painted to fill the
+                                        // cell. No playhead here (that's the player bar),
+                                        // so every bar is full brightness.
+                                        let rect = ui.max_rect();
+                                        if r.waveform.is_empty() {
+                                            // Unanalyzed: a faint baseline, not an empty cell.
+                                            let y = rect.center().y;
+                                            ui.painter().line_segment(
+                                                [
+                                                    egui::pos2(rect.left() + 2.0, y),
+                                                    egui::pos2(rect.right() - 2.0, y),
+                                                ],
+                                                egui::Stroke::new(
+                                                    1.0,
+                                                    egui::Color32::from_gray(55),
+                                                ),
+                                            );
+                                        } else {
+                                            let inset = rect.shrink2(egui::vec2(2.0, 3.0));
+                                            crate::player::draw_waveform(
+                                                ui.painter(),
+                                                inset,
+                                                &r.waveform,
+                                                &r.waveform_bands,
+                                                waveform_color_mode,
+                                                None,
+                                            );
                                         }
                                     } else {
                                         ui.add(egui::Label::new(if is_primary {
@@ -1836,6 +1869,14 @@ pub(crate) fn load_rows(
                 .map(|&ts| fmt_added(ts, now))
                 .unwrap_or_default(),
             added_at: added_at.get(&t.id).copied().unwrap_or(0),
+            waveform: analysis
+                .as_ref()
+                .map(|a| a.waveform_preview.clone())
+                .unwrap_or_default(),
+            waveform_bands: analysis
+                .as_ref()
+                .map(|a| a.waveform_bands.clone())
+                .unwrap_or_default(),
             source_path: PathBuf::from(t.source_path),
             has_cover: t.tags.has_cover,
             has_external_cover: ext_art.contains(&t.id),

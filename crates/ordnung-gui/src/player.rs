@@ -209,16 +209,21 @@ impl App {
                     }
                     ui.add_space(14.0);
 
-                    // Elapsed time.
+                    // Elapsed time. Fixed-width so the digits changing during a
+                    // scrub (e.g. "0:05" → "0:00", or crossing "10:00") can't shift
+                    // the waveform that follows it — that shift was the scrub jitter.
                     let shown_frac = self
                         .scrub
                         .unwrap_or(if dur > 0.0 { pos / dur } else { 0.0 })
                         .clamp(0.0, 1.0);
-                    ui.label(
-                        egui::RichText::new(fmt_time(shown_frac * dur))
-                            .monospace()
-                            .size(11.0)
-                            .color(egui::Color32::from_gray(170)),
+                    ui.add_sized(
+                        egui::vec2(46.0, 18.0),
+                        egui::Label::new(
+                            egui::RichText::new(fmt_time(shown_frac * dur))
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(170)),
+                        ),
                     );
 
                     // Scrubber — fills the space left after the trailing time label
@@ -244,7 +249,7 @@ impl App {
                         );
                     } else {
                         draw_waveform(
-                            painter, rect, &waveform, &bands, color_mode, shown_frac,
+                            painter, rect, &waveform, &bands, color_mode, Some(shown_frac),
                         );
                     }
                     let knob_r = if resp.hovered() || self.scrub.is_some() {
@@ -317,18 +322,20 @@ pub(crate) fn fmt_duration(ms: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-/// Paint the player waveform: one vertical bar per screen column, height from the
-/// peak envelope (`waveform`), color from `mode`. The played portion (left of
-/// `played_frac`) is full brightness; the rest is dimmed. Bands (`[low, mid,
-/// high]` per bin) drive both color modes; if absent, both degrade to a height
-/// ramp so an unanalyzed-under-v10 track still shows a sane waveform.
-fn draw_waveform(
+/// Paint a colored waveform: one vertical bar per screen column, height from the
+/// peak envelope (`waveform`), color from `mode`. With `played_frac = Some(f)` the
+/// portion left of `f` is full brightness and the rest is dimmed (the player's
+/// playhead); `None` paints every bar full brightness (table cells, no playhead).
+/// Bands (`[low, mid, high]` per bin) drive both color modes; if absent, both
+/// degrade to a height ramp so an unanalyzed-under-v10 track still shows a sane
+/// waveform.
+pub(crate) fn draw_waveform(
     painter: &egui::Painter,
     rect: egui::Rect,
     waveform: &[u8],
     bands: &[u8],
     mode: config::WaveformColorMode,
-    played_frac: f32,
+    played_frac: Option<f32>,
 ) {
     let n = waveform.len();
     let has_bands = bands.len() >= 3 * n && n > 0;
@@ -358,7 +365,7 @@ fn draw_waveform(
         let i = ((frac * n as f32) as usize).min(n - 1);
         let amp = waveform[i] as f32 / 255.0;
         let h = (amp * half).max(1.0);
-        let played = frac <= played_frac;
+        let played = played_frac.map_or(true, |p| frac <= p);
 
         let base = match mode {
             config::WaveformColorMode::Spectrum if has_bands => {

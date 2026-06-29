@@ -108,6 +108,15 @@ struct TrackRow {
     notes: String,
     /// Pre-formatted relative age for the Added column ("today", "3d ago").
     added: String,
+    /// Per-bin peak envelope (`Analysis::waveform_preview`) for the inline
+    /// Waveform column; empty when the track isn't analyzed. Loaded alongside the
+    /// other analysis-derived fields in `load_rows`, so the cell paints with no
+    /// extra query.
+    waveform: Vec<u8>,
+    /// Per-bin `[low, mid, high]` band energy (`Analysis::waveform_bands`) for the
+    /// Waveform column's colour; empty for pre-v10 analyses (cell degrades to a
+    /// height ramp).
+    waveform_bands: Vec<u8>,
     /// Raw `added_at` unix timestamp (seconds) behind `added`, so the Added
     /// column sorts by true recency rather than the rounded label.
     added_at: i64,
@@ -147,6 +156,7 @@ impl TrackRow {
     fn filter_text(&self, col: TableColumn) -> &str {
         match col {
             TableColumn::Cover => "",
+            TableColumn::Waveform => "",
             TableColumn::Artist => &self.artist,
             TableColumn::Title => &self.title,
             TableColumn::Album => &self.album,
@@ -226,6 +236,10 @@ enum SortColumn {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum TableColumn {
     Cover,
+    /// Inline colored waveform thumbnail (like Serato/rekordbox). Not sortable;
+    /// painted from the row's `waveform`/`waveform_bands`, colored per the
+    /// `waveform_color_mode` setting.
+    Waveform,
     Artist,
     Title,
     Album,
@@ -260,13 +274,14 @@ impl TableColumn {
     // this one line restores the column. Because `from_key`/`load_column_layout`
     // only resolve columns present in this list, a saved layout containing "bpm"
     // also drops it cleanly.
-    const DEFAULT_ORDER: [TableColumn; 12] = [
+    const DEFAULT_ORDER: [TableColumn; 13] = [
         TableColumn::Cover,
         TableColumn::Artist,
         TableColumn::Title,
         TableColumn::Album,
         TableColumn::Genre,
         TableColumn::Duration,
+        TableColumn::Waveform,
         TableColumn::Added,
         TableColumn::Key,
         TableColumn::Format,
@@ -281,6 +296,7 @@ impl TableColumn {
     fn key(self) -> &'static str {
         match self {
             TableColumn::Cover => "cover",
+            TableColumn::Waveform => "waveform",
             TableColumn::Artist => "artist",
             TableColumn::Title => "title",
             TableColumn::Album => "album",
@@ -309,6 +325,7 @@ impl TableColumn {
     fn label(self) -> &'static str {
         match self {
             TableColumn::Cover => "Cover",
+            TableColumn::Waveform => "Wave",
             TableColumn::Artist => "Artist",
             TableColumn::Title => "Title",
             TableColumn::Album => "Album",
@@ -329,6 +346,7 @@ impl TableColumn {
     fn sort_column(self) -> Option<SortColumn> {
         Some(match self {
             TableColumn::Cover => return None,
+            TableColumn::Waveform => return None,
             TableColumn::Artist => SortColumn::Artist,
             TableColumn::Title => SortColumn::Title,
             TableColumn::Album => SortColumn::Album,
@@ -353,6 +371,7 @@ impl TableColumn {
         let w = |default: f32| width.unwrap_or(default);
         match self {
             TableColumn::Cover => Column::exact(cover_px + 6.0),
+            TableColumn::Waveform => Column::initial(w(140.0)).at_least(60.0).clip(true),
             TableColumn::Artist => Column::initial(w(180.0)).at_least(80.0).clip(true),
             TableColumn::Title => Column::initial(w(260.0)).at_least(80.0).clip(true),
             TableColumn::Album => Column::initial(w(180.0)).at_least(60.0).clip(true),
