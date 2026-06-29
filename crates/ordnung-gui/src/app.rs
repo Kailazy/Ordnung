@@ -968,9 +968,12 @@ impl eframe::App for App {
                         ui.add_space(4.0);
                     });
 
-                // ── Collections (bottom, pinned) ──────────────────────────────
-                // The unique, non-playlist views read as their own group, set off
-                // from the playlist tree by living in a separate pinned section.
+                // ── Pinned bottom views (no captions) ─────────────────────────
+                // Two distinct groups, separated by spacing/rule rather than text
+                // headers: external sources (the Discogs vinyl collection) on top,
+                // then library-health diagnostics (Duplicates / Missing) below.
+                // They read as their own group, set off from the playlist tree by
+                // living in a separate pinned section.
                 egui::TopBottomPanel::bottom("nav_collections")
                     .frame(egui::Frame::none())
                     .show_separator_line(false)
@@ -978,8 +981,28 @@ impl eframe::App for App {
                         ui.add_space(8.0);
                         ui.separator();
                         ui.add_space(6.0);
-                        section_caption(ui, "COLLECTIONS");
-                        ui.add_space(4.0);
+                        // ── Sources ──
+                        let vinyl_label = if self.vinyl_count > 0 {
+                            format!("💿  My Vinyl Collection ({})", self.vinyl_count)
+                        } else {
+                            "💿  My Vinyl Collection".to_string()
+                        };
+                        if nav_button(
+                            ui,
+                            &vinyl_label,
+                            self.view == LibraryView::Vinyl,
+                            34.0,
+                            14.0,
+                        )
+                        .on_hover_note("Your Discogs vinyl collection — refresh to sync new records")
+                        .clicked()
+                        {
+                            self.view = LibraryView::Vinyl;
+                        }
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        // ── Library health ──
                         if nav_button(
                             ui,
                             "⧉  Duplicates",
@@ -1011,24 +1034,6 @@ impl eframe::App for App {
                         .clicked()
                         {
                             self.view = LibraryView::Missing;
-                        }
-                        ui.add_space(4.0);
-                        let vinyl_label = if self.vinyl_count > 0 {
-                            format!("💿  My Vinyl Collection ({})", self.vinyl_count)
-                        } else {
-                            "💿  My Vinyl Collection".to_string()
-                        };
-                        if nav_button(
-                            ui,
-                            &vinyl_label,
-                            self.view == LibraryView::Vinyl,
-                            34.0,
-                            14.0,
-                        )
-                        .on_hover_note("Your Discogs vinyl collection — refresh to sync new records")
-                        .clicked()
-                        {
-                            self.view = LibraryView::Vinyl;
                         }
                         ui.add_space(8.0);
                     });
