@@ -737,10 +737,18 @@ pub(crate) fn draw_waveform(
     // One mesh of axis-aligned colored rects is a single primitive, already
     // triangulated, with no per-shape overhead.
     let mut mesh = egui::epaint::Mesh::default();
+    // Each column is 1px wide; draw the bar a touch narrower and centered so a thin
+    // gap separates neighboring bars (the rekordbox "individual sample bands" look)
+    // instead of a solid fill.
+    const BAR_W: f32 = 0.6;
+    let pad = (1.0 - BAR_W) / 2.0;
     let bar = |mesh: &mut egui::epaint::Mesh, x: f32, h: f32, played: bool, c: egui::Color32| {
         let c = if played { c } else { dim(c, 0.4) };
         mesh.add_colored_rect(
-            egui::Rect::from_min_max(egui::pos2(x, y - h), egui::pos2(x + 1.0, y + h)),
+            egui::Rect::from_min_max(
+                egui::pos2(x + pad, y - h),
+                egui::pos2(x + pad + BAR_W, y + h),
+            ),
             c,
         );
     };
