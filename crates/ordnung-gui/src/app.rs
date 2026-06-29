@@ -97,6 +97,7 @@ impl App {
             col_filters: HashMap::new(),
             col_filter_open: None,
             settings_open: false,
+            settings_tab: SettingsTab::default(),
             token_input: String::new(),
             confirm_clear_db: false,
             failure_report_title: String::new(),
@@ -407,8 +408,11 @@ impl eframe::App for App {
                     a.toggle_pause();
                 }
             } else if let Some(id) = self.selected {
-                if let Some(path) =
-                    self.rows.iter().find(|r| r.id == id).map(|r| r.source_path.clone())
+                if let Some(path) = self
+                    .rows
+                    .iter()
+                    .find(|r| r.id == id)
+                    .map(|r| r.source_path.clone())
                 {
                     self.play_track(id, path);
                 }

@@ -73,6 +73,22 @@ pub struct Config {
     /// `"energy"`. See `WaveformColorMode`.
     #[serde(default = "default_waveform_color_mode")]
     pub waveform_color_mode: String,
+    /// Render-time height companding for the waveform. `1.0` keeps the stored
+    /// sqrt-companded amplitude (most compressed); `2.0` cancels the sqrt back to
+    /// linear amplitude (least compressed, rekordbox-like). See `wave_height`.
+    #[serde(default = "default_waveform_height_exp")]
+    pub waveform_height_exp: f32,
+    /// Per-band visual height gain for spectrum mode `[low, mid, high]`. The bass
+    /// band swamps the others, so the default trims it and lifts mid/high.
+    #[serde(default = "default_waveform_band_gain")]
+    pub waveform_band_gain: [f32; 3],
+    /// RGB colors for the three spectrum bands `[low, mid, high]`. Defaults to the
+    /// Serato/rekordbox convention (low = red, mid = green, high = light blue).
+    #[serde(default = "default_waveform_band_colors")]
+    pub waveform_band_colors: [[u8; 3]; 3],
+    /// RGB stops for the energy-mode cool→hot gradient, quiet → loudest (5 stops).
+    #[serde(default = "default_waveform_energy_colors")]
+    pub waveform_energy_colors: [[u8; 3]; 5],
 }
 
 fn default_true() -> bool {
@@ -85,6 +101,28 @@ fn default_convert_format() -> String {
 
 fn default_waveform_color_mode() -> String {
     "energy".to_string()
+}
+
+pub(crate) fn default_waveform_height_exp() -> f32 {
+    2.0
+}
+
+pub(crate) fn default_waveform_band_gain() -> [f32; 3] {
+    [0.78, 1.2, 1.35]
+}
+
+pub(crate) fn default_waveform_band_colors() -> [[u8; 3]; 3] {
+    [[232, 76, 60], [95, 200, 95], [95, 175, 235]]
+}
+
+pub(crate) fn default_waveform_energy_colors() -> [[u8; 3]; 5] {
+    [
+        [45, 80, 150],
+        [40, 160, 170],
+        [70, 190, 110],
+        [235, 195, 70],
+        [225, 75, 55],
+    ]
 }
 
 /// How the player waveform is colored. Parsed from `Config::waveform_color_mode`;
@@ -131,6 +169,10 @@ impl Default for Config {
             convert_out_dir: None,
             convert_in_place: true,
             waveform_color_mode: default_waveform_color_mode(),
+            waveform_height_exp: default_waveform_height_exp(),
+            waveform_band_gain: default_waveform_band_gain(),
+            waveform_band_colors: default_waveform_band_colors(),
+            waveform_energy_colors: default_waveform_energy_colors(),
         }
     }
 }

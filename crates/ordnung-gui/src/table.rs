@@ -641,6 +641,9 @@ impl App {
         // capturing it in the row closures doesn't borrow `self`).
         let waveform_color_mode =
             config::WaveformColorMode::from_key(&self.config.waveform_color_mode);
+        // Full live render style (colors, gains, height) for the inline waveform
+        // cells; `Copy`, so the row closures capture it without borrowing `self`.
+        let waveform_style = crate::player::WaveformStyle::from_config(&self.config);
 
         // Playlist views show a leading order-index gutter and support
         // drag-to-reorder. The index column is structural in every playlist view
@@ -717,7 +720,8 @@ impl App {
                 // One column per visible entry, in the user's chosen order, then a
                 // trailing remainder spacer so the striped rows span the full width.
                 for &col in &order {
-                    builder = builder.column(col.spec(COVER_PX, self.column_widths.get(&col).copied()));
+                    builder =
+                        builder.column(col.spec(COVER_PX, self.column_widths.get(&col).copied()));
                 }
                 builder = builder.column(Column::remainder());
                 // After "Reset to default", drop egui_extras' own stored widths so
@@ -778,12 +782,10 @@ impl App {
                                     // Let the header's left_to_right(Center) layout place
                                     // and vertically centre the button; a hand-positioned
                                     // rect sat slightly high in the 22px header.
-                                    let btn = ui
-                                        .add(egui::Button::new(glyph).small())
-                                        .on_hover_text(tip);
+                                    let btn =
+                                        ui.add(egui::Button::new(glyph).small()).on_hover_text(tip);
                                     if btn.hovered() {
-                                        ui.ctx()
-                                            .set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                     }
                                     if btn.clicked() {
                                         toggle_waveform_mode = true;
@@ -791,65 +793,66 @@ impl App {
                                     resp
                                 } else {
                                     match col.sort_column() {
-                                    // Cover: no label, but the whole cell still opens
-                                    // the reorder menu on right-click.
-                                    None => ui.interact(
-                                        ui.max_rect(),
-                                        ui.id().with(("hdr", col)),
-                                        egui::Sense::click(),
-                                    ),
-                                    Some(sc) => {
-                                        // Append ▲/▼ when this is the active sort column,
-                                        // and a ⌕ when a per-column filter is narrowing it.
-                                        let arrow = match cur_sort {
-                                            Some((c, true)) if c == sc => " ▲",
-                                            Some((c, false)) if c == sc => " ▼",
-                                            _ => "",
-                                        };
-                                        let filt = if filtered_cols.contains(&col) {
-                                            " ⌕"
-                                        } else {
-                                            ""
-                                        };
-                                        // Sense clicks across the whole header cell, not
-                                        // just the label glyphs, so anywhere in the column
-                                        // header sorts/filters. The label is then painted
-                                        // on top (non-interactive) for the text + markers.
-                                        let resp = ui.interact(
+                                        // Cover: no label, but the whole cell still opens
+                                        // the reorder menu on right-click.
+                                        None => ui.interact(
                                             ui.max_rect(),
                                             ui.id().with(("hdr", col)),
                                             egui::Sense::click(),
-                                        );
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(format!(
-                                                    "{}{arrow}{filt}",
-                                                    col.label()
-                                                ))
-                                                .strong()
-                                                .color(crate::ui::tokens::color::LABEL_2),
-                                            )
-                                            .selectable(false),
-                                        );
-                                        if resp.hovered() {
-                                            ui.ctx()
-                                                .set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        ),
+                                        Some(sc) => {
+                                            // Append ▲/▼ when this is the active sort column,
+                                            // and a ⌕ when a per-column filter is narrowing it.
+                                            let arrow = match cur_sort {
+                                                Some((c, true)) if c == sc => " ▲",
+                                                Some((c, false)) if c == sc => " ▼",
+                                                _ => "",
+                                            };
+                                            let filt = if filtered_cols.contains(&col) {
+                                                " ⌕"
+                                            } else {
+                                                ""
+                                            };
+                                            // Sense clicks across the whole header cell, not
+                                            // just the label glyphs, so anywhere in the column
+                                            // header sorts/filters. The label is then painted
+                                            // on top (non-interactive) for the text + markers.
+                                            let resp = ui.interact(
+                                                ui.max_rect(),
+                                                ui.id().with(("hdr", col)),
+                                                egui::Sense::click(),
+                                            );
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(format!(
+                                                        "{}{arrow}{filt}",
+                                                        col.label()
+                                                    ))
+                                                    .strong()
+                                                    .color(crate::ui::tokens::color::LABEL_2),
+                                                )
+                                                .selectable(false),
+                                            );
+                                            if resp.hovered() {
+                                                ui.ctx().set_cursor_icon(
+                                                    egui::CursorIcon::PointingHand,
+                                                );
+                                            }
+                                            // Single click sorts; double click opens the
+                                            // filter search bar for this column.
+                                            if resp.clicked() {
+                                                header_clicked = Some(sc);
+                                            }
+                                            if resp.double_clicked() {
+                                                open_col_filter = Some((
+                                                    col,
+                                                    ui.ctx()
+                                                        .pointer_interact_pos()
+                                                        .unwrap_or_else(|| resp.rect.left_bottom()),
+                                                ));
+                                            }
+                                            resp
                                         }
-                                        // Single click sorts; double click opens the
-                                        // filter search bar for this column.
-                                        if resp.clicked() {
-                                            header_clicked = Some(sc);
-                                        }
-                                        if resp.double_clicked() {
-                                            open_col_filter = Some((
-                                                col,
-                                                ui.ctx()
-                                                    .pointer_interact_pos()
-                                                    .unwrap_or_else(|| resp.rect.left_bottom()),
-                                            ));
-                                        }
-                                        resp
-                                    }
                                     }
                                 };
                                 // The Quality header is self-documenting: hovering it
@@ -1177,7 +1180,7 @@ impl App {
                                                 inset,
                                                 &r.waveform,
                                                 &r.waveform_bands,
-                                                waveform_color_mode,
+                                                &waveform_style,
                                                 None,
                                             );
                                         }
@@ -1515,7 +1518,10 @@ impl App {
             let viewport = scroll_out.inner_rect;
             if let Some(p) = ctx_clone.pointer_interact_pos() {
                 let below_header = p.y > viewport.top() + 22.0;
-                let on_row = self.row_screen_rects.iter().any(|(_, rect)| rect.contains(p));
+                let on_row = self
+                    .row_screen_rects
+                    .iter()
+                    .any(|(_, rect)| rect.contains(p));
                 if viewport.contains(p) && below_header && !on_row {
                     self.clear_selection();
                 }

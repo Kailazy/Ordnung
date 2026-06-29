@@ -109,7 +109,7 @@ impl App {
         // `self.scrub`) doesn't also need to borrow `self.now_playing`.
         let waveform = np.waveform.clone();
         let bands = np.waveform_bands.clone();
-        let color_mode = config::WaveformColorMode::from_key(&self.config.waveform_color_mode);
+        let wave_style = WaveformStyle::from_config(&self.config);
 
         const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
         let mut toggle = false;
@@ -154,10 +154,8 @@ impl App {
                     // wider than the column slow-scroll horizontally like
                     // Spotify; shorter ones sit left-aligned.
                     const LABEL_W: f32 = 220.0;
-                    let (block, _) = ui.allocate_exact_size(
-                        egui::vec2(LABEL_W, 56.0),
-                        egui::Sense::hover(),
-                    );
+                    let (block, _) =
+                        ui.allocate_exact_size(egui::vec2(LABEL_W, 56.0), egui::Sense::hover());
                     let now = ui.input(|i| i.time);
                     let mut animating = draw_scrolling_line(
                         ui,
@@ -273,7 +271,12 @@ impl App {
                         );
                     } else {
                         draw_waveform(
-                            painter, rect, &waveform, &bands, color_mode, Some(shown_frac),
+                            painter,
+                            rect,
+                            &waveform,
+                            &bands,
+                            &wave_style,
+                            Some(shown_frac),
                         );
                     }
                     let knob_r = if resp.hovered() || self.scrub.is_some() {
@@ -354,9 +357,7 @@ fn draw_scrolling_line(
     color: egui::Color32,
     time: f64,
 ) -> bool {
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), font, color);
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
     let size = galley.size();
     let clip = egui::Rect::from_min_size(top_left, egui::vec2(width, size.y));
     let painter = ui.painter_at(clip);
@@ -387,36 +388,60 @@ pub(crate) fn fmt_duration(ms: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-/// Render-time height companding for the band waveforms. The stored band byte is
-/// already sqrt-companded amplitude (`color_bands` lifts quiet detail toward the
-/// top), so loud sections slam the ceiling and lose internal contrast. Raising
-/// the normalized height by this exponent (>1) walks it back toward linear
-/// amplitude: the bulk of the waveform drops off the ceiling and regains
-/// dynamics (rekordbox-style), while the single loudest moment still reaches
-/// full height. 1.0 = stored sqrt as-is (most compressed); 2.0 exactly cancels
-/// the sqrt → linear amplitude (least compressed, rekordbox-like).
-const HEIGHT_EXP: f32 = 2.0;
-
-/// Shape a normalized band height `[0,1]` by [`HEIGHT_EXP`] so loud sections
-/// don't max out.
-fn wave_height(v: f32) -> f32 {
-    v.clamp(0.0, 1.0).powf(HEIGHT_EXP)
+/// Live, user-tunable rendering parameters for the waveform, built each frame
+/// from [`config::Config`] (the Waveform settings tab writes them). Held by value
+/// at the call sites and passed by reference into [`draw_waveform`], so slider
+/// moves take effect on the very next frame with no re-analysis.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WaveformStyle {
+    /// Energy vs. spectrum coloring.
+    pub mode: config::WaveformColorMode,
+    /// Render-time height companding (see [`wave_height`]).
+    pub height_exp: f32,
+    /// Per-band height gain `[low, mid, high]`, spectrum mode only.
+    pub band_gain: [f32; 3],
+    /// Per-band colors `[low, mid, high]` for spectrum mode.
+    pub band_colors: [egui::Color32; 3],
+    /// The five cool→hot gradient stops for energy mode (quiet → loudest).
+    pub energy_colors: [egui::Color32; 5],
 }
 
-/// Per-band visual height gain for spectrum mode `[low, mid, high]`. The low
-/// (bass) band carries the most energy and visually swamps the others, so trim
-/// it and lift mid/high so a synth stab or hi-hat still reads as its own spike.
-/// Applied after [`wave_height`] and clamped to full height, so the loudest
-/// moments still cap rather than overshoot.
-const BAND_GAIN: [f32; 3] = [0.78, 1.2, 1.35];
+impl WaveformStyle {
+    /// Build the live style from the current config.
+    pub(crate) fn from_config(cfg: &config::Config) -> Self {
+        let rgb = |c: [u8; 3]| egui::Color32::from_rgb(c[0], c[1], c[2]);
+        Self {
+            mode: config::WaveformColorMode::from_key(&cfg.waveform_color_mode),
+            height_exp: cfg.waveform_height_exp,
+            band_gain: cfg.waveform_band_gain,
+            band_colors: [
+                rgb(cfg.waveform_band_colors[0]),
+                rgb(cfg.waveform_band_colors[1]),
+                rgb(cfg.waveform_band_colors[2]),
+            ],
+            energy_colors: [
+                rgb(cfg.waveform_energy_colors[0]),
+                rgb(cfg.waveform_energy_colors[1]),
+                rgb(cfg.waveform_energy_colors[2]),
+                rgb(cfg.waveform_energy_colors[3]),
+                rgb(cfg.waveform_energy_colors[4]),
+            ],
+        }
+    }
+}
 
-/// Per-band colors for the spectrum (multiband) waveform: low→red, mid→green,
-/// high→light blue (the Serato/rekordbox convention).
-const BAND_COLORS: [egui::Color32; 3] = [
-    egui::Color32::from_rgb(232, 76, 60),  // low / bass
-    egui::Color32::from_rgb(95, 200, 95),  // mid
-    egui::Color32::from_rgb(95, 175, 235), // high
-];
+/// Shape a normalized band height `[0,1]` by `height_exp` so loud sections don't
+/// max out. The stored band byte is already sqrt-companded amplitude
+/// (`color_bands` lifts quiet detail toward the top), so loud sections slam the
+/// ceiling and lose internal contrast. Raising the normalized height by an
+/// exponent (>1) walks it back toward linear amplitude: the bulk of the waveform
+/// drops off the ceiling and regains dynamics (rekordbox-style), while the single
+/// loudest moment still reaches full height. `1.0` = stored sqrt as-is (most
+/// compressed); `2.0` exactly cancels the sqrt → linear amplitude (least
+/// compressed, rekordbox-like).
+fn wave_height(v: f32, height_exp: f32) -> f32 {
+    v.clamp(0.0, 1.0).powf(height_exp)
+}
 
 /// Paint a colored waveform: one vertical bar per screen column. With
 /// `played_frac = Some(f)` the portion left of `f` is full brightness and the
@@ -434,7 +459,7 @@ pub(crate) fn draw_waveform(
     rect: egui::Rect,
     waveform: &[u8],
     bands: &[u8],
-    mode: config::WaveformColorMode,
+    style: &WaveformStyle,
     played_frac: Option<f32>,
 ) {
     // Bands are `[low, mid, high, loudness]` per bin (see core `color_bands`).
@@ -465,8 +490,8 @@ pub(crate) fn draw_waveform(
             // fine transients then show as thin spikes instead of being sampled
             // away; when zoomed past 1 bin/pixel it degrades to a point sample.
             let b0 = ((cx as f32 / cols as f32 * nb as f32) as usize).min(nb - 1);
-            let b1 = (((cx + 1) as f32 / cols as f32 * nb as f32).ceil() as usize)
-                .clamp(b0 + 1, nb);
+            let b1 =
+                (((cx + 1) as f32 / cols as f32 * nb as f32).ceil() as usize).clamp(b0 + 1, nb);
             let mut agg = [0u8; 4];
             for j in b0..b1 {
                 let q = &bands[STRIDE * j..STRIDE * j + 4];
@@ -474,14 +499,17 @@ pub(crate) fn draw_waveform(
                     agg[t] = agg[t].max(q[t]);
                 }
             }
-            match mode {
+            match style.mode {
                 config::WaveformColorMode::Spectrum => {
                     // Draw the three bands tallest-first so the shortest ends up
                     // on top, visible in the centre of the taller ones.
+                    let h = |v: u8, b: usize| {
+                        wave_height(v as f32 / 255.0, style.height_exp) * style.band_gain[b]
+                    };
                     let mut layers = [
-                        (wave_height(agg[0] as f32 / 255.0) * BAND_GAIN[0], BAND_COLORS[0]),
-                        (wave_height(agg[1] as f32 / 255.0) * BAND_GAIN[1], BAND_COLORS[1]),
-                        (wave_height(agg[2] as f32 / 255.0) * BAND_GAIN[2], BAND_COLORS[2]),
+                        (h(agg[0], 0), style.band_colors[0]),
+                        (h(agg[1], 1), style.band_colors[1]),
+                        (h(agg[2], 2), style.band_colors[2]),
                     ];
                     layers.sort_by(|a, c| c.0.total_cmp(&a.0));
                     for (h, col) in layers {
@@ -492,14 +520,22 @@ pub(crate) fn draw_waveform(
                     // Envelope = loudest band; colour = K-weighted loudness.
                     let env = agg[0].max(agg[1]).max(agg[2]) as f32 / 255.0;
                     let loud = agg[3] as f32 / 255.0;
-                    bar(painter, (wave_height(env) * half).max(0.5), energy_color(energy_curve(loud)));
+                    bar(
+                        painter,
+                        (wave_height(env, style.height_exp) * half).max(0.5),
+                        energy_color(energy_curve(loud), &style.energy_colors),
+                    );
                 }
             }
         } else if n > 0 {
             // No band data: peak envelope on a height ramp.
             let i = ((frac * n as f32) as usize).min(n - 1);
             let amp = waveform[i] as f32 / 255.0;
-            bar(painter, (amp * half).max(1.0), energy_color(energy_curve(amp)));
+            bar(
+                painter,
+                (amp * half).max(1.0),
+                energy_color(energy_curve(amp), &style.energy_colors),
+            );
         }
     }
 }
@@ -515,33 +551,28 @@ fn energy_curve(t: f32) -> f32 {
     t.clamp(0.0, 1.0).powf(3.0)
 }
 
-/// Cool→hot gradient for the energy color mode: deep blue (quiet) → teal → green
-/// → amber → red (loudest). `t` is clamped to `[0, 1]`.
-fn energy_color(t: f32) -> egui::Color32 {
-    const STOPS: [(f32, (f32, f32, f32)); 5] = [
-        (0.0, (45.0, 80.0, 150.0)),
-        (0.3, (40.0, 160.0, 170.0)),
-        (0.55, (70.0, 190.0, 110.0)),
-        (0.8, (235.0, 195.0, 70.0)),
-        (1.0, (225.0, 75.0, 55.0)),
-    ];
+/// Cool→hot gradient for the energy color mode: five `colors` stops (quiet →
+/// loudest) interpolated at the fixed positions below. Defaults are deep blue →
+/// teal → green → amber → red, but the Waveform settings tab can recolor them.
+/// `t` is clamped to `[0, 1]`.
+fn energy_color(t: f32, colors: &[egui::Color32; 5]) -> egui::Color32 {
+    const POS: [f32; 5] = [0.0, 0.3, 0.55, 0.8, 1.0];
     let t = t.clamp(0.0, 1.0);
-    let mut lo = &STOPS[0];
-    let mut hi = &STOPS[STOPS.len() - 1];
-    for pair in STOPS.windows(2) {
-        if t >= pair[0].0 && t <= pair[1].0 {
-            lo = &pair[0];
-            hi = &pair[1];
+    let (mut lo, mut hi) = (0usize, POS.len() - 1);
+    for i in 0..POS.len() - 1 {
+        if t >= POS[i] && t <= POS[i + 1] {
+            lo = i;
+            hi = i + 1;
             break;
         }
     }
-    let span = (hi.0 - lo.0).max(1e-6);
-    let f = ((t - lo.0) / span).clamp(0.0, 1.0);
-    let lerp = |a: f32, b: f32| a + (b - a) * f;
+    let span = (POS[hi] - POS[lo]).max(1e-6);
+    let f = ((t - POS[lo]) / span).clamp(0.0, 1.0);
+    let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * f) as u8;
     egui::Color32::from_rgb(
-        lerp(lo.1 .0, hi.1 .0) as u8,
-        lerp(lo.1 .1, hi.1 .1) as u8,
-        lerp(lo.1 .2, hi.1 .2) as u8,
+        lerp(colors[lo].r(), colors[hi].r()),
+        lerp(colors[lo].g(), colors[hi].g()),
+        lerp(colors[lo].b(), colors[hi].b()),
     )
 }
 

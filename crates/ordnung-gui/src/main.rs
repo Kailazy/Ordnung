@@ -594,6 +594,43 @@ struct PreviewMsg {
     detail: Option<discogs::ReleaseDetail>,
 }
 
+/// Category tabs in the Settings window's left rail (Ableton-style). Session-only
+/// selection; the window always opens on the default ([`SettingsTab::General`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SettingsTab {
+    #[default]
+    General,
+    Analysis,
+    Waveform,
+    Sorting,
+    Conversion,
+    Advanced,
+}
+
+impl SettingsTab {
+    /// All tabs in rail order.
+    pub(crate) const ALL: [SettingsTab; 6] = [
+        SettingsTab::General,
+        SettingsTab::Analysis,
+        SettingsTab::Waveform,
+        SettingsTab::Sorting,
+        SettingsTab::Conversion,
+        SettingsTab::Advanced,
+    ];
+
+    /// Label shown in the left rail.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            SettingsTab::General => "General",
+            SettingsTab::Analysis => "Analysis",
+            SettingsTab::Waveform => "Waveform",
+            SettingsTab::Sorting => "Sorting",
+            SettingsTab::Conversion => "Conversion",
+            SettingsTab::Advanced => "Advanced",
+        }
+    }
+}
+
 struct App {
     db_path: PathBuf,
     rows: Vec<TrackRow>,
@@ -794,6 +831,9 @@ struct App {
     col_filter_open: Option<ColFilterPopup>,
     /// Whether the Settings window is open.
     settings_open: bool,
+    /// Which category tab is active in the Settings window. Session-only — the
+    /// window always opens on the default tab; not persisted to config.
+    settings_tab: SettingsTab,
     /// Edit buffer for the token field while the Settings window is open.
     token_input: String,
     /// Whether the "clear the whole catalog?" confirmation popup is showing.
