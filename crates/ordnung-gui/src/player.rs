@@ -741,28 +741,16 @@ pub(crate) fn draw_waveform(
     // Each column is 1px wide; draw the bar a touch narrower and centered so a thin
     // gap separates neighboring bars (the rekordbox "individual sample bands" look)
     // instead of a solid fill.
-    const BAR_W: f32 = 0.45;
+    const BAR_W: f32 = 0.55;
     let pad = (1.0 - BAR_W) / 2.0;
-    // A really light feather: a faint half-alpha strip on each side of the solid
-    // bar softens the sub-pixel edges so neighboring bars alias gently into the gap
-    // instead of hard-clipping (which shimmers as the mesh snaps to the pixel grid).
-    const FEATHER_W: f32 = 0.15;
     let bar = |mesh: &mut egui::epaint::Mesh, x: f32, h: f32, played: bool, c: egui::Color32| {
         let c = if played { c } else { dim(c, 0.4) };
-        let l = x + pad;
-        let r = x + pad + BAR_W;
         mesh.add_colored_rect(
-            egui::Rect::from_min_max(egui::pos2(l, y - h), egui::pos2(r, y + h)),
+            egui::Rect::from_min_max(
+                egui::pos2(x + pad, y - h),
+                egui::pos2(x + pad + BAR_W, y + h),
+            ),
             c,
-        );
-        let edge = egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), c.a() / 3);
-        mesh.add_colored_rect(
-            egui::Rect::from_min_max(egui::pos2(l - FEATHER_W, y - h), egui::pos2(l, y + h)),
-            edge,
-        );
-        mesh.add_colored_rect(
-            egui::Rect::from_min_max(egui::pos2(r, y - h), egui::pos2(r + FEATHER_W, y + h)),
-            edge,
         );
     };
 
