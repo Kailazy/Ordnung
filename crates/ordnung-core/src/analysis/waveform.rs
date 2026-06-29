@@ -45,38 +45,43 @@ pub fn levels(samples: &[f32]) -> Levels {
 
 /// Bytes per output bin in [`color_bands`]: `[low, mid, high, loudness]`.
 pub const COLOR_STRIDE: usize = 4;
+/// Time resolution of the colored-waveform data — higher than `PREVIEW_BINS` so
+/// the player's wide waveform shows real dynamics rather than coarse blocks; the
+/// inline table thumbnail just downsamples it.
+pub const WAVE_COLOR_BINS: usize = 1000;
 /// dB window below the track's loudest bin that the loudness byte spans. Anything
 /// quieter than `max - LOUDNESS_RANGE_DB` clamps to 0 (coolest). ~45 dB covers a
 /// track's musical dynamic range without wasting resolution on the noise floor.
 const LOUDNESS_RANGE_DB: f64 = 45.0;
 
 /// Per-bin colored-waveform data, derived from the shared spectrogram so we pay
-/// for no extra FFT. Returns `COLOR_STRIDE * PREVIEW_BINS` bytes —
-/// `[low, mid, high, loudness]` per time bin, time-aligned with `preview()`'s
-/// peak bins:
+/// for no extra FFT. Returns `COLOR_STRIDE * WAVE_COLOR_BINS` bytes —
+/// `[low, mid, high, loudness]` per time bin:
 ///
-/// * `low`/`mid`/`high` — K-weighted band *magnitude* (split at 200 Hz / 2 kHz),
-///   globally normalized to 0–255. Drive the spectrum mode's hue (the per-bin
-///   RGB ratio is the section's spectral balance).
+/// * `low`/`mid`/`high` — **raw** band RMS amplitude (split at 200 Hz / 2 kHz),
+///   sqrt-companded then globally normalized to 0–255. These are the per-band
+///   waveform heights drawn overlaid (Serato/rekordbox style), so bass reads as
+///   tall as it sounds and a hi-hat shows as a smaller high-band spike. RMS, not
+///   peak, so loud sections still fluctuate instead of flat-lining at full scale.
 /// * `loudness` — **K-weighted RMS in dB** (ITU-R BS.1770 / LUFS-style perceptual
 ///   weighting), normalized over a `LOUDNESS_RANGE_DB` window below the track's
-///   loudest bin to 0–255. Drives the energy mode so colour tracks *perceived
-///   loudness*. (Earlier it summed raw FFT magnitude — linear and bass-dominated,
-///   so quiet bass read as "hot"; loud and quiet sections looked alike.)
+///   loudest bin. Drives the energy color mode so colour tracks *perceived*
+///   loudness rather than raw, bass-dominated magnitude.
 pub fn color_bands(spec: &dsp::Spectrogram) -> Vec<u8> {
-    let out_len = COLOR_STRIDE * PREVIEW_BINS;
+    let out_len = COLOR_STRIDE * WAVE_COLOR_BINS;
     let n = spec.frames.len();
     if n == 0 || spec.frames[0].is_empty() {
         return vec![0; out_len];
     }
     let n_bins = spec.frames[0].len();
 
-    // K-weighting (ITU-R BS.1770) as a per-FFT-bin *power* gain: the product of
-    // the two stage biquads' magnitude responses. Approximates the ear's
-    // frequency sensitivity — trims sub-bass, lifts presence — so the loudness
-    // below is perceptual, not flat-spectrum RMS. Coefficients are the standard
-    // 48 kHz set; evaluated at our bin frequencies they're a close-enough
-    // approximation for colouring (this is not a certified LUFS meter).
+    // K-weighting (ITU-R BS.1770) as a per-FFT-bin *power* gain, used only for the
+    // loudness byte: the product of the two stage biquads' magnitude responses.
+    // Approximates the ear's frequency sensitivity — trims sub-bass, lifts
+    // presence. Coefficients are the standard 48 kHz set; evaluated at our bin
+    // frequencies they're a close-enough approximation (not a certified LUFS
+    // meter). The band heights deliberately stay un-weighted (raw spectral
+    // energy) so the bass shows big.
     let denom = (n_bins - 1).max(1) as f32;
     let kgain: Vec<f32> = (0..n_bins)
         .map(|i| {
@@ -97,15 +102,19 @@ pub fn color_bands(spec: &dsp::Spectrogram) -> Vec<u8> {
     let lo_hi = hz_to_bin(200.0);
     let mid_hi = hz_to_bin(2000.0).max(lo_hi);
 
-    // Mean K-weighted power per band, per time bin (averaged over its frames).
-    let mut bins = vec![[0.0f64; 3]; PREVIEW_BINS];
-    for (k, slot) in bins.iter_mut().enumerate() {
-        let start = k * n / PREVIEW_BINS;
-        let end = (((k + 1) * n / PREVIEW_BINS).max(start + 1)).min(n);
+    // Per time bin: mean raw power per band, and mean K-weighted power (loudness),
+    // averaged over the frames the bin spans.
+    let mut band_pow = vec![[0.0f64; 3]; WAVE_COLOR_BINS];
+    let mut kw_pow = vec![0.0f64; WAVE_COLOR_BINS];
+    for k in 0..WAVE_COLOR_BINS {
+        let start = k * n / WAVE_COLOR_BINS;
+        let end = (((k + 1) * n / WAVE_COLOR_BINS).max(start + 1)).min(n);
         let mut acc = [0.0f64; 3];
+        let mut kacc = 0.0f64;
         for frame in &spec.frames[start..end] {
             for (i, &m) in frame.iter().enumerate() {
-                let p = (kgain[i] * m * m) as f64; // K-weighted power
+                let p = (m * m) as f64;
+                kacc += (kgain[i] * m * m) as f64;
                 if i < lo_hi {
                     acc[0] += p;
                 } else if i < mid_hi {
@@ -116,30 +125,34 @@ pub fn color_bands(spec: &dsp::Spectrogram) -> Vec<u8> {
             }
         }
         let span = (end - start).max(1) as f64;
-        *slot = [acc[0] / span, acc[1] / span, acc[2] / span];
+        band_pow[k] = [acc[0] / span, acc[1] / span, acc[2] / span];
+        kw_pow[k] = kacc / span;
     }
 
-    // Hue: global magnitude scale (sqrt of power). Loudness: dB of total power,
-    // normalized to a fixed window below the loudest bin.
-    let max_mag = bins
+    // Band heights: RMS magnitude, globally normalized (so bass stays tallest),
+    // then sqrt-companded so the quieter bands and low-level detail are visible.
+    let max_rms = band_pow
         .iter()
         .flat_map(|b| b.iter().map(|&p| p.max(0.0).sqrt()))
         .fold(0.0f64, f64::max)
         .max(1e-12);
-    let total: Vec<f64> = bins.iter().map(|b| b[0] + b[1] + b[2]).collect();
-    let max_db = total
+    // Loudness: K-weighted dB over a fixed window below the loudest bin.
+    let max_db = kw_pow
         .iter()
         .map(|&p| 10.0 * p.max(1e-12).log10())
         .fold(f64::NEG_INFINITY, f64::max);
     let floor_db = max_db - LOUDNESS_RANGE_DB;
 
     let mut out = Vec::with_capacity(out_len);
-    for (k, b) in bins.iter().enumerate() {
-        let q = |mag: f64| ((mag / max_mag).clamp(0.0, 1.0) * 255.0).round() as u8;
-        out.push(q(b[0].max(0.0).sqrt()));
-        out.push(q(b[1].max(0.0).sqrt()));
-        out.push(q(b[2].max(0.0).sqrt()));
-        let db = 10.0 * total[k].max(1e-12).log10();
+    for k in 0..WAVE_COLOR_BINS {
+        let q = |p: f64| {
+            let mag = p.max(0.0).sqrt();
+            ((mag / max_rms).clamp(0.0, 1.0).sqrt() * 255.0).round() as u8
+        };
+        out.push(q(band_pow[k][0]));
+        out.push(q(band_pow[k][1]));
+        out.push(q(band_pow[k][2]));
+        let db = 10.0 * kw_pow[k].max(1e-12).log10();
         let t = ((db - floor_db) / LOUDNESS_RANGE_DB).clamp(0.0, 1.0);
         out.push((t * 255.0).round() as u8);
     }

@@ -173,15 +173,14 @@ pub struct Analysis {
     pub cues: Vec<Cue>,
     /// Low-resolution waveform preview bins (CDJ overview).
     pub waveform_preview: Vec<u8>,
-    /// Per-bin colored-waveform data: `[low, mid, high, loudness]` quads, one per
-    /// `waveform_preview` bin (length `4 × waveform_preview.len()`, time-aligned).
-    /// `low`/`mid`/`high` are K-weighted band magnitude (globally normalized
-    /// 0–255) — the RGB ratio is the bin's spectral balance, driving the spectrum
-    /// color mode. `loudness` is K-weighted (ITU-R BS.1770) RMS in dB, normalized
-    /// over a fixed window below the track's loudest bin — driving the energy
-    /// color mode so it tracks *perceived* loudness. See `analysis::waveform`.
-    /// Empty until (re)analyzed under analyzer v11+ (v10 stored 3 bytes/bin with
-    /// no loudness; the GUI treats the wrong stride as "no band data").
+    /// Per-bin colored-waveform data: `[low, mid, high, loudness]` quads
+    /// (`4 × WAVE_COLOR_BINS` bytes). `low`/`mid`/`high` are *raw* band RMS
+    /// amplitude (sqrt-companded, globally normalized 0–255) — the per-band
+    /// waveform heights drawn overlaid in the spectrum mode (bass tall, hi-hats a
+    /// small high-band spike). `loudness` is K-weighted (ITU-R BS.1770) RMS in dB,
+    /// driving the energy color mode so it tracks *perceived* loudness. See
+    /// `analysis::waveform`. Empty until (re)analyzed; the GUI ignores pre-v11
+    /// data (which had a different stride/semantics).
     pub waveform_bands: Vec<u8>,
     pub peak: Option<f32>,
     pub integrated_loudness_lufs: Option<f32>,

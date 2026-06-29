@@ -600,6 +600,9 @@ impl App {
         // recorded into `header_clicked` and applied after the table.
         let cur_sort = self.sort;
         let mut header_clicked: Option<SortColumn> = None;
+        // Set when the Waveform header's mode toggle is clicked: flip the inline
+        // waveform colouring between energy and frequency after the table.
+        let mut toggle_waveform_mode = false;
         // Which columns have an active per-column filter — snapshotted so the
         // header closure can mark them (a ⌕ glyph) without borrowing `self`.
         let filtered_cols: HashSet<TableColumn> = self.col_filters.keys().copied().collect();
@@ -749,7 +752,47 @@ impl App {
                                 if col != TableColumn::Cover {
                                     observed_widths.push((col, ui.max_rect().width()));
                                 }
-                                let resp = match col.sort_column() {
+                                let resp = if col == TableColumn::Waveform {
+                                    // The Waveform header carries no sort/title.
+                                    // Instead it hosts a small toggle that flips the
+                                    // inline waveform's colouring between energy
+                                    // (loudness) and frequency (spectrum). A full-cell
+                                    // interact underneath keeps right-click → reorder
+                                    // working; the button is painted on top for the
+                                    // click and shows the *current* mode's glyph.
+                                    let resp = ui.interact(
+                                        ui.max_rect(),
+                                        ui.id().with(("hdr", col)),
+                                        egui::Sense::click(),
+                                    );
+                                    let (glyph, tip) = match waveform_color_mode {
+                                        config::WaveformColorMode::Energy => (
+                                            "▮",
+                                            "Energy waveform (loudness) · click for frequency",
+                                        ),
+                                        config::WaveformColorMode::Spectrum => (
+                                            "≋",
+                                            "Frequency waveform (spectrum) · click for energy",
+                                        ),
+                                    };
+                                    let cell = ui.max_rect();
+                                    let btn_rect = egui::Rect::from_min_size(
+                                        egui::pos2(cell.left() + 2.0, cell.center().y - 9.0),
+                                        egui::vec2(22.0, 18.0),
+                                    );
+                                    let btn = ui
+                                        .put(btn_rect, egui::Button::new(glyph).small())
+                                        .on_hover_text(tip);
+                                    if btn.hovered() {
+                                        ui.ctx()
+                                            .set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if btn.clicked() {
+                                        toggle_waveform_mode = true;
+                                    }
+                                    resp
+                                } else {
+                                    match col.sort_column() {
                                     // Cover: no label, but the whole cell still opens
                                     // the reorder menu on right-click.
                                     None => ui.interact(
@@ -1873,8 +1916,12 @@ pub(crate) fn load_rows(
                 .as_ref()
                 .map(|a| a.waveform_preview.clone())
                 .unwrap_or_default(),
+            // Only the v11+ layout is the 4-byte `[low, mid, high, loudness]`
+            // stride the renderer expects; older data had a different stride and
+            // would be misread, so treat it as absent (the cell falls back).
             waveform_bands: analysis
                 .as_ref()
+                .filter(|a| a.analyzer_version >= 11)
                 .map(|a| a.waveform_bands.clone())
                 .unwrap_or_default(),
             source_path: PathBuf::from(t.source_path),

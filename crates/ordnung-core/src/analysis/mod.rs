@@ -37,7 +37,10 @@ use std::path::Path;
 ///     `[low, mid, high, loudness]`; loudness is K-weighted (BS.1770) RMS in dB,
 ///     so the energy mode tracks *perceived* loudness instead of raw, bass-
 ///     dominated, linear magnitude.
-pub const ANALYZER_VERSION: u32 = 11;
+/// v12: multiband colored waveform — band bytes are now *raw* RMS amplitude
+///     (sqrt-companded) at higher time resolution (`WAVE_COLOR_BINS`), drawn as
+///     three overlaid per-band waveforms; loudness byte stays K-weighted.
+pub const ANALYZER_VERSION: u32 = 12;
 
 /// How much audio to feed the analyzers. Steady-tempo material needs only a
 /// representative window, which keeps decoding fast.

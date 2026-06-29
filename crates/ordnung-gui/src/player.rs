@@ -48,7 +48,15 @@ impl App {
                 .and_then(|c| c.get_analysis(id))
                 .ok()
                 .flatten()
-                .map(|a| (a.waveform_preview, a.waveform_bands))
+                .map(|a| {
+                    // Only the v11+ 4-byte stride is what the renderer expects.
+                    let bands = if a.analyzer_version >= 11 {
+                        a.waveform_bands
+                    } else {
+                        Vec::new()
+                    };
+                    (a.waveform_preview, bands)
+                })
                 .unwrap_or_default();
             self.now_playing = Some(NowPlaying {
                 id,
@@ -379,13 +387,25 @@ pub(crate) fn fmt_duration(ms: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-/// Paint a colored waveform: one vertical bar per screen column, height from the
-/// peak envelope (`waveform`), color from `mode`. With `played_frac = Some(f)` the
-/// portion left of `f` is full brightness and the rest is dimmed (the player's
-/// playhead); `None` paints every bar full brightness (table cells, no playhead).
-/// Bands (`[low, mid, high]` per bin) drive both color modes; if absent, both
-/// degrade to a height ramp so an unanalyzed-under-v10 track still shows a sane
-/// waveform.
+/// Per-band colors for the spectrum (multiband) waveform: low→red, mid→green,
+/// high→light blue (the Serato/rekordbox convention).
+const BAND_COLORS: [egui::Color32; 3] = [
+    egui::Color32::from_rgb(232, 76, 60),  // low / bass
+    egui::Color32::from_rgb(95, 200, 95),  // mid
+    egui::Color32::from_rgb(95, 175, 235), // high
+];
+
+/// Paint a colored waveform: one vertical bar per screen column. With
+/// `played_frac = Some(f)` the portion left of `f` is full brightness and the
+/// rest is dimmed (the player's playhead); `None` paints every bar full
+/// brightness (table cells, no playhead).
+///
+/// In **spectrum** mode each of the three bands (`[low, mid, high]`, RMS heights
+/// from core `color_bands`) is drawn as its own waveform, overlaid tallest-first
+/// so the shorter bands sit visibly in the centre — bass shows big, a hi-hat
+/// shows as a small high-band spike. In **energy** mode a single envelope (the
+/// loudest band) is colored by K-weighted loudness. Without band data both fall
+/// back to the peak envelope (`waveform`) on a height ramp.
 pub(crate) fn draw_waveform(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -396,16 +416,9 @@ pub(crate) fn draw_waveform(
 ) {
     // Bands are `[low, mid, high, loudness]` per bin (see core `color_bands`).
     const STRIDE: usize = 4;
+    let nb = bands.len() / STRIDE;
+    let has_bands = nb > 0 && bands.len() % STRIDE == 0;
     let n = waveform.len();
-    let has_bands = bands.len() >= STRIDE * n && n > 0;
-    // Spectral balance (hue) for a bin.
-    let triple = |i: usize| -> (f32, f32, f32) {
-        let b = &bands[STRIDE * i..STRIDE * i + 3];
-        (b[0] as f32, b[1] as f32, b[2] as f32)
-    };
-    // Perceptual (K-weighted) loudness for a bin, already dB-normalized 0..1 at
-    // analysis time — drives the energy gradient.
-    let loudness = |i: usize| bands[STRIDE * i + 3] as f32 / 255.0;
 
     let y = rect.center().y;
     let (x0, x1) = (rect.left(), rect.right());
@@ -413,34 +426,46 @@ pub(crate) fn draw_waveform(
     let cols = (x1 - x0).floor().max(1.0) as usize;
     for cx in 0..cols {
         let frac = (cx as f32 + 0.5) / cols as f32;
-        let i = ((frac * n as f32) as usize).min(n - 1);
-        let amp = waveform[i] as f32 / 255.0;
-        let h = (amp * half).max(1.0);
         let played = played_frac.map_or(true, |p| frac <= p);
-
-        let base = match mode {
-            config::WaveformColorMode::Spectrum if has_bands => {
-                let (l, m, hi) = triple(i);
-                // Additive RGB from the band balance: low→red, mid→green, high→
-                // blue. Normalize to the strongest band so the hue stays vivid
-                // regardless of absolute loudness (amplitude is already in `h`).
-                let mx = l.max(m).max(hi).max(1.0);
-                egui::Color32::from_rgb(
-                    (l / mx * 255.0) as u8,
-                    (m / mx * 255.0) as u8,
-                    (hi / mx * 255.0) as u8,
-                )
-            }
-            config::WaveformColorMode::Energy if has_bands => energy_color(loudness(i)),
-            // No band data: fall back to a height-driven energy ramp.
-            _ => energy_color(amp),
-        };
-        let color = if played { base } else { dim(base, 0.4) };
         let x = x0 + cx as f32;
-        painter.line_segment(
-            [egui::pos2(x, y - h), egui::pos2(x, y + h)],
-            egui::Stroke::new(1.0, color),
-        );
+        let bar = |painter: &egui::Painter, h: f32, c: egui::Color32| {
+            let c = if played { c } else { dim(c, 0.4) };
+            painter.line_segment(
+                [egui::pos2(x, y - h), egui::pos2(x, y + h)],
+                egui::Stroke::new(1.0, c),
+            );
+        };
+
+        if has_bands {
+            let bi = ((frac * nb as f32) as usize).min(nb - 1);
+            let b = &bands[STRIDE * bi..STRIDE * bi + 4];
+            match mode {
+                config::WaveformColorMode::Spectrum => {
+                    // Draw the three bands tallest-first so the shortest ends up
+                    // on top, visible in the centre of the taller ones.
+                    let mut layers = [
+                        (b[0] as f32 / 255.0, BAND_COLORS[0]),
+                        (b[1] as f32 / 255.0, BAND_COLORS[1]),
+                        (b[2] as f32 / 255.0, BAND_COLORS[2]),
+                    ];
+                    layers.sort_by(|a, c| c.0.total_cmp(&a.0));
+                    for (v, col) in layers {
+                        bar(painter, (v * half).max(0.4), col);
+                    }
+                }
+                config::WaveformColorMode::Energy => {
+                    // Envelope = loudest band; colour = K-weighted loudness.
+                    let env = (b[0].max(b[1]).max(b[2])) as f32 / 255.0;
+                    let loud = b[3] as f32 / 255.0;
+                    bar(painter, (env * half).max(0.5), energy_color(loud));
+                }
+            }
+        } else if n > 0 {
+            // No band data: peak envelope on a height ramp.
+            let i = ((frac * n as f32) as usize).min(n - 1);
+            let amp = waveform[i] as f32 / 255.0;
+            bar(painter, (amp * half).max(1.0), energy_color(amp));
+        }
     }
 }
 
