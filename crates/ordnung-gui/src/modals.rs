@@ -681,9 +681,10 @@ impl App {
 
                                 ui.add_space(10.0);
                                 if ui
-                                    .button("Reset to defaults")
+                                    .button("Reset all to defaults")
                                     .on_hover_text(
-                                        "Restore the built-in waveform rendering and colors.",
+                                        "Restore every waveform section above to its built-in \
+                                         defaults.",
                                     )
                                     .clicked()
                                 {

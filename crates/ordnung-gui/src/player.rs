@@ -766,6 +766,12 @@ const HIRES_BINS_PER_SEC: f32 = 2000.0;
 /// it stands above its local neighbors and eases the shoulders down, so the attack
 /// rises to a sharper point. `0` disables; higher is pointier.
 const TRANSIENT_SHARPEN: f32 = 0.85;
+/// Transient sharpening for the **low** band specifically. Nudged above the shared
+/// [`TRANSIENT_SHARPEN`] so a kick's attack spikes harder and its sustained tail —
+/// lingering sub/bass — gets pulled down faster: the unsharp mask lifts the peak
+/// where it stands above the local mean and eases the shoulders down more, which
+/// reads as a sharper attack with a faster release than the mid/high bands.
+const LOW_TRANSIENT_SHARPEN: f32 = 1.15;
 /// Half-window (in hi-res bins) of the unsharp-mask reference blur. At
 /// [`HIRES_BINS_PER_SEC`] this spans ~3 ms each side — the timescale of a
 /// percussive attack's shoulders, so the blur tracks the hump the peak sits on
@@ -864,7 +870,7 @@ pub(crate) fn compute_hires_bands(
 
     // Sharpen each band's peak track so percussive attacks read as pointed spikes
     // rather than the rounded humps their decay would otherwise smear them into.
-    sharpen_peaks(&mut peak_lo, SHARPEN_RADIUS, TRANSIENT_SHARPEN);
+    sharpen_peaks(&mut peak_lo, SHARPEN_RADIUS, LOW_TRANSIENT_SHARPEN);
     sharpen_peaks(&mut peak_md, SHARPEN_RADIUS, TRANSIENT_SHARPEN);
     sharpen_peaks(&mut peak_hi, SHARPEN_RADIUS, TRANSIENT_SHARPEN);
 
