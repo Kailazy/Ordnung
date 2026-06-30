@@ -515,12 +515,7 @@ impl App {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
             }
             let grip_painter = ui.painter();
-            // Opaque dark backing keeps the pill legible over bright bars.
-            grip_painter.rect_filled(
-                egui::Rect::from_center_size(grip_center, egui::vec2(grip_w + 12.0, 11.0)),
-                egui::Rounding::same(5.0),
-                egui::Color32::from_gray(26),
-            );
+            // Just the gray pill, floating see-through over the lane (no backing box).
             let pill_color = if grip.hovered() || grip.dragged() {
                 egui::Color32::from_gray(220)
             } else {
