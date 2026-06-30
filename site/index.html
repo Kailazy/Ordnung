@@ -6,7 +6,6 @@
 <title>Ordnung — DJ catalog, analyzer & rekordbox/CDJ USB exporter</title>
 <meta name="description" content="A fast, self-sufficient DJ music catalog, analyzer, and rekordbox/CDJ USB exporter written in Rust. Tempo, beatgrids, Camelot key, waveforms — without rekordbox." />
 
-<!-- Open Graph / social -->
 <meta property="og:title" content="Ordnung" />
 <meta property="og:description" content="A fast, self-sufficient DJ music catalog, analyzer, and rekordbox/CDJ USB exporter — written in Rust." />
 <meta property="og:type" content="website" />
@@ -15,20 +14,24 @@
 
 <style>
   :root {
-    --bg: #161718;
-    --panel: #1d1f22;
-    --panel-2: #232529;
+    /* pulled straight from the egui app's palette */
+    --bg: #141414;            /* from_gray(20) */
+    --panel: #1d1d1d;
+    --panel-2: #212121;
+    --hover: #292929;         /* gray 0x29 */
+    --line: #333333;          /* ~from_gray(51) */
+    --line-soft: #262626;
     --squircle: #42454b;
-    --accent: #93a6bf;
-    --accent-soft: rgba(147, 166, 191, 0.14);
-    --text: #dadce1;
-    --muted: #8b8f98;
-    --line: rgba(255, 255, 255, 0.07);
-    --radius: 16px;
+    --accent: #406eb4;        /* NAV_ACCENT rgb(64,110,180) */
+    --accent-bright: #5a96dc; /* selection stroke rgb(90,150,220) */
+    --text: #d6d6d6;
+    --muted: #888888;         /* from_gray(120-ish) */
+    --good: #4e9a5e;
+    --radius: 6px;            /* egui Rounding::same(6.0) */
+    --mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
 
   * { box-sizing: border-box; }
-
   html { scroll-behavior: smooth; }
 
   body {
@@ -36,264 +39,228 @@
     background: var(--bg);
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
-    line-height: 1.6;
+    font-size: 15px;
+    line-height: 1.55;
     -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
   }
 
-  /* subtle halo behind hero, echoing the icon's fuzzed "O" */
-  body::before {
-    content: "";
-    position: fixed;
-    top: -30vh;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 90vw;
-    max-width: 900px;
-    height: 70vh;
-    background: radial-gradient(circle, var(--accent-soft) 0%, transparent 68%);
-    pointer-events: none;
-    z-index: 0;
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 20px; }
+
+  a { color: var(--accent-bright); }
+
+  /* ---- app-window frame ---- */
+  .app {
+    margin: 46px auto 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    overflow: hidden;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.55);
   }
 
-  .wrap {
-    position: relative;
-    z-index: 1;
-    max-width: 920px;
-    margin: 0 auto;
-    padding: 0 24px;
+  /* titlebar like the app chrome */
+  .titlebar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    background: #1a1a1a;
+    border-bottom: 1px solid var(--line);
+  }
+  .lights { display: flex; gap: 7px; }
+  .lights i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+  .lights i:nth-child(1) { background: #5a5a5a; }
+  .lights i:nth-child(2) { background: #4a4a4a; }
+  .lights i:nth-child(3) { background: #3f3f3f; }
+  .titlebar span {
+    font-size: 12px; color: var(--muted); margin-left: 4px;
+    font-family: var(--mono); letter-spacing: 0.02em;
   }
 
-  /* ---------- hero ---------- */
-  header.hero {
-    text-align: center;
-    padding: 92px 24px 64px;
-  }
+  /* ---- hero body ---- */
+  .hero { padding: 40px 32px 30px; text-align: center; }
 
-  .mark {
-    width: 112px;
-    height: 112px;
-    display: block;
-    margin: 0 auto 28px;
-    filter: drop-shadow(0 12px 30px rgba(0, 0, 0, 0.45));
-  }
+  .mark { width: 84px; height: 84px; display: block; margin: 0 auto 18px; }
 
   h1 {
-    font-size: clamp(2.6rem, 7vw, 4rem);
     margin: 0;
-    letter-spacing: -0.03em;
-    font-weight: 650;
+    font-size: 2.4rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
     color: #fff;
   }
+  .tagline { margin: 10px auto 0; max-width: 520px; color: var(--muted); font-size: 1.02rem; }
+  .tagline b { color: var(--text); font-weight: 600; }
 
-  .tagline {
-    font-size: clamp(1.05rem, 2.4vw, 1.3rem);
-    color: var(--muted);
-    max-width: 640px;
-    margin: 18px auto 0;
-    font-weight: 400;
-  }
-
-  .tagline strong { color: var(--text); font-weight: 550; }
-
-  /* ---------- buttons ---------- */
-  .cta {
-    margin-top: 40px;
+  /* ---- waveform strip: the app's signature element ---- */
+  .wave {
+    height: 64px;
+    margin: 26px 0 4px;
     display: flex;
-    gap: 14px;
-    justify-content: center;
-    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+    padding: 0 2px;
+    border-radius: var(--radius);
+    background: #161616;
+    border: 1px solid var(--line-soft);
+    overflow: hidden;
+  }
+  .wave i {
+    flex: 1 1 0;
+    border-radius: 1px;
+    background: var(--accent);
+    opacity: 0.85;
+    min-width: 0;
   }
 
+  /* ---- buttons ---- */
+  .cta { display: flex; gap: 10px; justify-content: center; margin-top: 28px; flex-wrap: wrap; }
   .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    padding: 14px 26px;
-    border-radius: 12px;
-    font-size: 1rem;
-    font-weight: 550;
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 10px 20px;
+    border-radius: var(--radius);
+    font-size: 0.95rem; font-weight: 550;
     text-decoration: none;
     border: 1px solid transparent;
-    transition: transform 0.12s ease, background 0.2s ease, border-color 0.2s ease;
+    transition: background 0.15s ease, border-color 0.15s ease;
   }
-  .btn:active { transform: translateY(1px); }
+  .btn svg { width: 17px; height: 17px; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-bright); }
+  .btn-ghost { background: var(--panel-2); color: var(--text); border-color: var(--line); }
+  .btn-ghost:hover { background: var(--hover); }
 
-  .btn-primary {
-    background: var(--accent);
-    color: #15171a;
-  }
-  .btn-primary:hover { background: #a7b8cf; }
+  .platform-note { margin-top: 14px; font-size: 0.82rem; color: var(--muted); }
+  .platform-note code { font-family: var(--mono); color: #aab6c4; }
 
-  .btn-ghost {
-    background: transparent;
-    color: var(--text);
-    border-color: var(--line);
-  }
-  .btn-ghost:hover { background: var(--panel-2); border-color: rgba(255,255,255,0.16); }
-
-  .btn svg { width: 18px; height: 18px; }
-
-  .platform-note {
-    margin-top: 16px;
-    font-size: 0.86rem;
-    color: var(--muted);
-  }
-
-  /* ---------- sections ---------- */
-  section { padding: 28px 0; }
-
+  /* ---- sections under the window ---- */
+  section { margin-top: 40px; }
   h2 {
-    font-size: 0.82rem;
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
-    color: var(--muted);
-    font-weight: 600;
-    margin: 0 0 22px;
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.16em;
+    color: var(--muted); font-weight: 600; margin: 0 0 14px; padding-left: 2px;
   }
 
-  /* ---------- feature grid ---------- */
-  .features {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    gap: 14px;
+  /* feature rows — dense, like catalog rows */
+  .rows {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--panel); overflow: hidden;
   }
-
-  .card {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    padding: 22px 22px 24px;
+  .row {
+    display: flex; gap: 14px; align-items: flex-start;
+    padding: 15px 18px;
+    border-bottom: 1px solid var(--line-soft);
   }
-  .card h3 {
-    margin: 0 0 8px;
-    font-size: 1.02rem;
-    font-weight: 600;
-    color: #fff;
-  }
-  .card p {
-    margin: 0;
-    font-size: 0.92rem;
-    color: var(--muted);
-  }
-  .card .ic {
-    width: 30px; height: 30px;
-    border-radius: 9px;
-    background: var(--accent-soft);
-    color: var(--accent);
+  .row:last-child { border-bottom: none; }
+  .row:hover { background: var(--hover); }
+  .row .k {
+    flex: 0 0 22px; height: 22px; margin-top: 1px;
+    color: var(--accent-bright); font-size: 15px;
     display: flex; align-items: center; justify-content: center;
-    margin-bottom: 14px;
-    font-size: 16px;
+  }
+  .row .t b { color: #fff; font-weight: 600; display: block; font-size: 0.98rem; }
+  .row .t span { color: var(--muted); font-size: 0.9rem; }
+
+  /* camelot chip row, a nod to the key feature */
+  .chips { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+  .chip {
+    font-family: var(--mono); font-size: 0.74rem; color: #cdd6e2;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 4px; padding: 1px 7px;
   }
 
-  /* ---------- install ---------- */
+  /* install */
   .install {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    padding: 26px 28px;
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--panel); padding: 20px 22px;
   }
   .install ol { margin: 0; padding-left: 20px; }
-  .install li { margin: 8px 0; color: var(--text); }
-  .install li::marker { color: var(--accent); font-weight: 600; }
+  .install li { margin: 7px 0; }
+  .install li::marker { color: var(--accent-bright); }
   code {
-    font-family: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.86em;
-    background: var(--panel-2);
-    border: 1px solid var(--line);
-    padding: 2px 7px;
-    border-radius: 6px;
-    color: #c9d4e3;
+    font-family: var(--mono); font-size: 0.85em;
+    background: var(--panel-2); border: 1px solid var(--line);
+    padding: 1px 6px; border-radius: 4px; color: #cdd6e2;
   }
-  .install .why {
-    margin-top: 18px;
-    padding-top: 16px;
-    border-top: 1px solid var(--line);
-    font-size: 0.86rem;
-    color: var(--muted);
-  }
+  .install .why { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line-soft); font-size: 0.85rem; color: var(--muted); }
 
-  /* ---------- footer ---------- */
   footer {
-    text-align: center;
-    padding: 56px 24px 72px;
-    color: var(--muted);
-    font-size: 0.88rem;
-    border-top: 1px solid var(--line);
-    margin-top: 32px;
+    margin-top: 44px; padding: 26px 0 56px;
+    text-align: center; color: var(--muted); font-size: 0.85rem;
+    border-top: 1px solid var(--line-soft);
   }
-  footer a { color: var(--accent); text-decoration: none; }
+  footer a { text-decoration: none; }
   footer a:hover { text-decoration: underline; }
-  .footer-links { margin-bottom: 12px; display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; }
+  .footer-links { display: flex; gap: 18px; justify-content: center; margin-bottom: 10px; flex-wrap: wrap; }
 </style>
 </head>
 <body>
 
 <div class="wrap">
-  <header class="hero">
-    <svg class="mark" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-      <defs>
-        <filter id="fuzz" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB">
-          <feGaussianBlur stdDeviation="22"/>
-        </filter>
-      </defs>
-      <rect x="100" y="100" width="824" height="824" rx="184" fill="#42454b"/>
-      <path d="M512 257 A255 255 0 1 0 512 767 A255 255 0 1 0 512 257 Z M512 337 A175 175 0 1 1 512 687 A175 175 0 1 1 512 337 Z"
-            fill="#93a6bf" fill-rule="evenodd" filter="url(#fuzz)"/>
-      <rect x="424" y="490" width="176" height="35" rx="17" fill="#93a6bf"/>
-    </svg>
-
-    <h1>Ordnung</h1>
-    <p class="tagline">
-      A fast, self-sufficient DJ music catalog, analyzer, and
-      <strong>rekordbox / CDJ USB exporter</strong> — written in Rust.
-    </p>
-
-    <div class="cta">
-      <a class="btn btn-primary" href="https://github.com/Kailazy/Ordnung/releases/latest" id="download">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
-        Download for macOS
-      </a>
-      <a class="btn btn-ghost" href="https://github.com/Kailazy/Ordnung">
-        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.7.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 016 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .4.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
-        View on GitHub
-      </a>
+  <div class="app">
+    <div class="titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <span>Ordnung</span>
     </div>
-    <p class="platform-note">Universal macOS <code>.dmg</code> — Apple Silicon + Intel. Requires macOS 11+.</p>
-  </header>
+
+    <div class="hero">
+      <svg class="mark" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <defs>
+          <filter id="fuzz" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB">
+            <feGaussianBlur stdDeviation="20"/>
+          </filter>
+        </defs>
+        <rect x="100" y="100" width="824" height="824" rx="184" fill="#42454b"/>
+        <path d="M512 257 A255 255 0 1 0 512 767 A255 255 0 1 0 512 257 Z M512 337 A175 175 0 1 1 512 687 A175 175 0 1 1 512 337 Z"
+              fill="#93a6bf" fill-rule="evenodd" filter="url(#fuzz)"/>
+        <rect x="424" y="490" width="176" height="35" rx="17" fill="#93a6bf"/>
+      </svg>
+
+      <h1>Ordnung</h1>
+      <p class="tagline">
+        A fast, self-sufficient DJ music catalog, analyzer, and
+        <b>rekordbox / CDJ USB exporter</b> — written in Rust.
+      </p>
+
+      <div class="wave" id="wave" aria-hidden="true"></div>
+
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/Kailazy/Ordnung/releases/latest">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
+          Download for macOS
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/Kailazy/Ordnung">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.7.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 016 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .4.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
+          GitHub
+        </a>
+      </div>
+      <p class="platform-note">Universal <code>.dmg</code> — Apple Silicon + Intel · macOS 11+</p>
+    </div>
+  </div>
 
   <section>
     <h2>What it does</h2>
-    <div class="features">
-      <div class="card">
-        <div class="ic">♪</div>
-        <h3>Catalog your library</h3>
-        <p>Scans your music and builds a fast SQLite catalog — the single source of truth, with duplicate and missing-file detection.</p>
+    <div class="rows">
+      <div class="row">
+        <div class="k">♪</div>
+        <div class="t"><b>Catalog your library</b><span>Scans your music into a fast SQLite catalog — the single source of truth, with duplicate and missing-file detection.</span></div>
       </div>
-      <div class="card">
-        <div class="ic">◷</div>
-        <h3>Analyze everything</h3>
-        <p>Tempo, beatgrids, musical key, waveforms and loudness — computed on its own with pure-Rust decoders.</p>
+      <div class="row">
+        <div class="k">◷</div>
+        <div class="t"><b>Analyze everything</b><span>Tempo, beatgrids, key, waveforms and loudness — computed on its own with pure-Rust decoders.</span></div>
       </div>
-      <div class="card">
-        <div class="ic">◆</div>
-        <h3>Camelot keys</h3>
-        <p>Detects musical key and renders it as Camelot by default, so harmonic mixing is built into your catalog.</p>
+      <div class="row">
+        <div class="k">◆</div>
+        <div class="t"><b>Camelot keys</b><span>Detects musical key and renders it as Camelot by default, so harmonic mixing is built in.</span>
+          <div class="chips"><span class="chip">8A</span><span class="chip">8B</span><span class="chip">9A</span><span class="chip">5A</span><span class="chip">12B</span></div>
+        </div>
       </div>
-      <div class="card">
-        <div class="ic">⇲</div>
-        <h3>rekordbox / CDJ export</h3>
-        <p>Generates a native rekordbox USB the CDJs can read — export.pdb and ANLZ analysis — without rekordbox itself.</p>
+      <div class="row">
+        <div class="k">⇲</div>
+        <div class="t"><b>rekordbox / CDJ export</b><span>Generates a native rekordbox USB the CDJs can read — export.pdb and ANLZ analysis — without rekordbox itself.</span></div>
       </div>
-      <div class="card">
-        <div class="ic">⌘</div>
-        <h3>Native desktop app</h3>
-        <p>A fast egui app with an interactive waveform and zoom lane. A matching CLI exposes the same engine for scripting.</p>
-      </div>
-      <div class="card">
-        <div class="ic">⛉</div>
-        <h3>Source files are sacred</h3>
-        <p>Tag writes and conversions are opt-in. Deletes go to the OS Trash — never a hard remove. Your originals stay untouched.</p>
+      <div class="row">
+        <div class="k">⛉</div>
+        <div class="t"><b>Source files are sacred</b><span>Tag writes and conversions are opt-in. Deletes go to the OS Trash — never a hard remove.</span></div>
       </div>
     </div>
   </section>
@@ -303,26 +270,51 @@
     <div class="install">
       <ol>
         <li>Download the latest <code>.dmg</code> and open it.</li>
-        <li>Drag <strong>Ordnung</strong> into your <strong>Applications</strong> folder.</li>
-        <li>First launch only: right-click <code>Ordnung.app</code> → <strong>Open</strong> → <strong>Open</strong>.</li>
+        <li>Drag <b>Ordnung</b> into your <b>Applications</b> folder.</li>
+        <li>First launch only: right-click <code>Ordnung.app</code> → <b>Open</b> → <b>Open</b>.</li>
       </ol>
       <p class="why">
         The one-time right-click is needed because the build is ad-hoc signed, not notarized by Apple —
-        macOS Gatekeeper warns once on apps from unidentified developers, then trusts it from then on.
-        You can also run <code>xattr -dr com.apple.quarantine /Applications/Ordnung.app</code>.
+        macOS warns once on apps from unidentified developers, then trusts it. Or run
+        <code>xattr -dr com.apple.quarantine /Applications/Ordnung.app</code>.
       </p>
     </div>
   </section>
+
+  <footer>
+    <div class="footer-links">
+      <a href="https://github.com/Kailazy/Ordnung">GitHub</a>
+      <a href="https://github.com/Kailazy/Ordnung/releases/latest">Releases</a>
+      <a href="https://github.com/Kailazy/Ordnung/blob/main/README.md">Docs</a>
+    </div>
+    Free and open source under the MIT license.
+  </footer>
 </div>
 
-<footer>
-  <div class="footer-links">
-    <a href="https://github.com/Kailazy/Ordnung">GitHub</a>
-    <a href="https://github.com/Kailazy/Ordnung/releases/latest">Releases</a>
-    <a href="https://github.com/Kailazy/Ordnung/blob/main/README.md">Docs</a>
-  </div>
-  Ordnung is free and open source under the MIT license.
-</footer>
+<script>
+  // Build a static waveform strip echoing the app's spectrum view.
+  // Deterministic shape (no randomness) — a couple of musical "swells".
+  (function () {
+    var wave = document.getElementById("wave");
+    if (!wave) return;
+    var N = 96;
+    for (var i = 0; i < N; i++) {
+      var x = i / N;
+      // two overlapping envelopes + a fine ripple, all in [0,1]
+      var env = 0.45
+        + 0.40 * Math.sin(x * Math.PI)                 // overall swell
+        + 0.18 * Math.sin(x * Math.PI * 7 + 0.6)       // mid detail
+        + 0.10 * Math.sin(x * Math.PI * 23 + 1.2);     // fine ripple
+      env = Math.max(0.10, Math.min(1, env));
+      var bar = document.createElement("i");
+      bar.style.height = (env * 100).toFixed(1) + "%";
+      // tint shifts subtly toward the bright accent at peaks (spectrum feel)
+      bar.style.opacity = (0.55 + env * 0.4).toFixed(2);
+      if (env > 0.8) bar.style.background = "var(--accent-bright)";
+      wave.appendChild(bar);
+    }
+  })();
+</script>
 
 </body>
 </html>
