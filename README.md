@@ -50,6 +50,21 @@ phased roadmap.
   rendering, plus Xcode command-line tools. `brew install librsvg`.
 - **Linux:** `libdbus` for media-key integration (`apt install libdbus-1-dev`).
 
+## Download (macOS)
+
+Grab the latest universal `.dmg` from the
+[**Releases**](../../releases/latest) page (Apple Silicon + Intel in one build):
+
+1. Open the `.dmg` and drag **Ordnung** into **Applications**.
+2. First launch only: right-click `Ordnung.app` → **Open** → **Open**.
+   (Or run `xattr -dr com.apple.quarantine /Applications/Ordnung.app`.)
+
+The one-time right-click is needed because the build is ad-hoc signed, not
+notarized by Apple — Gatekeeper warns once on apps from unidentified developers,
+then trusts it. Releases are cut by pushing a `vX.Y.Z` tag, which runs
+[.github/workflows/release.yml](.github/workflows/release.yml) to build and
+attach the DMG.
+
 ## Build & run
 
 ```bash
@@ -70,7 +85,10 @@ make app-only   # build + ad-hoc sign the local Ordnung.app, don't touch /Applic
 
 `make app` rasterizes the icon, assembles `Ordnung.app`, and ad-hoc codesigns it
 with a stable identity so file-access/media-key permissions and the custom icon
-persist across rebuilds. See [tools/build-app.sh](tools/build-app.sh).
+persist across rebuilds. See [tools/build-app.sh](tools/build-app.sh), which also
+takes `--universal` (fat arm64+x86_64 binary), `--dmg` (package a
+drag-to-Applications `Ordnung.dmg`), and `--version=X.Y.Z`. The release CI runs
+`build-app.sh --no-install --no-launch --universal --dmg --version=<tag>`.
 
 ## CLI usage
 

@@ -12,8 +12,11 @@ Cargo.lock.orig
 # macOS cruft
 .DS_Store
 
-# Built app bundle — regenerate with tools/build-app.sh
+# Built app bundle + DMG — regenerate with tools/build-app.sh
 /Ordnung.app/
+/Ordnung.dmg
+/tools/.app-build/
+/tools/.dmg-build/
 
 # Local secrets — Discogs token etc. The committed .env.example is the template.
 /.env

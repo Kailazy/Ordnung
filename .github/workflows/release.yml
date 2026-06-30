@@ -1,0 +1,82 @@
+name: Release
+
+# Push a version tag (e.g. `git tag v0.0.2 && git push origin v0.0.2`) to build a
+# universal macOS DMG and publish it as a GitHub Release that DJs can download.
+# `workflow_dispatch` lets you dry-run a build (artifact only, no Release) by hand.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to stamp (e.g. 0.0.2). No Release is published on manual runs.'
+        required: false
+        default: '0.0.0'
+
+permissions:
+  contents: write   # needed to create the Release and upload the DMG
+
+jobs:
+  macos-dmg:
+    runs-on: macos-14   # Apple Silicon runner; cross-builds x86_64 too
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install rsvg-convert (icon rendering)
+        run: brew install librsvg
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ -n "${GITHUB_REF_NAME:-}" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            ver="${GITHUB_REF_NAME#v}"
+          else
+            ver="${{ github.event.inputs.version }}"
+          fi
+          [ -z "$ver" ] && ver="0.0.0"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "Building version $ver"
+
+      - name: Build universal DMG
+        run: bash tools/build-app.sh --no-install --no-launch --universal --dmg --version=${{ steps.ver.outputs.version }}
+
+      - name: Name the artifact
+        run: mv Ordnung.dmg "Ordnung-${{ steps.ver.outputs.version }}-macos-universal.dmg"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ordnung-macos-universal
+          path: Ordnung-*.dmg
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Ordnung-*.dmg
+          name: Ordnung ${{ github.ref_name }}
+          body: |
+            **Universal macOS build** (Apple Silicon + Intel), ad-hoc signed.
+
+            ### Install
+            1. Open the `.dmg` and drag **Ordnung** into **Applications**.
+            2. First launch only: right-click `Ordnung.app` → **Open** → **Open**.
+               (Or run `xattr -dr com.apple.quarantine /Applications/Ordnung.app`.)
+
+            The right-click step is needed because this build isn't notarized by
+            Apple — macOS Gatekeeper warns once on apps from unidentified
+            developers, then trusts it from then on.

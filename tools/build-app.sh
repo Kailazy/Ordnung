@@ -5,13 +5,18 @@
 #   tools/build-app.sh            # build → sign → install to /Applications → relaunch
 #   tools/build-app.sh --no-install   # build the local Ordnung.app only, don't touch /Applications
 #   tools/build-app.sh --no-launch    # install but don't relaunch the app
+#   tools/build-app.sh --universal    # build a fat arm64+x86_64 binary (runs on any Mac)
+#   tools/build-app.sh --dmg          # also package Ordnung.dmg (drag-to-Applications)
+#   tools/build-app.sh --version=X.Y.Z  # stamp this version into Info.plist / DMG name
+#   # The release CI uses: --no-install --no-launch --universal --dmg --version=<tag>
 #
 # What it does:
-#   1. cargo build --release -p ordnung-gui
+#   1. cargo build --release -p ordnung-gui (both arches + lipo, when --universal)
 #   2. Rasterizes tools/icon.svg → 1024×1024 PNG, regenerates the iconset → .icns
 #   3. Assembles the .app (Contents/MacOS, Resources, Info.plist)
 #   4. Deep ad-hoc codesigns with a stable identity (icon + permissions persist)
-#   5. Installs to /Applications, registers with LaunchServices, relaunches
+#   5. Optionally packages a compressed .dmg (--dmg)
+#   6. Installs to /Applications, registers with LaunchServices, relaunches
 #
 # Run it any time after editing the GUI; one command refreshes the Dock app.
 
@@ -19,10 +24,16 @@ set -euo pipefail
 
 install=1
 launch=1
+universal=0
+make_dmg=0
+version=""
 for arg in "$@"; do
   case "$arg" in
     --no-install) install=0 ;;
     --no-launch)  launch=0 ;;
+    --universal)  universal=1 ;;
+    --dmg)        make_dmg=1 ;;
+    --version=*)  version="${arg#--version=}" ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -34,6 +45,13 @@ out_app="$here/Ordnung.app"
 installed_app="/Applications/Ordnung.app"
 work="$here/tools/.app-build"
 
+# Version stamped into the bundle. Default to the workspace Cargo.toml so local
+# builds stay coherent; the release workflow overrides it with the pushed tag.
+if [[ -z "$version" ]]; then
+  version="$(awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' "$here/Cargo.toml")"
+  version="${version:-0.0.1}"
+fi
+
 echo "==> Rendering icons"
 rm -rf "$work"
 mkdir -p "$work/icon.iconset"
@@ -43,8 +61,21 @@ rsvg-convert -w 1024 -h 1024 "$src_icon" -o "$work/icon-1024.png"
 # in-app icon (title bar / app switcher) matches the bundle icon.
 rsvg-convert -w 512 -h 512 "$src_icon" -o "$here/crates/ordnung-gui/assets/icon.png"
 
-echo "==> Building release binary"
-cargo build --release -p ordnung-gui
+if [[ "$universal" -eq 1 ]]; then
+  echo "==> Building universal release binary (arm64 + x86_64)"
+  rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null 2>&1 || true
+  cargo build --release -p ordnung-gui --target aarch64-apple-darwin
+  cargo build --release -p ordnung-gui --target x86_64-apple-darwin
+  bin="$here/target/release/Ordnung-universal"
+  lipo -create -output "$bin" \
+    "$here/target/aarch64-apple-darwin/release/Ordnung" \
+    "$here/target/x86_64-apple-darwin/release/Ordnung"
+  echo "    arches: $(lipo -archs "$bin")"
+else
+  echo "==> Building release binary"
+  cargo build --release -p ordnung-gui
+  bin="$here/target/release/Ordnung"
+fi
 
 if [[ ! -f "$bin" ]]; then
   echo "build did not produce $bin" >&2
@@ -78,7 +109,7 @@ cp "$bin" "$out_app/Contents/MacOS/Ordnung"
 chmod +x "$out_app/Contents/MacOS/Ordnung"
 cp "$work/Ordnung.icns" "$out_app/Contents/Resources/Ordnung.icns"
 
-cat >"$out_app/Contents/Info.plist" <<'PLIST'
+cat >"$out_app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -86,8 +117,8 @@ cat >"$out_app/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key>                <string>Ordnung</string>
     <key>CFBundleDisplayName</key>         <string>Ordnung</string>
     <key>CFBundleIdentifier</key>          <string>app.ordnung.gui</string>
-    <key>CFBundleVersion</key>             <string>0.0.1</string>
-    <key>CFBundleShortVersionString</key>  <string>0.0.1</string>
+    <key>CFBundleVersion</key>             <string>$version</string>
+    <key>CFBundleShortVersionString</key>  <string>$version</string>
     <key>CFBundleExecutable</key>          <string>Ordnung</string>
     <key>CFBundleIconFile</key>            <string>Ordnung</string>
     <key>CFBundlePackageType</key>         <string>APPL</string>
@@ -118,6 +149,23 @@ touch "$out_app"
 
 echo
 echo "Built: $out_app"
+
+# Package a compressed, read-only DMG with a drag-to-Applications layout. This is
+# the artifact the release workflow uploads; recipients open it, drag the app in,
+# then right-click → Open once (ad-hoc signed, so Gatekeeper prompts the first time).
+if [[ "$make_dmg" -eq 1 ]]; then
+  echo "==> Building DMG"
+  dmg_out="$here/Ordnung.dmg"
+  dmg_work="$here/tools/.dmg-build"
+  rm -rf "$dmg_work" "$dmg_out"
+  mkdir -p "$dmg_work"
+  cp -R "$out_app" "$dmg_work/Ordnung.app"
+  ln -s /Applications "$dmg_work/Applications"
+  hdiutil create -volname "Ordnung $version" \
+    -srcfolder "$dmg_work" -fs HFS+ -format UDZO -ov "$dmg_out" >/dev/null
+  rm -rf "$dmg_work"
+  echo "Built: $dmg_out"
+fi
 
 if [[ "$install" -eq 0 ]]; then
   echo "Skipped install (--no-install). Drag it to /Applications to pin."
