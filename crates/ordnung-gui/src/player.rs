@@ -1163,34 +1163,59 @@ fn draw_waveform_scrolling(
     // the second pass can blur the aggregate sequence by the smoothing radius —
     // blending each bar with its neighbors into a continuous envelope — before
     // drawing, without disturbing the scroll-stable bin grid.
-    let bf0 = (w0 * nb as f32) as i64;
-    let mut gb = bf0 - bf0.rem_euclid(group);
-    let stop = w1 * nb as f32 + gf;
     let mut bars: Vec<(f32, f32, bool, [u8; 4])> = Vec::new();
-    while (gb as f32) < stop {
-        let b0 = gb.clamp(0, nb as i64) as usize;
-        let b1 = (gb + group).clamp(0, nb as i64) as usize;
-        if b1 > b0 {
+    if solid {
+        // Zoomed in past one bin per pixel. Drawing one flat-topped rectangle per
+        // bin (each `bin_w_px` wide) reads as a blocky staircase — adjacent bins
+        // jump to their own height with no ramp between them. Instead sample one
+        // bar per screen pixel and lerp the band aggregate between the two nearest
+        // bins, so the envelope ramps continuously: the most-zoomed-in view is the
+        // smooth baseline, and wider zooms scale down from it via the MAX grouping
+        // below. Pixel columns map through the absolute window (`w0`), so the curve
+        // still glides as the lane scrolls.
+        let cols = width.ceil().max(1.0) as usize;
+        for cx in 0..cols {
+            let center_frac = w0 + (cx as f32 + 0.5) / cols as f32 * wspan;
+            let fpos = (center_frac * nb as f32 - 0.5).clamp(0.0, (nb - 1) as f32);
+            let i0 = fpos.floor() as usize;
+            let i1 = (i0 + 1).min(nb - 1);
+            let t = fpos - i0 as f32;
+            let q0 = &bands[STRIDE * i0..STRIDE * i0 + 4];
+            let q1 = &bands[STRIDE * i1..STRIDE * i1 + 4];
             let mut agg = [0u8; 4];
-            for j in b0..b1 {
-                let q = &bands[STRIDE * j..STRIDE * j + 4];
-                for t in 0..4 {
-                    agg[t] = agg[t].max(q[t]);
-                }
+            for k in 0..4 {
+                agg[k] = (q0[k] as f32 + (q1[k] as f32 - q0[k] as f32) * t).round() as u8;
             }
-            let left_frac = gb as f32 / nb as f32;
-            let center_frac = (gb as f32 + gf * 0.5) / nb as f32;
-            let x_left = x0 + (left_frac - w0) / wspan * width;
             let played = center_frac <= played_frac;
-            let (bx, bw) = if solid {
-                (x_left - 0.25, bin_w_px + 0.5) // touch neighbors → no seams
-            } else {
-                let pad = (1.0 - fill) * 0.5;
-                (x_left + bin_w_px * pad, (bin_w_px * fill).max(0.6))
-            };
-            bars.push((bx, bw, played, agg));
+            // 1px columns tiled edge-to-edge, nudged to overlap a hair so no seam
+            // shimmers between neighbors as the lane scrolls.
+            bars.push((x0 + cx as f32 - 0.25, 1.5, played, agg));
         }
-        gb += group;
+    } else {
+        let bf0 = (w0 * nb as f32) as i64;
+        let mut gb = bf0 - bf0.rem_euclid(group);
+        let stop = w1 * nb as f32 + gf;
+        while (gb as f32) < stop {
+            let b0 = gb.clamp(0, nb as i64) as usize;
+            let b1 = (gb + group).clamp(0, nb as i64) as usize;
+            if b1 > b0 {
+                let mut agg = [0u8; 4];
+                for j in b0..b1 {
+                    let q = &bands[STRIDE * j..STRIDE * j + 4];
+                    for t in 0..4 {
+                        agg[t] = agg[t].max(q[t]);
+                    }
+                }
+                let left_frac = gb as f32 / nb as f32;
+                let center_frac = (gb as f32 + gf * 0.5) / nb as f32;
+                let x_left = x0 + (left_frac - w0) / wspan * width;
+                let played = center_frac <= played_frac;
+                let pad = (1.0 - fill) * 0.5;
+                let (bx, bw) = (x_left + bin_w_px * pad, (bin_w_px * fill).max(0.6));
+                bars.push((bx, bw, played, agg));
+            }
+            gb += group;
+        }
     }
 
     let aggs: Vec<[u8; 4]> = bars.iter().map(|b| b.3).collect();
