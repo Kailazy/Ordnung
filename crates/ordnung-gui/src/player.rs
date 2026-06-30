@@ -115,8 +115,10 @@ impl App {
                 self.now_playing.as_mut().unwrap().hires_requested = true;
                 let tx = self.hires_tx.clone();
                 let ctx = ctx.clone();
+                let low_hz = self.config.waveform_low_hz;
+                let mid_hz = self.config.waveform_mid_hz;
                 thread::spawn(move || {
-                    let hires = compute_hires_bands(&samples, ch, sr);
+                    let hires = compute_hires_bands(&samples, ch, sr, low_hz, mid_hz);
                     let _ = tx.send((np_id, hires));
                     ctx.request_repaint();
                 });
@@ -815,7 +817,13 @@ fn sharpen_peaks(peaks: &mut [f32], radius: usize, amount: f32) {
 /// and records each bucket's per-band peak plus its RMS loudness. At
 /// [`HIRES_BINS_PER_SEC`] the zoom lane resolves individual transients; the column
 /// view keeps scaling down the coarse stored preview (it's only a few px tall).
-pub(crate) fn compute_hires_bands(samples: &[f32], channels: u16, sample_rate: u32) -> Vec<u8> {
+pub(crate) fn compute_hires_bands(
+    samples: &[f32],
+    channels: u16,
+    sample_rate: u32,
+    low_hz: f32,
+    mid_hz: f32,
+) -> Vec<u8> {
     let ch = channels.max(1) as usize;
     let total_frames = samples.len() / ch;
     if total_frames == 0 || sample_rate == 0 {
@@ -827,13 +835,15 @@ pub(crate) fn compute_hires_bands(samples: &[f32], channels: u16, sample_rate: u
         .max(1)
         .min(total_frames);
 
-    // One-pole low-pass coefficients (a = 1 - e^{-2π fc/sr}). The 120 Hz pole peels
-    // off the lows; the 2.5 kHz pole peels off everything below the highs; the gap
-    // between the two poles is the mid band. The low pole sits at 120 Hz (kick
-    // fundamental + sub) rather than higher up, so low-mid energy that isn't part of
-    // a DJ's kick/bass cue stays out of the low band.
-    let a_low = 1.0 - (-std::f32::consts::TAU * 120.0 / sr).exp();
-    let a_mid = 1.0 - (-std::f32::consts::TAU * 2500.0 / sr).exp();
+    // One-pole low-pass coefficients (a = 1 - e^{-2π fc/sr}). The `low_hz` pole peels
+    // off the lows; the `mid_hz` pole peels off everything below the highs; the gap
+    // between the two poles is the mid band. The low pole defaults to 120 Hz (kick
+    // fundamental + sub) so low-mid energy that isn't part of a DJ's kick/bass cue
+    // stays out of the low band; both are settable from the waveform settings.
+    let low_hz = low_hz.clamp(20.0, sr * 0.5);
+    let mid_hz = mid_hz.clamp(low_hz, sr * 0.5);
+    let a_low = 1.0 - (-std::f32::consts::TAU * low_hz / sr).exp();
+    let a_mid = 1.0 - (-std::f32::consts::TAU * mid_hz / sr).exp();
 
     let mut peak_lo = vec![0f32; bins];
     let mut peak_md = vec![0f32; bins];

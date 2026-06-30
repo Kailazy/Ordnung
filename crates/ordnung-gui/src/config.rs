@@ -94,6 +94,16 @@ pub struct Config {
     /// RGB stops for the energy-mode cool→hot gradient, quiet → loudest (5 stops).
     #[serde(default = "default_waveform_energy_colors")]
     pub waveform_energy_colors: [[u8; 3]; 5],
+    /// Low/mid band crossover (Hz) for the zoom detail lane's live hi-res bands.
+    /// Lower it toward kick + sub so low-mid energy stays out of the bass band.
+    /// Only the zoom lane honors this live; the full-track overview uses the split
+    /// baked in at analysis time. See `compute_hires_bands`.
+    #[serde(default = "default_waveform_low_hz")]
+    pub waveform_low_hz: f32,
+    /// Mid/high band crossover (Hz) for the zoom detail lane's live hi-res bands.
+    /// Everything above this reads as the high band. See `compute_hires_bands`.
+    #[serde(default = "default_waveform_mid_hz")]
+    pub waveform_mid_hz: f32,
 }
 
 fn default_true() -> bool {
@@ -122,6 +132,14 @@ pub(crate) fn default_waveform_energy_gain() -> f32 {
 
 pub(crate) fn default_waveform_band_colors() -> [[u8; 3]; 3] {
     [[232, 76, 60], [95, 200, 95], [95, 175, 235]]
+}
+
+pub(crate) fn default_waveform_low_hz() -> f32 {
+    120.0
+}
+
+pub(crate) fn default_waveform_mid_hz() -> f32 {
+    2000.0
 }
 
 pub(crate) fn default_waveform_energy_colors() -> [[u8; 3]; 5] {
@@ -183,6 +201,8 @@ impl Default for Config {
             waveform_energy_gain: default_waveform_energy_gain(),
             waveform_band_colors: default_waveform_band_colors(),
             waveform_energy_colors: default_waveform_energy_colors(),
+            waveform_low_hz: default_waveform_low_hz(),
+            waveform_mid_hz: default_waveform_mid_hz(),
         }
     }
 }

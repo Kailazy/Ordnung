@@ -507,6 +507,79 @@ impl App {
                                     });
 
                                 ui.add_space(12.0);
+                                ui.label(egui::RichText::new("Frequency bands").strong());
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Crossover frequencies that split the low / mid / high \
+                                         bands. Lower the bass top toward kick + sub to keep \
+                                         low-mids out of the bass band. Applies live to the zoom \
+                                         detail lane; the full-track overview keeps its analyzed \
+                                         split until tracks are re-analyzed.",
+                                    )
+                                    .small()
+                                    .weak(),
+                                );
+                                ui.add_space(4.0);
+                                // Reset the loaded track's hi-res bands so the zoom lane
+                                // recomputes from PCM with the new crossovers next frame.
+                                let mut freq_dirty = false;
+                                egui::Grid::new("settings_waveform_freq_grid")
+                                    .num_columns(2)
+                                    .spacing([12.0, 8.0])
+                                    .show(ui, |ui| {
+                                        ui.label("Bass top (Hz):");
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut self.config.waveform_low_hz,
+                                                    40.0..=400.0,
+                                                )
+                                                .fixed_decimals(0),
+                                            )
+                                            .on_hover_text(
+                                                "Low / mid crossover. 120 Hz keeps the low band on \
+                                                 kick fundamental + sub; raise it to fold low-mids \
+                                                 back into the bass.",
+                                            )
+                                            .changed()
+                                        {
+                                            freq_dirty = true;
+                                        }
+                                        ui.end_row();
+
+                                        ui.label("Mid top (Hz):");
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut self.config.waveform_mid_hz,
+                                                    800.0..=6000.0,
+                                                )
+                                                .fixed_decimals(0),
+                                            )
+                                            .on_hover_text(
+                                                "Mid / high crossover. Everything above it reads as \
+                                                 the high band (hats, cymbals, air).",
+                                            )
+                                            .changed()
+                                        {
+                                            freq_dirty = true;
+                                        }
+                                        ui.end_row();
+                                    });
+                                if freq_dirty {
+                                    // Keep mid above low so the bands never invert.
+                                    self.config.waveform_mid_hz = self
+                                        .config
+                                        .waveform_mid_hz
+                                        .max(self.config.waveform_low_hz);
+                                    if let Some(np) = self.now_playing.as_mut() {
+                                        np.hires_bands = None;
+                                        np.hires_requested = false;
+                                    }
+                                    wave_dirty = true;
+                                }
+
+                                ui.add_space(12.0);
                                 ui.label(egui::RichText::new("Band colors").strong());
                                 ui.label(
                                     egui::RichText::new(
@@ -578,6 +651,15 @@ impl App {
                                         config::default_waveform_band_colors();
                                     self.config.waveform_energy_colors =
                                         config::default_waveform_energy_colors();
+                                    self.config.waveform_low_hz =
+                                        config::default_waveform_low_hz();
+                                    self.config.waveform_mid_hz =
+                                        config::default_waveform_mid_hz();
+                                    // Restored crossovers → recompute the zoom lane bands.
+                                    if let Some(np) = self.now_playing.as_mut() {
+                                        np.hires_bands = None;
+                                        np.hires_requested = false;
+                                    }
                                     wave_dirty = true;
                                 }
                                 if wave_dirty {
