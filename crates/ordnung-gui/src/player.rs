@@ -683,22 +683,27 @@ fn wave_height(v: f32, height_exp: f32) -> f32 {
     v.clamp(0.0, 1.0).powf(height_exp)
 }
 
-/// Convert a `[0, 1]` smoothing amount to a moving-average half-window in bars.
-/// `0` disables smoothing; otherwise it scales up to [`MAX_SMOOTH_BARS`].
-fn smooth_radius(smoothing: f32) -> usize {
-    (smoothing.clamp(0.0, 1.0) * MAX_SMOOTH_BARS).round() as usize
-}
-
-/// Box-blur a sequence of per-bar band aggregates `[low, mid, high, loudness]` so
-/// neighboring bars blend into a continuous envelope (the rekordbox "no jagged dip
-/// between every bin" look) rather than each bar standing alone. `radius` is the
-/// moving-average half-window in bars; `0` returns the input as `f32` unchanged.
-/// Runs per channel with a prefix sum, so it stays O(n) regardless of radius. A
-/// single loud transient spreads gently into its neighbors instead of spiking.
-fn smooth_aggs(aggs: &[[u8; 4]], radius: usize) -> Vec<[f32; 4]> {
+/// Slope-aware smoothing of a sequence of per-bar band aggregates
+/// `[low, mid, high, loudness]`. A symmetric box blur rounds off the leading edge
+/// of a kick exactly as hard as its tail, which mushes the very transients that
+/// make a waveform readable. Instead this runs a one-pole follower whose
+/// coefficient depends on the local slope:
+///
+/// * **Rising** samples — the attack of a transient jumping up, e.g. the front of
+///   a kick — are tracked with a fast coefficient ([`ATTACK_ALPHA_FLOOR`]) so the
+///   edge stays sharp and barely smoothed.
+/// * **Falling** samples — the kick tapering off — are smoothed with a slow
+///   coefficient ([`RELEASE_ALPHA_FLOOR`]) so the decay reads as a clean ring-out.
+///
+/// `smoothing` `[0, 1]` scales how much the two coefficients ease away from `1.0`
+/// (raw, no smoothing); the release floor is far lower than the attack floor, so
+/// every step of the slider smooths downslopes harder than upslopes. Runs per
+/// channel in O(n). `0` returns the input as `f32` unchanged.
+fn smooth_aggs(aggs: &[[u8; 4]], smoothing: f32) -> Vec<[f32; 4]> {
     let n = aggs.len();
     let mut out = vec![[0f32; 4]; n];
-    if radius == 0 {
+    let s = smoothing.clamp(0.0, 1.0);
+    if s == 0.0 || n == 0 {
         for (o, a) in out.iter_mut().zip(aggs) {
             for k in 0..4 {
                 o[k] = a[k] as f32;
@@ -706,15 +711,19 @@ fn smooth_aggs(aggs: &[[u8; 4]], radius: usize) -> Vec<[f32; 4]> {
         }
         return out;
     }
-    let mut prefix = vec![0f32; n + 1];
+    // A coefficient of 1.0 follows the input exactly (no smoothing); lower lags it.
+    // Attack stays high (transient-preserving) while release drops far lower
+    // (heavy taper smoothing); both collapse to 1.0 as the slider approaches 0.
+    let attack = 1.0 - s * (1.0 - ATTACK_ALPHA_FLOOR);
+    let release = 1.0 - s * (1.0 - RELEASE_ALPHA_FLOOR);
     for k in 0..4 {
-        for i in 0..n {
-            prefix[i + 1] = prefix[i] + aggs[i][k] as f32;
-        }
-        for i in 0..n {
-            let lo = i.saturating_sub(radius);
-            let hi = (i + radius + 1).min(n);
-            out[i][k] = (prefix[hi] - prefix[lo]) / (hi - lo) as f32;
+        let mut prev = aggs[0][k] as f32;
+        out[0][k] = prev;
+        for i in 1..n {
+            let x = aggs[i][k] as f32;
+            let alpha = if x >= prev { attack } else { release };
+            prev += alpha * (x - prev);
+            out[i][k] = prev;
         }
     }
     out
@@ -746,10 +755,14 @@ const PANEL_BASE_H: f32 = 135.0;
 /// rekordbox-style envelope with no shimmering seams out of the box. Lower it for
 /// crisper separated bands; raise it for a softer envelope.
 pub(crate) const DEFAULT_SMOOTHING: f32 = 0.5;
-/// Largest moving-average half-window (in bars) the smoothing slider maps to at
-/// `1.0`. The radius is `round(smoothing * this)`, so `0` disables smoothing and
-/// the top of the range blends each bar with ~this-many neighbors on each side.
-const MAX_SMOOTH_BARS: f32 = 10.0;
+/// One-pole coefficient `smooth_aggs` eases the *attack* (rising-edge) toward at
+/// full smoothing. Kept high so a transient jumping up — the front of a kick —
+/// still snaps to ~this fraction of the jump per bar and the edge stays crisp.
+const ATTACK_ALPHA_FLOOR: f32 = 0.65;
+/// One-pole coefficient `smooth_aggs` eases the *release* (falling-edge) toward at
+/// full smoothing. Far lower than [`ATTACK_ALPHA_FLOOR`] so a kick's taper is
+/// blended across many bars into a smooth ring-out instead of a jagged decay.
+const RELEASE_ALPHA_FLOOR: f32 = 0.08;
 
 /// Buckets per second for the high-res zoom envelope. ~100× the stored preview's
 /// ~20/sec — well past rekordbox's detailed waveform, so even the tightest
@@ -1020,7 +1033,7 @@ pub(crate) fn draw_waveform(
         }
     }
 
-    let smoothed = smooth_aggs(&col_agg, smooth_radius(style.smoothing));
+    let smoothed = smooth_aggs(&col_agg, style.smoothing);
 
     for cx in 0..cols {
         let frac = (w0 + (cx as f32 + 0.5) / cols as f32 * wspan).clamp(0.0, 1.0);
@@ -1176,7 +1189,7 @@ fn draw_waveform_scrolling(
     }
 
     let aggs: Vec<[u8; 4]> = bars.iter().map(|b| b.3).collect();
-    let smoothed = smooth_aggs(&aggs, smooth_radius(style.smoothing));
+    let smoothed = smooth_aggs(&aggs, style.smoothing);
 
     for (&(bx, bw, played, _), agg) in bars.iter().zip(&smoothed) {
         match style.mode {
