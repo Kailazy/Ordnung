@@ -660,13 +660,18 @@ impl App {
             | LibraryView::Missing
             | LibraryView::Vinyl => None,
         };
-        let show_index = playlist_pid.is_some();
+        // The leading order gutter (row-number column) is shown in EVERY view — the
+        // library and every playlist — at one fixed width, so the data columns line
+        // up at the same x everywhere and the shared per-column widths read as truly
+        // universal. (It used to be playlist-only and sized to the row count, which
+        // shifted every column by a different amount in each view.) Drag-to-reorder
+        // still only engages on a real playlist in stored order (`reorderable`).
+        let show_index = true;
         let reorderable = playlist_pid.is_some() && self.sort.is_none() && menu_unfiltered;
-        // Width of the index gutter, sized to the widest row number.
-        let index_w = {
-            let digits = self.rows.len().max(1).to_string().len() as f32;
-            12.0 + digits * 7.0
-        };
+        // Fixed gutter width, independent of the row count so it never changes
+        // between views. Numbers are right-aligned, so larger counts grow leftward
+        // within the gutter and never crowd the first data column.
+        let index_w = 34.0;
         // Per-row vertical bands (full-list index, top y, bottom y) for the
         // visible rows, filled inside the body closure and used after the table to
         // map the cursor onto an insertion slot for the reorder line.
@@ -698,24 +703,19 @@ impl App {
                     // persisted per-column widths (saved via egui memory by eframe's
                     // `persistence` feature) are shared globally: resize a column in
                     // one playlist and the same widths apply everywhere. The leading
-                    // index gutter is always present as the first column (zero-width
-                    // outside playlist views, see below) so the data columns keep the
-                    // same positional indices in every view and the stored widths never
-                    // shift by one when switching between the library and a playlist.
+                    // index gutter is always present as the first column at a constant
+                    // width in every view (see below) so the data columns keep the
+                    // same positional indices AND the same x-offset in every view.
                     .id_salt("songs_table")
                     .striped(false)
                     .resizable(true)
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-                // Leading fixed-width gutter for the playlist order index. Always the
-                // first column so data-column positions (and their stored widths) line
-                // up across every view; collapsed to zero width when there's no index
-                // to show, so the library reads as if the gutter weren't there.
-                // Non-resizable so egui_extras doesn't paint a resize-separator
-                // hairline at its right edge — in the library view the gutter is
-                // zero-width, which would otherwise drop a stray vertical line right
-                // on the first data column's (the Waveform's) left edge.
-                builder = builder
-                    .column(Column::exact(if show_index { index_w } else { 0.0 }).resizable(false));
+                // Leading fixed-width gutter for the row-order index. Always the first
+                // column, at one constant width in every view, so the data columns
+                // (and their shared per-column widths) line up at the same x
+                // everywhere. Non-resizable so egui_extras doesn't paint a resize
+                // separator hairline at its right edge.
+                builder = builder.column(Column::exact(index_w).resizable(false));
                 // Steer a pending jump (from the vinyl grid) to its row. Done at the
                 // builder level because the body is virtualized — an off-screen row's
                 // closure never runs, so an in-row `scroll_to_me` couldn't reach it.
@@ -742,9 +742,8 @@ impl App {
                         // still a valid right-click target. The file path is
                         // intentionally not a column — it lives in the Info panel and
                         // the right-click menu.
-                        // The index gutter header is always emitted to match the
-                        // always-present first column; it's empty (and zero-width) when
-                        // not a playlist view.
+                        // The index gutter header shows "#" in every view, matching the
+                        // always-present first column.
                         header.col(|ui| {
                             if show_index {
                                 ui.add(
@@ -948,9 +947,8 @@ impl App {
                             // number. Drawn first so it sits at the far left, and its
                             // cell rect is recorded as this row's vertical band for the
                             // reorder hit-test after the table.
-                            // Always emit the leading gutter cell to match the
-                            // always-present first column; it draws the row number only
-                            // in playlist views (and is zero-width otherwise).
+                            // Always emit the leading gutter cell; it draws the 1-based
+                            // row number in every view (library and playlists).
                             let (rect, _) = row.col(|ui| {
                                 if show_index {
                                     let r = ui.max_rect();
