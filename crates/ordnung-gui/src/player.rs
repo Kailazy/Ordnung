@@ -516,10 +516,11 @@ impl App {
             }
             let grip_painter = ui.painter();
             // Just the gray pill, floating see-through over the lane (no backing box).
+            // Semi-transparent so the waveform shows through; opaquer on hover.
             let pill_color = if grip.hovered() || grip.dragged() {
-                egui::Color32::from_gray(220)
+                egui::Color32::from_rgba_unmultiplied(220, 220, 220, 200)
             } else {
-                egui::Color32::from_gray(150)
+                egui::Color32::from_rgba_unmultiplied(150, 150, 150, 90)
             };
             grip_painter.rect_filled(
                 egui::Rect::from_center_size(grip_center, egui::vec2(grip_w, 4.0)),
