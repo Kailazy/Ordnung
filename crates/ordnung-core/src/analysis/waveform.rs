@@ -68,7 +68,7 @@ fn color_bin_count(n_samples: usize, sample_rate: u32) -> usize {
 /// `COLOR_STRIDE * bins` bytes — `[low, mid, high, loudness]` per time bin, where
 /// `bins` scales with duration (`color_bin_count`):
 ///
-/// * `low`/`mid`/`high` — **raw** band RMS amplitude (split at 200 Hz / 2 kHz),
+/// * `low`/`mid`/`high` — **raw** band RMS amplitude (split at 120 Hz / 2 kHz),
 ///   sqrt-companded then globally normalized to 0–255. These are the per-band
 ///   waveform heights drawn overlaid (Serato/rekordbox style), so bass reads as
 ///   tall as it sounds and a hi-hat shows as a smaller high-band spike. RMS, not
@@ -112,7 +112,9 @@ pub fn color_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let hz_to_bin = |hz: f32| {
         ((hz * dsp::WINDOW as f32 / sample_rate as f32).round() as usize).min(n_bins)
     };
-    let lo_hi = hz_to_bin(200.0);
+    // Low band caps at 120 Hz (kick fundamental + sub) so low-mid energy that isn't
+    // really part of a DJ's bass cue stays out of it; mid runs up to 2 kHz.
+    let lo_hi = hz_to_bin(120.0);
     let mid_hi = hz_to_bin(2000.0).max(lo_hi);
 
     // Accumulate raw band power + K-weighted power per time bin, streaming the
