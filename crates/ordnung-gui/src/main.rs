@@ -965,6 +965,13 @@ struct App {
     /// handle above the lane; the bottom player panel grows to match. See
     /// [`player`].
     wave_lane_h: f32,
+    /// Receives the one-shot startup update check's result off the network
+    /// thread. `Some(info)` → a newer release exists; `None` → up to date or the
+    /// check failed (we stay silent). Consumed once in `update()`, then dropped.
+    update_rx: Option<Receiver<Option<ordnung_core::update::UpdateInfo>>>,
+    /// A published release newer than this build, surfaced as a dismissible
+    /// banner above the toolbar until the user downloads or dismisses it.
+    update_available: Option<ordnung_core::update::UpdateInfo>,
 }
 
 /// What the bottom player bar needs to render the current track.

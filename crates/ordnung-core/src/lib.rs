@@ -14,6 +14,7 @@ pub mod error;
 pub mod model;
 pub mod scan;
 pub mod tag;
+pub mod update;
 
 pub use catalog::{
     best_copy_index, AlbumSibling, Catalog, DuplicateGroup, DuplicateKind, MissingArtwork,

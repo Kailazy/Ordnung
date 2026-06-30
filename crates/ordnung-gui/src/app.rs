@@ -136,6 +136,8 @@ impl App {
             scrub: None,
             wave_zoom_secs: crate::player::DEFAULT_ZOOM_SECS,
             wave_lane_h: crate::player::DEFAULT_LANE_H,
+            update_rx: None,
+            update_available: None,
         };
         let config = Config::load();
         app.token_input = config.discogs_token.clone();
@@ -148,8 +150,31 @@ impl App {
         app.recount_missing();
         // Refresh anything we always want current (Discogs vinyl collection)
         // in the background as soon as the catalog is loaded.
-        app.spawn_startup_refresh(startup_ctx);
+        app.spawn_startup_refresh(startup_ctx.clone());
+        // Ask GitHub once, off-thread, whether a newer release is out. The result
+        // drives a dismissible banner; a network failure is swallowed (no banner).
+        app.spawn_update_check(startup_ctx);
         app
+    }
+
+    /// Fire the one-shot "is there a newer release?" check on a background
+    /// thread, handing the result back through `update_rx`. Best-effort: any
+    /// transport error resolves to `None`, so a flaky network never nags. The
+    /// running version is the GUI crate's compile-time `CARGO_PKG_VERSION`, which
+    /// inherits the workspace version stamped into each release build.
+    pub(crate) fn spawn_update_check(&mut self, ctx: egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        self.update_rx = Some(rx);
+        thread::spawn(move || {
+            let current = env!("CARGO_PKG_VERSION");
+            let found = match ordnung_core::update::check_latest(current) {
+                Ok(ordnung_core::update::UpdateOutcome::Update(info)) => Some(info),
+                _ => None,
+            };
+            // Ignore send errors — the app may have closed before the check returned.
+            let _ = tx.send(found);
+            ctx.request_repaint();
+        });
     }
 
     /// The Discogs token to use: the saved config value wins; if unset, fall
@@ -442,6 +467,55 @@ impl eframe::App for App {
                     n.hires_bands = Some(hires);
                 }
             }
+        }
+
+        // Pick up the startup update check's verdict (once). A hit populates the
+        // banner below; `None` (up to date or check failed) leaves it hidden.
+        if let Some(rx) = &self.update_rx {
+            if let Ok(found) = rx.try_recv() {
+                self.update_available = found;
+                self.update_rx = None;
+            }
+        }
+
+        // "New version available" strip, above the toolbar. Shown only while an
+        // update is pending; the user can open the download page or dismiss it.
+        if let Some(info) = self.update_available.clone() {
+            egui::TopBottomPanel::top("update_banner")
+                .frame(
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(64, 110, 180))
+                        .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("Ordnung {} is available", info.version))
+                                .color(egui::Color32::WHITE)
+                                .strong(),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("(you have {})", env!("CARGO_PKG_VERSION")))
+                                .color(egui::Color32::from_rgb(220, 230, 245)),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button("✕")
+                                .on_hover_note("Dismiss until the next launch")
+                                .clicked()
+                            {
+                                self.update_available = None;
+                            }
+                            if ui
+                                .button(egui::RichText::new("Download").strong())
+                                .on_hover_note("Open the release page in your browser")
+                                .clicked()
+                            {
+                                open_url(&info.url);
+                            }
+                        });
+                    });
+                });
         }
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
