@@ -6,7 +6,8 @@
       "Bash(cargo test *)",
       "Bash(awk 'NR>=3380 && NR<=3900 { if \\($0 ~ /^            \\\\.body\\\\\\(\\\\|body\\\\|/\\) print \"BODYSTART:\"NR; if \\($0 ~ /^            \\\\}\\\\\\);/\\) print \"ENDSEMI:\"NR; if \\($0 ~ /^        \\\\/\\\\/ /\\) print \"POST?:\"NR\" \"$0 }' crates/ordnung-gui/src/main.rs)",
       "Bash(awk -F: '$1>3441 && $1<3950')",
-      "Bash(awk '/^fn.*tx.*ctx.*cancel/,/^fn [^{]*\\\\{/' /Users/kailazarov/Desktop/Ordnung/crates/ordnung-gui/src/main.rs)"
+      "Bash(awk '/^fn.*tx.*ctx.*cancel/,/^fn [^{]*\\\\{/' /Users/kailazarov/Desktop/Ordnung/crates/ordnung-gui/src/main.rs)",
+      "Bash(make run *)"
     ]
   }
 }

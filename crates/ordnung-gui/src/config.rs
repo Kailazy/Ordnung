@@ -110,6 +110,18 @@ pub struct Config {
     /// bars. See `smooth_aggs` and `WaveformStyle::smoothing`.
     #[serde(default = "default_waveform_smoothing")]
     pub waveform_smoothing: f32,
+    /// Bass floor threshold `[0, 1]` (fraction of full scale): low-band content
+    /// quieter than this is treated as sustained sub (the tail lingering under a
+    /// kick) rather than a transient peak, and is dimmed by
+    /// `waveform_bass_floor_amount`. Louder bass (kick attacks) is kept at full
+    /// height. See `bass_floor_gain`.
+    #[serde(default = "default_waveform_bass_floor_threshold")]
+    pub waveform_bass_floor_threshold: f32,
+    /// How much to dim sustained sub below `waveform_bass_floor_threshold`:
+    /// `0` keeps it (no change), `1` removes it entirely, leaving only bass
+    /// transients. See `bass_floor_gain`.
+    #[serde(default = "default_waveform_bass_floor_amount")]
+    pub waveform_bass_floor_amount: f32,
 }
 
 fn default_true() -> bool {
@@ -150,6 +162,14 @@ pub(crate) fn default_waveform_mid_hz() -> f32 {
 
 pub(crate) fn default_waveform_smoothing() -> f32 {
     0.5
+}
+
+pub(crate) fn default_waveform_bass_floor_threshold() -> f32 {
+    0.35
+}
+
+pub(crate) fn default_waveform_bass_floor_amount() -> f32 {
+    0.0
 }
 
 pub(crate) fn default_waveform_energy_colors() -> [[u8; 3]; 5] {
@@ -214,6 +234,8 @@ impl Default for Config {
             waveform_low_hz: default_waveform_low_hz(),
             waveform_mid_hz: default_waveform_mid_hz(),
             waveform_smoothing: default_waveform_smoothing(),
+            waveform_bass_floor_threshold: default_waveform_bass_floor_threshold(),
+            waveform_bass_floor_amount: default_waveform_bass_floor_amount(),
         }
     }
 }

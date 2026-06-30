@@ -426,6 +426,10 @@ impl App {
                                         config::default_waveform_energy_gain();
                                     self.config.waveform_band_gain =
                                         config::default_waveform_band_gain();
+                                    self.config.waveform_bass_floor_amount =
+                                        config::default_waveform_bass_floor_amount();
+                                    self.config.waveform_bass_floor_threshold =
+                                        config::default_waveform_bass_floor_threshold();
                                     wave_dirty = true;
                                 }
                                 ui.label(
@@ -532,6 +536,46 @@ impl App {
                                             }
                                             ui.end_row();
                                         }
+
+                                        ui.label("Bass floor amount:");
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut self.config.waveform_bass_floor_amount,
+                                                    0.0..=1.0,
+                                                )
+                                                .fixed_decimals(2),
+                                            )
+                                            .on_hover_text(
+                                                "Dims sustained sub-bass (the tail lingering under \
+                                                 a kick) while keeping the loud kick transients. \
+                                                 0 = off; 1 = show only bass transients.",
+                                            )
+                                            .changed()
+                                        {
+                                            wave_dirty = true;
+                                        }
+                                        ui.end_row();
+
+                                        ui.label("Bass floor threshold:");
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut self.config.waveform_bass_floor_threshold,
+                                                    0.0..=1.0,
+                                                )
+                                                .fixed_decimals(2),
+                                            )
+                                            .on_hover_text(
+                                                "Bass level below which content counts as \
+                                                 sustained sub and gets dimmed by the amount \
+                                                 above. Higher = dims more of the bass.",
+                                            )
+                                            .changed()
+                                        {
+                                            wave_dirty = true;
+                                        }
+                                        ui.end_row();
                                     });
 
                                 ui.add_space(12.0);

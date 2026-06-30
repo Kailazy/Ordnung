@@ -631,6 +631,12 @@ pub(crate) struct WaveformStyle {
     /// every dip between adjacent bins. `0` = raw bars. From the Waveform settings
     /// tab (`config::waveform_smoothing`).
     pub smoothing: f32,
+    /// Bass floor threshold `[0, 1]`: low-band content quieter than this is
+    /// dimmed by `bass_floor_amount` (sustained sub under a kick), louder bass
+    /// kept. Spectrum mode only. See [`bass_floor_gain`].
+    pub bass_floor_threshold: f32,
+    /// How hard to dim sub below `bass_floor_threshold` (`0` off, `1` removes it).
+    pub bass_floor_amount: f32,
 }
 
 impl WaveformStyle {
@@ -655,6 +661,8 @@ impl WaveformStyle {
                 rgb(cfg.waveform_energy_colors[4]),
             ],
             smoothing: cfg.waveform_smoothing.clamp(0.0, 1.0),
+            bass_floor_threshold: cfg.waveform_bass_floor_threshold.clamp(0.0, 1.0),
+            bass_floor_amount: cfg.waveform_bass_floor_amount.clamp(0.0, 1.0),
         }
     }
 }
@@ -670,6 +678,25 @@ impl WaveformStyle {
 /// compressed, rekordbox-like).
 fn wave_height(v: f32, height_exp: f32) -> f32 {
     v.clamp(0.0, 1.0).powf(height_exp)
+}
+
+/// Visualization-only height multiplier for the bass band. A kick's sharp attack
+/// peaks loud, but the sub under it lingers quietly after the transient; both read
+/// as bass and clutter the lane. `low_norm` is the band's normalized amplitude
+/// `[0, 1]`. Content at/above `threshold` (the kick transient) keeps full height
+/// (gain `1.0`); content well below it (sustained sub) is scaled toward
+/// `1 - amount`. A soft knee below the threshold ramps between the two so the cut
+/// reads as a gentle dip rather than a hard horizontal clip line. `amount` `0`
+/// disables (always `1.0`).
+fn bass_floor_gain(low_norm: f32, threshold: f32, amount: f32) -> f32 {
+    if amount <= 0.0 {
+        return 1.0;
+    }
+    // Soft knee width below the threshold; the gain ramps from `1 - amount` at
+    // `threshold - KNEE` up to `1.0` at `threshold`.
+    const KNEE: f32 = 0.18;
+    let t = ((low_norm - (threshold - KNEE)) / KNEE).clamp(0.0, 1.0);
+    (1.0 - amount) + amount * t
 }
 
 /// Slope-aware smoothing of a sequence of per-bar band aggregates
@@ -1056,7 +1083,14 @@ pub(crate) fn draw_waveform(
                         wave_height(v / 255.0, style.height_exp) * style.band_gain[b]
                     };
                     for b in 0..3 {
-                        let hh = h(agg[b], b);
+                        let mut hh = h(agg[b], b);
+                        if b == 0 {
+                            hh *= bass_floor_gain(
+                                agg[0] / 255.0,
+                                style.bass_floor_threshold,
+                                style.bass_floor_amount,
+                            );
+                        }
                         bar(&mut mesh, x, (hh.min(1.0) * half).max(0.4), played, style.band_colors[b]);
                     }
                 }
@@ -1228,7 +1262,14 @@ fn draw_waveform_scrolling(
                     wave_height(v / 255.0, style.height_exp) * style.band_gain[b]
                 };
                 for b in 0..3 {
-                    let hh = h(agg[b], b);
+                    let mut hh = h(agg[b], b);
+                    if b == 0 {
+                        hh *= bass_floor_gain(
+                            agg[0] / 255.0,
+                            style.bass_floor_threshold,
+                            style.bass_floor_amount,
+                        );
+                    }
                     add(bx, bw, (hh.min(1.0) * half).max(0.4), played, style.band_colors[b]);
                 }
             }
