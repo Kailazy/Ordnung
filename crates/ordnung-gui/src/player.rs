@@ -900,9 +900,9 @@ pub(crate) fn compute_hires_bands(
 /// whole-track fraction regardless of the window.
 ///
 /// In **spectrum** mode each of the three bands (`[low, mid, high]`, RMS heights
-/// from core `color_bands`) is drawn as its own waveform, overlaid tallest-first
-/// so the shorter bands sit visibly in the centre — bass shows big, a hi-hat
-/// shows as a small high-band spike. In **energy** mode a single envelope (the
+/// from core `color_bands`) is drawn as its own waveform in a fixed back-to-front
+/// order (low body behind, highs overlaid in the centre) — bass shows big, a
+/// hi-hat shows as a small high-band spike. In **energy** mode a single envelope (the
 /// loudest band) is colored by K-weighted loudness. Without band data both fall
 /// back to the peak envelope (`waveform`) on a height ramp.
 pub(crate) fn draw_waveform(
@@ -1045,19 +1045,19 @@ pub(crate) fn draw_waveform(
         if has_bands {
             match style.mode {
                 config::WaveformColorMode::Spectrum => {
-                    // Draw the three bands tallest-first so the shortest ends up
-                    // on top, visible in the centre of the taller ones.
+                    // Fixed back-to-front order (low → mid → high), the same every
+                    // column. Sorting by per-column height instead made whichever
+                    // band was shortest sit on top, and that band flips column to
+                    // column — the "tiger stripes" of alternating colours. A fixed
+                    // z-order keeps bass as the big body envelope with the highs
+                    // overlaid in the centre (rekordbox's look), so the centre colour
+                    // stays consistent between neighbours.
                     let h = |v: f32, b: usize| {
                         wave_height(v / 255.0, style.height_exp) * style.band_gain[b]
                     };
-                    let mut layers = [
-                        (h(agg[0], 0), style.band_colors[0]),
-                        (h(agg[1], 1), style.band_colors[1]),
-                        (h(agg[2], 2), style.band_colors[2]),
-                    ];
-                    layers.sort_by(|a, c| c.0.total_cmp(&a.0));
-                    for (h, col) in layers {
-                        bar(&mut mesh, x, (h.min(1.0) * half).max(0.4), played, col);
+                    for b in 0..3 {
+                        let hh = h(agg[b], b);
+                        bar(&mut mesh, x, (hh.min(1.0) * half).max(0.4), played, style.band_colors[b]);
                     }
                 }
                 config::WaveformColorMode::Energy => {
@@ -1220,17 +1220,16 @@ fn draw_waveform_scrolling(
     for (&(bx, bw, played, _), agg) in bars.iter().zip(&smoothed) {
         match style.mode {
             config::WaveformColorMode::Spectrum => {
+                // Fixed back-to-front order (low → mid → high) every column, so the
+                // centre colour stays consistent between neighbours instead of
+                // flipping to whichever band is shortest — the "tiger stripes". See
+                // the matching note in `draw_waveform`.
                 let h = |v: f32, b: usize| {
                     wave_height(v / 255.0, style.height_exp) * style.band_gain[b]
                 };
-                let mut layers = [
-                    (h(agg[0], 0), style.band_colors[0]),
-                    (h(agg[1], 1), style.band_colors[1]),
-                    (h(agg[2], 2), style.band_colors[2]),
-                ];
-                layers.sort_by(|a, c| c.0.total_cmp(&a.0));
-                for (h, col) in layers {
-                    add(bx, bw, (h.min(1.0) * half).max(0.4), played, col);
+                for b in 0..3 {
+                    let hh = h(agg[b], b);
+                    add(bx, bw, (hh.min(1.0) * half).max(0.4), played, style.band_colors[b]);
                 }
             }
             config::WaveformColorMode::Energy => {
