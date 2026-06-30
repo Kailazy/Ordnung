@@ -4,7 +4,16 @@ A fast, self-sufficient DJ music catalog and rekordbox/CDJ USB exporter, written
 Rust. Replaces rekordbox for cataloging, analysis, tagging, and (eventually) USB
 export — with full user control over conversions and tagging.
 
-> "Ordnung" = German for *order / tidiness*. CLI core now, GUI later.
+> "Ordnung" = German for *order / tidiness*.
+
+> **Status note (updated 2026-06-30):** this is an early snapshot and parts are now
+> stale. Since it was written: the **GUI is the primary front-end** (not "later"),
+> the analyzer is at **v14** (this doc says v4), **BPM/tempo + beatgrid were disabled
+> in v8**, loudness is now **K-weighted BS.1770** (not RMS dBFS), the waveform spans
+> the **full track** (no ~150 s cap), and **Phases 3–4 (playlists, conversion) are
+> done**. Treat the `ordnung-roadmap`, `ordnung-architecture`, and `audio-analysis`
+> skills as the live source of truth; §8 below ("Recommended next steps") is largely
+> superseded.
 
 This file is the single catch-up document for the project. For deeper detail see
 [PLAN.md](PLAN.md), the skills in [.claude/skills/](.claude/skills/), and

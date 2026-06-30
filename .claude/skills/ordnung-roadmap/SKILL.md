@@ -45,11 +45,14 @@ all tracks on one key) to HPCP-style spectral peak-picking + 4096 FFT + EDM-tune
 `edma` profiles + minor mode bias. Keys now spread correctly across the wheel; the
 two same-release DJ Sprinkles tracks agree on Camelot number (4A/4B). See the
 `audio-analysis` skill for the full method and citations.
-**Still open (Phase 2.1):** no labeled key set yet, so no hard accuracy number —
-trust the Camelot *number* over the A/B side. Add manual key correction (key is not
-yet an editable field — extend the model + `tag`), bin-adaptive tuning, and a majmin
-tiebreak. BPM octave reads can wobble on tonally-sparse tracks. Loudness is RMS dBFS,
-not BS.1770 LUFS.
+**Since then (v4 → v14):** the analyzer is now at **v14**. Key accuracy has a labeled
+regression test (v9 floor: 27/79 exact, 40 compatible — see `audio-analysis`).
+Loudness moved to **K-weighted BS.1770** (v11) and the waveform is colored
+`[low, mid, high, loudness]` over the **full track** (no 150 s cap). **BPM/tempo and
+beatgrid were disabled in v8** — analysis no longer emits a bpm or beatgrid; the DoD
+text above describes the original v4 behavior.
+**Still open (Phase 2.1):** a majmin tiebreak for major-key tracks the minor bias now
+costs; re-enabling BPM/beatgrid for export.
 
 ## Phase 3 — Playlists  `[x]`
 `playlist` subcommands over the flat master pool: `new [--folder] [--parent ID]`,
@@ -134,18 +137,22 @@ First-cut features:
   never touches the catalog or source bytes. Note: the drag-out carries the audio
   only — Ordnung's beatgrids/cues/keys still require the Phase 5 native USB export.
 
-Still to do for full GUI parity: tag editing, intra-playlist track reordering by
-drag (adding tracks to a playlist by drag now works; reordering within one does
-not), multi-select batch conversion (the selection model now exists — wire the
-convert modal to it), waveform preview, harmonic-mixing key view.
+Done since first-cut: tag editing (inspector edits write catalog + file),
+intra-playlist track reordering by drag, multi-select batch conversion, waveform
+preview (inline table waveforms + full-track player lane with zoom/smoothing/band
+settings), and the multi-candidate Discogs release picker (below).
+
+Still to do for full GUI parity: a dedicated **harmonic-mixing key view** (the table
+already color-codes the Camelot wheel, but there's no separate mixing view).
 
 GUI artwork TODOs:
-- **Multi-candidate release picker.** The Discogs search already returns up to 10
-  releases (`per_page=10`), but `discogs::find_artwork` auto-takes the first hit.
-  Return the full candidate list (release id / title / year / label / thumbnail)
-  and turn the Save/Skip modal into a picker so the user can *choose one of many*
-  releases per track. See the multi-candidate picker in
-  `docs/design/discogs-track-inspector.md` §5. (Code pointer: `find_artwork` TODO.)
+- ~~**Multi-candidate release picker.**~~ **Done.** The Discogs candidate list
+  (release id / title / year / label / thumbnail) is returned via
+  `discogs::find_artwork_candidates` and the Save/Skip modal is now a picker with a
+  "None of these" option (`ordnung-gui/src/modals.rs`). Song-data mode previews the
+  exact fields that would be written before applying. The fuller confirmed-match
+  inspector view (styles, tracklist, other versions, marketplace, link-outs) from
+  `docs/design/discogs-track-inspector.md` §4.2 remains future work.
 
 ---
 When finishing work, flip the marker and note anything that changed the design back

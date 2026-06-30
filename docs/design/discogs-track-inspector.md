@@ -1,6 +1,16 @@
 # Discogs Track Inspector — Design Brief
 
-**Status:** Draft for design exploration
+> **Implementation status (2026-06-30):** partially built. The Discogs backend
+> (`ordnung-core/src/discogs.rs` — search, multi-candidate fetch, release details,
+> field-level diff/apply, rate limiting, caching) and the GUI **candidate picker**
+> (`ordnung-gui/src/modals.rs`, with song-data field preview and a "None of these"
+> option) are shipped. The basic track inspector panel (`ordnung-gui/src/inspector.rs`)
+> shows core tags + cover art with catalog/file write-back. **Not yet built:** the
+> rich *confirmed-match* view from §4.2 (release identity strip, Discogs Styles chips,
+> expandable tracklist, "other versions", marketplace snippet, link-out/refresh/unlink
+> actions) and the error/offline/rate-limit match states from §4.1.
+
+**Status:** Draft for design exploration (backend + picker implemented; full inspector view pending)
 **Target surface:** Ordnung GUI (desktop app, `ordnung-gui` crate)
 **Trigger:** Double-click on a track row in the library view
 **Audience for this brief:** UI/UX designer

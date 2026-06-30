@@ -48,17 +48,19 @@ ordnung/
 ├── Cargo.toml                  # workspace
 ├── crates/
 │   ├── ordnung-core/           # domain model + engines (no UI, no policy)
-│   │   ├── model/              # Track, Analysis, Key, Playlist, Catalog, ExportProfile
-│   │   ├── catalog/            # SQLite persistence (rusqlite)
-│   │   ├── scan/               # discovery + tag/property read (lofty, symphonia)
-│   │   ├── analysis/           # BPM, beatgrid, key, waveform, loudness (rustfft)
-│   │   ├── tag/                # metadata read/write (lofty)
-│   │   └── convert/            # ffmpeg orchestration (explicit only)
-│   ├── ordnung-rbdb/           # rekordbox export: export.pdb + ANLZ writers
-│   │   ├── pdb/                # DeviceSQL tables via rekordcrate (binrw)
-│   │   └── anlz/               # .DAT/.EXT (beatgrid, cues, waveforms)
-│   └── ordnung-cli/            # clap command surface; the only "policy" layer
-└── (future) crates/ordnung-gui # wraps ordnung-core
+│   │   ├── model/              # Track, Analysis, Key, Playlist, ExportProfile (dir)
+│   │   ├── analysis/           # key, waveform, loudness (rustfft) — BPM/beatgrid off (dir)
+│   │   ├── catalog.rs          # SQLite persistence + Catalog type (rusqlite)
+│   │   ├── scan.rs             # discovery + tag/property read (lofty, symphonia)
+│   │   ├── tag.rs              # metadata read/write (lofty)
+│   │   ├── convert.rs          # ffmpeg orchestration (explicit only)
+│   │   ├── discogs.rs          # Discogs metadata/artwork client
+│   │   └── error.rs            # crate error type
+│   ├── ordnung-rbdb/           # rekordbox export: export.pdb + ANLZ writers (Phase 5, skeleton)
+│   │   ├── pdb.rs              # DeviceSQL tables (export.pdb)
+│   │   └── anlz.rs             # .DAT/.EXT (beatgrid, cues, waveforms)
+│   ├── ordnung-cli/            # clap command surface; a "policy" layer → core + rbdb
+│   └── ordnung-gui/            # egui/eframe desktop app (primary front-end) → core
 ```
 
 ### Dependencies (chosen, not yet pinned)
@@ -110,7 +112,10 @@ ordnung/
 - **Phase 4 — Conversion.** `convert`: explicit, CDJ-safe ffmpeg presets.
 - **Phase 5 — rekordbox export.** `export`: `export.pdb` + ANLZ to FAT32 USB.
 - **Phase 6 — Validation.** Round-trip against rekordbox/real CDJ; hot-cue editing.
-- **Later — GUI.** Library grid wrapping `ordnung-core`.
+- **GUI (built early, now the primary front-end).** `ordnung-gui` is a native
+  egui/eframe app wrapping `ordnung-core`: catalog table, inspector + tag editing,
+  conversion, Discogs artwork/metadata, inline + full-track waveforms, drag-to-
+  rekordbox. See the `ordnung-roadmap` skill for live GUI status.
 
 ## 6. Risks & mitigations
 

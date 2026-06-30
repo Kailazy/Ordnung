@@ -10,16 +10,23 @@ stateless and parallelizable with `rayon`. Every result is cached.
 
 ## Pipeline per track
 
+The live pipeline (analyzer **v14**) currently emits **key, waveform, and loudness**.
+BPM/tempo and beatgrid are **disabled as of v8** — `analyze_file` leaves `bpm: None`
+and an empty (anchorless) beatgrid. Steps 2–3 below describe how they worked and
+should be rebuilt when re-enabled; they are NOT in the current output.
+
 1. **Decode** to mono f32 PCM at a known rate (e.g. downmix; 44.1 kHz) via symphonia.
-2. **BPM / tempo** — spectral-flux onset envelope → tempo via autocorrelation /
-   comb-filter over a plausible DJ range (~70–185 BPM, with octave-error correction).
-3. **Beatgrid** — phase-align beats to onset peaks; emit anchored beat positions
-   (ms + sample). Assume near-constant tempo for electronic music; support tempo
+2. **BPM / tempo** *(disabled, v8+)* — spectral-flux onset envelope → tempo via
+   autocorrelation / comb-filter over a plausible DJ range (~70–185 BPM, with
+   octave-error correction).
+3. **Beatgrid** *(disabled, v8+)* — phase-align beats to onset peaks; emit anchored
+   beat positions. Assume near-constant tempo for electronic music; support tempo
    segments for variable material.
 4. **Key** — HPCP-style chromagram correlated against EDM-tuned profiles → best
    `(PitchClass, Mode)`. See "Key detection" below; the naive version is a trap.
-5. **Waveform** — preview (low-res, for CDJ overview) + detailed/color bins.
-6. **Loudness/peak** — peak and integrated loudness for gain hints.
+5. **Waveform** — preview (low-res, for CDJ overview) + detailed/color bins. Spans the
+   full track; color bins carry `[low, mid, high, loudness]` (120 Hz / 2 kHz splits).
+6. **Loudness/peak** — peak and K-weighted (BS.1770) integrated loudness for gain hints.
 
 ## Canonical Key model & Camelot mapping
 

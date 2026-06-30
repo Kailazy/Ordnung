@@ -2,6 +2,8 @@
 
 Tracking doc for a staged UI/UX pass on the Ordnung egui GUI. Each task is done **one at a time**, confirmed before starting. Paste the **Master prompt** below into a fresh chat to resume from wherever the status table left off.
 
+> **Status (2026-06-30): the staged pass is complete — Tasks 1–5 are all ✅ Done.** The "Now:" file/line references in each Task detail describe the *pre-change* state and are kept as historical context. The unscheduled backlog (**A–F**, "Remaining design suggestions" below) is the source of future UI work; promote items from there into a new status table when the next pass begins.
+
 ---
 
 ## Master prompt (paste this into a new chat to continue)

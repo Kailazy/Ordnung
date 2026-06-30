@@ -28,22 +28,26 @@ If a requested change would break one of these, stop and flag it rather than cod
 
 - `ordnung-core` — domain model + engines. **No policy, no UI, no `println!`, no
   process exits.** Pure library returning typed results/errors. Submodules:
-  `model`, `catalog`, `scan`, `analysis`, `tag`, `convert`.
+  `model`, `catalog`, `scan`, `analysis`, `tag`, `convert`, `discogs`, `error`.
 - `ordnung-rbdb` — rekordbox export only: `pdb` (DeviceSQL via `rekordcrate`) and
   `anlz` (.DAT/.EXT). Depends on `ordnung-core` model, not the reverse. Format
   details belong in the `rekordbox-format` skill.
 - `ordnung-cli` — the ONLY place that decides policy, prints, prompts, and maps
   user intent to core calls. Owns `clap` definitions and progress UI.
-- Future `ordnung-gui` wraps `ordnung-core` exactly like the CLI does — so keep all
-  reusable logic in core, never in the CLI.
+- `ordnung-gui` — the egui/eframe desktop app, the primary front-end. Wraps
+  `ordnung-core` exactly like the CLI does — so keep all reusable logic in core,
+  never in the CLI or GUI.
 
-Dependency direction: `cli`/`gui` → `rbdb` → `core`. Never let `core` depend upward.
+Dependency direction: `cli` → `rbdb` → `core`, and `gui` → `core` (the GUI does
+NOT depend on `rbdb` — rekordbox export is CLI-only for now). Never let `core`
+depend upward.
 
 ## Data model (authoritative shapes)
 
-`Track`, `Analysis`, `Key`, `Cue`, `Beatgrid`, `Playlist`, `Catalog`, `ExportProfile`
-— defined in `ordnung-core/model`. Extend these in place; do not invent parallel
-structs in `cli` or `rbdb`. `Analysis` carries a `content_hash` and `analyzer_version`
+`Track`, `Analysis`, `Key`, `Cue`, `Beatgrid`, `Playlist`, `ExportProfile` — defined
+in `ordnung-core/model`. `Catalog` (the SQLite-backed store + CRUD) lives in
+`ordnung-core/catalog.rs`, not `model`. Extend these in place; do not invent parallel
+structs in `cli`, `gui`, or `rbdb`. `Analysis` carries a `content_hash` and `analyzer_version`
 so the cache can invalidate correctly.
 
 ## Conventions
