@@ -139,10 +139,7 @@ impl App {
         // High-res bands for the zoom lane; fall back to the coarse preview until
         // the PCM has been analyzed (or for tracks the engine never decoded).
         let hires = np.hires_bands.clone().unwrap_or_default();
-        let mut wave_style = WaveformStyle::from_config(&self.config);
-        // The smoothing amount lives on app state (driven by the lane slider), not
-        // config, so fold it in after building the style from the saved settings.
-        wave_style.smoothing = self.wave_smoothing.clamp(0.0, 1.0);
+        let wave_style = WaveformStyle::from_config(&self.config);
 
         const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
         let mut toggle = false;
@@ -439,55 +436,10 @@ impl App {
         let lane_h = self.wave_lane_h.clamp(MIN_LANE_H, MAX_LANE_H);
         let lane_w = (ui.available_width() - 2.0 * MARGIN).max(60.0);
 
-        // Smoothing slider, sitting on the waveform itself (not buried in Settings)
-        // so it's adjustable while watching the lane. Higher values blend each
-        // sample bar into its neighbors — a rekordbox-style continuous envelope
-        // instead of showing every dip between bins. Drives `self.wave_smoothing`,
-        // which the caller folds into `WaveformStyle::smoothing` next frame.
-        ui.horizontal(|ui| {
-            ui.add_space(MARGIN);
-            ui.label(
-                egui::RichText::new("Smoothing")
-                    .size(11.0)
-                    .color(egui::Color32::from_gray(150)),
-            );
-            let mut sm = self.wave_smoothing;
-            if ui
-                .add(egui::Slider::new(&mut sm, 0.0..=1.0).show_value(false))
-                .changed()
-            {
-                self.wave_smoothing = sm.clamp(0.0, 1.0);
-                ui.ctx().request_repaint();
-            }
-        });
-
-        // Grip handle above the lane: drag it up to grow the lane (and the panel),
-        // down to shrink. A short centered pill, brightening on hover/drag.
-        let grip_w = 48.0;
-        let (grip_rect, grip) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), 9.0),
-            egui::Sense::drag(),
-        );
-        if grip.dragged() {
-            // Dragging up is negative dy; growing the lane means subtracting it.
-            self.wave_lane_h =
-                (lane_h - grip.drag_delta().y).clamp(MIN_LANE_H, MAX_LANE_H);
-            ui.ctx().request_repaint();
-        }
-        if grip.hovered() || grip.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-        }
-        let grip_color = if grip.hovered() || grip.dragged() {
-            egui::Color32::from_gray(150)
-        } else {
-            egui::Color32::from_gray(80)
-        };
-        let pill = egui::Rect::from_center_size(
-            grip_rect.center(),
-            egui::vec2(grip_w, 4.0),
-        );
-        ui.painter()
-            .rect_filled(pill, egui::Rounding::same(2.0), grip_color);
+        // The smoothing slider and the resize grip used to sit in their own rows
+        // above the lane, leaving a dead band of empty panel between them and the
+        // waveform. Smoothing now lives in Settings → Waveform; the grip floats
+        // directly over the lane's top edge (below), so the lane fills the panel.
 
         ui.horizontal(|ui| {
             ui.add_space(MARGIN);
@@ -538,6 +490,46 @@ impl App {
                     egui::pos2(play_x, rect.bottom()),
                 ],
                 egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 80, 80)),
+            );
+
+            // Resize grip, floating opaquely over the lane's top edge instead of
+            // taking its own row above it. Drag up to grow the lane (and the
+            // panel), down to shrink. Registered after the lane so it sits on top
+            // and captures the drag there rather than seeking.
+            let grip_w = 48.0;
+            let grip_center = egui::pos2(rect.center().x, rect.top() + 9.0);
+            let grip_hit =
+                egui::Rect::from_center_size(grip_center, egui::vec2(grip_w + 16.0, 16.0));
+            let grip = ui.interact(
+                grip_hit,
+                ui.id().with("wave_resize_grip"),
+                egui::Sense::drag(),
+            );
+            if grip.dragged() {
+                // Dragging up is negative dy; growing the lane means subtracting it.
+                self.wave_lane_h =
+                    (lane_h - grip.drag_delta().y).clamp(MIN_LANE_H, MAX_LANE_H);
+                ui.ctx().request_repaint();
+            }
+            if grip.hovered() || grip.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            }
+            let grip_painter = ui.painter();
+            // Opaque dark backing keeps the pill legible over bright bars.
+            grip_painter.rect_filled(
+                egui::Rect::from_center_size(grip_center, egui::vec2(grip_w + 12.0, 11.0)),
+                egui::Rounding::same(5.0),
+                egui::Color32::from_gray(26),
+            );
+            let pill_color = if grip.hovered() || grip.dragged() {
+                egui::Color32::from_gray(220)
+            } else {
+                egui::Color32::from_gray(150)
+            };
+            grip_painter.rect_filled(
+                egui::Rect::from_center_size(grip_center, egui::vec2(grip_w, 4.0)),
+                egui::Rounding::same(2.0),
+                pill_color,
             );
 
             // Wheel to zoom (multiplicative, so each notch is a constant ratio).
@@ -640,8 +632,8 @@ pub(crate) struct WaveformStyle {
     pub energy_colors: [egui::Color32; 5],
     /// Bar smoothing `[0, 1]`: blends each bar's height with its neighbors so the
     /// envelope reads as a continuous curve (rekordbox-style) instead of showing
-    /// every dip between adjacent bins. `0` = raw bars. Not from config — set per
-    /// frame from the live slider above the zoom lane.
+    /// every dip between adjacent bins. `0` = raw bars. From the Waveform settings
+    /// tab (`config::waveform_smoothing`).
     pub smoothing: f32,
 }
 
@@ -666,8 +658,7 @@ impl WaveformStyle {
                 rgb(cfg.waveform_energy_colors[3]),
                 rgb(cfg.waveform_energy_colors[4]),
             ],
-            // Live runtime value; the caller overwrites it from the lane slider.
-            smoothing: DEFAULT_SMOOTHING,
+            smoothing: cfg.waveform_smoothing.clamp(0.0, 1.0),
         }
     }
 }
@@ -748,15 +739,11 @@ const MIN_LANE_H: f32 = 46.0;
 /// Tallest the lane can be dragged (keeps the lane from swallowing the screen).
 const MAX_LANE_H: f32 = 460.0;
 /// Base height of the player panel excluding the resizable lane (artwork/controls
-/// row, the spacing around the lane, the grip handle, and the smoothing-slider row
-/// above the lane). Panel height = this + the lane height.
-const PANEL_BASE_H: f32 = 135.0;
+/// row plus the spacing around the lane). The grip floats over the lane and the
+/// smoothing slider moved to Settings, so neither reserves a row here any more.
+/// Panel height = this + the lane height.
+const PANEL_BASE_H: f32 = 100.0;
 
-/// Default waveform bar smoothing `[0, 1]`. Set where the inter-bar gaps have just
-/// closed (see `fill` in the draw fns) so the scrolling lane reads as a solid
-/// rekordbox-style envelope with no shimmering seams out of the box. Lower it for
-/// crisper separated bands; raise it for a softer envelope.
-pub(crate) const DEFAULT_SMOOTHING: f32 = 0.5;
 /// One-pole coefficient `smooth_aggs` eases the *attack* (rising-edge) toward at
 /// full smoothing. Kept high so a transient jumping up — the front of a kick —
 /// still snaps to ~this fraction of the jump per bar and the edge stays crisp.

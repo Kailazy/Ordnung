@@ -418,7 +418,16 @@ impl App {
                                 }
 
                                 ui.add_space(12.0);
-                                ui.label(egui::RichText::new("Rendering").strong());
+                                let mut wave_dirty = false;
+                                if subsection_header(ui, "Rendering") {
+                                    self.config.waveform_height_exp =
+                                        config::default_waveform_height_exp();
+                                    self.config.waveform_energy_gain =
+                                        config::default_waveform_energy_gain();
+                                    self.config.waveform_band_gain =
+                                        config::default_waveform_band_gain();
+                                    wave_dirty = true;
+                                }
                                 ui.label(
                     egui::RichText::new(
                         "Tune how tall the waveform draws. Changes apply live to the \
@@ -428,7 +437,6 @@ impl App {
                     .weak(),
                 );
                                 ui.add_space(4.0);
-                                let mut wave_dirty = false;
                                 egui::Grid::new("settings_waveform_render_grid")
                                     .num_columns(2)
                                     .spacing([12.0, 8.0])
@@ -464,6 +472,26 @@ impl App {
                                             .on_hover_text(
                                                 "Height of the envelope in Energy mode (the \
                                                  spectrum band-gain equivalent).",
+                                            )
+                                            .changed()
+                                        {
+                                            wave_dirty = true;
+                                        }
+                                        ui.end_row();
+
+                                        ui.label("Smoothing:");
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut self.config.waveform_smoothing,
+                                                    0.0..=1.0,
+                                                )
+                                                .fixed_decimals(2),
+                                            )
+                                            .on_hover_text(
+                                                "Blends each bar of the zoom detail lane into its \
+                                                 neighbors for a continuous rekordbox-style \
+                                                 envelope. 0 = raw bars; 1 = heavily smoothed.",
                                             )
                                             .changed()
                                         {
@@ -507,7 +535,17 @@ impl App {
                                     });
 
                                 ui.add_space(12.0);
-                                ui.label(egui::RichText::new("Frequency bands").strong());
+                                if subsection_header(ui, "Frequency bands") {
+                                    self.config.waveform_low_hz =
+                                        config::default_waveform_low_hz();
+                                    self.config.waveform_mid_hz =
+                                        config::default_waveform_mid_hz();
+                                    if let Some(np) = self.now_playing.as_mut() {
+                                        np.hires_bands = None;
+                                        np.hires_requested = false;
+                                    }
+                                    wave_dirty = true;
+                                }
                                 ui.label(
                                     egui::RichText::new(
                                         "Crossover frequencies that split the low / mid / high \
@@ -580,7 +618,11 @@ impl App {
                                 }
 
                                 ui.add_space(12.0);
-                                ui.label(egui::RichText::new("Band colors").strong());
+                                if subsection_header(ui, "Band colors") {
+                                    self.config.waveform_band_colors =
+                                        config::default_waveform_band_colors();
+                                    wave_dirty = true;
+                                }
                                 ui.label(
                                     egui::RichText::new(
                                         "Colors of the three frequency bands in Spectrum mode.",
@@ -610,7 +652,11 @@ impl App {
                                     });
 
                                 ui.add_space(12.0);
-                                ui.label(egui::RichText::new("Energy gradient").strong());
+                                if subsection_header(ui, "Energy gradient") {
+                                    self.config.waveform_energy_colors =
+                                        config::default_waveform_energy_colors();
+                                    wave_dirty = true;
+                                }
                                 ui.label(
                                     egui::RichText::new(
                                         "Cool → hot gradient used in Energy mode, quiet (left) to \
@@ -655,6 +701,8 @@ impl App {
                                         config::default_waveform_low_hz();
                                     self.config.waveform_mid_hz =
                                         config::default_waveform_mid_hz();
+                                    self.config.waveform_smoothing =
+                                        config::default_waveform_smoothing();
                                     // Restored crossovers → recompute the zoom lane bands.
                                     if let Some(np) = self.now_playing.as_mut() {
                                         np.hires_bands = None;
@@ -2008,4 +2056,21 @@ impl App {
             self.reload();
         }
     }
+}
+
+/// A waveform-settings subsection header: a bold title with a small right-aligned
+/// "Reset" button that restores just that subsection's defaults. Returns `true`
+/// the frame the button is clicked.
+fn subsection_header(ui: &mut egui::Ui, title: &str) -> bool {
+    let mut reset = false;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            reset = ui
+                .small_button("Reset")
+                .on_hover_text("Restore this section's defaults.")
+                .clicked();
+        });
+    });
+    reset
 }

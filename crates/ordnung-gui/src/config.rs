@@ -104,6 +104,12 @@ pub struct Config {
     /// Everything above this reads as the high band. See `compute_hires_bands`.
     #[serde(default = "default_waveform_mid_hz")]
     pub waveform_mid_hz: f32,
+    /// Bar smoothing `[0, 1]` for the zoom detail lane: blends each bar's height
+    /// with its neighbors so the envelope reads as a continuous curve
+    /// (rekordbox-style) instead of showing every dip between bins. `0` = raw
+    /// bars. See `smooth_aggs` and `WaveformStyle::smoothing`.
+    #[serde(default = "default_waveform_smoothing")]
+    pub waveform_smoothing: f32,
 }
 
 fn default_true() -> bool {
@@ -140,6 +146,10 @@ pub(crate) fn default_waveform_low_hz() -> f32 {
 
 pub(crate) fn default_waveform_mid_hz() -> f32 {
     2000.0
+}
+
+pub(crate) fn default_waveform_smoothing() -> f32 {
+    0.5
 }
 
 pub(crate) fn default_waveform_energy_colors() -> [[u8; 3]; 5] {
@@ -203,6 +213,7 @@ impl Default for Config {
             waveform_energy_colors: default_waveform_energy_colors(),
             waveform_low_hz: default_waveform_low_hz(),
             waveform_mid_hz: default_waveform_mid_hz(),
+            waveform_smoothing: default_waveform_smoothing(),
         }
     }
 }

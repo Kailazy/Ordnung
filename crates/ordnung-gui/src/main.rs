@@ -965,11 +965,6 @@ struct App {
     /// handle above the lane; the bottom player panel grows to match. See
     /// [`player`].
     wave_lane_h: f32,
-    /// Waveform smoothing `[0, 1]`: how strongly neighboring sample bars are
-    /// blended into a continuous envelope (rekordbox-style) instead of showing
-    /// every dip between bins. `0` = raw bars; `1` = heavily smoothed. Adjusted by
-    /// the slider above the zoom lane. See [`player`].
-    wave_smoothing: f32,
 }
 
 /// What the bottom player bar needs to render the current track.
