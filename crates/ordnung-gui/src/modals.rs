@@ -764,6 +764,85 @@ impl App {
                                     }
                                 });
 
+                                ui.add_space(12.0);
+                                ui.label(egui::RichText::new("Presets").strong());
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Five slots that snapshot every waveform setting above, \
+                                         so a look you like isn't lost while experimenting. \
+                                         Saving overwrites the slot; loading applies it.",
+                                    )
+                                    .small()
+                                    .weak(),
+                                );
+                                ui.add_space(4.0);
+                                let mut load_slot: Option<u8> = None;
+                                let mut save_slot: Option<u8> = None;
+                                ui.horizontal(|ui| {
+                                    ui.label("Save:");
+                                    for slot in 1..=5u8 {
+                                        let filled =
+                                            self.config.waveform_preset(slot).is_some();
+                                        let label = slot.to_string();
+                                        if ui
+                                            .button(label)
+                                            .on_hover_text(if filled {
+                                                format!(
+                                                    "Overwrite preset {slot} with the current \
+                                                     settings."
+                                                )
+                                            } else {
+                                                format!(
+                                                    "Save the current settings as preset {slot}."
+                                                )
+                                            })
+                                            .clicked()
+                                        {
+                                            save_slot = Some(slot);
+                                        }
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Load:");
+                                    for slot in 1..=5u8 {
+                                        let filled =
+                                            self.config.waveform_preset(slot).is_some();
+                                        let resp = ui
+                                            .add_enabled(
+                                                filled,
+                                                egui::Button::new(slot.to_string()),
+                                            )
+                                            .on_hover_text(format!("Apply preset {slot}."))
+                                            .on_disabled_hover_text(format!(
+                                                "Preset {slot} is empty — save to it first."
+                                            ));
+                                        if resp.clicked() {
+                                            load_slot = Some(slot);
+                                        }
+                                    }
+                                });
+                                if let Some(slot) = save_slot {
+                                    self.config.save_waveform_preset(slot);
+                                    self.status = format!("Saved waveform preset {slot}.");
+                                    wave_dirty = true;
+                                }
+                                if let Some(slot) = load_slot {
+                                    if let Some(freq_changed) =
+                                        self.config.load_waveform_preset(slot)
+                                    {
+                                        if freq_changed {
+                                            // New crossovers → recompute the zoom lane bands.
+                                            if let Some(np) = self.now_playing.as_mut() {
+                                                np.hires_bands = None;
+                                                np.hires_requested = false;
+                                            }
+                                        }
+                                        self.status =
+                                            format!("Loaded waveform preset {slot}.");
+                                        wave_dirty = true;
+                                    }
+                                }
+
                                 ui.add_space(10.0);
                                 if ui
                                     .button("Reset all to defaults")
@@ -793,6 +872,10 @@ impl App {
                                         config::default_waveform_smooth_attack_ms();
                                     self.config.waveform_smooth_release_ms =
                                         config::default_waveform_smooth_release_ms();
+                                    self.config.waveform_bass_floor_threshold =
+                                        config::default_waveform_bass_floor_threshold();
+                                    self.config.waveform_bass_floor_amount =
+                                        config::default_waveform_bass_floor_amount();
                                     // Restored crossovers → recompute the zoom lane bands.
                                     if let Some(np) = self.now_playing.as_mut() {
                                         np.hires_bands = None;

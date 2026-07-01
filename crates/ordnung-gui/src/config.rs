@@ -134,6 +134,35 @@ pub struct Config {
     /// transients. See `bass_floor_gain`.
     #[serde(default = "default_waveform_bass_floor_amount")]
     pub waveform_bass_floor_amount: f32,
+    /// Saved snapshots of the Waveform settings tab (Settings → Waveform →
+    /// Presets), keyed by their 1-based `slot`. At most one entry per slot; a
+    /// plain `Vec` (not `[Option<_>; 5]`) because TOML can't represent `None`
+    /// holes in an array.
+    #[serde(default)]
+    pub waveform_presets: Vec<WaveformPreset>,
+}
+
+/// One saved snapshot of every tunable on the Waveform settings tab. Saving to
+/// an occupied slot overwrites it; loading applies the whole snapshot at once,
+/// so an in-progress tweak can be parked and recalled without redialing each
+/// slider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaveformPreset {
+    /// 1-based UI slot this preset lives in.
+    pub slot: u8,
+    pub color_mode: String,
+    pub height_exp: f32,
+    pub band_gain: [f32; 3],
+    pub energy_gain: f32,
+    pub band_colors: [[u8; 3]; 3],
+    pub energy_colors: [[u8; 3]; 5],
+    pub low_hz: f32,
+    pub mid_hz: f32,
+    pub smoothing: f32,
+    pub smooth_attack_ms: f32,
+    pub smooth_release_ms: f32,
+    pub bass_floor_threshold: f32,
+    pub bass_floor_amount: f32,
 }
 
 fn default_true() -> bool {
@@ -258,11 +287,66 @@ impl Default for Config {
             waveform_smooth_release_ms: default_waveform_smooth_release_ms(),
             waveform_bass_floor_threshold: default_waveform_bass_floor_threshold(),
             waveform_bass_floor_amount: default_waveform_bass_floor_amount(),
+            waveform_presets: Vec::new(),
         }
     }
 }
 
 impl Config {
+    /// The waveform preset saved in 1-based `slot`, if any.
+    pub fn waveform_preset(&self, slot: u8) -> Option<&WaveformPreset> {
+        self.waveform_presets.iter().find(|p| p.slot == slot)
+    }
+
+    /// Snapshot the current waveform settings into `slot`, overwriting whatever
+    /// was there. Caller persists with [`Config::save`].
+    pub fn save_waveform_preset(&mut self, slot: u8) {
+        let preset = WaveformPreset {
+            slot,
+            color_mode: self.waveform_color_mode.clone(),
+            height_exp: self.waveform_height_exp,
+            band_gain: self.waveform_band_gain,
+            energy_gain: self.waveform_energy_gain,
+            band_colors: self.waveform_band_colors,
+            energy_colors: self.waveform_energy_colors,
+            low_hz: self.waveform_low_hz,
+            mid_hz: self.waveform_mid_hz,
+            smoothing: self.waveform_smoothing,
+            smooth_attack_ms: self.waveform_smooth_attack_ms,
+            smooth_release_ms: self.waveform_smooth_release_ms,
+            bass_floor_threshold: self.waveform_bass_floor_threshold,
+            bass_floor_amount: self.waveform_bass_floor_amount,
+        };
+        self.waveform_presets.retain(|p| p.slot != slot);
+        self.waveform_presets.push(preset);
+        // Keep the saved TOML stable regardless of save order.
+        self.waveform_presets.sort_by_key(|p| p.slot);
+    }
+
+    /// Apply the preset in `slot` to the live settings. Returns whether the
+    /// band crossovers changed — the caller must then invalidate the loaded
+    /// track's hi-res bands so the zoom lane recomputes — or `None` if the slot
+    /// is empty.
+    pub fn load_waveform_preset(&mut self, slot: u8) -> Option<bool> {
+        let p = self.waveform_preset(slot)?.clone();
+        let freq_changed =
+            p.low_hz != self.waveform_low_hz || p.mid_hz != self.waveform_mid_hz;
+        self.waveform_color_mode = p.color_mode;
+        self.waveform_height_exp = p.height_exp;
+        self.waveform_band_gain = p.band_gain;
+        self.waveform_energy_gain = p.energy_gain;
+        self.waveform_band_colors = p.band_colors;
+        self.waveform_energy_colors = p.energy_colors;
+        self.waveform_low_hz = p.low_hz;
+        self.waveform_mid_hz = p.mid_hz;
+        self.waveform_smoothing = p.smoothing;
+        self.waveform_smooth_attack_ms = p.smooth_attack_ms;
+        self.waveform_smooth_release_ms = p.smooth_release_ms;
+        self.waveform_bass_floor_threshold = p.bass_floor_threshold;
+        self.waveform_bass_floor_amount = p.bass_floor_amount;
+        Some(freq_changed)
+    }
+
     /// Load settings from disk, or return defaults if the file is missing or
     /// unreadable. Never fails: a broken/absent config simply yields defaults.
     pub fn load() -> Self {
