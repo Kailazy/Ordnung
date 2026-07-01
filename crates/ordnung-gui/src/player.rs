@@ -715,7 +715,17 @@ fn bass_floor_gain(low_norm: f32, threshold: f32, amount: f32) -> f32 {
 /// (raw, no smoothing); the release floor is far lower than the attack floor, so
 /// every step of the slider smooths downslopes harder than upslopes. Runs per
 /// channel in O(n). `0` returns the input as `f32` unchanged.
-fn smooth_aggs(aggs: &[[u8; 4]], smoothing: f32) -> Vec<[f32; 4]> {
+///
+/// `oversample` (`>= 1`) is how many rendered bars fall on one source bin. The
+/// follower's coefficient is fixed *per bar*, so its radius shrinks — measured in
+/// audio — the further the lane is zoomed in: at the overview each bar aggregates
+/// many bins and the blend spans a lot of audio, but zoomed all the way in each
+/// bar is ~one bin and the follower tracks every bin exactly, reading as a jagged
+/// comb. Raising `oversample` slows the coefficients (`memory ^ (1/oversample)`)
+/// so the same amount of *audio* is smoothed at full zoom as at the overview —
+/// the slider keeps biting no matter how far in you go. `1` leaves the coefficients
+/// untouched (the zoomed-out behaviour).
+fn smooth_aggs(aggs: &[[u8; 4]], smoothing: f32, oversample: f32) -> Vec<[f32; 4]> {
     let n = aggs.len();
     let mut out = vec![[0f32; 4]; n];
     let s = smoothing.clamp(0.0, 1.0);
@@ -730,8 +740,12 @@ fn smooth_aggs(aggs: &[[u8; 4]], smoothing: f32) -> Vec<[f32; 4]> {
     // A coefficient of 1.0 follows the input exactly (no smoothing); lower lags it.
     // Attack stays high (transient-preserving) while release drops far lower
     // (heavy taper smoothing); both collapse to 1.0 as the slider approaches 0.
-    let attack = 1.0 - s * (1.0 - ATTACK_ALPHA_FLOOR);
-    let release = 1.0 - s * (1.0 - RELEASE_ALPHA_FLOOR);
+    // `memory` is the retained fraction (`1 - alpha`); raising it to `1/oversample`
+    // grows it toward 1 as bars pile onto a single bin, stretching the blend back
+    // out over the same span of audio the overview smooths across.
+    let inv = 1.0 / oversample.max(1.0);
+    let attack = 1.0 - (s * (1.0 - ATTACK_ALPHA_FLOOR)).powf(inv);
+    let release = 1.0 - (s * (1.0 - RELEASE_ALPHA_FLOOR)).powf(inv);
     for k in 0..4 {
         let mut prev = aggs[0][k] as f32;
         out[0][k] = prev;
@@ -775,6 +789,16 @@ const ATTACK_ALPHA_FLOOR: f32 = 0.65;
 /// full smoothing. Far lower than [`ATTACK_ALPHA_FLOOR`] so a kick's taper is
 /// blended across many bars into a smooth ring-out instead of a jagged decay.
 const RELEASE_ALPHA_FLOOR: f32 = 0.08;
+
+/// Source bins per bar at/above which the follower is left alone (its natural
+/// per-bar radius already spans plenty of audio). Below this — zoomed in, where
+/// each bar covers a bin or less — `smooth_aggs`'s `oversample` ramps up to keep
+/// the slider biting; see the note there. Picked so the strengthening only kicks
+/// in once a bar stops aggregating a meaningful clump of bins.
+const SMOOTH_REF_BINS: f32 = 8.0;
+/// Cap on that ramp so the tightest zoom can't drive the follower so slow it
+/// flattens the envelope into a near-flat DC line.
+const SMOOTH_MAX_OVERSAMPLE: f32 = 12.0;
 
 /// Buckets per second for the high-res zoom envelope. ~100× the stored preview's
 /// ~20/sec — well past rekordbox's detailed waveform, so even the tightest
@@ -1061,7 +1085,11 @@ pub(crate) fn draw_waveform(
         }
     }
 
-    let smoothed = smooth_aggs(&col_agg, style.smoothing);
+    // Strengthen the follower once a column samples a bin or less (zoomed past the
+    // stored resolution), so the slider smooths the stretched envelope as much as it
+    // does the packed overview instead of tracing every interpolated step.
+    let oversample = (SMOOTH_REF_BINS / bins_per_col).clamp(1.0, SMOOTH_MAX_OVERSAMPLE);
+    let smoothed = smooth_aggs(&col_agg, style.smoothing, oversample);
 
     for cx in 0..cols {
         let frac = (w0 + (cx as f32 + 0.5) / cols as f32 * wspan).clamp(0.0, 1.0);
@@ -1168,6 +1196,14 @@ fn draw_waveform_scrolling(
     let bin_w_px = gf * px_per_bin;
     let solid = px_per_bin >= 1.0;
 
+    // Bins each bar represents: one pixel spans `1/px_per_bin` bins when zoomed in
+    // (solid), or `group` bins when grouped. Below `SMOOTH_REF_BINS` the follower is
+    // slowed (see `smooth_aggs`) so the smoothing slider keeps biting the tight-zoom
+    // envelope instead of tracing every bin; at/above it the grouping already spans
+    // enough audio and the coefficients are left untouched.
+    let bins_per_bar = if solid { 1.0 / px_per_bin } else { gf };
+    let oversample = (SMOOTH_REF_BINS / bins_per_bar).clamp(1.0, SMOOTH_MAX_OVERSAMPLE);
+
     // Fraction of each bar's slot that's filled. The thin separated bars leave a
     // gap between neighbors, and as the lane scrolls those gap edges cross pixel
     // boundaries at sub-pixel positions — the bars' anti-aliased edges flicker
@@ -1249,7 +1285,7 @@ fn draw_waveform_scrolling(
     }
 
     let aggs: Vec<[u8; 4]> = bars.iter().map(|b| b.3).collect();
-    let smoothed = smooth_aggs(&aggs, style.smoothing);
+    let smoothed = smooth_aggs(&aggs, style.smoothing, oversample);
 
     for (&(bx, bw, played, _), agg) in bars.iter().zip(&smoothed) {
         match style.mode {
