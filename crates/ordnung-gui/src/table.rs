@@ -916,25 +916,28 @@ impl App {
                                             "Frequency waveform (spectrum) · click for energy",
                                         ),
                                     };
+                                    // When the inline waveforms stretch left across
+                                    // the blank gutter, the header toggle spans the
+                                    // same widened rect so glyph and click area stay
+                                    // centred over the waveforms. The glyph is
+                                    // painted (not laid out) so the extension can't
+                                    // inflate the column's measured width.
+                                    let mut hdr_rect = ui.max_rect();
+                                    if waveform_flush_left {
+                                        hdr_rect.min.x -=
+                                            index_w + ui.spacing().item_spacing.x;
+                                    }
                                     let resp = ui.interact(
-                                        ui.max_rect(),
+                                        hdr_rect,
                                         ui.id().with(("hdr", col)),
                                         egui::Sense::click(),
                                     );
-                                    ui.with_layout(
-                                        egui::Layout::centered_and_justified(
-                                            egui::Direction::LeftToRight,
-                                        ),
-                                        |ui| {
-                                            ui.add(
-                                                egui::Label::new(
-                                                    egui::RichText::new(glyph).strong().color(
-                                                        crate::ui::tokens::color::LABEL_2,
-                                                    ),
-                                                )
-                                                .selectable(false),
-                                            );
-                                        },
+                                    ui.painter().text(
+                                        hdr_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        glyph,
+                                        egui::TextStyle::Body.resolve(ui.style()),
+                                        crate::ui::tokens::color::LABEL_2,
                                     );
                                     if resp.hovered() {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
