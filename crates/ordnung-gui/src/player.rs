@@ -478,7 +478,24 @@ impl App {
                     (w0, w1),
                 );
             } else {
-                draw_waveform_scrolling(painter, draw_rect, bands, wave_style, shown_frac, (w0, w1));
+                // The lane draws whichever envelope the caller picked (hi-res, or
+                // the coarse preview until PCM analysis lands) — derive its actual
+                // bin rate so the time-based smoothing spans the same audio either
+                // way.
+                let bins_per_sec = if dur > 0.0 {
+                    (bands.len() / 4) as f32 / dur
+                } else {
+                    HIRES_BINS_PER_SEC
+                };
+                draw_waveform_scrolling(
+                    painter,
+                    draw_rect,
+                    bands,
+                    bins_per_sec,
+                    wave_style,
+                    shown_frac,
+                    (w0, w1),
+                );
             }
 
             // Fixed playhead line at the window's mapping of the live position.
@@ -712,24 +729,43 @@ fn bass_floor_gain(low_norm: f32, threshold: f32, amount: f32) -> f32 {
 /// kick as hard as its tail, mushing the transients that make a waveform readable,
 /// so this runs a one-pole follower whose coefficient depends on the local slope:
 ///
-/// * **Rising** samples — the front of a transient — track with a fast coefficient
-///   ([`BIN_ATTACK_FLOOR`]) so the edge stays reasonably crisp.
-/// * **Falling** samples — the tail — smooth with a far slower coefficient
-///   ([`BIN_RELEASE_FLOOR`]) so the decay reads as a clean ring-out.
+/// * **Rising** samples — the front of a transient — track with a fast constant
+///   ([`SMOOTH_ATTACK_SECS`]) so the edge stays reasonably crisp.
+/// * **Falling** samples — the tail — smooth with a far slower constant
+///   ([`SMOOTH_RELEASE_SECS`]) so the decay reads as a clean ring-out.
 ///
-/// Because it runs per *bin* (the ~[`HIRES_BINS_PER_SEC`] envelope), its radius is
-/// a fixed span of audio — a handful of bins — so it erases the very small jaggies
-/// without blurring the beat. `smoothing` `[0, 1]` scales both coefficients away
-/// from `1.0` (raw); `0` returns `data` unchanged. O(n) per channel.
-fn smooth_source(data: &[u8], stride: usize, smoothing: f32) -> Vec<u8> {
+/// The follower's reach is defined in *seconds of audio* ([`SMOOTH_ATTACK_SECS`] /
+/// [`SMOOTH_RELEASE_SECS`]) and converted to per-bin coefficients via
+/// `bins_per_sec`, so the coarse ~20/sec preview and the ~2000/sec hi-res envelope
+/// smooth over the same span of *time* — a per-bin coefficient that rounded the
+/// hi-res envelope nicely would smear the preview across a minute. The release
+/// span is beat-scale on purpose: a tail must survive to the next kick or every
+/// beat pinches back to the centerline and the lane reads as a row of separate
+/// petals (the "ripple") instead of a connected silhouette.
+///
+/// `smoothing` `[0, 1]` scales the time constants linearly from `0` (raw) to the
+/// full spans — time-space scaling, because scaling the *coefficients* toward 1.0
+/// left the slider perceptually dead until the very top. O(n) per channel.
+fn smooth_source(data: &[u8], stride: usize, smoothing: f32, bins_per_sec: f32) -> Vec<u8> {
     let mut out = data.to_vec();
     let n = data.len() / stride;
     let s = smoothing.clamp(0.0, 1.0);
-    if s == 0.0 || n == 0 {
+    if s == 0.0 || n == 0 || bins_per_sec <= 0.0 {
         return out;
     }
-    let attack = 1.0 - s * (1.0 - BIN_ATTACK_FLOOR);
-    let release = 1.0 - s * (1.0 - BIN_RELEASE_FLOOR);
+    // One-pole coefficient for a time constant of `tau_secs * s`: after that span
+    // the follower has covered ~63% of a step. `exp` keeps it exact even when the
+    // constant spans less than one bin (coarse preview), degrading to ~raw.
+    let alpha = |tau_secs: f32| {
+        let tau_bins = tau_secs * s * bins_per_sec;
+        if tau_bins <= f32::EPSILON {
+            1.0
+        } else {
+            1.0 - (-1.0 / tau_bins).exp()
+        }
+    };
+    let attack = alpha(SMOOTH_ATTACK_SECS);
+    let release = alpha(SMOOTH_RELEASE_SECS);
     for k in 0..stride {
         let mut prev = data[k] as f32;
         for i in 1..n {
@@ -764,16 +800,17 @@ const MAX_LANE_H: f32 = 460.0;
 /// Panel height = this + the lane height.
 const PANEL_BASE_H: f32 = 100.0;
 
-/// One-pole coefficient `smooth_source` eases the *attack* (rising-edge) toward at
-/// full smoothing, measured *per source bin*. Lower than the old per-bar value so
-/// that at the tightest zoom (~1 bin/pixel) rising edges get visibly rounded
-/// rather than tracked spike-for-spike — the small jaggies the slider is meant to
-/// iron out — while still staying above the release floor to keep transients read.
-const BIN_ATTACK_FLOOR: f32 = 0.3;
-/// One-pole coefficient `smooth_source` eases the *release* (falling-edge) toward
-/// at full smoothing. Far lower than [`BIN_ATTACK_FLOOR`] so a tail is blended
-/// across many bins into a smooth ring-out instead of a jagged decay.
-const BIN_RELEASE_FLOOR: f32 = 0.06;
+/// `smooth_source` attack time constant at full smoothing, in seconds of audio.
+/// A few milliseconds: enough to round the pixel-scale jaggies on a rising edge
+/// at the tightest zoom without softening where the transient *starts*.
+const SMOOTH_ATTACK_SECS: f32 = 0.004;
+/// `smooth_source` release time constant at full smoothing, in seconds of audio.
+/// Beat-scale (roughly one beat at house tempo) so a kick's tail is still standing
+/// when the next kick hits and the envelope stays a connected silhouette; anything
+/// much shorter decays to the centerline between beats and the waveform ripples
+/// into separate petals. The attack stays fast, so onsets keep their edge — the
+/// shape leans sawtooth (sharp front, long tail), which is how rekordbox reads.
+const SMOOTH_RELEASE_SECS: f32 = 0.45;
 
 /// Buckets per second for the high-res zoom envelope. ~100× the stored preview's
 /// ~20/sec — well past rekordbox's detailed waveform, so even the tightest
@@ -950,9 +987,12 @@ pub(crate) fn draw_waveform(
     // small details at every zoom (see `smooth_source`). Everything below samples
     // these smoothed bins; sampling raw and blending the drawn bars instead tied
     // the smoothing to the zoom.
-    let sbands = smooth_source(bands, STRIDE, style.smoothing);
+    // Both inputs here are the stored preview envelopes, so the time constants
+    // convert through the preview's fixed bin rate.
+    let rate = analysis::waveform::COLOR_BINS_PER_SEC;
+    let sbands = smooth_source(bands, STRIDE, style.smoothing, rate);
     let bands = sbands.as_slice();
-    let swave = smooth_source(waveform, 1, style.smoothing);
+    let swave = smooth_source(waveform, 1, style.smoothing, rate);
     let waveform = swave.as_slice();
 
     let y = rect.center().y;
@@ -1125,6 +1165,7 @@ fn draw_waveform_scrolling(
     painter: &egui::Painter,
     rect: egui::Rect,
     bands: &[u8],
+    bins_per_sec: f32,
     style: &WaveformStyle,
     played_frac: f32,
     window: (f32, f32),
@@ -1137,7 +1178,9 @@ fn draw_waveform_scrolling(
     // Smooth the source bins once, up front, so the slider irons out the same small
     // details no matter how far the lane is zoomed (see `smooth_source`); the bars
     // below are sampled from these smoothed bins with no further per-bar blend.
-    let sbands = smooth_source(bands, STRIDE, style.smoothing);
+    // `bins_per_sec` is the caller's actual envelope rate (hi-res or the coarse
+    // preview fallback), so the smoothing spans the same time either way.
+    let sbands = smooth_source(bands, STRIDE, style.smoothing, bins_per_sec);
     let bands = sbands.as_slice();
     let y = rect.center().y;
     let x0 = rect.left();

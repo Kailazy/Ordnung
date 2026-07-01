@@ -49,7 +49,9 @@ pub const COLOR_STRIDE: usize = 4;
 /// scales with track length so a 10-min track is as detailed *per second* as a
 /// 3-min one (the renderer takes the per-pixel max over the bins it spans, so the
 /// detail shows as thin spikes). Clamped to `[MIN_COLOR_BINS, MAX_COLOR_BINS]`.
-const COLOR_BINS_PER_SEC: f32 = 20.0;
+/// Public so renderers can convert time-based smoothing constants into per-bin
+/// coefficients for this envelope.
+pub const COLOR_BINS_PER_SEC: f32 = 20.0;
 const MIN_COLOR_BINS: usize = 400;
 const MAX_COLOR_BINS: usize = 24_000;
 /// dB window below the track's loudest bin that the loudness byte spans. Anything
