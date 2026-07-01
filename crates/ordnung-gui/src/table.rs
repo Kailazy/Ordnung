@@ -740,6 +740,12 @@ impl App {
         // between views. Numbers are right-aligned, so larger counts grow leftward
         // within the gutter and never crowd the first data column.
         let index_w = 34.0;
+        // When the Waveform column leads the row over a blank gutter (library
+        // views — no row numbers), its inline paint stretches left across the
+        // gutter so the waveform starts at the table's edge instead of
+        // hanging ~40px in.
+        let waveform_flush_left =
+            !draw_index && order.first() == Some(&TableColumn::Waveform);
         // Per-row vertical bands (full-list index, top y, bottom y) for the
         // visible rows, filled inside the body closure and used after the table to
         // map the cursor onto an insertion slot for the reorder line.
@@ -1251,8 +1257,14 @@ impl App {
                                     } else if col == TableColumn::Waveform {
                                         // Inline colored waveform, painted to fill the
                                         // cell. No playhead here (that's the player bar),
-                                        // so every bar is full brightness.
-                                        let rect = ui.max_rect();
+                                        // so every bar is full brightness. The column
+                                        // spec leaves clipping off so the flush-left
+                                        // stretch below can paint across the gutter.
+                                        let mut rect = ui.max_rect();
+                                        if waveform_flush_left {
+                                            rect.min.x -=
+                                                index_w + ui.spacing().item_spacing.x;
+                                        }
                                         if r.waveform.is_empty() {
                                             // Unanalyzed: a faint baseline, not an empty cell.
                                             let y = rect.center().y;

@@ -371,7 +371,10 @@ impl TableColumn {
         let w = |default: f32| width.unwrap_or(default);
         match self {
             TableColumn::Cover => Column::exact(cover_px + 6.0),
-            TableColumn::Waveform => Column::initial(w(140.0)).at_least(60.0).clip(true),
+            // Unclipped: when Waveform leads the row its paint stretches left
+            // across the blank order gutter (see the flush-left rect in
+            // table.rs), which a cell clip would cut off.
+            TableColumn::Waveform => Column::initial(w(140.0)).at_least(60.0),
             TableColumn::Artist => Column::initial(w(180.0)).at_least(80.0).clip(true),
             TableColumn::Title => Column::initial(w(260.0)).at_least(80.0).clip(true),
             TableColumn::Album => Column::initial(w(180.0)).at_least(60.0).clip(true),
