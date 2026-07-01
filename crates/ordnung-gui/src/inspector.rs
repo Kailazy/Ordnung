@@ -207,7 +207,7 @@ impl App {
             ui.add_enabled_ui(!busy, |ui| {
                 if ui
                     .button("⬇ Embed fetched cover into file")
-                    .on_hover_note("Writes the fetched cover art into the source file's tags")
+                    .on_hover_note("Write the fetched cover into the source file's tags")
                     .clicked()
                 {
                     action = Some(InspectorAction::EmbedCover(id, source_path.clone()));
@@ -243,9 +243,7 @@ impl App {
                 ui.add_enabled_ui(dirty && !busy, |ui| {
                     if ui
                         .button("Save")
-                        .on_hover_note(
-                            "Save these edits to the catalog (does not touch the source file)",
-                        )
+                        .on_hover_note("Save to the catalog only. The source file is untouched.")
                         .clicked()
                     {
                         action = Some(InspectorAction::SaveToCatalog(id));
@@ -253,8 +251,7 @@ impl App {
                     if ui
                         .button("⬇ Write to source file")
                         .on_hover_note(
-                            "Save to the catalog AND write these tags into the original \
-                             file on disk. This modifies the source file.",
+                            "Save to the catalog and write the tags into the source file",
                         )
                         .clicked()
                     {

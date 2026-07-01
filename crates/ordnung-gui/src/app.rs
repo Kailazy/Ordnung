@@ -548,7 +548,7 @@ impl eframe::App for App {
                     let add = egui::menu::menu_custom_button(ui, add_btn, |ui| {
                         if ui
                             .button("🎵  Choose files…")
-                            .on_hover_note("Pick one or more audio files to add")
+                            .on_hover_note("Add audio files")
                             .clicked()
                         {
                             let picked = rfd::FileDialog::new()
@@ -566,7 +566,7 @@ impl eframe::App for App {
                         }
                         if ui
                             .button("📁  Choose folder…")
-                            .on_hover_note("Scan a whole folder of music (subfolders included)")
+                            .on_hover_note("Add a folder, subfolders included")
                             .clicked()
                         {
                             if let Some(dir) = rfd::FileDialog::new().pick_folder() {
@@ -576,8 +576,7 @@ impl eframe::App for App {
                         }
                     });
                     add.response.on_hover_note(
-                        "Add music to the catalog (your master library) — pick individual \
-                         files or a whole folder. Source files are never moved or modified.",
+                        "Add files or a folder to the catalog. Source files are never modified.",
                     );
                     ui.separator();
                     // When rows are selected, the toolbar buttons act on just that
@@ -601,8 +600,8 @@ impl eframe::App for App {
                     if ui
                         .button(analyze_label)
                         .on_hover_note(
-                            "Detect BPM, key, beatgrid, and transcode quality for these \
-                             tracks (skips ones already analyzed at the current version)",
+                            "Detect BPM, key, beatgrid, and quality. Skips tracks \
+                             already analyzed.",
                         )
                         .clicked()
                     {
@@ -620,7 +619,7 @@ impl eframe::App for App {
                         };
                         if ui
                             .button(reanalyze_label)
-                            .on_hover_note("Re-run analysis even for tracks already analyzed")
+                            .on_hover_note("Re-analyze, including tracks already analyzed")
                             .clicked()
                         {
                             if sel_ids.is_empty() {
@@ -633,13 +632,9 @@ impl eframe::App for App {
                         if ui
                             .button("Fetch song data…")
                             .on_hover_note(
-                                "Query Discogs and, for the release you pick, cache the \
-                                 cover and fill in the track's missing fields (genre/style, \
-                                 label, catalog #, year, country, album, date). Only fills \
-                                 empty fields — never overwrites existing tags, and only \
-                                 edits the catalog, not your files. Requires a Discogs \
-                                 token (set it in Settings). For cover art alone, right-click \
-                                 a track and choose “Fetch artwork”.",
+                                "Pick a Discogs release to cache the cover and fill \
+                                 empty fields. Never overwrites tags or files. Needs \
+                                 a Discogs token (see Settings).",
                             )
                             .clicked()
                         {
@@ -657,8 +652,8 @@ impl eframe::App for App {
                         if ui
                             .button(format!("Convert {n} {noun}…"))
                             .on_hover_note(
-                                "Convert all selected tracks to one target format. \
-                                 New files keep the full catalog metadata + cover.",
+                                "Convert selected tracks to one format, keeping \
+                                 metadata and cover.",
                             )
                             .clicked()
                         {
@@ -697,8 +692,7 @@ impl eframe::App for App {
                             if ui
                                 .button(format!("Remove {n} from playlist"))
                                 .on_hover_note(
-                                    "Remove the selected track(s) from this playlist. \
-                                     They stay in the catalog.",
+                                    "Remove from this playlist. Tracks stay in the catalog.",
                                 )
                                 .clicked()
                             {
@@ -729,10 +723,7 @@ impl eframe::App for App {
                         .fill(egui::Color32::from_rgb(70, 110, 70));
                         if ui
                             .add(btn)
-                            .on_hover_note(
-                                "Write the edited tags of every changed track into its \
-                                 source file on disk, then mark them as synced.",
-                            )
+                            .on_hover_note("Write edited tags into the source files")
                             .clicked()
                         {
                             self.confirm_bulk_write = true;
@@ -823,7 +814,7 @@ impl eframe::App for App {
                     // Settings stays reachable even while a job runs.
                     if ui
                         .button("⚙ Settings")
-                        .on_hover_note("Set your Discogs token (saved to ~/.ordnung/config.toml)")
+                        .on_hover_note("Discogs token and app options")
                         .clicked()
                     {
                         self.token_input = self.config.discogs_token.clone();
@@ -879,7 +870,7 @@ impl eframe::App for App {
                             };
                             if ui
                                 .button(label)
-                                .on_hover_note("Clear the search and all column filters")
+                                .on_hover_note("Clear search and filters")
                                 .clicked()
                             {
                                 self.filter.clear();
@@ -916,9 +907,7 @@ impl eframe::App for App {
                 if self.job_cancel.is_some()
                     && ui
                         .button("Abort")
-                        .on_hover_note(
-                            "Stop the running scan / artwork fetch after the current item.",
-                        )
+                        .on_hover_note("Stop after the current item")
                         .clicked()
                 {
                     do_abort = true;
@@ -1036,9 +1025,8 @@ impl eframe::App for App {
                                 17.0,
                             )
                             .on_hover_note(
-                                "Recently added — fresh imports that still need analysis \
-                                 and/or a Discogs song-data fetch. Tracks drop off this \
-                                 list automatically once they're both analyzed and fetched.",
+                                "New imports awaiting analysis or a Discogs fetch. \
+                                 They drop off once both are done.",
                             )
                             .clicked()
                             {
@@ -1099,7 +1087,7 @@ impl eframe::App for App {
                             34.0,
                             14.0,
                         )
-                        .on_hover_note("Your Discogs vinyl collection — refresh to sync new records")
+                        .on_hover_note("Your Discogs vinyl collection")
                         .clicked()
                         {
                             self.view = LibraryView::Vinyl;
@@ -1134,7 +1122,7 @@ impl eframe::App for App {
                             14.0,
                         )
                         .on_hover_note(
-                            "Tracks whose source file is no longer on disk — relocate or remove them",
+                            "Tracks whose source file is gone. Relocate or remove them.",
                         )
                         .clicked()
                         {

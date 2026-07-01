@@ -296,25 +296,79 @@ impl App {
                 ui.add_space(6.0);
 
                 let visible_count = order.iter().filter(|c| !hidden.contains(c)).count();
+                // Which row is mid-drag, if any (payload set by the ⠿ sources below).
+                let dragging: Option<usize> =
+                    egui::DragAndDrop::payload::<usize>(ui.ctx()).map(|p| *p);
+                // The insertion gap the pointer hovered last frame drives this
+                // frame's placeholder line and make-room animation — rects aren't
+                // known until rows are laid out, and one frame of lag is invisible.
+                let gap_memory = egui::Id::new("col_reorder_gap_pos");
+                let prev_to: Option<usize> =
+                    ui.data(|d| d.get_temp::<Option<usize>>(gap_memory)).flatten();
                 let mut to: Option<usize> = None;
                 let frame = egui::Frame::default().inner_margin(2.0);
                 let (_, dropped) = ui.dnd_drop_zone::<usize, ()>(frame, |ui| {
+                    let mut row_rects: Vec<egui::Rect> = Vec::with_capacity(order.len());
+                    // A make-room gap is one row tall so neighbours part exactly far
+                    // enough for the dragged row to fit where the line shows.
+                    let gap_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+                    // Animated spacer before row `idx` (or after the last row). The
+                    // gap the pointer is over eases open — pushing rows out of the
+                    // way — while every other gap eases shut, and a drop-position
+                    // line fades in with it.
+                    let gap = |ui: &mut egui::Ui, idx: usize| {
+                        let target = if dragging.is_some() && prev_to == Some(idx) {
+                            gap_h
+                        } else {
+                            0.0
+                        };
+                        let h = ui.ctx().animate_value_with_time(
+                            egui::Id::new(("col_reorder_gap", idx)),
+                            target,
+                            0.12,
+                        );
+                        if h > 0.5 {
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), h),
+                                egui::Sense::hover(),
+                            );
+                            let color = ui
+                                .visuals()
+                                .selection
+                                .stroke
+                                .color
+                                .gamma_multiply((h / gap_h).clamp(0.0, 1.0));
+                            ui.painter().hline(
+                                rect.x_range(),
+                                rect.center().y,
+                                egui::Stroke::new(2.0, color),
+                            );
+                        }
+                    };
                     for (idx, &col) in order.iter().enumerate() {
+                        gap(ui, idx);
                         // Lay out each row by hand so that *only* the ⠿ handle is a
                         // drag source — making the whole row (checkbox included)
                         // draggable meant a press on the checkbox started a drag
                         // instead of toggling visibility.
                         let row = ui.horizontal(|ui| {
-                            ui.dnd_drag_source(
-                                egui::Id::new(("col_reorder_item", col)),
-                                idx,
-                                |ui| {
-                                    let handle = ui.label(egui::RichText::new("⠿").weak());
-                                    // A grab cursor on the handle signals it's the
-                                    // draggable part, not the label.
-                                    handle.on_hover_cursor(egui::CursorIcon::Grab);
-                                },
-                            );
+                            let src_id = egui::Id::new(("col_reorder_item", col));
+                            ui.dnd_drag_source(src_id, idx, |ui| {
+                                let handle = ui.label(egui::RichText::new("⠿").weak());
+                                // A grab cursor on the handle signals it's the
+                                // draggable part, not the label.
+                                handle.on_hover_cursor(egui::CursorIcon::Grab);
+                                // Mid-drag this content floats with the pointer, so
+                                // add the column name to make a readable preview.
+                                if ui.ctx().is_being_dragged(src_id) {
+                                    ui.label(col.label());
+                                }
+                            });
+                            // Fade the static copy of the row being dragged (after
+                            // the drag source, so the floating preview stays solid).
+                            if dragging == Some(idx) {
+                                ui.set_opacity(0.35);
+                            }
                             let mut vis = !hidden.contains(&col);
                             // Never let the user hide the last visible column — an
                             // empty table has no header to right-click to reopen
@@ -332,19 +386,30 @@ impl App {
                                 changed = true;
                             }
                         });
-                        // Track which gap the pointer is over so a drop lands there.
-                        // Use the whole row's rect so the entire strip is a valid
-                        // drop target, not just the narrow handle.
+                        row_rects.push(row.response.rect);
+                    }
+                    gap(ui, order.len());
+                    // Which gap is the pointer over? Compare against row centers
+                    // (not row rects) so the answer stays stable while the pointer
+                    // crosses the animated gaps between rows.
+                    if dragging.is_some() {
                         if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
-                            if row.response.rect.contains(p) {
-                                to = Some(if p.y < row.response.rect.center().y {
-                                    idx
-                                } else {
-                                    idx + 1
-                                });
+                            let zone = row_rects
+                                .iter()
+                                .fold(egui::Rect::NOTHING, |a, r| a.union(*r));
+                            if zone.expand(12.0).contains(p) {
+                                let mut t = row_rects.len();
+                                for (i, r) in row_rects.iter().enumerate() {
+                                    if p.y < r.center().y {
+                                        t = i;
+                                        break;
+                                    }
+                                }
+                                to = Some(t);
                             }
                         }
                     }
+                    ui.data_mut(|d| d.insert_temp(gap_memory, to));
                 });
                 if let Some(dragged) = dropped {
                     let from = *dragged;
@@ -1401,8 +1466,8 @@ impl App {
                                         if ui
                                             .button("Edit release…")
                                             .on_hover_note(
-                                                "Search Discogs and choose this track's release \
-                                             to set its cover and fill missing fields.",
+                                                "Pick a Discogs release to set the cover \
+                                             and fill empty fields",
                                             )
                                             .clicked()
                                         {
@@ -1421,9 +1486,8 @@ impl App {
                                         if ui
                                             .button(art_label)
                                             .on_hover_note(
-                                                "Search Discogs and pick a release per track to \
-                                             cache its cover. Cover art only — never touches \
-                                             tags.",
+                                                "Pick a Discogs release per track for cover \
+                                             art only. Tags are untouched.",
                                             )
                                             .clicked()
                                         {
@@ -1440,10 +1504,8 @@ impl App {
                                         if ui
                                             .button(data_label)
                                             .on_hover_note(
-                                                "Search Discogs and pick a release per track to \
-                                             cache its cover and fill the track's empty fields \
-                                             (genre/style, label, catalog #, year, country, \
-                                             album, date). Only fills empty fields — edits the \
+                                                "Pick a Discogs release per track to cache \
+                                             the cover and fill empty fields. Edits the \
                                              catalog, not your files.",
                                             )
                                             .clicked()
@@ -1470,9 +1532,8 @@ impl App {
                                                     .color(egui::Color32::from_rgb(220, 90, 90)),
                                             )
                                             .on_hover_note(
-                                                "Remove the selected track(s) from the catalog \
-                                             and all playlists. The source files on disk are \
-                                             not deleted.",
+                                                "Remove from the catalog and all playlists. \
+                                             Files on disk are kept.",
                                             )
                                             .clicked()
                                         {
@@ -2020,8 +2081,8 @@ pub(crate) fn quality_legend_ui(ui: &mut egui::Ui) {
     ui.strong("Transcode quality");
     ui.label(
         egui::RichText::new(
-            "From the spectral roll-off — how the file's top end falls off, which \
-             reveals a lossy source upsampled into a bigger container.",
+            "From the spectral roll-off, which reveals a lossy source \
+             upsampled into a bigger container.",
         )
         .small()
         .weak(),
@@ -2042,23 +2103,22 @@ pub(crate) fn quality_legend_ui(ui: &mut egui::Ui) {
             ui.add(egui::Label::new(egui::RichText::new(meaning).small()).wrap());
         });
     };
-    row(ui, TranscodeVerdict::Clean, "Full-band — looks lossless.");
+    row(ui, TranscodeVerdict::Clean, "Full-band. Looks lossless.");
     row(
         ui,
         TranscodeVerdict::Suspect,
-        "Sharp cutoff near 20 kHz — likely a 320 kbps transcode (a lossless master \
-         with a 20 kHz shelf also lands here).",
+        "Sharp cutoff near 20 kHz. Likely a 320 kbps transcode.",
     );
     row(
         ui,
         TranscodeVerdict::LikelyLossy,
-        "Sharp wall well below 20 kHz — almost certainly upsampled from a worse-than-320 \
+        "Sharp wall well below 20 kHz. Almost certainly from a worse-than-320 \
          lossy source.",
     );
     row(
         ui,
         TranscodeVerdict::Inconclusive,
-        "Band-limited with a gentle roll-off — old/quiet master, not a transcode. Benign.",
+        "Gentle roll-off. An old or quiet master, not a transcode.",
     );
 }
 
@@ -2080,7 +2140,7 @@ pub(crate) fn quality_chip(v: TranscodeVerdict) -> (&'static str, egui::Color32)
 /// measured cutoff and estimated lossy source when there's a wall to report.
 pub(crate) fn quality_tooltip(r: &TrackRow) -> String {
     let Some(v) = r.quality else {
-        return "Not checked yet — run Analyze to scan for lossy transcodes.".into();
+        return "Not checked yet. Run Analyze to scan for lossy transcodes.".into();
     };
     quality_blurb(v, r.quality_cut_hz, r.quality_src)
 }
@@ -2095,13 +2155,13 @@ pub(crate) fn quality_blurb(
 ) -> String {
     let mut s = match v {
         TranscodeVerdict::Clean | TranscodeVerdict::Inconclusive => {
-            "No transcode signature — looks fine.".to_string()
+            "No transcode signature. Looks fine.".to_string()
         }
         TranscodeVerdict::Suspect => {
-            "Sharp cutoff near 20 kHz — possibly a 320 kbps transcode.".to_string()
+            "Sharp cutoff near 20 kHz, possibly a 320 kbps transcode".to_string()
         }
         TranscodeVerdict::LikelyLossy => {
-            "Brick wall well below Nyquist — almost certainly a lossy transcode.".to_string()
+            "Brick wall well below Nyquist, almost certainly a lossy transcode".to_string()
         }
     };
     if let Some(hz) = cut_hz {

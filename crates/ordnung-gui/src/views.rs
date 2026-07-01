@@ -239,10 +239,7 @@ impl App {
                     let n = unanalyzed.len();
                     if ui
                         .button(format!("⚡ Analyze {n} for quality"))
-                        .on_hover_note(
-                            "Scan every copy that hasn't been checked for a lossy-transcode \
-                             signature; the quality chips fill in when it finishes",
-                        )
+                        .on_hover_note("Scan unchecked copies for lossy transcodes")
                         .clicked()
                     {
                         acts.push(Act::Analyze(unanalyzed.clone()));
@@ -262,8 +259,8 @@ impl App {
                 );
                 if resp
                     .on_hover_note(
-                        "Move every copy marked Delete to the Trash (recoverable) in the \
-                         background. The kept copy in each group inherits its playlist slots.",
+                        "Move marked copies to the Trash. Kept copies inherit \
+                         their playlist slots.",
                     )
                     .clicked()
                 {
@@ -382,7 +379,7 @@ impl App {
                     ui.label(
                         egui::RichText::new("★").color(egui::Color32::from_rgb(0xD8, 0xB0, 0x4A)),
                     )
-                    .on_hover_note("Best copy — lossless, else highest bitrate");
+                    .on_hover_note("Best copy: lossless, else highest bitrate");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.monospace(egui::RichText::new(format!("{} {}", c.fmt, c.br)).strong());
@@ -409,7 +406,7 @@ impl App {
                     None => {
                         if ui
                             .small_button("Analyze")
-                            .on_hover_note("Scan this copy for a lossy-transcode signature")
+                            .on_hover_note("Scan this copy for a lossy transcode")
                             .clicked()
                         {
                             inner_clicked = true;
@@ -450,7 +447,7 @@ impl App {
                 acts.push(Act::SetDelete(c.id, kept));
             }
             tile.on_hover_note(if kept {
-                "Click to reject this copy (mark for deletion)"
+                "Click to mark for deletion"
             } else {
                 "Click to keep this copy"
             });
@@ -472,7 +469,7 @@ impl App {
                                     .strong()
                                     .color(egui::Color32::from_rgb(0xE0, 0x6C, 0x6C)),
                             )
-                            .on_hover_note("No copy is kept — all copies move to the Trash.");
+                            .on_hover_note("No copy is kept. All copies move to the Trash.");
                         } else {
                             ui.label(
                                 egui::RichText::new(format!("· {marked} to delete"))
@@ -485,8 +482,8 @@ impl App {
                         if ui
                             .button("Not a dup")
                             .on_hover_note(
-                                "These aren't the same song (e.g. two different \"Untitled\" \
-                                 tracks). Dismiss this group for good — nothing is deleted.",
+                                "Not the same song. Dismisses this group for good; \
+                                 nothing is deleted.",
                             )
                             .clicked()
                         {
@@ -762,10 +759,7 @@ impl App {
                 ui.add_enabled_ui(!busy, |ui| {
                     if ui
                         .button("↻ Refresh")
-                        .on_hover_note(
-                            "Sync from Discogs: pull new records, drop removed ones, \
-                             and download any missing covers.",
-                        )
+                        .on_hover_note("Sync with Discogs and download missing covers")
                         .clicked()
                     {
                         refresh = true;
@@ -774,7 +768,7 @@ impl App {
                 if let Some(url) = &collection_url {
                     if ui
                         .button("↗ Open in Discogs")
-                        .on_hover_note("Open your collection on discogs.com in a browser")
+                        .on_hover_note("Open your collection on discogs.com")
                         .clicked()
                     {
                         open_url(url);
@@ -957,9 +951,9 @@ impl App {
                                 );
                                 let n = c.linked.len();
                                 let tip = if n > 1 {
-                                    format!("In your catalog ({n} tracks) — click to show")
+                                    format!("In your catalog ({n} tracks). Click to show.")
                                 } else {
-                                    "In your catalog — click to show the track".to_string()
+                                    "In your catalog. Click to show.".to_string()
                                 };
                                 let badge = badge.on_hover_cursor(egui::CursorIcon::PointingHand);
                                 if badge.on_hover_note(tip).clicked() {
@@ -1090,9 +1084,8 @@ impl App {
                             .fill(egui::Color32::from_rgb(150, 90, 40)),
                         )
                         .on_hover_note(
-                            "Pick a folder to search; files found there by name (confirmed by \
-                             content when names collide) are repointed in the catalog. Your \
-                             files are never moved or modified.",
+                            "Search a folder and repoint matches in the catalog. \
+                             Files are never modified.",
                         )
                         .clicked()
                 {
@@ -1131,10 +1124,7 @@ impl App {
                     ui.horizontal(|ui| {
                         if ui
                             .button("Remove")
-                            .on_hover_note(
-                                "Drop this stale entry from the catalog. The file is already \
-                                 gone, so nothing on disk is touched.",
-                            )
+                            .on_hover_note("Remove this entry from the catalog")
                             .clicked()
                         {
                             remove_one = Some(m.id);
@@ -1153,7 +1143,7 @@ impl App {
         ui.separator();
         if ui
             .button(format!("Remove all {}", all_ids.len()))
-            .on_hover_note("Remove every missing entry from the catalog. Files are not touched.")
+            .on_hover_note("Remove all missing entries from the catalog")
             .clicked()
         {
             remove_all = true;

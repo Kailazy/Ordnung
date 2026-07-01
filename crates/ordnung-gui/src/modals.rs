@@ -365,8 +365,8 @@ impl App {
                         "Analyze tracks automatically when added",
                     )
                     .on_hover_text(
-                        "Run BPM, key, and waveform analysis on each track as it's imported. \
-                         Turn this off to analyze on demand with the Analyze button instead.",
+                        "Analyze tracks as they're imported. Turn off to analyze \
+                         on demand instead.",
                     )
                     .changed()
                 {
@@ -452,8 +452,7 @@ impl App {
                                 .fixed_decimals(2),
                             )
                             .on_hover_text(
-                                "1.0 = most compressed (quiet detail lifted); 2.0 = linear \
-                                 amplitude (rekordbox-like). Affects both color modes.",
+                                "1.0 lifts quiet detail; 2.0 is linear like rekordbox",
                             )
                             .changed()
                         {
@@ -471,8 +470,7 @@ impl App {
                                                 .fixed_decimals(2),
                                             )
                                             .on_hover_text(
-                                                "Height of the envelope in Energy mode (the \
-                                                 spectrum band-gain equivalent).",
+                                                "Envelope height in Energy mode",
                                             )
                                             .changed()
                                         {
@@ -551,9 +549,8 @@ impl App {
                                                 .fixed_decimals(2),
                                             )
                                             .on_hover_text(
-                                                "Overall smoothing: scales attack and release \
-                                                 together. 0 = raw envelope; 1 = the full \
-                                                 attack/release times below.",
+                                                "Scales attack and release together. 0 is \
+                                                 raw; 1 uses the full times below.",
                                             )
                                             .changed()
                                         {
@@ -572,8 +569,7 @@ impl App {
                                                 .suffix(" ms"),
                                             )
                                             .on_hover_text(
-                                                "How much rising edges are rounded. Low keeps \
-                                                 transients crisp; high softens onsets.",
+                                                "Rounds rising edges. Higher softens onsets.",
                                             )
                                             .changed()
                                         {
@@ -592,9 +588,8 @@ impl App {
                                                 .suffix(" ms"),
                                             )
                                             .on_hover_text(
-                                                "How long tails ring out. Beat-scale (~450 ms) \
-                                                 connects beats into one silhouette; short values \
-                                                 let the waveform pinch between beats.",
+                                                "How long tails ring out. Around 450 ms \
+                                                 connects beats; shorter pinches between them.",
                                             )
                                             .changed()
                                         {
@@ -635,9 +630,8 @@ impl App {
                                                 .fixed_decimals(2),
                                             )
                                             .on_hover_text(
-                                                "Bass level below which content counts as \
-                                                 sustained sub and gets dimmed by the amount \
-                                                 below. Higher = dims more of the bass.",
+                                                "Bass below this level is dimmed as \
+                                                 sustained sub. Higher dims more.",
                                             )
                                             .changed()
                                         {
@@ -656,7 +650,7 @@ impl App {
                                             )
                                             .on_hover_text(
                                                 "How hard sub below the threshold is dimmed. \
-                                                 0 = off; 1 = show only bass transients.",
+                                                 0 is off; 1 keeps only bass transients.",
                                             )
                                             .changed()
                                         {
@@ -706,9 +700,8 @@ impl App {
                                                 .fixed_decimals(0),
                                             )
                                             .on_hover_text(
-                                                "Low / mid crossover. 120 Hz keeps the low band on \
-                                                 kick fundamental + sub; raise it to fold low-mids \
-                                                 back into the bass.",
+                                                "Low to mid crossover. Raise to fold \
+                                                 low-mids into the bass.",
                                             )
                                             .changed()
                                         {
@@ -726,8 +719,8 @@ impl App {
                                                 .fixed_decimals(0),
                                             )
                                             .on_hover_text(
-                                                "Mid / high crossover. Everything above it reads as \
-                                                 the high band (hats, cymbals, air).",
+                                                "Mid to high crossover. Everything above \
+                                                 reads as highs.",
                                             )
                                             .changed()
                                         {
@@ -833,14 +826,9 @@ impl App {
                                         if ui
                                             .button(label)
                                             .on_hover_text(if filled {
-                                                format!(
-                                                    "Overwrite preset {slot} with the current \
-                                                     settings."
-                                                )
+                                                format!("Overwrite preset {slot}")
                                             } else {
-                                                format!(
-                                                    "Save the current settings as preset {slot}."
-                                                )
+                                                format!("Save as preset {slot}")
                                             })
                                             .clicked()
                                         {
@@ -858,9 +846,9 @@ impl App {
                                                 filled,
                                                 egui::Button::new(slot.to_string()),
                                             )
-                                            .on_hover_text(format!("Apply preset {slot}."))
+                                            .on_hover_text(format!("Apply preset {slot}"))
                                             .on_disabled_hover_text(format!(
-                                                "Preset {slot} is empty — save to it first."
+                                                "Preset {slot} is empty. Save to it first."
                                             ));
                                         if resp.clicked() {
                                             load_slot = Some(slot);
@@ -892,10 +880,7 @@ impl App {
                                 ui.add_space(10.0);
                                 if ui
                                     .button("Reset all to defaults")
-                                    .on_hover_text(
-                                        "Restore every waveform section above to its built-in \
-                                         defaults.",
-                                    )
+                                    .on_hover_text("Restore all waveform defaults")
                                     .clicked()
                                 {
                                     self.config.waveform_height_exp =
@@ -1137,8 +1122,8 @@ impl App {
                                 "Replace each source file",
                             )
                             .on_hover_text(
-                                "When on, conversions replace the original file instead of \
-                                 writing a new one. The catalog is repointed automatically.",
+                                "Conversions replace the original file. The catalog \
+                                 is repointed automatically.",
                             )
                             .changed()
                         {
@@ -1736,9 +1721,8 @@ impl App {
                     ui.add_space(6.0);
                     ui.checkbox(&mut overwrite, "Overwrite existing fields")
                         .on_hover_note(
-                            "Off: fill only empty fields (non-destructive). On: replace \
-                         the track's existing values with this release's too. \
-                         Catalog only — your source files are never touched.",
+                            "On: replace existing values too. Off: fill only empty \
+                             fields. Catalog only; files are never touched.",
                         );
                     ui.label(
                         egui::RichText::new(if overwrite {
@@ -1813,10 +1797,8 @@ impl App {
                     ui.add_space(6.0);
                     ui.checkbox(&mut set_cover, "Set the album cover from this release")
                         .on_hover_note(
-                            "Off: keep the track's current cover and only fill its \
-                             tag fields. On: also replace the cover with this \
-                             release's art. Catalog only — your source files are \
-                             never touched.",
+                            "On: also replace the current cover. Off: keep it and \
+                             only fill tag fields.",
                         );
                 }
 
@@ -1831,10 +1813,7 @@ impl App {
                         &mut apply_album,
                         "Also apply this cover to other tracks on this album",
                     )
-                    .on_hover_note(
-                        "Copies the selected artwork to the other tracks on this \
-                             album in the catalog.",
-                    );
+                    .on_hover_note("Copy this artwork to the album's other tracks");
                     // Spell out exactly which tracks share this album, so the user
                     // knows what "apply to album" (and the overwrite toggle) touches.
                     if !album_mate_labels.is_empty() {
@@ -1871,9 +1850,8 @@ impl App {
                                     "Replace covers they already have (match the whole album)",
                                 )
                                 .on_hover_note(
-                                    "On: every track on the album gets this cover, \
-                                     replacing any it already has. Off: only tracks \
-                                     with no cover are filled in.",
+                                    "On: replace every track's cover. Off: fill only \
+                                     tracks with no cover.",
                                 );
                             });
                             // Spell out exactly how many tracks will be touched.
@@ -1929,8 +1907,7 @@ impl App {
                         if ui
                             .button("Skip track")
                             .on_hover_note(
-                                "Decide later — leaves the track in Recently Added so the next \
-                                 fetch offers it again.",
+                                "Decide later. The track stays in Recently Added.",
                             )
                             .clicked()
                         {
@@ -1944,9 +1921,8 @@ impl App {
                             && ui
                                 .button("None of these")
                                 .on_hover_note(
-                                    "No candidate matches this song. Marks it done so it leaves \
-                                     Recently Added and isn't offered again. Re-run later with \
-                                     \"Edit release…\" if you change your mind.",
+                                    "Mark done so it isn't offered again. Undo later \
+                                     with \"Edit release…\".",
                                 )
                                 .clicked()
                         {
