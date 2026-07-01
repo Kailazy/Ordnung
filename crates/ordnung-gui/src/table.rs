@@ -660,13 +660,16 @@ impl App {
             | LibraryView::Missing
             | LibraryView::Vinyl => None,
         };
-        // The leading order gutter (row-number column) is shown in EVERY view — the
-        // library and every playlist — at one fixed width, so the data columns line
-        // up at the same x everywhere and the shared per-column widths read as truly
-        // universal. (It used to be playlist-only and sized to the row count, which
-        // shifted every column by a different amount in each view.) Drag-to-reorder
-        // still only engages on a real playlist in stored order (`reorderable`).
+        // The leading order gutter is RESERVED in EVERY view — the library and every
+        // playlist — at one fixed width, so the data columns line up at the same x
+        // everywhere and the shared per-column widths read as truly universal. (It
+        // used to be playlist-only and sized to the row count, which shifted every
+        // column by a different amount in each view.) The "#" header and the row
+        // numbers themselves are only drawn in playlist views (`draw_index`); the
+        // library keeps the gutter blank so it reads as plain whitespace there.
+        // Drag-to-reorder still only engages on a real playlist in stored order.
         let show_index = true;
+        let draw_index = playlist_pid.is_some();
         let reorderable = playlist_pid.is_some() && self.sort.is_none() && menu_unfiltered;
         // Fixed gutter width, independent of the row count so it never changes
         // between views. Numbers are right-aligned, so larger counts grow leftward
@@ -742,10 +745,11 @@ impl App {
                         // still a valid right-click target. The file path is
                         // intentionally not a column — it lives in the Info panel and
                         // the right-click menu.
-                        // The index gutter header shows "#" in every view, matching the
-                        // always-present first column.
+                        // The gutter header cell is always emitted to match the
+                        // always-present first column, but the "#" label is only shown
+                        // in playlist views — the library leaves it blank.
                         header.col(|ui| {
-                            if show_index {
+                            if draw_index {
                                 ui.add(
                                     egui::Label::new(egui::RichText::new("#").weak())
                                         .selectable(false),
@@ -947,10 +951,11 @@ impl App {
                             // number. Drawn first so it sits at the far left, and its
                             // cell rect is recorded as this row's vertical band for the
                             // reorder hit-test after the table.
-                            // Always emit the leading gutter cell; it draws the 1-based
-                            // row number in every view (library and playlists).
+                            // Always emit the leading gutter cell to reserve its width;
+                            // the 1-based row number is only drawn in playlist views,
+                            // so the library gutter stays blank.
                             let (rect, _) = row.col(|ui| {
-                                if show_index {
+                                if draw_index {
                                     let r = ui.max_rect();
                                     ui.painter().text(
                                         egui::pos2(r.right() - 5.0, r.center().y),
