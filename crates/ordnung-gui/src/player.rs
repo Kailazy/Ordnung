@@ -643,11 +643,16 @@ pub(crate) struct WaveformStyle {
     pub band_colors: [egui::Color32; 3],
     /// The five cool→hot gradient stops for energy mode (quiet → loudest).
     pub energy_colors: [egui::Color32; 5],
-    /// Bar smoothing `[0, 1]`: blends each bar's height with its neighbors so the
-    /// envelope reads as a continuous curve (rekordbox-style) instead of showing
-    /// every dip between adjacent bins. `0` = raw bars. From the Waveform settings
-    /// tab (`config::waveform_smoothing`).
+    /// Smoothing strength `[0, 1]`: scales `attack_secs`/`release_secs` from `0`
+    /// (raw envelope) to their full values. From the Waveform settings tab
+    /// (`config::waveform_smoothing`).
     pub smoothing: f32,
+    /// Attack time constant (seconds of audio) at full smoothing — how much a
+    /// rising edge is rounded (`config::waveform_smooth_attack_ms`).
+    pub attack_secs: f32,
+    /// Release time constant (seconds of audio) at full smoothing — how long a
+    /// falling tail rings out (`config::waveform_smooth_release_ms`).
+    pub release_secs: f32,
     /// Bass floor threshold `[0, 1]`: low-band content quieter than this is
     /// dimmed by `bass_floor_amount` (sustained sub under a kick), louder bass
     /// kept. Spectrum mode only. See [`bass_floor_gain`].
@@ -678,6 +683,8 @@ impl WaveformStyle {
                 rgb(cfg.waveform_energy_colors[4]),
             ],
             smoothing: cfg.waveform_smoothing.clamp(0.0, 1.0),
+            attack_secs: (cfg.waveform_smooth_attack_ms / 1000.0).clamp(0.0, 0.1),
+            release_secs: (cfg.waveform_smooth_release_ms / 1000.0).clamp(0.0, 2.0),
             bass_floor_threshold: cfg.waveform_bass_floor_threshold.clamp(0.0, 1.0),
             bass_floor_amount: cfg.waveform_bass_floor_amount.clamp(0.0, 1.0),
         }
@@ -730,26 +737,28 @@ fn bass_floor_gain(low_norm: f32, threshold: f32, amount: f32) -> f32 {
 /// so this runs a one-pole follower whose coefficient depends on the local slope:
 ///
 /// * **Rising** samples — the front of a transient — track with a fast constant
-///   ([`SMOOTH_ATTACK_SECS`]) so the edge stays reasonably crisp.
+///   (`style.attack_secs`) so the edge stays reasonably crisp.
 /// * **Falling** samples — the tail — smooth with a far slower constant
-///   ([`SMOOTH_RELEASE_SECS`]) so the decay reads as a clean ring-out.
+///   (`style.release_secs`) so the decay reads as a clean ring-out.
 ///
-/// The follower's reach is defined in *seconds of audio* ([`SMOOTH_ATTACK_SECS`] /
-/// [`SMOOTH_RELEASE_SECS`]) and converted to per-bin coefficients via
-/// `bins_per_sec`, so the coarse ~20/sec preview and the ~2000/sec hi-res envelope
-/// smooth over the same span of *time* — a per-bin coefficient that rounded the
-/// hi-res envelope nicely would smear the preview across a minute. The release
-/// span is beat-scale on purpose: a tail must survive to the next kick or every
-/// beat pinches back to the centerline and the lane reads as a row of separate
-/// petals (the "ripple") instead of a connected silhouette.
+/// The follower's reach is defined in *seconds of audio* (the style's
+/// attack/release constants, from Settings → Waveform) and converted to per-bin
+/// coefficients via `bins_per_sec`, so the coarse ~20/sec preview and the
+/// ~2000/sec hi-res envelope smooth over the same span of *time* — a per-bin
+/// coefficient that rounded the hi-res envelope nicely would smear the preview
+/// across a minute. The default release span is beat-scale on purpose: a tail
+/// must survive to the next kick or every beat pinches back to the centerline
+/// and the lane reads as a row of separate petals (the "ripple") instead of a
+/// connected silhouette.
 ///
-/// `smoothing` `[0, 1]` scales the time constants linearly from `0` (raw) to the
-/// full spans — time-space scaling, because scaling the *coefficients* toward 1.0
-/// left the slider perceptually dead until the very top. O(n) per channel.
-fn smooth_source(data: &[u8], stride: usize, smoothing: f32, bins_per_sec: f32) -> Vec<u8> {
+/// `style.smoothing` `[0, 1]` scales the time constants linearly from `0` (raw)
+/// to the full spans — time-space scaling, because scaling the *coefficients*
+/// toward 1.0 left the slider perceptually dead until the very top. O(n) per
+/// channel.
+fn smooth_source(data: &[u8], stride: usize, style: &WaveformStyle, bins_per_sec: f32) -> Vec<u8> {
     let mut out = data.to_vec();
     let n = data.len() / stride;
-    let s = smoothing.clamp(0.0, 1.0);
+    let s = style.smoothing.clamp(0.0, 1.0);
     if s == 0.0 || n == 0 || bins_per_sec <= 0.0 {
         return out;
     }
@@ -764,8 +773,8 @@ fn smooth_source(data: &[u8], stride: usize, smoothing: f32, bins_per_sec: f32) 
             1.0 - (-1.0 / tau_bins).exp()
         }
     };
-    let attack = alpha(SMOOTH_ATTACK_SECS);
-    let release = alpha(SMOOTH_RELEASE_SECS);
+    let attack = alpha(style.attack_secs);
+    let release = alpha(style.release_secs);
     for k in 0..stride {
         let mut prev = data[k] as f32;
         for i in 1..n {
@@ -799,18 +808,6 @@ const MAX_LANE_H: f32 = 460.0;
 /// smoothing slider moved to Settings, so neither reserves a row here any more.
 /// Panel height = this + the lane height.
 const PANEL_BASE_H: f32 = 100.0;
-
-/// `smooth_source` attack time constant at full smoothing, in seconds of audio.
-/// A few milliseconds: enough to round the pixel-scale jaggies on a rising edge
-/// at the tightest zoom without softening where the transient *starts*.
-const SMOOTH_ATTACK_SECS: f32 = 0.004;
-/// `smooth_source` release time constant at full smoothing, in seconds of audio.
-/// Beat-scale (roughly one beat at house tempo) so a kick's tail is still standing
-/// when the next kick hits and the envelope stays a connected silhouette; anything
-/// much shorter decays to the centerline between beats and the waveform ripples
-/// into separate petals. The attack stays fast, so onsets keep their edge — the
-/// shape leans sawtooth (sharp front, long tail), which is how rekordbox reads.
-const SMOOTH_RELEASE_SECS: f32 = 0.45;
 
 /// Buckets per second for the high-res zoom envelope. ~100× the stored preview's
 /// ~20/sec — well past rekordbox's detailed waveform, so even the tightest
@@ -990,9 +987,9 @@ pub(crate) fn draw_waveform(
     // Both inputs here are the stored preview envelopes, so the time constants
     // convert through the preview's fixed bin rate.
     let rate = analysis::waveform::COLOR_BINS_PER_SEC;
-    let sbands = smooth_source(bands, STRIDE, style.smoothing, rate);
+    let sbands = smooth_source(bands, STRIDE, style, rate);
     let bands = sbands.as_slice();
-    let swave = smooth_source(waveform, 1, style.smoothing, rate);
+    let swave = smooth_source(waveform, 1, style, rate);
     let waveform = swave.as_slice();
 
     let y = rect.center().y;
@@ -1180,7 +1177,7 @@ fn draw_waveform_scrolling(
     // below are sampled from these smoothed bins with no further per-bar blend.
     // `bins_per_sec` is the caller's actual envelope rate (hi-res or the coarse
     // preview fallback), so the smoothing spans the same time either way.
-    let sbands = smooth_source(bands, STRIDE, style.smoothing, bins_per_sec);
+    let sbands = smooth_source(bands, STRIDE, style, bins_per_sec);
     let bands = sbands.as_slice();
     let y = rect.center().y;
     let x0 = rect.left();

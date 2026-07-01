@@ -104,12 +104,24 @@ pub struct Config {
     /// Everything above this reads as the high band. See `compute_hires_bands`.
     #[serde(default = "default_waveform_mid_hz")]
     pub waveform_mid_hz: f32,
-    /// Bar smoothing `[0, 1]` for the zoom detail lane: blends each bar's height
-    /// with its neighbors so the envelope reads as a continuous curve
-    /// (rekordbox-style) instead of showing every dip between bins. `0` = raw
-    /// bars. See `smooth_aggs` and `WaveformStyle::smoothing`.
+    /// Waveform smoothing strength `[0, 1]`: scales the attack/release time
+    /// constants below from `0` (raw envelope) to their full values, so one knob
+    /// sweeps raw → fully smoothed. See `smooth_source` and
+    /// `WaveformStyle::smoothing`.
     #[serde(default = "default_waveform_smoothing")]
     pub waveform_smoothing: f32,
+    /// Waveform smoothing attack time constant (ms of audio) at full smoothing:
+    /// how much a *rising* edge is rounded. A few ms irons out pixel-scale
+    /// jaggies while keeping transient onsets crisp. See `smooth_source`.
+    #[serde(default = "default_waveform_smooth_attack_ms")]
+    pub waveform_smooth_attack_ms: f32,
+    /// Waveform smoothing release time constant (ms of audio) at full smoothing:
+    /// how long a *falling* tail rings out. Beat-scale (~450 ms) keeps a kick's
+    /// tail standing until the next kick so the envelope reads as a connected
+    /// silhouette; short values let it pinch to the centerline between beats
+    /// (separate petals). See `smooth_source`.
+    #[serde(default = "default_waveform_smooth_release_ms")]
+    pub waveform_smooth_release_ms: f32,
     /// Bass floor threshold `[0, 1]` (fraction of full scale): low-band content
     /// quieter than this is treated as sustained sub (the tail lingering under a
     /// kick) rather than a transient peak, and is dimmed by
@@ -162,6 +174,14 @@ pub(crate) fn default_waveform_mid_hz() -> f32 {
 
 pub(crate) fn default_waveform_smoothing() -> f32 {
     0.5
+}
+
+pub(crate) fn default_waveform_smooth_attack_ms() -> f32 {
+    4.0
+}
+
+pub(crate) fn default_waveform_smooth_release_ms() -> f32 {
+    450.0
 }
 
 pub(crate) fn default_waveform_bass_floor_threshold() -> f32 {
@@ -234,6 +254,8 @@ impl Default for Config {
             waveform_low_hz: default_waveform_low_hz(),
             waveform_mid_hz: default_waveform_mid_hz(),
             waveform_smoothing: default_waveform_smoothing(),
+            waveform_smooth_attack_ms: default_waveform_smooth_attack_ms(),
+            waveform_smooth_release_ms: default_waveform_smooth_release_ms(),
             waveform_bass_floor_threshold: default_waveform_bass_floor_threshold(),
             waveform_bass_floor_amount: default_waveform_bass_floor_amount(),
         }

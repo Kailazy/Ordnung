@@ -493,9 +493,50 @@ impl App {
                                                 .fixed_decimals(2),
                                             )
                                             .on_hover_text(
-                                                "Blends each bar of the zoom detail lane into its \
-                                                 neighbors for a continuous rekordbox-style \
-                                                 envelope. 0 = raw bars; 1 = heavily smoothed.",
+                                                "Overall smoothing strength: scales attack and \
+                                                 release together. 0 = raw envelope; 1 = the full \
+                                                 attack/release times below.",
+                                            )
+                                            .changed()
+                                        {
+                                            wave_dirty = true;
+                                        }
+                                        ui.end_row();
+
+                                        ui.label("Attack:");
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut self.config.waveform_smooth_attack_ms,
+                                                    0.0..=20.0,
+                                                )
+                                                .fixed_decimals(1)
+                                                .suffix(" ms"),
+                                            )
+                                            .on_hover_text(
+                                                "How much rising edges are rounded. Low keeps \
+                                                 transients crisp; high softens onsets.",
+                                            )
+                                            .changed()
+                                        {
+                                            wave_dirty = true;
+                                        }
+                                        ui.end_row();
+
+                                        ui.label("Release:");
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut self.config.waveform_smooth_release_ms,
+                                                    0.0..=1000.0,
+                                                )
+                                                .fixed_decimals(0)
+                                                .suffix(" ms"),
+                                            )
+                                            .on_hover_text(
+                                                "How long tails ring out. Beat-scale (~450 ms) \
+                                                 connects beats into one silhouette; short values \
+                                                 let the waveform pinch between beats.",
                                             )
                                             .changed()
                                         {
@@ -748,6 +789,10 @@ impl App {
                                         config::default_waveform_mid_hz();
                                     self.config.waveform_smoothing =
                                         config::default_waveform_smoothing();
+                                    self.config.waveform_smooth_attack_ms =
+                                        config::default_waveform_smooth_attack_ms();
+                                    self.config.waveform_smooth_release_ms =
+                                        config::default_waveform_smooth_release_ms();
                                     // Restored crossovers → recompute the zoom lane bands.
                                     if let Some(np) = self.now_playing.as_mut() {
                                         np.hires_bands = None;
