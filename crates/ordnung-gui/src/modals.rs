@@ -419,22 +419,19 @@ impl App {
 
                                 ui.add_space(12.0);
                                 let mut wave_dirty = false;
-                                if subsection_header(ui, "Rendering") {
+                                if subsection_header(ui, "Height & gain") {
                                     self.config.waveform_height_exp =
                                         config::default_waveform_height_exp();
                                     self.config.waveform_energy_gain =
                                         config::default_waveform_energy_gain();
                                     self.config.waveform_band_gain =
                                         config::default_waveform_band_gain();
-                                    self.config.waveform_bass_floor_amount =
-                                        config::default_waveform_bass_floor_amount();
-                                    self.config.waveform_bass_floor_threshold =
-                                        config::default_waveform_bass_floor_threshold();
                                     wave_dirty = true;
                                 }
                                 ui.label(
                     egui::RichText::new(
-                        "Tune how tall the waveform draws. Changes apply live to the \
+                        "How tall the waveform draws — the overall height curve, plus \
+                         the height of each frequency band. Changes apply live to the \
                          player and the table waveforms — no re-analysis needed.",
                     )
                     .small()
@@ -483,7 +480,68 @@ impl App {
                                         }
                                         ui.end_row();
 
-                                        ui.label("Smoothing:");
+                                        for (i, name, tip) in [
+                                            (
+                                                0usize,
+                                                "Bass gain:",
+                                                "Height of the low band (spectrum mode).",
+                                            ),
+                                            (
+                                                1,
+                                                "Mid gain:",
+                                                "Height of the mid band (spectrum mode).",
+                                            ),
+                                            (
+                                                2,
+                                                "High gain:",
+                                                "Height of the high band (spectrum mode).",
+                                            ),
+                                        ] {
+                                            ui.label(name);
+                                            if ui
+                                                .add(
+                                                    egui::Slider::new(
+                                                        &mut self.config.waveform_band_gain[i],
+                                                        0.0..=2.0,
+                                                    )
+                                                    .fixed_decimals(2),
+                                                )
+                                                .on_hover_text(tip)
+                                                .changed()
+                                            {
+                                                wave_dirty = true;
+                                            }
+                                            ui.end_row();
+                                        }
+
+                                    });
+
+                                ui.add_space(12.0);
+                                if subsection_header(ui, "Smoothing") {
+                                    self.config.waveform_smoothing =
+                                        config::default_waveform_smoothing();
+                                    self.config.waveform_smooth_attack_ms =
+                                        config::default_waveform_smooth_attack_ms();
+                                    self.config.waveform_smooth_release_ms =
+                                        config::default_waveform_smooth_release_ms();
+                                    wave_dirty = true;
+                                }
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Irons the envelope's small jaggies into a connected, \
+                                         rekordbox-style silhouette. Strength scales the attack \
+                                         (rising edges) and release (tails) together, and the \
+                                         result is identical at every zoom level.",
+                                    )
+                                    .small()
+                                    .weak(),
+                                );
+                                ui.add_space(4.0);
+                                egui::Grid::new("settings_waveform_smooth_grid")
+                                    .num_columns(2)
+                                    .spacing([12.0, 8.0])
+                                    .show(ui, |ui| {
+                                        ui.label("Strength:");
                                         if ui
                                             .add(
                                                 egui::Slider::new(
@@ -493,8 +551,8 @@ impl App {
                                                 .fixed_decimals(2),
                                             )
                                             .on_hover_text(
-                                                "Overall smoothing strength: scales attack and \
-                                                 release together. 0 = raw envelope; 1 = the full \
+                                                "Overall smoothing: scales attack and release \
+                                                 together. 0 = raw envelope; 1 = the full \
                                                  attack/release times below.",
                                             )
                                             .changed()
@@ -543,62 +601,31 @@ impl App {
                                             wave_dirty = true;
                                         }
                                         ui.end_row();
+                                    });
 
-                                        for (i, name, tip) in [
-                                            (
-                                                0usize,
-                                                "Bass gain:",
-                                                "Height of the low band (spectrum mode).",
-                                            ),
-                                            (
-                                                1,
-                                                "Mid gain:",
-                                                "Height of the mid band (spectrum mode).",
-                                            ),
-                                            (
-                                                2,
-                                                "High gain:",
-                                                "Height of the high band (spectrum mode).",
-                                            ),
-                                        ] {
-                                            ui.label(name);
-                                            if ui
-                                                .add(
-                                                    egui::Slider::new(
-                                                        &mut self.config.waveform_band_gain[i],
-                                                        0.0..=2.0,
-                                                    )
-                                                    .fixed_decimals(2),
-                                                )
-                                                .on_hover_text(tip)
-                                                .changed()
-                                            {
-                                                wave_dirty = true;
-                                            }
-                                            ui.end_row();
-                                        }
-
-                                        ui.label("Bass floor amount:");
-                                        if ui
-                                            .add(
-                                                egui::Slider::new(
-                                                    &mut self.config.waveform_bass_floor_amount,
-                                                    0.0..=1.0,
-                                                )
-                                                .fixed_decimals(2),
-                                            )
-                                            .on_hover_text(
-                                                "Dims sustained sub-bass (the tail lingering under \
-                                                 a kick) while keeping the loud kick transients. \
-                                                 0 = off; 1 = show only bass transients.",
-                                            )
-                                            .changed()
-                                        {
-                                            wave_dirty = true;
-                                        }
-                                        ui.end_row();
-
-                                        ui.label("Bass floor threshold:");
+                                ui.add_space(12.0);
+                                if subsection_header(ui, "Bass floor") {
+                                    self.config.waveform_bass_floor_threshold =
+                                        config::default_waveform_bass_floor_threshold();
+                                    self.config.waveform_bass_floor_amount =
+                                        config::default_waveform_bass_floor_amount();
+                                    wave_dirty = true;
+                                }
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Declutters the low band in Spectrum mode: sustained sub \
+                                         (the quiet rumble lingering under a kick) is dimmed so \
+                                         only the kick transients read as bass.",
+                                    )
+                                    .small()
+                                    .weak(),
+                                );
+                                ui.add_space(4.0);
+                                egui::Grid::new("settings_waveform_bass_floor_grid")
+                                    .num_columns(2)
+                                    .spacing([12.0, 8.0])
+                                    .show(ui, |ui| {
+                                        ui.label("Threshold:");
                                         if ui
                                             .add(
                                                 egui::Slider::new(
@@ -610,7 +637,26 @@ impl App {
                                             .on_hover_text(
                                                 "Bass level below which content counts as \
                                                  sustained sub and gets dimmed by the amount \
-                                                 above. Higher = dims more of the bass.",
+                                                 below. Higher = dims more of the bass.",
+                                            )
+                                            .changed()
+                                        {
+                                            wave_dirty = true;
+                                        }
+                                        ui.end_row();
+
+                                        ui.label("Amount:");
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut self.config.waveform_bass_floor_amount,
+                                                    0.0..=1.0,
+                                                )
+                                                .fixed_decimals(2),
+                                            )
+                                            .on_hover_text(
+                                                "How hard sub below the threshold is dimmed. \
+                                                 0 = off; 1 = show only bass transients.",
                                             )
                                             .changed()
                                         {
