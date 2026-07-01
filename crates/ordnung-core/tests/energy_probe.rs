@@ -3,7 +3,7 @@
 //! (intro / breakdown / drop) can be eyeballed per metric.
 //! Run: cargo test -p ordnung-core --test energy_probe --release -- --ignored --nocapture
 
-use ordnung_core::analysis::{decode_mono, dsp};
+use ordnung_core::analysis::{decode_mono, dsp, waveform};
 use std::path::PathBuf;
 
 /// Time bins per track (one output char each).
@@ -175,13 +175,30 @@ fn print_energy_curves() {
             .collect();
         let hybrid = norm(&hybrid);
 
+        // Production path: what analyzer v15 stores, rendered as the GUI does
+        // (energy byte cubed by `energy_curve`). Should match the hybrid row.
+        let bands = waveform::color_bands(&audio.samples, audio.sample_rate);
+        let nb2 = bands.len() / waveform::COLOR_STRIDE;
+        let mut shipped = vec![0.0f64; BINS];
+        let mut scount = vec![0u32; BINS];
+        for (j, q) in bands.chunks(waveform::COLOR_STRIDE).enumerate() {
+            let k = (j * BINS / nb2.max(1)).min(BINS - 1);
+            shipped[k] += (q[3] as f64 / 255.0).powi(3);
+            scount[k] += 1;
+        }
+        for k in 0..BINS {
+            shipped[k] /= scount[k].max(1) as f64;
+        }
+        let shipped = norm(&shipped);
+
         let name = path.file_name().unwrap().to_string_lossy();
         let secs = audio.samples.len() as f32 / sr;
         println!("\n== {name} ({:.0}s, {} Hz)", secs, audio.sample_rate);
-        println!("  loud (current) c={:.3} |{}|", contrast(&loud), strip(&loud));
+        println!("  loud (v14)     c={:.3} |{}|", contrast(&loud), strip(&loud));
         println!("  occupancy      c={:.3} |{}|", contrast(&occ_n), strip(&occ_n));
         println!("  flux           c={:.3} |{}|", contrast(&flux_n), strip(&flux_n));
         println!("  flatness       c={:.3} |{}|", contrast(&flat_n), strip(&flat_n));
         println!("  hybrid l*occ   c={:.3} |{}|", contrast(&hybrid), strip(&hybrid));
+        println!("  shipped (v15)  c={:.3} |{}|", contrast(&shipped), strip(&shipped));
     }
 }

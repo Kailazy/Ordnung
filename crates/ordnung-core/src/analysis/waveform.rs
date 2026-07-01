@@ -58,6 +58,14 @@ const MAX_COLOR_BINS: usize = 24_000;
 /// quieter than `max - LOUDNESS_RANGE_DB` clamps to 0 (coolest). ~45 dB covers a
 /// track's musical dynamic range without wasting resolution on the noise floor.
 const LOUDNESS_RANGE_DB: f64 = 45.0;
+/// An FFT bin counts as "active" for spectral occupancy when its power is within
+/// this many dB of the track's single hottest bin.
+const OCCUPANCY_FLOOR_DB: f64 = 60.0;
+/// Occupancy is measured over this band: above the DC/sub rumble, below the
+/// region lossy encoders low-pass away (an mp3's 16 kHz cutoff would otherwise
+/// deflate every frame equally).
+const OCCUPANCY_LO_HZ: f32 = 30.0;
+const OCCUPANCY_HI_HZ: f32 = 15_000.0;
 
 /// Number of color time-bins for a track of `n_samples` (see `COLOR_BINS_PER_SEC`).
 fn color_bin_count(n_samples: usize, sample_rate: u32) -> usize {
@@ -75,10 +83,16 @@ fn color_bin_count(n_samples: usize, sample_rate: u32) -> usize {
 ///   waveform heights drawn overlaid (Serato/rekordbox style), so bass reads as
 ///   tall as it sounds and a hi-hat shows as a smaller high-band spike. RMS, not
 ///   peak, so loud sections still fluctuate instead of flat-lining at full scale.
-/// * `loudness` — **K-weighted RMS in dB** (ITU-R BS.1770 / LUFS-style perceptual
-///   weighting), normalized over a `LOUDNESS_RANGE_DB` window below the track's
-///   loudest bin. Drives the energy color mode so colour tracks *perceived*
-///   loudness rather than raw, bass-dominated magnitude.
+/// * `loudness` — hybrid **energy**: K-weighted RMS dB (ITU-R BS.1770,
+///   normalized over a `LOUDNESS_RANGE_DB` window below the track's loudest bin)
+///   gated by **spectral occupancy** — the fraction of `OCCUPANCY_LO_HZ`–
+///   `OCCUPANCY_HI_HZ` FFT bins within `OCCUPANCY_FLOOR_DB` of the track's
+///   hottest bin. Modern masters sit within a few dB of peak for the whole
+///   track, so loudness alone is a structureless wall; occupancy recovers the
+///   intro/breakdown/drop shape (validated in `tests/energy_probe.rs`). Stored
+///   as the cube root of `loud^1.2 · occ^0.6` (normalized to the track max) so
+///   the GUI's gamma-3 energy curve reconstructs the validated hybrid at draw
+///   time — and pre-v15 cached loudness bytes keep rendering as before.
 pub fn color_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let total_frames = dsp::frame_count(samples.len());
     // Cap bins to the frame count so every bin gets at least one frame (no comb
@@ -118,12 +132,17 @@ pub fn color_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     // really part of a DJ's bass cue stays out of it; mid runs up to 2 kHz.
     let lo_hi = hz_to_bin(120.0);
     let mid_hi = hz_to_bin(2000.0).max(lo_hi);
+    // Occupancy band, clamped inside the spectrum.
+    let occ_lo = hz_to_bin(OCCUPANCY_LO_HZ).max(1).min(n_bins - 1);
+    let occ_hi = hz_to_bin(OCCUPANCY_HI_HZ).clamp(occ_lo + 1, n_bins);
 
-    // Accumulate raw band power + K-weighted power per time bin, streaming the
-    // STFT frame-by-frame and assigning each frame to its bin by position.
+    // Pass 1: accumulate raw band power + K-weighted power per time bin, streaming
+    // the STFT frame-by-frame and assigning each frame to its bin by position.
+    // Also track the hottest single-bin power — the occupancy threshold reference.
     let mut band_pow = vec![[0.0f64; 3]; bins];
     let mut kw_pow = vec![0.0f64; bins];
     let mut counts = vec![0u32; bins];
+    let mut max_bin_pow = 0.0f64;
     let mut t = 0usize;
     dsp::for_each_frame(samples, |frame| {
         let k = (t * bins / total_frames).min(bins - 1);
@@ -137,6 +156,9 @@ pub fn color_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
                 mid += p;
             } else {
                 hi += p;
+            }
+            if i >= occ_lo && i < occ_hi && p > max_bin_pow {
+                max_bin_pow = p;
             }
         }
         band_pow[k][0] += lo;
@@ -155,6 +177,27 @@ pub fn color_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
         kw_pow[k] /= c;
     }
 
+    // Pass 2: spectral occupancy — the active fraction of the occupancy band,
+    // averaged per time bin. The threshold is relative to the track's hottest
+    // bin, so this needs a second streamed STFT (memory stays flat; it costs one
+    // extra FFT pass over the track).
+    let occ_thresh = max_bin_pow * 10f64.powf(-OCCUPANCY_FLOOR_DB / 10.0);
+    let occ_width = (occ_hi - occ_lo) as f64;
+    let mut occupancy = vec![0.0f64; bins];
+    let mut t = 0usize;
+    dsp::for_each_frame(samples, |frame| {
+        let k = (t * bins / total_frames).min(bins - 1);
+        let active = frame[occ_lo..occ_hi]
+            .iter()
+            .filter(|&&m| (m * m) as f64 > occ_thresh)
+            .count();
+        occupancy[k] += active as f64 / occ_width;
+        t += 1;
+    });
+    for k in 0..bins {
+        occupancy[k] /= counts[k].max(1) as f64;
+    }
+
     // Band heights: RMS magnitude, globally normalized (so bass stays tallest),
     // then sqrt-companded so the quieter bands and low-level detail are visible.
     let max_rms = band_pow
@@ -169,6 +212,21 @@ pub fn color_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
         .fold(f64::NEG_INFINITY, f64::max);
     let floor_db = max_db - LOUDNESS_RANGE_DB;
 
+    // Energy byte: hybrid of loudness and occupancy, as the cube root of the
+    // validated curve `loud^1.2 · occ^0.6` (each factor normalized to its track
+    // max) so the renderer's gamma-3 lands back on it.
+    let occ_max = occupancy.iter().cloned().fold(0.0f64, f64::max).max(1e-9);
+    let energy: Vec<f64> = kw_pow
+        .iter()
+        .zip(&occupancy)
+        .map(|(&p, &o)| {
+            let db = 10.0 * p.max(1e-12).log10();
+            let loud = ((db - floor_db) / LOUDNESS_RANGE_DB).clamp(0.0, 1.0);
+            loud.powf(0.4) * (o / occ_max).powf(0.2)
+        })
+        .collect();
+    let energy_max = energy.iter().cloned().fold(0.0f64, f64::max).max(1e-9);
+
     let mut out = Vec::with_capacity(out_len);
     for k in 0..bins {
         let q = |p: f64| {
@@ -178,9 +236,7 @@ pub fn color_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
         out.push(q(band_pow[k][0]));
         out.push(q(band_pow[k][1]));
         out.push(q(band_pow[k][2]));
-        let db = 10.0 * kw_pow[k].max(1e-12).log10();
-        let t = ((db - floor_db) / LOUDNESS_RANGE_DB).clamp(0.0, 1.0);
-        out.push((t * 255.0).round() as u8);
+        out.push(((energy[k] / energy_max).clamp(0.0, 1.0) * 255.0).round() as u8);
     }
     out
 }

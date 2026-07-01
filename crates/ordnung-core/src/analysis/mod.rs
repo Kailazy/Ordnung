@@ -51,7 +51,14 @@ use std::path::Path;
 ///     landed under v13 but forgot to bump the version, so v13 caches may hold
 ///     either span; this bump forces re-analysis so every cached waveform is
 ///     unambiguously full-track and lines up with the player's playhead.
-pub const ANALYZER_VERSION: u32 = 14;
+/// v15: hybrid energy byte — `waveform_bands` byte 4 is now K-weighted loudness
+///     gated by *spectral occupancy* (the fraction of 30 Hz–15 kHz FFT bins
+///     within 60 dB of the track's hottest bin), stored as the cube root of
+///     `loud^1.2 · occ^0.6` so the GUI's existing gamma-3 curve reconstructs
+///     it. Compressed masters sit within a few dB of peak throughout, so the
+///     old loudness-only byte was a structureless wall; occupancy recovers the
+///     intro/breakdown/drop contour (see `tests/energy_probe.rs`).
+pub const ANALYZER_VERSION: u32 = 15;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key

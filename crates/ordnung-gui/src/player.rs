@@ -963,8 +963,9 @@ pub(crate) fn compute_hires_bands(
 /// from core `color_bands`) is drawn as its own waveform in a fixed back-to-front
 /// order (low body behind, highs overlaid in the centre) — bass shows big, a
 /// hi-hat shows as a small high-band spike. In **energy** mode a single envelope (the
-/// loudest band) is colored by K-weighted loudness. Without band data both fall
-/// back to the peak envelope (`waveform`) on a height ramp.
+/// loudest band) is colored by the energy byte (K-weighted loudness × spectral
+/// occupancy, see core `color_bands`). Without band data both fall back to the
+/// peak envelope (`waveform`) on a height ramp.
 pub(crate) fn draw_waveform(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -1120,7 +1121,7 @@ pub(crate) fn draw_waveform(
                 }
             }
             config::WaveformColorMode::Energy => {
-                // Envelope = loudest band; colour = K-weighted loudness.
+                // Envelope = loudest band; colour = the hybrid energy byte.
                 let mut layer: Vec<(f32, f32, egui::Color32)> = Vec::with_capacity(cols);
                 for (cx, a) in col_agg.iter().enumerate() {
                     let env = a[0].max(a[1]).max(a[2]) as f32 / 255.0;
@@ -1305,13 +1306,14 @@ fn draw_waveform_scrolling(
     }
 }
 
-/// Raise the threshold for reading as "high energy". The loudness byte is
-/// normalized per-track over a wide (45 dB) window below the track's own peak,
-/// so compressed music — which lives within a few dB of its peak — would
-/// otherwise map almost entirely to the hot (amber/red) end and show no
-/// contrast. This gamma curve pushes the bulk down into the cool/mid range so
-/// only sections genuinely near the track's loudest moment read hot, giving the
-/// waveform usable structure (intro/breakdown cool, drops hot).
+/// Raise the threshold for reading as "high energy". Analyzer v15+ stores the
+/// energy byte as the cube root of the loudness × spectral-occupancy hybrid
+/// (see core `color_bands`), so this cube reconstructs the intended curve. For
+/// older cached loudness-only bytes (and the hires lane's RMS byte) it doubles
+/// as the contrast fix: compressed music lives within a few dB of its peak and
+/// would otherwise map almost entirely to the hot end; the gamma pushes the
+/// bulk down into the cool/mid range so only sections near the track's loudest
+/// moment read hot.
 fn energy_curve(t: f32) -> f32 {
     t.clamp(0.0, 1.0).powf(3.0)
 }

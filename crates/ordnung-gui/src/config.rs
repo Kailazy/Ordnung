@@ -67,10 +67,11 @@ pub struct Config {
     /// On by default, preserving the prior hard-coded behavior.
     #[serde(default = "default_true")]
     pub convert_in_place: bool,
-    /// How the player's waveform is colored: `"energy"` (cool→hot gradient by the
-    /// loudness of each section) or `"spectrum"` (additive RGB from the low/mid/
-    /// high band balance, like rekordbox/Serato). Unknown values fall back to
-    /// `"energy"`. See `WaveformColorMode`.
+    /// How the player's waveform is colored: `"energy"` (cool→hot gradient by
+    /// each section's energy — perceived loudness × spectral occupancy) or
+    /// `"spectrum"` (additive RGB from the low/mid/high band balance, like
+    /// rekordbox/Serato). Unknown values fall back to `"energy"`. See
+    /// `WaveformColorMode`.
     #[serde(default = "default_waveform_color_mode")]
     pub waveform_color_mode: String,
     /// Render-time height companding for the waveform. `1.0` keeps the stored
