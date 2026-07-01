@@ -415,6 +415,18 @@ impl eframe::App for App {
             }
         }
 
+        // Cmd/Ctrl+W: close the frontmost "window" — the floating Settings window
+        // if it's open, otherwise the app window itself (Ordnung is single-window,
+        // so that quits like the red traffic-light button). Transient confirmation
+        // dialogs already close with Escape.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)) {
+            if self.settings_open {
+                self.settings_open = false;
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+
         // Drive the snippet-preview engine: pick up finished decodes, notice when
         // a clip ends, and keep animating the button while audio is active.
         if let Some(a) = &mut self.audio {
