@@ -968,9 +968,8 @@ pub(crate) fn draw_waveform(
     // One mesh of axis-aligned colored rects is a single primitive, already
     // triangulated, with no per-shape overhead.
     let mut mesh = egui::epaint::Mesh::default();
-    // Each column is 1px wide; draw the bar a touch narrower and centered so a thin
-    // gap separates neighboring bars (the rekordbox "individual sample bands" look)
-    // instead of a solid fill.
+    // Columns are 1px wide and their peaks are joined into a filled envelope below
+    // (see `fill_envelope`), so the waveform reads as one continuous silhouette.
     // Visible track-fraction span. `(0, 1)` is the whole track; a narrower window
     // stretches its slice across `rect` (the zoom lane). The column→track-fraction
     // map below routes through it, so the bin sampling and the played/dimmed split
@@ -980,33 +979,12 @@ pub(crate) fn draw_waveform(
 
     // How many stored bins fall under one pixel column. Below 1 a single bin is
     // stretched across multiple pixels (zoomed in past the stored resolution):
-    // point-sampling stair-steps and the thin-bar gaps read as a hard comb. In
-    // that regime we interpolate between adjacent bins and fill each column solid
-    // so the lane reads as a smooth continuous envelope (rekordbox's zoomed-in
-    // look). When more bins than pixels (zoomed out / overview / table cells) we
-    // keep the peak-preserving MAX and the thin separated bars.
+    // point-sampling would stair-step, so there we interpolate between adjacent
+    // bins for a smooth ramp. When more bins than pixels (zoomed out / overview /
+    // table cells) we take the peak-preserving MAX across the column's bin span.
     let src_bins = if has_bands { nb } else { n };
     let bins_per_col = src_bins as f32 * wspan / cols as f32;
     let smooth = bins_per_col < 1.0;
-    // Widen the bars toward a solid fill as smoothing rises (closing the gaps that
-    // shimmer while the lane scrolls); see `draw_waveform_scrolling`. Already solid
-    // when zoomed in past the stored resolution.
-    let fill = (0.75 + 0.5 * style.smoothing.clamp(0.0, 1.0)).min(1.0);
-    let (bar_pad, bar_w) = if smooth {
-        (0.0, 1.0)
-    } else {
-        ((1.0 - fill) * 0.5, fill)
-    };
-    let bar = |mesh: &mut egui::epaint::Mesh, x: f32, h: f32, played: bool, c: egui::Color32| {
-        let c = if played { c } else { dim(c, 0.4) };
-        mesh.add_colored_rect(
-            egui::Rect::from_min_max(
-                egui::pos2(x + bar_pad, y - h),
-                egui::pos2(x + bar_pad + bar_w, y + h),
-            ),
-            c,
-        );
-    };
 
     // First pass: reduce each pixel column to its band aggregate (or, without band
     // data, its peak amplitude packed into channel 0). The second pass blurs that
@@ -1069,64 +1047,65 @@ pub(crate) fn draw_waveform(
         }
     }
 
-    // Smoothing already happened in bin space (`smooth_source`), so the bars are
-    // drawn straight from their aggregates — no per-bar blend to re-tie it to zoom.
-    for cx in 0..cols {
+    // Smoothing already happened in bin space (`smooth_source`); connect the
+    // per-column heights into a filled, centre-mirrored envelope so the peaks join
+    // into a continuous silhouette (rekordbox's look) rather than separated bars.
+    let played_at = |cx: usize| {
         let frac = (w0 + (cx as f32 + 0.5) / cols as f32 * wspan).clamp(0.0, 1.0);
-        let played = played_frac.map_or(true, |p| frac <= p);
-        let x = x0 + cx as f32;
-        let a = col_agg[cx];
-        let agg = [a[0] as f32, a[1] as f32, a[2] as f32, a[3] as f32];
+        played_frac.map_or(true, |p| frac <= p)
+    };
+    let lit = |c: egui::Color32, played: bool| if played { c } else { dim(c, 0.4) };
 
-        if has_bands {
-            match style.mode {
-                config::WaveformColorMode::Spectrum => {
-                    // Fixed back-to-front order (low → mid → high), the same every
-                    // column. Sorting by per-column height instead made whichever
-                    // band was shortest sit on top, and that band flips column to
-                    // column — the "tiger stripes" of alternating colours. A fixed
-                    // z-order keeps bass as the big body envelope with the highs
-                    // overlaid in the centre (rekordbox's look), so the centre colour
-                    // stays consistent between neighbours.
-                    let h = |v: f32, b: usize| {
-                        wave_height(v / 255.0, style.height_exp) * style.band_gain[b]
-                    };
-                    for b in 0..3 {
-                        let mut hh = h(agg[b], b);
+    if has_bands {
+        match style.mode {
+            config::WaveformColorMode::Spectrum => {
+                // One filled strip per band in a fixed back-to-front order (low body,
+                // highs overlaid in the centre). Sorting by per-column height instead
+                // made whichever band was shortest sit on top, and that flips column
+                // to column — the "tiger stripes"; a fixed z-order keeps the centre
+                // colour consistent between neighbours.
+                for b in 0..3 {
+                    let mut layer: Vec<(f32, f32, egui::Color32)> = Vec::with_capacity(cols);
+                    for (cx, a) in col_agg.iter().enumerate() {
+                        let mut hh =
+                            wave_height(a[b] as f32 / 255.0, style.height_exp) * style.band_gain[b];
                         if b == 0 {
                             hh *= bass_floor_gain(
-                                agg[0] / 255.0,
+                                a[0] as f32 / 255.0,
                                 style.bass_floor_threshold,
                                 style.bass_floor_amount,
                             );
                         }
-                        bar(&mut mesh, x, (hh.min(1.0) * half).max(0.4), played, style.band_colors[b]);
+                        let h = (hh.min(1.0) * half).max(0.4);
+                        layer.push((x0 + cx as f32, h, lit(style.band_colors[b], played_at(cx))));
                     }
-                }
-                config::WaveformColorMode::Energy => {
-                    // Envelope = loudest band; colour = K-weighted loudness.
-                    let env = agg[0].max(agg[1]).max(agg[2]) / 255.0;
-                    let loud = agg[3] / 255.0;
-                    bar(
-                        &mut mesh,
-                        x,
-                        ((wave_height(env, style.height_exp) * style.energy_gain).min(1.0) * half)
-                            .max(0.5),
-                        played,
-                        energy_color(energy_curve(loud), &style.energy_colors),
-                    );
+                    fill_envelope(&mut mesh, &layer, y);
                 }
             }
-        } else if n > 0 {
-            let amp = agg[0] / 255.0;
-            bar(
-                &mut mesh,
-                x,
-                ((amp * style.energy_gain).min(1.0) * half).max(1.0),
-                played,
-                energy_color(energy_curve(amp), &style.energy_colors),
-            );
+            config::WaveformColorMode::Energy => {
+                // Envelope = loudest band; colour = K-weighted loudness.
+                let mut layer: Vec<(f32, f32, egui::Color32)> = Vec::with_capacity(cols);
+                for (cx, a) in col_agg.iter().enumerate() {
+                    let env = a[0].max(a[1]).max(a[2]) as f32 / 255.0;
+                    let loud = a[3] as f32 / 255.0;
+                    let h = ((wave_height(env, style.height_exp) * style.energy_gain).min(1.0)
+                        * half)
+                        .max(0.5);
+                    let c = energy_color(energy_curve(loud), &style.energy_colors);
+                    layer.push((x0 + cx as f32, h, lit(c, played_at(cx))));
+                }
+                fill_envelope(&mut mesh, &layer, y);
+            }
         }
+    } else if n > 0 {
+        let mut layer: Vec<(f32, f32, egui::Color32)> = Vec::with_capacity(cols);
+        for (cx, a) in col_agg.iter().enumerate() {
+            let amp = a[0] as f32 / 255.0;
+            let h = ((amp * style.energy_gain).min(1.0) * half).max(1.0);
+            let c = energy_color(energy_curve(amp), &style.energy_colors);
+            layer.push((x0 + cx as f32, h, lit(c, played_at(cx))));
+        }
+        fill_envelope(&mut mesh, &layer, y);
     }
 
     if !mesh.is_empty() {
@@ -1174,40 +1153,21 @@ fn draw_waveform_scrolling(
     // Group bins into bars ~1.4 px apart when zoomed out (one bar per bin once a
     // bin is wider than that). The groups sit on a fixed absolute bin grid, so a
     // given bar keeps its identity and just translates left as the window scrolls
-    // — that's what makes the motion continuous rather than stepped. Solid fill
-    // when a bin is at least a pixel wide (zoomed in → smooth envelope); thin
-    // separated bars otherwise (the rekordbox band look).
+    // — that's what makes the motion continuous rather than stepped. Sample one
+    // point per pixel when a bin is at least a pixel wide (zoomed in), else one
+    // point per group of bins.
     let group = (1.4 / px_per_bin).ceil().max(1.0) as i64;
     let gf = group as f32;
-    let bin_w_px = gf * px_per_bin;
     let solid = px_per_bin >= 1.0;
 
-    // Fraction of each bar's slot that's filled. The thin separated bars leave a
-    // gap between neighbors, and as the lane scrolls those gap edges cross pixel
-    // boundaries at sub-pixel positions — the bars' anti-aliased edges flicker
-    // frame to frame (the "shimmer" between bands). Widening the fill toward 1.0
-    // closes the gaps so the lane becomes a continuous shape with no flickering
-    // seams. Even at smoothing 0 the bars stay mostly filled (0.75) so the gaps
-    // never get wide enough to shimmer badly; the slider closes them the rest of
-    // the way (full fill by ~0.5) → solid rekordbox envelope.
-    let fill = (0.75 + 0.5 * style.smoothing.clamp(0.0, 1.0)).min(1.0);
-
     let mut mesh = egui::epaint::Mesh::default();
-    let mut add = |x: f32, w: f32, h: f32, played: bool, c: egui::Color32| {
-        let c = if played { c } else { dim(c, 0.4) };
-        mesh.add_colored_rect(
-            egui::Rect::from_min_max(egui::pos2(x, y - h), egui::pos2(x + w, y + h)),
-            c,
-        );
-    };
 
     // First pass: walk the absolute bin grid from the group at/just before the
-    // left edge to just past the right edge, reducing each group to one bar
-    // (geometry + band aggregate). The bars come out uniformly spaced along x, so
-    // the second pass can blur the aggregate sequence by the smoothing radius —
-    // blending each bar with its neighbors into a continuous envelope — before
-    // drawing, without disturbing the scroll-stable bin grid.
-    let mut bars: Vec<(f32, f32, bool, [u8; 4])> = Vec::new();
+    // left edge to just past the right edge, reducing each group to one point
+    // (centre x + band aggregate). The points come out ordered along x, so the
+    // second pass can join their peaks into a filled envelope (`fill_envelope`) —
+    // one continuous silhouette — without disturbing the scroll-stable bin grid.
+    let mut bars: Vec<(f32, bool, [u8; 4])> = Vec::new();
     if solid {
         // Zoomed in past one bin per pixel. Drawing one flat-topped rectangle per
         // bin (each `bin_w_px` wide) reads as a blocky staircase — adjacent bins
@@ -1231,9 +1191,7 @@ fn draw_waveform_scrolling(
                 agg[k] = (q0[k] as f32 + (q1[k] as f32 - q0[k] as f32) * t).round() as u8;
             }
             let played = center_frac <= played_frac;
-            // 1px columns tiled edge-to-edge, nudged to overlap a hair so no seam
-            // shimmers between neighbors as the lane scrolls.
-            bars.push((x0 + cx as f32 - 0.25, 1.5, played, agg));
+            bars.push((x0 + cx as f32 + 0.5, played, agg));
         }
     } else {
         let bf0 = (w0 * nb as f32) as i64;
@@ -1250,60 +1208,54 @@ fn draw_waveform_scrolling(
                         agg[t] = agg[t].max(q[t]);
                     }
                 }
-                let left_frac = gb as f32 / nb as f32;
                 let center_frac = (gb as f32 + gf * 0.5) / nb as f32;
-                let x_left = x0 + (left_frac - w0) / wspan * width;
+                let x_center = x0 + (center_frac - w0) / wspan * width;
                 let played = center_frac <= played_frac;
-                let pad = (1.0 - fill) * 0.5;
-                let (bx, bw) = (x_left + bin_w_px * pad, (bin_w_px * fill).max(0.6));
-                bars.push((bx, bw, played, agg));
+                bars.push((x_center, played, agg));
             }
             gb += group;
         }
     }
 
-    // Smoothing already happened in bin space (`smooth_source`); draw each bar
-    // straight from its aggregate with no per-bar blend to re-tie it to the zoom.
-    for &(bx, bw, played, agg_u8) in bars.iter() {
-        let agg = [
-            agg_u8[0] as f32,
-            agg_u8[1] as f32,
-            agg_u8[2] as f32,
-            agg_u8[3] as f32,
-        ];
-        match style.mode {
-            config::WaveformColorMode::Spectrum => {
-                // Fixed back-to-front order (low → mid → high) every column, so the
-                // centre colour stays consistent between neighbours instead of
-                // flipping to whichever band is shortest — the "tiger stripes". See
-                // the matching note in `draw_waveform`.
-                let h = |v: f32, b: usize| {
-                    wave_height(v / 255.0, style.height_exp) * style.band_gain[b]
-                };
-                for b in 0..3 {
-                    let mut hh = h(agg[b], b);
+    // Smoothing already happened in bin space (`smooth_source`); join the points'
+    // peaks into a filled, centre-mirrored envelope (`fill_envelope`) so the lane
+    // reads as one continuous silhouette instead of separated bars.
+    let lit = |c: egui::Color32, played: bool| if played { c } else { dim(c, 0.4) };
+    match style.mode {
+        config::WaveformColorMode::Spectrum => {
+            // One strip per band in a fixed back-to-front order (low body, highs
+            // overlaid in the centre) so the centre colour stays consistent between
+            // neighbours instead of flipping to the shortest band ("tiger stripes").
+            // See the matching note in `draw_waveform`.
+            for b in 0..3 {
+                let mut layer: Vec<(f32, f32, egui::Color32)> = Vec::with_capacity(bars.len());
+                for &(x, played, a) in bars.iter() {
+                    let mut hh =
+                        wave_height(a[b] as f32 / 255.0, style.height_exp) * style.band_gain[b];
                     if b == 0 {
                         hh *= bass_floor_gain(
-                            agg[0] / 255.0,
+                            a[0] as f32 / 255.0,
                             style.bass_floor_threshold,
                             style.bass_floor_amount,
                         );
                     }
-                    add(bx, bw, (hh.min(1.0) * half).max(0.4), played, style.band_colors[b]);
+                    let h = (hh.min(1.0) * half).max(0.4);
+                    layer.push((x, h, lit(style.band_colors[b], played)));
                 }
+                fill_envelope(&mut mesh, &layer, y);
             }
-            config::WaveformColorMode::Energy => {
-                let env = agg[0].max(agg[1]).max(agg[2]) / 255.0;
-                let loud = agg[3] / 255.0;
-                add(
-                    bx,
-                    bw,
-                    ((wave_height(env, style.height_exp) * style.energy_gain).min(1.0) * half)
-                        .max(0.5),
-                    played,
-                    energy_color(energy_curve(loud), &style.energy_colors),
-                );
+        }
+        config::WaveformColorMode::Energy => {
+            let mut layer: Vec<(f32, f32, egui::Color32)> = Vec::with_capacity(bars.len());
+            for &(x, played, a) in bars.iter() {
+                let env = a[0].max(a[1]).max(a[2]) as f32 / 255.0;
+                let loud = a[3] as f32 / 255.0;
+                let h = ((wave_height(env, style.height_exp) * style.energy_gain).min(1.0) * half)
+                    .max(0.5);
+                let c = energy_color(energy_curve(loud), &style.energy_colors);
+                layer.push((x, h, lit(c, played)));
             }
+            fill_envelope(&mut mesh, &layer, y);
         }
     }
 
@@ -1356,4 +1308,45 @@ fn dim(c: egui::Color32, f: f32) -> egui::Color32 {
         (c.g() as f32 * f) as u8,
         (c.b() as f32 * f) as u8,
     )
+}
+
+/// Push a single flat-shaded quad (two triangles) into the mesh.
+fn add_quad(
+    mesh: &mut egui::epaint::Mesh,
+    a: egui::Pos2,
+    b: egui::Pos2,
+    c: egui::Pos2,
+    d: egui::Pos2,
+    color: egui::Color32,
+) {
+    let i = mesh.vertices.len() as u32;
+    mesh.colored_vertex(a, color);
+    mesh.colored_vertex(b, color);
+    mesh.colored_vertex(c, color);
+    mesh.colored_vertex(d, color);
+    mesh.add_triangle(i, i + 1, i + 2);
+    mesh.add_triangle(i, i + 2, i + 3);
+}
+
+/// Draw one waveform layer as a *filled, centre-mirrored envelope* instead of
+/// separate bars: consecutive points are joined by a quad running from the top
+/// envelope (`y - h`) down to the bottom (`y + h`), so the peaks connect into a
+/// continuous silhouette the way rekordbox fills between the waves. Where the
+/// height dips toward zero between cycles the fill pinches to the centre line, so
+/// quiet passages still read as separated "leaves" rather than one solid block.
+/// Each point is `(x, height, color)`; the segment takes its left point's colour
+/// (which carries the played/dimmed split).
+fn fill_envelope(mesh: &mut egui::epaint::Mesh, pts: &[(f32, f32, egui::Color32)], y: f32) {
+    for w in pts.windows(2) {
+        let (x0, h0, c) = w[0];
+        let (x1, h1, _) = w[1];
+        add_quad(
+            mesh,
+            egui::pos2(x0, y - h0),
+            egui::pos2(x1, y - h1),
+            egui::pos2(x1, y + h1),
+            egui::pos2(x0, y + h0),
+            c,
+        );
+    }
 }
