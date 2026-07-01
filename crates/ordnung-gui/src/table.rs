@@ -281,19 +281,43 @@ impl App {
         let mut changed = false;
         let mut reset = false;
 
+        let win_frame = egui::Frame::window(&ctx.style())
+            .rounding(egui::Rounding::same(10.0))
+            .inner_margin(egui::Margin::symmetric(12.0, 10.0));
         egui::Window::new("Columns")
             .id(egui::Id::new("column_reorder_popup"))
+            .title_bar(false)
+            .frame(win_frame)
             .collapsible(false)
-            .open(&mut open)
+            .resizable(false)
             .default_pos(pos)
             .auto_sized()
             .show(ctx, |ui| {
-                // Cap the content width to the narrow column list. Without this the
-                // full-width `separator()` below requests all available width and
-                // inflates the whole window far past the short labels.
-                ui.set_max_width(150.0);
-                ui.label(egui::RichText::new("Drag · toggle").weak().small());
-                ui.add_space(6.0);
+                // Fixed content width: the list is short labels, and the header /
+                // footer below should not stretch the window.
+                ui.set_width(170.0);
+
+                // Custom header (the native title bar is disabled so the popup
+                // reads as one card): title left, frameless close button right,
+                // then a one-line hint.
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Columns").strong().size(15.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let close = ui.add(
+                            egui::Button::new(egui::RichText::new("✕").size(13.0).weak())
+                                .frame(false),
+                        );
+                        if close.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            open = false;
+                        }
+                    });
+                });
+                ui.label(
+                    egui::RichText::new("Drag to reorder · toggle to show")
+                        .weak()
+                        .small(),
+                );
+                ui.add_space(8.0);
 
                 let visible_count = order.iter().filter(|c| !hidden.contains(c)).count();
                 // Which row is mid-drag, if any (payload set by the ⠿ sources below).
@@ -305,13 +329,19 @@ impl App {
                 let gap_memory = egui::Id::new("col_reorder_gap_pos");
                 let prev_to: Option<usize> =
                     ui.data(|d| d.get_temp::<Option<usize>>(gap_memory)).flatten();
-                let mut to: Option<usize> = None;
-                let frame = egui::Frame::default().inner_margin(2.0);
-                let (_, dropped) = ui.dnd_drop_zone::<usize, ()>(frame, |ui| {
+                // Rows sit directly on the window background (no inset box) with a
+                // full-width rounded hover highlight, like a native menu. The drop
+                // is handled by hand below rather than via `dnd_drop_zone` because
+                // the zone paints its own boxy fill that fights this look.
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let row_h = 24.0;
+                    let mut to: Option<usize> = None;
                     let mut row_rects: Vec<egui::Rect> = Vec::with_capacity(order.len());
-                    // A make-room gap is one row tall so neighbours part exactly far
-                    // enough for the dragged row to fit where the line shows.
-                    let gap_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+                    // A make-room gap is one row step tall so neighbours part
+                    // exactly far enough for the dragged row to fit where the line
+                    // shows.
+                    let gap_h = row_h + ui.spacing().item_spacing.y;
                     // Animated spacer before row `idx` (or after the last row). The
                     // gap the pointer is over eases open — pushing rows out of the
                     // way — while every other gap eases shut, and a drop-position
@@ -347,11 +377,15 @@ impl App {
                     };
                     for (idx, &col) in order.iter().enumerate() {
                         gap(ui, idx);
+                        // Reserve a paint slot so the hover highlight can be drawn
+                        // *behind* the row once its rect is known.
+                        let bg = ui.painter().add(egui::Shape::Noop);
                         // Lay out each row by hand so that *only* the ⠿ handle is a
                         // drag source — making the whole row (checkbox included)
                         // draggable meant a press on the checkbox started a drag
                         // instead of toggling visibility.
                         let row = ui.horizontal(|ui| {
+                            ui.set_min_height(row_h);
                             let src_id = egui::Id::new(("col_reorder_item", col));
                             ui.dnd_drag_source(src_id, idx, |ui| {
                                 let handle = ui.label(egui::RichText::new("⠿").weak());
@@ -386,7 +420,24 @@ impl App {
                                 changed = true;
                             }
                         });
-                        row_rects.push(row.response.rect);
+                        // The hover highlight spans the whole content width, not
+                        // just the widgets, so the row reads as one target.
+                        let full = egui::Rect::from_x_y_ranges(
+                            ui.max_rect().x_range(),
+                            row.response.rect.y_range(),
+                        )
+                        .expand2(egui::vec2(4.0, 1.0));
+                        if dragging.is_none() && ui.rect_contains_pointer(full) {
+                            ui.painter().set(
+                                bg,
+                                egui::Shape::rect_filled(
+                                    full,
+                                    egui::Rounding::same(5.0),
+                                    ui.visuals().widgets.hovered.weak_bg_fill,
+                                ),
+                            );
+                        }
+                        row_rects.push(full);
                     }
                     gap(ui, order.len());
                     // Which gap is the pointer over? Compare against row centers
@@ -410,23 +461,35 @@ impl App {
                         }
                     }
                     ui.data_mut(|d| d.insert_temp(gap_memory, to));
-                });
-                if let Some(dragged) = dropped {
-                    let from = *dragged;
-                    if let Some(mut t) = to {
-                        // Removing the source first shifts later indices down by one.
-                        if t > from {
-                            t -= 1;
+                    // Any pointer release ends the drag: always take the payload so
+                    // it can't go stale, and reorder only if it landed on a gap.
+                    if ui.input(|i| i.pointer.any_released()) {
+                        if let Some(from) = egui::DragAndDrop::take_payload::<usize>(ui.ctx()) {
+                            let from = *from;
+                            if let Some(mut t) = to {
+                                // Removing the source first shifts later indices
+                                // down by one.
+                                if t > from {
+                                    t -= 1;
+                                }
+                                let item = order.remove(from);
+                                order.insert(t.min(order.len()), item);
+                                changed = true;
+                            }
                         }
-                        let item = order.remove(from);
-                        order.insert(t.min(order.len()), item);
-                        changed = true;
                     }
-                }
+                });
 
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 ui.separator();
-                if ui.button("Reset").clicked() {
+                ui.add_space(2.0);
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 24.0],
+                        egui::Button::new(egui::RichText::new("Reset to default").small()),
+                    )
+                    .clicked()
+                {
                     reset = true;
                 }
             });
