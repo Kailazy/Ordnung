@@ -982,6 +982,9 @@ struct NowPlaying {
     id: Id,
     artist: String,
     title: String,
+    /// Album tag captured alongside artist/title; empty when unknown. Lets the
+    /// bar's title click jump to an album filter without a catalog read.
+    album: String,
     source_path: String,
     /// Per-bin peak envelope (`Analysis::waveform_preview`), drives bar heights.
     /// Empty when the track isn't analyzed yet — the bar falls back to a line.

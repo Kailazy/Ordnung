@@ -12,19 +12,19 @@ impl App {
             .rows
             .iter()
             .find(|r| r.id == id)
-            .map(|r| (r.artist.clone(), r.title.clone()));
+            .map(|r| (r.artist.clone(), r.title.clone(), r.album.clone()));
         if let Some(a) = self.audio.as_mut() {
             a.play_or_toggle(id, path.clone());
         }
         // Only (re)seed the bar when switching to a different track; a same-track
         // click is just a pause/resume and keeps the existing display + scrub.
         if !toggling {
-            let (artist, title) = display.unwrap_or_else(|| {
+            let (artist, title, album) = display.unwrap_or_else(|| {
                 let stem = path
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                (String::new(), stem)
+                (String::new(), stem, String::new())
             });
             let source_path = path.to_string_lossy().into_owned();
             // Advertise the track to the OS Now Playing panel right away; its cover
@@ -62,6 +62,7 @@ impl App {
                 id,
                 artist,
                 title,
+                album,
                 source_path,
                 waveform,
                 waveform_bands,
@@ -132,6 +133,7 @@ impl App {
             np.title.clone()
         };
         let artist = np.artist.clone();
+        let album = np.album.clone();
         // Clone the waveform out so the panel closure (which mutably borrows
         // `self.scrub`) doesn't also need to borrow `self.now_playing`.
         let waveform = np.waveform.clone();
@@ -145,6 +147,10 @@ impl App {
         let mut toggle = false;
         let mut close = false;
         let mut seek_to: Option<f32> = None;
+        // Set by clicking the title/artist labels; applied after the panel closure
+        // (jumping rebuilds rows and selection, which needs `&mut self`).
+        let mut filter_album = false;
+        let mut filter_artist = false;
 
         // Fraction the bar reflects: the live position, or the in-progress scrub
         // before release. Shared by the zoom lane and the overview strip so both
@@ -225,7 +231,7 @@ impl App {
                     let (block, _) =
                         ui.allocate_exact_size(egui::vec2(LABEL_W, 56.0), egui::Sense::hover());
                     let now = ui.input(|i| i.time);
-                    let mut animating = draw_scrolling_line(
+                    let (anim_title, title_size) = draw_scrolling_line(
                         ui,
                         egui::pos2(block.left(), block.top() + 8.0),
                         LABEL_W,
@@ -234,7 +240,7 @@ impl App {
                         egui::Color32::from_gray(240),
                         now,
                     );
-                    animating |= draw_scrolling_line(
+                    let (anim_artist, artist_size) = draw_scrolling_line(
                         ui,
                         egui::pos2(block.left(), block.top() + 32.0),
                         LABEL_W,
@@ -243,8 +249,57 @@ impl App {
                         egui::Color32::from_gray(165),
                         now,
                     );
-                    if animating {
+                    if anim_title || anim_artist {
                         ui.ctx().request_repaint();
+                    }
+
+                    // Title → album filter, artist → artist filter. Only the text
+                    // itself is the hit target; hover shows a pointer + underline
+                    // (link affordance). Skipped when the tag is empty (nothing to
+                    // filter by).
+                    let link = |pos: egui::Pos2,
+                                    size: egui::Vec2,
+                                    salt: &str,
+                                    color: egui::Color32,
+                                    note: &str,
+                                    hit: &mut bool| {
+                        let rect = egui::Rect::from_min_size(pos, size);
+                        let resp = ui
+                            .interact(rect, ui.id().with(salt), egui::Sense::click())
+                            .on_hover_note(note);
+                        if resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            ui.painter().line_segment(
+                                [
+                                    egui::pos2(rect.left(), rect.bottom()),
+                                    egui::pos2(rect.right(), rect.bottom()),
+                                ],
+                                egui::Stroke::new(1.0, color),
+                            );
+                        }
+                        if resp.clicked() {
+                            *hit = true;
+                        }
+                    };
+                    if !album.trim().is_empty() {
+                        link(
+                            egui::pos2(block.left(), block.top() + 8.0),
+                            title_size,
+                            "np_title_link",
+                            egui::Color32::from_gray(240),
+                            "Show this album",
+                            &mut filter_album,
+                        );
+                    }
+                    if !artist.trim().is_empty() {
+                        link(
+                            egui::pos2(block.left(), block.top() + 32.0),
+                            artist_size,
+                            "np_artist_link",
+                            egui::Color32::from_gray(165),
+                            "Show this artist",
+                            &mut filter_artist,
+                        );
                     }
                     ui.add_space(16.0);
 
@@ -405,6 +460,30 @@ impl App {
             }
             self.now_playing = None;
             self.scrub = None;
+        }
+
+        // Title/artist label click: show the full library narrowed to the playing
+        // track's album or artist (a per-column filter, so an artist named like a
+        // song title doesn't over-match), then select and reveal the track. Same
+        // shape as `jump_to_catalog_tracks`.
+        if filter_album || filter_artist {
+            let np = self.now_playing.as_ref().unwrap();
+            let (col, needle) = if filter_album {
+                (TableColumn::Album, np.album.clone())
+            } else {
+                (TableColumn::Artist, np.artist.clone())
+            };
+            self.view = LibraryView::Library;
+            self.filter.clear();
+            self.col_filters.clear();
+            self.col_filters.insert(col, needle);
+            // `reload` prunes the selection to live rows, so seed it after.
+            self.reload();
+            self.selection = std::iter::once(np_id).collect();
+            self.selected = Some(np_id);
+            self.select_anchor = Some(np_id);
+            self.scroll_to_track = Some(np_id);
+            self.refresh_selected();
         }
 
         // Drive the playhead: while audio is rolling, keep repainting so the zoom
@@ -584,7 +663,9 @@ impl App {
 /// Paint one line of text left-aligned within `width`, clipped to it. If the
 /// text is wider than `width`, scroll it horizontally Spotify-style: hold at the
 /// start, glide left to reveal the tail, hold at the end, then loop. Returns
-/// `true` while the line is animating so the caller can request a repaint.
+/// `true` while the line is animating (so the caller can request a repaint) plus
+/// the displayed size — text size clamped to `width` — for hit-testing the text
+/// as a link.
 fn draw_scrolling_line(
     ui: &egui::Ui,
     top_left: egui::Pos2,
@@ -593,14 +674,15 @@ fn draw_scrolling_line(
     font: egui::FontId,
     color: egui::Color32,
     time: f64,
-) -> bool {
+) -> (bool, egui::Vec2) {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
     let size = galley.size();
+    let shown = egui::vec2(size.x.min(width), size.y);
     let clip = egui::Rect::from_min_size(top_left, egui::vec2(width, size.y));
     let painter = ui.painter_at(clip);
     if size.x <= width {
         painter.galley(top_left, galley, color);
-        return false;
+        return (false, shown);
     }
     // Overflowing: hold, scroll left at a constant pace, hold, then repeat.
     const SPEED: f64 = 28.0; // px/s
@@ -617,7 +699,7 @@ fn draw_scrolling_line(
         overflow
     };
     painter.galley(top_left - egui::vec2(offset as f32, 0.0), galley, color);
-    true
+    (true, shown)
 }
 
 pub(crate) fn fmt_duration(ms: u64) -> String {
