@@ -1168,6 +1168,16 @@ impl App {
                             });
                     });
                 });
+                // Release version, bottom-left under the nav rail. The crate
+                // version inherits `[workspace.package] version`, which the
+                // release procedure bumps — so this always shows the shipped
+                // release.
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(concat!("Ordnung v", env!("CARGO_PKG_VERSION")))
+                        .size(10.5)
+                        .color(egui::Color32::from_gray(120)),
+                );
             });
 
         if save {
