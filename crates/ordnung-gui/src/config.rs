@@ -179,19 +179,19 @@ fn default_waveform_color_mode() -> String {
 }
 
 pub(crate) fn default_waveform_height_exp() -> f32 {
-    2.0
+    1.01
 }
 
 pub(crate) fn default_waveform_band_gain() -> [f32; 3] {
-    [0.78, 1.2, 1.35]
+    [1.0, 0.85, 0.38]
 }
 
 pub(crate) fn default_waveform_energy_gain() -> f32 {
-    1.0
+    0.9
 }
 
 pub(crate) fn default_waveform_band_colors() -> [[u8; 3]; 3] {
-    [[232, 76, 60], [95, 200, 95], [95, 175, 235]]
+    [[0, 50, 255], [207, 156, 42], [230, 241, 255]]
 }
 
 pub(crate) fn default_waveform_low_hz() -> f32 {
@@ -203,23 +203,23 @@ pub(crate) fn default_waveform_mid_hz() -> f32 {
 }
 
 pub(crate) fn default_waveform_smoothing() -> f32 {
-    0.5
+    0.79
 }
 
 pub(crate) fn default_waveform_smooth_attack_ms() -> f32 {
-    4.0
+    1.2
 }
 
 pub(crate) fn default_waveform_smooth_release_ms() -> f32 {
-    450.0
+    60.0
 }
 
 pub(crate) fn default_waveform_bass_floor_threshold() -> f32 {
-    0.35
+    0.2
 }
 
 pub(crate) fn default_waveform_bass_floor_amount() -> f32 {
-    0.0
+    0.25
 }
 
 pub(crate) fn default_waveform_energy_colors() -> [[u8; 3]; 5] {
