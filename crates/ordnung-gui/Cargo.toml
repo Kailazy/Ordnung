@@ -18,7 +18,10 @@ anyhow = "1.0.102"
 # `persistence` lets eframe auto-save egui's memory (and window geometry) to the
 # OS app-data dir on exit and restore it on launch. We rely on this so resized
 # table column widths — which egui_extras keeps in egui memory — survive restarts.
-eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+# `wgpu` (not `glow`): macOS caps OpenGL presentation at 60Hz; Metal via wgpu
+# tracks the display's real refresh rate, so scrolling stays smooth on
+# high-refresh (120/144Hz) screens.
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "wgpu", "persistence"] }
 egui = "0.29"
 # `serde` makes egui_extras store its TableState (the per-column widths) as
 # *persisted* egui memory instead of transient temp memory; only persisted memory
