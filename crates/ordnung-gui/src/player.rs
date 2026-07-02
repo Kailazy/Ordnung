@@ -73,6 +73,57 @@ impl App {
         }
     }
 
+    /// Start a random next track, for the player bar's shuffle buttons. The
+    /// candidate pool is the current table rows, so shuffle respects the active
+    /// view and filters. With `smart` the pool narrows to tracks harmonically
+    /// compatible with the playing key on the Camelot wheel; when the current
+    /// key is unknown or nothing compatible exists it falls back to plain
+    /// shuffle rather than going silent.
+    fn shuffle_next(&mut self, current: Id, smart: bool) {
+        let current_camelot = self
+            .rows
+            .iter()
+            .find(|r| r.id == current)
+            .and_then(|r| r.camelot)
+            .or_else(|| {
+                // Playing track not in the visible rows (filtered out): read its
+                // key from the catalog instead.
+                Catalog::open(&self.db_path)
+                    .and_then(|c| c.get_analysis(current))
+                    .ok()
+                    .flatten()
+                    .and_then(|a| a.key)
+                    .map(|k| k.camelot())
+            });
+        let pick = |compatible_only: bool| -> Option<(Id, PathBuf)> {
+            let pool: Vec<&TrackRow> = self
+                .rows
+                .iter()
+                .filter(|r| r.id != current)
+                .filter(|r| {
+                    !compatible_only
+                        || matches!(
+                            (current_camelot, r.camelot),
+                            (Some(a), Some(b)) if a.compatible_with(b)
+                        )
+                })
+                .collect();
+            if pool.is_empty() {
+                return None;
+            }
+            let r = pool[random_index(pool.len())];
+            Some((r.id, r.source_path.clone()))
+        };
+        let next = if smart {
+            pick(true).or_else(|| pick(false))
+        } else {
+            pick(false)
+        };
+        if let Some((id, path)) = next {
+            self.play_track(id, path);
+        }
+    }
+
     /// Render the bottom now-playing bar: artwork, title/artist, a play/pause
     /// button and a draggable scrubber. Shown only while the engine still has the
     /// `now_playing` track loaded (or decoding). The seek fires on scrub release so
@@ -146,6 +197,8 @@ impl App {
         const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
         let mut toggle = false;
         let mut close = false;
+        let mut shuffle = false;
+        let mut smart_shuffle = false;
         let mut seek_to: Option<f32> = None;
         // Set by clicking the title/artist labels; applied after the panel closure
         // (jumping rebuilds rows and selection, which needs `&mut self`).
@@ -352,7 +405,46 @@ impl App {
                     if btn.clicked() && !loading {
                         toggle = true;
                     }
-                    ui.add_space(14.0);
+                    ui.add_space(10.0);
+
+                    // Shuffle + smart-shuffle: plain glyphs beside the play disc,
+                    // hand-drawn like the play glyph so no icon font is needed.
+                    // Shuffle jumps to a random track from the current view; the
+                    // vinyl "DJ" button restricts the pool to tracks harmonically
+                    // compatible with the playing key on the Camelot wheel.
+                    let (sh_rect, sh) =
+                        ui.allocate_exact_size(egui::vec2(28.0, 36.0), egui::Sense::click());
+                    let sh = sh.on_hover_note("Play a random track");
+                    let col = if sh.hovered() {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_gray(170)
+                    };
+                    draw_shuffle_glyph(ui.painter(), sh_rect.center(), col);
+                    if sh.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if sh.clicked() {
+                        shuffle = true;
+                    }
+                    ui.add_space(6.0);
+
+                    let (dj_rect, dj) =
+                        ui.allocate_exact_size(egui::vec2(30.0, 36.0), egui::Sense::click());
+                    let dj = dj.on_hover_note("Play a random track in a compatible key");
+                    let col = if dj.hovered() {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_gray(170)
+                    };
+                    draw_vinyl_glyph(ui.painter(), dj_rect.center(), col, ACCENT);
+                    if dj.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if dj.clicked() {
+                        smart_shuffle = true;
+                    }
+                    ui.add_space(12.0);
 
                     // Elapsed time. Fixed-width so the digits changing during a
                     // scrub (e.g. "0:05" → "0:00", or crossing "10:00") can't shift
@@ -453,6 +545,9 @@ impl App {
             if let Some(a) = self.audio.as_mut() {
                 a.toggle_pause();
             }
+        }
+        if shuffle || smart_shuffle {
+            self.shuffle_next(np_id, smart_shuffle);
         }
         if close {
             if let Some(a) = self.audio.as_mut() {
@@ -708,6 +803,66 @@ fn draw_scrolling_line(
 pub(crate) fn fmt_duration(ms: u64) -> String {
     let secs = ms / 1000;
     format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+/// Random index in `0..len` without pulling in an RNG crate: each
+/// `RandomState` is seeded from per-process entropy plus a per-instance
+/// counter, so one fresh hasher's output is unpredictable enough for
+/// picking a shuffle track. `len` must be non-zero.
+fn random_index(len: usize) -> usize {
+    use std::hash::{BuildHasher, Hasher};
+    let h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.finish() as usize % len
+}
+
+/// Hand-drawn shuffle glyph (two crossing arrows), sized for the 28px player
+/// buttons. Drawn like the play/pause glyph so it renders identically
+/// regardless of which fonts are present.
+fn draw_shuffle_glyph(painter: &egui::Painter, c: egui::Pos2, color: egui::Color32) {
+    let (w, h) = (8.0, 5.0);
+    let stroke = egui::Stroke::new(1.8, color);
+    for dir in [-1.0_f32, 1.0] {
+        let from = egui::pos2(c.x - w, c.y - dir * h);
+        let to = egui::pos2(c.x + w, c.y + dir * h);
+        painter.line_segment([from, to], stroke);
+        let v = (to - from).normalized();
+        let n = egui::vec2(-v.y, v.x);
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                to + v * 2.5,
+                to - v * 3.5 + n * 3.0,
+                to - v * 3.5 - n * 3.0,
+            ],
+            color,
+            egui::Stroke::NONE,
+        ));
+    }
+}
+
+/// Hand-drawn vinyl-record glyph with an accent sparkle for the smart-shuffle
+/// (DJ) button: outer platter, groove ring, spindle dot.
+fn draw_vinyl_glyph(
+    painter: &egui::Painter,
+    c: egui::Pos2,
+    color: egui::Color32,
+    accent: egui::Color32,
+) {
+    painter.circle_stroke(c, 8.0, egui::Stroke::new(1.6, color));
+    painter.circle_stroke(c, 4.6, egui::Stroke::new(1.0, color.gamma_multiply(0.55)));
+    painter.circle_filled(c, 1.7, color);
+    // Sparkle at the platter's top-right corner marks the pick as "smart".
+    let s = egui::pos2(c.x + 8.0, c.y - 8.0);
+    let r = 3.4;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(s.x, s.y - r),
+            egui::pos2(s.x + r * 0.55, s.y),
+            egui::pos2(s.x, s.y + r),
+            egui::pos2(s.x - r * 0.55, s.y),
+        ],
+        accent,
+        egui::Stroke::NONE,
+    ));
 }
 
 /// Live, user-tunable rendering parameters for the waveform, built each frame

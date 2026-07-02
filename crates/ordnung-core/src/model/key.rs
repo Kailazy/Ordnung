@@ -47,6 +47,20 @@ impl Camelot {
     pub fn label(self) -> String {
         format!("{}{}", self.number, if self.major { 'B' } else { 'A' })
     }
+
+    /// Harmonic-mixing compatibility between two wheel positions: same number
+    /// (same key or relative major/minor) or one step around the wheel on the
+    /// same side.
+    pub fn compatible_with(self, other: Camelot) -> bool {
+        if self.number == other.number {
+            return true;
+        }
+        if self.major == other.major {
+            let diff = (self.number as i8 - other.number as i8).rem_euclid(12);
+            return diff == 1 || diff == 11;
+        }
+        false
+    }
 }
 
 impl Key {
@@ -98,18 +112,9 @@ impl Key {
     }
 
     /// Harmonic-mixing compatibility: same key, ±1 on the wheel, or relative
-    /// major/minor (same number, opposite side).
+    /// major/minor (same number, opposite side). See [`Camelot::compatible_with`].
     pub fn compatible_with(self, other: Key) -> bool {
-        let a = self.camelot();
-        let b = other.camelot();
-        if a.number == b.number {
-            return true; // same key or relative major/minor
-        }
-        if a.major == b.major {
-            let diff = (a.number as i8 - b.number as i8).rem_euclid(12);
-            return diff == 1 || diff == 11;
-        }
-        false
+        self.camelot().compatible_with(other.camelot())
     }
 }
 
@@ -164,5 +169,15 @@ mod tests {
         assert!(am.compatible_with(key(4, Mode::Minor))); // 9A, +1
         assert!(am.compatible_with(key(2, Mode::Minor))); // 7A, -1
         assert!(!am.compatible_with(key(6, Mode::Minor))); // 11A, not adjacent
+    }
+
+    #[test]
+    fn camelot_compatibility_wraps_and_respects_side() {
+        let c = |number: u8, major: bool| Camelot { number, major };
+        assert!(c(12, false).compatible_with(c(1, false))); // wheel wraps 12 -> 1
+        assert!(c(1, false).compatible_with(c(12, false)));
+        assert!(c(8, false).compatible_with(c(8, true))); // relative major/minor
+        assert!(!c(8, false).compatible_with(c(9, true))); // +1 across sides
+        assert!(!c(3, true).compatible_with(c(5, true))); // two steps away
     }
 }
