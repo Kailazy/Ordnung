@@ -218,11 +218,17 @@ impl App {
             set_cover(*id);
         }
 
-        // Drop cached textures for every touched track so each re-decodes the new
-        // cover on the next render.
+        // Evict cached textures for every touched track so each re-decodes the
+        // new cover on the next render. Parked in the graveyard, not dropped —
+        // this runs mid-frame and a same-frame texture free panics wgpu (see
+        // `tex_graveyard`).
         for id in &touched {
-            self.cover_cache.remove(id);
-            self.cover_full_cache.remove(id);
+            if let Some(ThumbState::Ready(Some(tex))) = self.cover_cache.remove(id) {
+                self.tex_graveyard.push(tex);
+            }
+            if let Some(Some(tex)) = self.cover_full_cache.remove(id) {
+                self.tex_graveyard.push(tex);
+            }
             self.cover_inflight.remove(id);
         }
         self.status = if mates.is_empty() {

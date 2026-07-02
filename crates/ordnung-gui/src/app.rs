@@ -97,6 +97,7 @@ impl App {
             column_menu: None,
             col_filters: HashMap::new(),
             col_filter_open: None,
+            tex_graveyard: Vec::new(),
             settings_open: false,
             settings_tab: SettingsTab::default(),
             token_input: String::new(),
@@ -208,12 +209,31 @@ impl App {
                 // computing the live set, so the selection/cover bookkeeping below
                 // only ever references rows the user can actually see.
                 let rows = self.apply_col_filters(rows);
-                // Drop cover textures for tracks that are no longer in the
+                // Evict cover textures for tracks that are no longer in the
                 // visible set; keep the ones still present (the texture id is
-                // stable since track ids don't change).
+                // stable since track ids don't change). Evicted handles go to
+                // the graveyard (dropped next frame), not straight to drop —
+                // `reload` runs mid-frame and a same-frame free panics wgpu
+                // (see `tex_graveyard`).
                 let live: std::collections::BTreeSet<Id> = rows.iter().map(|r| r.id).collect();
-                self.cover_cache.retain(|id, _| live.contains(id));
-                self.cover_full_cache.retain(|id, _| live.contains(id));
+                let dead: Vec<Id> =
+                    self.cover_cache.keys().filter(|id| !live.contains(id)).copied().collect();
+                for id in dead {
+                    if let Some(ThumbState::Ready(Some(tex))) = self.cover_cache.remove(&id) {
+                        self.tex_graveyard.push(tex);
+                    }
+                }
+                let dead: Vec<Id> = self
+                    .cover_full_cache
+                    .keys()
+                    .filter(|id| !live.contains(id))
+                    .copied()
+                    .collect();
+                for id in dead {
+                    if let Some(Some(tex)) = self.cover_full_cache.remove(&id) {
+                        self.tex_graveyard.push(tex);
+                    }
+                }
                 self.cover_inflight.retain(|id| live.contains(id));
                 // Drop any selected/anchor ids that filtered out of the view so a
                 // drag-out never references a row the user can't see.
@@ -235,8 +255,18 @@ impl App {
             }
             Err(e) => {
                 self.rows.clear();
-                self.cover_cache.clear();
-                self.cover_full_cache.clear();
+                // Park the cleared textures until next frame — same mid-frame
+                // free hazard as the eviction above (see `tex_graveyard`).
+                self.tex_graveyard.extend(
+                    self.cover_cache
+                        .drain()
+                        .filter_map(|(_, s)| match s {
+                            ThumbState::Ready(tex) => tex,
+                            ThumbState::Loading => None,
+                        }),
+                );
+                self.tex_graveyard
+                    .extend(self.cover_full_cache.drain().filter_map(|(_, tex)| tex));
                 self.cover_inflight.clear();
                 self.selection.clear();
                 self.select_anchor = None;
@@ -369,6 +399,10 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Drop cover textures evicted during the PREVIOUS frame. Doing it here —
+        // before anything paints or uploads — guarantees the frame that painted
+        // them has already been submitted to the GPU (see `tex_graveyard`).
+        self.tex_graveyard.clear();
         if self.poll_worker() {
             self.reload();
             self.refresh_selected();

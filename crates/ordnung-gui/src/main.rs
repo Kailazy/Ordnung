@@ -687,6 +687,15 @@ struct App {
     /// Track ids whose full cover is currently decoding on a background thread.
     /// Prevents spawning duplicate loaders and drives the "loading…" placeholder.
     cover_inflight: HashSet<Id>,
+    /// Cover textures evicted mid-frame (e.g. a filter keystroke narrowing the
+    /// visible rows during `reload`), parked here and dropped at the top of the
+    /// NEXT frame. Dropping a `TextureHandle` mid-frame frees the GPU texture in
+    /// the same frame that may have painted or just uploaded it — egui-wgpu
+    /// destroys freed textures *before* submitting the frame's commands, so the
+    /// submit hits a destroyed texture and panics (fast typing into the filter
+    /// crashed exactly this way). Holding evicted handles one extra frame keeps
+    /// the texture alive until every command referencing it has been submitted.
+    tex_graveyard: Vec<egui::TextureHandle>,
     /// Persistent channel for finished cover decodes. Loader threads clone the
     /// sender; the UI drains the receiver each frame and builds textures.
     cover_tx: Sender<CoverLoaded>,
