@@ -300,15 +300,28 @@ impl App {
                                 self.settings_tab = tab;
                             }
                         }
+                        // Release version, at the bottom of the nav. Must live
+                        // *inside* this row: content added below it makes the
+                        // auto-sized window grow every frame (the vertical
+                        // separator fills to the new height each time). The
+                        // crate version inherits `[workspace.package] version`,
+                        // which the release procedure bumps.
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new(concat!(
+                                "Ordnung v",
+                                env!("CARGO_PKG_VERSION")
+                            ))
+                            .size(10.5)
+                            .color(egui::Color32::from_gray(120)),
+                        );
                     });
                     ui.separator();
                     // Right: the active tab's controls.
-                    // Let the scroll viewport grow to (nearly) the screen height so
-                    // tall tabs — the Waveform tab runs ~760px — show every control
-                    // and the window auto-sizes to fit. A fixed cap clipped the last
-                    // controls (e.g. the High band-color swatch) below the fold even
-                    // when the screen had room. Still scrolls on short displays.
-                    let max_scroll_h = (ctx.screen_rect().height() - 160.0).clamp(360.0, 900.0);
+                    // Cap the scroll viewport well under the screen height: tall
+                    // tabs (Waveform runs ~760px) scroll instead of stretching
+                    // the window toward the screen edges, which read as too tall.
+                    let max_scroll_h = (ctx.screen_rect().height() - 160.0).clamp(360.0, 620.0);
                     ui.vertical(|ui| {
                         ui.set_min_width(360.0);
                         ui.set_max_width(360.0);
@@ -1168,16 +1181,6 @@ impl App {
                             });
                     });
                 });
-                // Release version, bottom-left under the nav rail. The crate
-                // version inherits `[workspace.package] version`, which the
-                // release procedure bumps — so this always shows the shipped
-                // release.
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(concat!("Ordnung v", env!("CARGO_PKG_VERSION")))
-                        .size(10.5)
-                        .color(egui::Color32::from_gray(120)),
-                );
             });
 
         if save {
