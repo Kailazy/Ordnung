@@ -465,11 +465,14 @@ impl App {
         // Title/artist label click: show the full library narrowed to the playing
         // track's album or artist (a per-column filter, so an artist named like a
         // song title doesn't over-match), then select and reveal the track. Same
-        // shape as `jump_to_catalog_tracks`.
+        // shape as `jump_to_catalog_tracks`. The album needle is quoted — exact
+        // whole-cell match (see `apply_col_filters`) — so a short album name
+        // doesn't also pull in every longer album containing it. Artist stays
+        // substring so "A feat. B" tracks still show under artist A.
         if filter_album || filter_artist {
             let np = self.now_playing.as_ref().unwrap();
             let (col, needle) = if filter_album {
-                (TableColumn::Album, np.album.clone())
+                (TableColumn::Album, format!("\"{}\"", np.album))
             } else {
                 (TableColumn::Artist, np.artist.clone())
             };

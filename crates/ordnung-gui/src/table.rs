@@ -100,7 +100,10 @@ impl App {
 
     /// Keep only the rows passing every active per-column filter. Each filter is
     /// a case-insensitive substring match against that column's displayed text
-    /// (`TrackRow::filter_text`); multiple active columns are AND-ed. No active
+    /// (`TrackRow::filter_text`); multiple active columns are AND-ed. A needle
+    /// wrapped in double quotes ("...") instead matches the whole cell exactly
+    /// (still case-insensitive) — used by the player's title link so an album
+    /// named like a common word doesn't pull in half the catalog. No active
     /// filters returns `rows` untouched.
     pub(crate) fn apply_col_filters(&self, rows: Vec<TrackRow>) -> Vec<TrackRow> {
         if self.col_filters.is_empty() {
@@ -123,6 +126,16 @@ impl App {
                 // lossy" to show every likely-transcoded copy in one filter).
                 needles.iter().all(|(col, n)| {
                     let hay = r.filter_text(*col).to_lowercase();
+                    // Fully-quoted needle: exact whole-cell match, no comma
+                    // splitting (so an album title containing a comma stays one
+                    // needle rather than OR-ing its halves).
+                    if let Some(exact) = n
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        .filter(|s| !s.is_empty())
+                    {
+                        return hay == exact;
+                    }
                     let mut alts = n.split(',').map(str::trim).filter(|s| !s.is_empty());
                     let mut any = false;
                     let matched = alts.any(|alt| {
@@ -583,7 +596,7 @@ impl App {
                     );
                     let edit = ui.add(
                         egui::TextEdit::singleline(&mut text)
-                            .hint_text("contains…")
+                            .hint_text("contains… or \"exact\"")
                             .desired_width(150.0),
                     );
                     // Grab the keyboard the frame the bar opens so the user can
