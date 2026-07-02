@@ -288,7 +288,7 @@ impl App {
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
-                ui.horizontal_top(|ui| {
+                let row = ui.horizontal_top(|ui| {
                     // Left rail: selectable category tabs (Ableton-style).
                     ui.vertical(|ui| {
                         ui.set_width(140.0);
@@ -301,11 +301,10 @@ impl App {
                             }
                         }
                         // Release version, at the bottom of the nav. Must live
-                        // *inside* this row: content added below it makes the
-                        // auto-sized window grow every frame (the vertical
-                        // separator fills to the new height each time). The
-                        // crate version inherits `[workspace.package] version`,
-                        // which the release procedure bumps.
+                        // *inside* this row so it can't add height below the
+                        // divider. The crate version inherits
+                        // `[workspace.package] version`, which the release
+                        // procedure bumps.
                         ui.add_space(10.0);
                         ui.label(
                             egui::RichText::new(concat!(
@@ -316,7 +315,16 @@ impl App {
                             .color(egui::Color32::from_gray(120)),
                         );
                     });
-                    ui.separator();
+                    // Rail/content divider: reserve the gap here, draw the line
+                    // after the row lays out (below) so it spans exactly the
+                    // final content height. A `ui.separator()` expands to the
+                    // window's current height instead, which locks in any
+                    // inherited height — the auto-sized window can grow but
+                    // never shrink back (the "Settings keeps its bugged tall
+                    // size" dead space).
+                    ui.add_space(5.0);
+                    let sep_x = ui.cursor().left();
+                    ui.add_space(7.0);
                     // Right: the active tab's controls.
                     // Cap the scroll viewport well under the screen height: tall
                     // tabs (Waveform runs ~760px) scroll instead of stretching
@@ -1180,7 +1188,13 @@ impl App {
                         }
                             });
                     });
+                    sep_x
                 });
+                ui.painter().vline(
+                    row.inner,
+                    row.response.rect.y_range(),
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                );
             });
 
         if save {
