@@ -2800,6 +2800,7 @@ dependencies = [
  "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
  "ordnung-core",
+ "ordnung-rbdb",
  "raw-window-handle",
  "rayon",
  "rfd",
@@ -2815,6 +2816,7 @@ name = "ordnung-rbdb"
 version = "0.6.4"
 dependencies = [
  "ordnung-core",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

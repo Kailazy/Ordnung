@@ -729,8 +729,14 @@ impl App {
             | LibraryView::Duplicates
             | LibraryView::Missing
             | LibraryView::Vinyl
-            | LibraryView::Usb(_) => None,
+            | LibraryView::Usb(..) => None,
         };
+        // USB rows aren't catalog tracks (synthetic ids, files on the device):
+        // catalog actions — convert, analyze, playlists, Discogs, delete — are
+        // hidden for them, drag-to-playlist is disabled (⌥ file drag-out still
+        // works, it's path-based), and double-click plays instead of opening
+        // the convert modal.
+        let is_usb = matches!(self.view, LibraryView::Usb(..));
         // Reordering ("Move to top/bottom") rewrites the whole playlist order, so
         // only offer it on an unfiltered view where the visible rows are the full
         // list — never on a filtered subset that would drop the hidden tracks. A
@@ -801,7 +807,7 @@ impl App {
             | LibraryView::Duplicates
             | LibraryView::Missing
             | LibraryView::Vinyl
-            | LibraryView::Usb(_) => None,
+            | LibraryView::Usb(..) => None,
         };
         // The leading order gutter is RESERVED in EVERY view — the library and every
         // playlist — at one fixed width, so the data columns line up at the same x
@@ -1261,7 +1267,8 @@ impl App {
                                                 native_drag_ids = Some(drag_ids.clone());
                                             }
                                         }
-                                        if !over_play_btn && resp.dragged() && !alt_drag {
+                                        if !over_play_btn && resp.dragged() && !alt_drag && !is_usb
+                                        {
                                             resp.dnd_set_drag_payload(DraggedTracks(
                                                 drag_ids.clone(),
                                             ));
@@ -1404,7 +1411,7 @@ impl App {
                                             native_drag_ids = Some(drag_ids.clone());
                                         }
                                     }
-                                    if resp.dragged() && !alt_drag {
+                                    if resp.dragged() && !alt_drag && !is_usb {
                                         resp.dnd_set_drag_payload(DraggedTracks(drag_ids.clone()));
                                     }
                                     // Right-click menu. Attached to each text cell's
@@ -1427,6 +1434,43 @@ impl App {
                                                 r.source_path.clone(),
                                             ));
                                             ui.close_menu();
+                                        }
+                                        // Device rows: only the path-based actions apply —
+                                        // everything below this branch edits the catalog,
+                                        // which these tracks aren't in.
+                                        if is_usb {
+                                            if ui.button("Reveal in Finder").clicked() {
+                                                menu_action =
+                                                    Some(TrackMenuAction::RevealInFinder(
+                                                        r.source_path.clone(),
+                                                    ));
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Copy file path").clicked() {
+                                                menu_action = Some(TrackMenuAction::CopyPath(
+                                                    r.source_path.display().to_string(),
+                                                ));
+                                                ui.close_menu();
+                                            }
+                                            let slsk_label = if drag_ids.len() > 1 {
+                                                format!("Copy for Soulseek ({})", drag_ids.len())
+                                            } else {
+                                                "Copy for Soulseek".to_string()
+                                            };
+                                            if ui
+                                                .button(slsk_label)
+                                                .on_hover_note(soulseek_query(
+                                                    &r.artist, &r.title,
+                                                ))
+                                                .clicked()
+                                            {
+                                                menu_action =
+                                                    Some(TrackMenuAction::CopyForSoulseek(
+                                                        drag_ids.clone(),
+                                                    ));
+                                                ui.close_menu();
+                                            }
+                                            return;
                                         }
                                         if ui.button("Convert…").clicked() {
                                             menu_action = Some(TrackMenuAction::Convert(r.id));
@@ -1656,7 +1700,12 @@ impl App {
                             }
                             if dbl {
                                 clicked_id = Some(r.id);
-                                open_convert_for = Some(r.id);
+                                if is_usb {
+                                    // Device rows: double-click previews the file.
+                                    preview_request = Some((r.id, r.source_path.clone()));
+                                } else {
+                                    open_convert_for = Some(r.id);
+                                }
                             }
                         });
                     });
@@ -2038,7 +2087,7 @@ pub(crate) fn load_rows(
         LibraryView::Duplicates
         | LibraryView::Missing
         | LibraryView::Vinyl
-        | LibraryView::Usb(_) => Ok(Vec::new()),
+        | LibraryView::Usb(..) => Ok(Vec::new()),
     }
     .map_err(|e| e.to_string())?;
     let ext_art: HashSet<Id> = catalog

@@ -212,9 +212,11 @@ enum LibraryView {
     /// not the flat track table. Backed by the local `vinyl_collection` cache.
     Vinyl,
     /// A mounted removable volume (USB stick / external drive), keyed by its
-    /// mount path. Rendered as its own file browser — the tracks live on the
-    /// device, not in the catalog. Backed by `usb_tracks`.
-    Usb(PathBuf),
+    /// mount path, showing either the whole device (`None`) or one playlist
+    /// from its rekordbox export (`Some(playlist id)`). The tracks live on the
+    /// device, not in the catalog — rows are built from `usb_tracks` (with
+    /// synthetic ids, see [`usb_track_id`]) and rendered in the normal table.
+    Usb(PathBuf, Option<u32>),
 }
 
 /// A sortable table column. The cover column isn't sortable, so it has no
@@ -970,11 +972,17 @@ struct App {
     /// Which volume `usb_tracks` was scanned from, so switching volumes (or an
     /// explicit Rescan setting this to `None`) triggers a fresh scan.
     usb_loaded_for: Option<PathBuf>,
+    /// Playlist tree read from the volume's rekordbox `export.pdb` (empty for
+    /// plain sticks). Drives the sidebar tree under the active device.
+    usb_playlists: Vec<ordnung_rbdb::pdb::RbPlaylist>,
+    /// Playlist id → indices into `usb_tracks`, in playlist order. Resolved by
+    /// the scan worker (pdb paths matched to scanned files case-insensitively).
+    usb_playlist_tracks: HashMap<u32, Vec<usize>>,
     /// A background USB scan is in flight; drives the view's spinner and gates
     /// re-spawning. The result arrives over `usb_rx` tagged with its volume.
     usb_loading: bool,
-    /// Receives `(volume, tracks)` from the background USB scan worker.
-    usb_rx: Option<std::sync::mpsc::Receiver<(PathBuf, Vec<ScannedTrack>)>>,
+    /// Receives the finished device scan from the background USB scan worker.
+    usb_rx: Option<std::sync::mpsc::Receiver<UsbScan>>,
     /// Receives the result message of a background `diskutil eject`, surfaced
     /// in the status bar (ejecting can fail, e.g. Finder holding a file open,
     /// and a silent failure looks like a broken button). `None` when idle.
@@ -1042,6 +1050,31 @@ struct NowPlaying {
     /// Set once the off-thread hi-res analysis has been kicked off, so we don't
     /// respawn it every frame while it runs (or the PCM is still decoding).
     hires_requested: bool,
+}
+
+/// Everything one background USB device scan produces: the audio files found
+/// on the volume, and — when it carries a rekordbox export — the export's
+/// playlist tree with each playlist's tracks already resolved to indices into
+/// `tracks`. Tagged with the volume so a stale scan can't fill the wrong view.
+struct UsbScan {
+    vol: PathBuf,
+    tracks: Vec<ScannedTrack>,
+    playlists: Vec<ordnung_rbdb::pdb::RbPlaylist>,
+    playlist_tracks: HashMap<u32, Vec<usize>>,
+}
+
+/// USB tracks aren't catalog rows, but the shared table needs an `Id` per row.
+/// Synthesize ids far above any real SQLite rowid so the two spaces can never
+/// collide; catalog lookups on these simply miss (no analysis, no covers).
+const USB_ID_BASE: Id = 1 << 62;
+
+fn usb_track_id(index: usize) -> Id {
+    USB_ID_BASE + index as Id
+}
+
+/// Inverse of [`usb_track_id`]: the `usb_tracks` index behind a synthetic id.
+fn usb_track_index(id: Id) -> Option<usize> {
+    id.checked_sub(USB_ID_BASE).map(|i| i as usize)
 }
 
 /// Edit buffers for a USB track's core tags — written straight to the file on

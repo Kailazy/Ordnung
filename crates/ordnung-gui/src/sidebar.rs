@@ -328,6 +328,56 @@ pub(crate) fn draw_playlist_leaf(
     ui.add_space(3.0);
 }
 
+/// Render one level of a USB device's rekordbox playlist tree in the sidebar,
+/// recursing into folders. Read-only navigation: clicking a playlist filters
+/// the device view to that playlist's tracks (in export order). `parent` is
+/// the pdb node id whose children are drawn (`0` = top level).
+pub(crate) fn draw_usb_playlist_nodes(
+    ui: &mut egui::Ui,
+    all: &[ordnung_rbdb::pdb::RbPlaylist],
+    tracks_by_playlist: &HashMap<u32, Vec<usize>>,
+    parent: u32,
+    vol: &Path,
+    view: &mut LibraryView,
+) {
+    for p in all.iter().filter(|p| p.parent_id == parent) {
+        if p.is_folder {
+            egui::CollapsingHeader::new(egui::RichText::new(p.name.as_str()).size(12.5))
+                .id_salt(("usb-pl-folder", vol, p.id))
+                .default_open(false)
+                .show(ui, |ui| {
+                    draw_usb_playlist_nodes(ui, all, tracks_by_playlist, p.id, vol, view);
+                });
+            ui.add_space(2.0);
+        } else {
+            let selected = *view == LibraryView::Usb(vol.to_path_buf(), Some(p.id));
+            let resp = nav_button(ui, &format!("♪  {}", p.name), selected, 26.0, 12.5)
+                .on_hover_note("Playlist from this device's rekordbox export");
+            // Right-aligned track count, mirroring the catalog playlist rows.
+            let count_color = if selected {
+                egui::Color32::from_white_alpha(170)
+            } else {
+                egui::Color32::from_gray(130)
+            };
+            ui.painter().text(
+                egui::pos2(resp.rect.right() - 10.0, resp.rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                tracks_by_playlist
+                    .get(&p.id)
+                    .map(Vec::len)
+                    .unwrap_or(0)
+                    .to_string(),
+                egui::FontId::proportional(10.5),
+                count_color,
+            );
+            if resp.clicked() {
+                *view = LibraryView::Usb(vol.to_path_buf(), Some(p.id));
+            }
+            ui.add_space(2.0);
+        }
+    }
+}
+
 pub(crate) fn folder_context_menu(
     ui: &mut egui::Ui,
     p: &Playlist,

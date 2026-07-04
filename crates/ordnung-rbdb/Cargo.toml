@@ -8,4 +8,6 @@ description = "rekordbox/CDJ export: export.pdb (DeviceSQL) + ANLZ writers."
 
 [dependencies]
 ordnung-core = { path = "../ordnung-core" }
-# Phase 5: rekordcrate (binrw read/write of DeviceSQL). See the rekordbox-format skill.
+thiserror = "2.0.18"
+# Phase 5 (write side): rekordcrate (binrw read/write of DeviceSQL). See the
+# rekordbox-format skill. The read side is a self-contained parser in `pdb`.

@@ -134,6 +134,8 @@ impl App {
             usb_last_poll: 0.0,
             usb_tracks: Vec::new(),
             usb_loaded_for: None,
+            usb_playlists: Vec::new(),
+            usb_playlist_tracks: HashMap::new(),
             usb_loading: false,
             usb_rx: None,
             usb_eject_rx: None,
@@ -213,7 +215,15 @@ impl App {
                 self.view = LibraryView::Library;
             }
         }
-        match load_rows(&self.db_path, &self.filter, &self.view, &self.recent_pinned) {
+        // USB views build rows from the scanned device (no catalog involved);
+        // everything else queries the catalog. Both feed the same
+        // post-processing below so filters/selection/covers behave uniformly.
+        let loaded = if matches!(self.view, LibraryView::Usb(..)) {
+            Ok(self.usb_rows())
+        } else {
+            load_rows(&self.db_path, &self.filter, &self.view, &self.recent_pinned)
+        };
+        match loaded {
             Ok(rows) => {
                 // Narrow to the rows passing every active per-column filter before
                 // computing the live set, so the selection/cover bookkeeping below
@@ -412,19 +422,25 @@ impl App {
         // Adopt a finished scan; results are tagged with their volume so a
         // stale scan (user already switched sticks) can't fill the wrong view.
         if let Some(rx) = &self.usb_rx {
-            if let Ok((vol, tracks)) = rx.try_recv() {
+            if let Ok(scan) = rx.try_recv() {
                 self.usb_loading = false;
                 self.usb_rx = None;
-                if self.usb_loaded_for.as_deref() == Some(vol.as_path()) {
-                    self.usb_tracks = tracks;
+                if self.usb_loaded_for.as_deref() == Some(scan.vol.as_path()) {
+                    self.usb_tracks = scan.tracks;
+                    self.usb_playlists = scan.playlists;
+                    self.usb_playlist_tracks = scan.playlist_tracks;
+                    // Build the table rows for whatever USB view is showing.
+                    self.reload();
                 }
             }
         }
-        let LibraryView::Usb(vol) = &self.view else {
+        let LibraryView::Usb(vol, _) = &self.view else {
             // Free the device's track list once the view moves elsewhere.
             if !self.usb_tracks.is_empty() {
                 self.usb_tracks = Vec::new();
             }
+            self.usb_playlists = Vec::new();
+            self.usb_playlist_tracks = HashMap::new();
             self.usb_loaded_for = None;
             self.usb_selected = None;
             return;
@@ -440,24 +456,113 @@ impl App {
         }
         self.usb_loaded_for = Some(vol.clone());
         self.usb_tracks = Vec::new();
+        self.usb_playlists = Vec::new();
+        self.usb_playlist_tracks = HashMap::new();
         self.usb_selected = None;
         self.usb_loading = true;
         let (tx, rx) = std::sync::mpsc::channel();
         self.usb_rx = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let files = scan::discover(&vol);
-            // Tag reads are per-file and independent; rayon keeps a big stick
-            // from taking minutes. Unreadable files are skipped, not fatal.
-            let mut tracks: Vec<ScannedTrack> = files
-                .par_iter()
-                .filter_map(|p| scan::scan_file(p).ok())
-                .collect();
-            tracks.sort_by(|a, b| a.source_path.cmp(&b.source_path));
-            let _ = tx.send((vol, tracks));
+            let _ = tx.send(scan_usb_volume(vol));
             ctx.request_repaint();
         });
     }
+
+    /// Build table rows for the active USB view straight from the scanned
+    /// device tracks (synthetic ids — see [`usb_track_id`]). Mirrors
+    /// `load_rows` field-for-field, but analysis-derived columns (waveform,
+    /// quality, Added) stay empty: these files aren't in the catalog. BPM and
+    /// key come from the files' own tags — on a rekordbox export those carry
+    /// what rekordbox analyzed.
+    pub(crate) fn usb_rows(&self) -> Vec<TrackRow> {
+        let LibraryView::Usb(_, playlist) = &self.view else {
+            return Vec::new();
+        };
+        let indices: Vec<usize> = match playlist {
+            Some(pid) => self
+                .usb_playlist_tracks
+                .get(pid)
+                .cloned()
+                .unwrap_or_default(),
+            None => (0..self.usb_tracks.len()).collect(),
+        };
+        let filter = self.filter.trim().to_lowercase();
+        indices
+            .into_iter()
+            .filter_map(|i| {
+                let t = self.usb_tracks.get(i)?;
+                let artist = t.tags.artist.clone().unwrap_or_default();
+                let title = t.tags.title.clone().unwrap_or_default();
+                let album = t.tags.album.clone().unwrap_or_default();
+                let genre = t.tags.genre.clone().unwrap_or_default();
+                if !filter.is_empty() {
+                    let hay = format!(
+                        "{artist} {title} {album} {genre} {}",
+                        t.source_path.to_lowercase()
+                    )
+                    .to_lowercase();
+                    if !hay.contains(&filter) {
+                        return None;
+                    }
+                }
+                let key = t.tags.initial_key_tag.clone().unwrap_or_else(|| "—".into());
+                let camelot = parse_camelot_label(&key);
+                let bpm_val = t.tags.bpm_tag;
+                Some(TrackRow {
+                    id: usb_track_id(i),
+                    artist,
+                    title,
+                    album,
+                    genre,
+                    duration: fmt_duration(t.properties.duration_ms),
+                    bpm: bpm_val
+                        .map(|b| format!("{b:.0}"))
+                        .unwrap_or_else(|| "—".into()),
+                    key,
+                    format: t.format,
+                    format_label: format_label(t.format).into(),
+                    bitrate: t
+                        .properties
+                        .bitrate_kbps
+                        .map(|b| b.to_string())
+                        .unwrap_or_else(|| "—".into()),
+                    notes: t.tags.comment.clone().unwrap_or_default(),
+                    added: "—".into(),
+                    added_at: 0,
+                    waveform: Vec::new(),
+                    waveform_bands: Vec::new(),
+                    source_path: PathBuf::from(&t.source_path),
+                    has_cover: false,
+                    has_external_cover: false,
+                    dur_ms: Some(t.properties.duration_ms),
+                    bpm_val,
+                    bitrate_val: t.properties.bitrate_kbps,
+                    key_sort: camelot.map(|c| u16::from(c.number) * 2 + u16::from(c.major)),
+                    camelot,
+                    quality: None,
+                    quality_cut_hz: None,
+                    quality_src: None,
+                    quality_sort: None,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Parse a Camelot label from a file's key tag ("8A", "12b") so the Key column
+/// gets its coloured chip. Other notations (classical "Am", open key) simply
+/// render as plain text. `None` for anything that isn't `<1-12><A|B>`.
+fn parse_camelot_label(s: &str) -> Option<Camelot> {
+    let s = s.trim();
+    let letter = s.chars().last()?;
+    let major = match letter {
+        'B' | 'b' => true,
+        'A' | 'a' => false,
+        _ => return None,
+    };
+    let number: u8 = s[..s.len() - 1].parse().ok()?;
+    (1..=12).contains(&number).then_some(Camelot { number, major })
 }
 
 impl eframe::App for App {
@@ -680,12 +785,19 @@ impl eframe::App for App {
                     // selection (in visible order); otherwise they fall back to the
                     // whole filtered view. The label reflects which, so a user who
                     // picked a few tracks isn't surprised by a full-library run.
-                    let sel_ids: Vec<Id> = self
-                        .rows
-                        .iter()
-                        .filter(|x| self.selection.contains(&x.id))
-                        .map(|x| x.id)
-                        .collect();
+                    // USB rows have synthetic non-catalog ids, so a device-view
+                    // selection is ignored here — the buttons keep their
+                    // whole-catalog fallback meaning instead of no-op'ing.
+                    let usb_view = matches!(self.view, LibraryView::Usb(..));
+                    let sel_ids: Vec<Id> = if usb_view {
+                        Vec::new()
+                    } else {
+                        self.rows
+                            .iter()
+                            .filter(|x| self.selection.contains(&x.id))
+                            .map(|x| x.id)
+                            .collect()
+                    };
                     // Analysis cluster: the common "Analyze" stays one click; its
                     // less-frequent siblings (force re-analyze, Discogs metadata)
                     // tuck into an adjacent ▾ menu so the toolbar stays lean.
@@ -743,7 +855,7 @@ impl eframe::App for App {
                         .on_hover_note("More analysis & metadata actions");
                     // Batch convert: enabled whenever tracks are selected. Opens a
                     // dialog to pick one target format for all of them.
-                    if !self.selection.is_empty() {
+                    if !self.selection.is_empty() && !usb_view {
                         let n = self.selection.len();
                         let noun = if n == 1 { "track" } else { "tracks" };
                         if ui
@@ -782,7 +894,7 @@ impl eframe::App for App {
                         | LibraryView::Duplicates
                         | LibraryView::Missing
                         | LibraryView::Vinyl
-                        | LibraryView::Usb(_) => None,
+                        | LibraryView::Usb(..) => None,
                     };
                     if let Some(pid) = playlist_view {
                         if !self.selection.is_empty() {
@@ -1189,7 +1301,7 @@ impl eframe::App for App {
                                 if nav_button(
                                     ui,
                                     &label,
-                                    self.view == LibraryView::Usb(v.path.clone()),
+                                    self.view == LibraryView::Usb(v.path.clone(), None),
                                     34.0,
                                     14.0,
                                 )
@@ -1201,7 +1313,25 @@ impl eframe::App for App {
                                 })
                                 .clicked()
                                 {
-                                    self.view = LibraryView::Usb(v.path.clone());
+                                    self.view = LibraryView::Usb(v.path.clone(), None);
+                                }
+                                // The active device's rekordbox playlist tree,
+                                // indented under its tile like the catalog's
+                                // own playlist tree. Only the scanned device
+                                // has this data (the pdb is read by its scan).
+                                if self.usb_loaded_for.as_deref() == Some(v.path.as_path())
+                                    && !self.usb_playlists.is_empty()
+                                {
+                                    ui.indent(("usb-pl-tree", &v.path), |ui| {
+                                        draw_usb_playlist_nodes(
+                                            ui,
+                                            &self.usb_playlists.clone(),
+                                            &self.usb_playlist_tracks,
+                                            0,
+                                            &v.path,
+                                            &mut self.view,
+                                        );
+                                    });
                                 }
                                 ui.add_space(3.0);
                             }
@@ -1362,8 +1492,8 @@ impl eframe::App for App {
                     self.draw_missing(ui);
                 } else if self.view == LibraryView::Vinyl {
                     self.draw_vinyl(ui, ctx);
-                } else if let LibraryView::Usb(vol) = self.view.clone() {
-                    self.draw_usb(ui, &vol);
+                } else if let LibraryView::Usb(vol, _) = self.view.clone() {
+                    native_drag = self.draw_usb(ui, &vol);
                 } else if self.rows.is_empty()
                     && self.load_error.is_none()
                     && (!self.filter.trim().is_empty()
@@ -1684,5 +1814,125 @@ impl eframe::App for App {
         if self.is_busy() || !self.artwork_queue.is_empty() || self.artwork_saving {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
+    }
+}
+
+/// The USB device scan, run on a worker thread: find every audio file on the
+/// volume and read its tags, then — when the volume carries a rekordbox
+/// export — read the export's playlist tree and resolve each playlist entry's
+/// pdb path to a scanned track. FAT32 is case-insensitive, so paths match on
+/// the lowercased volume-relative form; entries whose file wasn't found (or
+/// failed to scan) drop out of the playlist rather than showing as dead rows.
+pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
+    let files = scan::discover(&vol);
+    // Tag reads are per-file and independent; rayon keeps a big stick from
+    // taking minutes. Unreadable files are skipped, not fatal.
+    let mut tracks: Vec<ScannedTrack> = files
+        .par_iter()
+        .filter_map(|p| scan::scan_file(p).ok())
+        .collect();
+    tracks.sort_by(|a, b| a.source_path.cmp(&b.source_path));
+
+    let mut playlists = Vec::new();
+    let mut playlist_tracks: HashMap<u32, Vec<usize>> = HashMap::new();
+    let pdb = vol.join("PIONEER").join("rekordbox").join("export.pdb");
+    if pdb.is_file() {
+        if let Ok(export) = ordnung_rbdb::pdb::read_export(&pdb) {
+            let by_rel_path: HashMap<String, usize> = tracks
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| {
+                    let rel = Path::new(&t.source_path)
+                        .strip_prefix(&vol)
+                        .ok()?
+                        .to_string_lossy()
+                        .to_lowercase();
+                    Some((rel, i))
+                })
+                .collect();
+            for (playlist, track_ids) in &export.entries {
+                let indices: Vec<usize> = track_ids
+                    .iter()
+                    .filter_map(|tid| {
+                        let rel = export
+                            .track_paths
+                            .get(tid)?
+                            .trim_start_matches('/')
+                            .to_lowercase();
+                        by_rel_path.get(&rel).copied()
+                    })
+                    .collect();
+                playlist_tracks.insert(*playlist, indices);
+            }
+            // Playlists with no resolvable tracks still show (empty), so the
+            // tree mirrors what the player would list.
+            for p in &export.playlists {
+                if !p.is_folder {
+                    playlist_tracks.entry(p.id).or_default();
+                }
+            }
+            playlists = export.playlists;
+        }
+    }
+    UsbScan {
+        vol,
+        tracks,
+        playlists,
+        playlist_tracks,
+    }
+}
+
+#[cfg(test)]
+mod usb_scan_tests {
+    use super::*;
+
+    /// End-to-end device scan against a synthetic rekordbox stick: the real
+    /// `num_rows` export.pdb fixture (104 playlists / 3886 tracks) plus audio
+    /// files placed at the paths of playlist 11's first three entries. The
+    /// scan must find the files, read the playlist tree, and resolve exactly
+    /// those entries — in playlist order — to scanned-track indices.
+    #[test]
+    fn fake_stick_resolves_playlists() {
+        let vol = std::env::temp_dir().join("ordnung-fake-usb-test");
+        let _ = std::fs::remove_dir_all(&vol);
+        let rb = vol.join("PIONEER/rekordbox");
+        std::fs::create_dir_all(&rb).unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../ordnung-rbdb/tests/fixtures/num_rows_export.pdb");
+        std::fs::copy(fixture, rb.join("export.pdb")).unwrap();
+        // Playlist 11 ("2.1 VIBEY TECHNO DEEPER") entries 1–3 in the pdb.
+        let paths = [
+            "Contents/Aleksi Perala/CBS024X/Aleksi Perala - A2 - 128C70 123.7.mp3",
+            "Contents/Anthony Rother/Mistress 12/A1  Anthony Rother - Heaven To Heaven_MMM.wav",
+            "Contents/Anthony Rother/Mistress 12/B1  Anthony Rother - Ab Ab Ab_MMM.wav",
+        ];
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/seeker-sample/Rezzett-Doyce.mp3");
+        for p in paths {
+            let dst = vol.join(p);
+            std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+            std::fs::copy(&sample, dst).unwrap();
+        }
+
+        let scan = scan_usb_volume(vol.clone());
+        assert_eq!(scan.tracks.len(), 3, "all three files scanned");
+        assert_eq!(scan.playlists.len(), 104, "full playlist tree read");
+        let pl11 = scan.playlists.iter().find(|p| p.id == 11).unwrap();
+        assert_eq!(pl11.name, "2.1 VIBEY TECHNO DEEPER");
+        assert!(!pl11.is_folder);
+        // Only the three planted files resolve; they come back in playlist
+        // (entry-index) order, which here is the pdb path order above.
+        let got: Vec<String> = scan.playlist_tracks[&11]
+            .iter()
+            .map(|&i| scan.tracks[i].source_path.clone())
+            .collect();
+        let want: Vec<String> = paths
+            .iter()
+            .map(|p| vol.join(p).to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(got, want);
+        // A playlist whose files aren't on the stick is present but empty.
+        assert_eq!(scan.playlist_tracks[&48], Vec::<usize>::new());
+        let _ = std::fs::remove_dir_all(&vol);
     }
 }

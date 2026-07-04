@@ -39,6 +39,21 @@ pub fn detect_volumes() -> Vec<UsbVolume> {
     use std::os::unix::fs::MetadataExt;
     let root_dev = std::fs::metadata("/").map(|m| m.dev()).ok();
     let mut out = Vec::new();
+    // Dev/test hook: treat a plain directory as a mounted device, so the USB
+    // flow (scan, playlists, editing) can be exercised without real hardware.
+    if let Ok(fake) = std::env::var("ORDNUNG_FAKE_USB") {
+        let path = PathBuf::from(fake);
+        if path.is_dir() {
+            out.push(UsbVolume {
+                name: path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Fake USB".into()),
+                is_rekordbox_export: is_rekordbox_export(&path),
+                path,
+            });
+        }
+    }
     let Ok(entries) = std::fs::read_dir("/Volumes") else {
         return out;
     };

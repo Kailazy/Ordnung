@@ -1227,7 +1227,7 @@ impl App {
     /// opens direct tag editing — Save writes to the file on the stick. When
     /// the volume is a rekordbox export, a banner warns that players read
     /// export.pdb/ANLZ, not file tags, so direct edits desync until re-export.
-    pub(crate) fn draw_usb(&mut self, ui: &mut egui::Ui, vol: &Path) {
+    pub(crate) fn draw_usb(&mut self, ui: &mut egui::Ui, vol: &Path) -> Option<Vec<PathBuf>> {
         let name = vol
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -1236,16 +1236,26 @@ impl App {
             .usb_volumes
             .iter()
             .any(|v| v.path == vol && v.is_rekordbox_export);
+        // When a playlist from the export is selected, name it in the header.
+        let playlist_name = match &self.view {
+            LibraryView::Usb(_, Some(pid)) => self
+                .usb_playlists
+                .iter()
+                .find(|p| p.id == *pid)
+                .map(|p| p.name.clone()),
+            _ => None,
+        };
 
         let mut rescan = false;
         let mut eject = false;
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.heading(format!("⏏  {name}"));
+            match &playlist_name {
+                Some(pl) => ui.heading(format!("⏏  {name}  ▸  ♪ {pl}")),
+                None => ui.heading(format!("⏏  {name}")),
+            };
             if !self.usb_loading {
-                ui.label(
-                    egui::RichText::new(format!("{} track(s)", self.usb_tracks.len())).weak(),
-                );
+                ui.label(egui::RichText::new(format!("{} track(s)", self.rows.len())).weak());
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -1331,7 +1341,7 @@ impl App {
         }
         if rescan {
             self.usb_loaded_for = None; // poll_usb respawns the scan
-            return;
+            return None;
         }
 
         if self.usb_loading {
@@ -1340,7 +1350,7 @@ impl App {
                 ui.spinner();
                 ui.label("Scanning device…");
             });
-            return;
+            return None;
         }
         if self.usb_tracks.is_empty() {
             ui.add_space(24.0);
@@ -1348,10 +1358,38 @@ impl App {
                 ui.heading("No audio files");
                 ui.label("Nothing playable was found on this volume.");
             });
-            return;
+            return None;
+        }
+        if self.rows.is_empty() {
+            // The playlist resolved to nothing (files missing from /Contents)
+            // or the search filter hid every row.
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                ui.heading("No tracks to show");
+                ui.label(if self.filter.trim().is_empty() {
+                    "This playlist's files weren't found on the device."
+                } else {
+                    "Nothing on this device matches the search."
+                });
+            });
+            return None;
         }
 
-        // ── Bottom edit panel (pinned, so the list scroll can fill the rest) ──
+        // The direct tag editor follows the table's (single) selection: the
+        // synthetic row id decodes back to an index into `usb_tracks`.
+        let table_sel = self
+            .selected
+            .and_then(usb_track_index)
+            .filter(|i| *i < self.usb_tracks.len());
+        if table_sel != self.usb_selected {
+            self.usb_selected = table_sel;
+            if let Some(i) = table_sel {
+                self.usb_edit = UsbEdit::from_tags(&self.usb_tracks[i].tags);
+                self.usb_edit_saved = self.usb_edit.clone();
+            }
+        }
+
+        // ── Bottom edit panel (pinned, so the table scroll can fill the rest) ──
         if let Some(i) = self.usb_selected.filter(|i| *i < self.usb_tracks.len()) {
             let file = PathBuf::from(&self.usb_tracks[i].source_path);
             let fname = file
@@ -1373,7 +1411,11 @@ impl App {
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
                                 if ui.button("✕").on_hover_note("Close the editor").clicked() {
+                                    // Also drop the table selection, or the
+                                    // panel would re-open from it next frame.
                                     self.usb_selected = None;
+                                    self.selected = None;
+                                    self.selection.clear();
                                 }
                                 if ui
                                     .add_enabled(
@@ -1435,126 +1477,23 @@ impl App {
                         }
                         self.usb_edit_saved = self.usb_edit.clone();
                         self.status = format!("Saved tags to {fname}.");
+                        // Rebuild the table rows so they show the saved tags.
+                        self.reload();
                     }
                     Err(e) => self.status = format!("Couldn't write {fname}: {e}"),
                 }
             }
         }
 
-        // ── Track list ─────────────────────────────────────────────────────
-        // Snapshot the row strings so the scroll closure doesn't borrow `self`.
-        struct UsbRow {
-            title: String,
-            meta: String,
-            rel_path: String,
-        }
-        let rows: Vec<UsbRow> = self
-            .usb_tracks
-            .iter()
-            .map(|t| {
-                let file = Path::new(&t.source_path);
-                let fname = file
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let title = match (t.tags.artist.as_deref(), t.tags.title.as_deref()) {
-                    (Some(a), Some(ti)) => format!("{a} — {ti}"),
-                    (None, Some(ti)) => ti.to_string(),
-                    _ => fname.clone(),
-                };
-                let mut meta: Vec<String> = vec![format_label(t.format).to_string()];
-                let secs = t.properties.duration_ms as f32 / 1000.0;
-                if secs > 0.0 {
-                    meta.push(fmt_time(secs));
-                }
-                if let Some(bpm) = t.tags.bpm_tag {
-                    meta.push(format!("{bpm:.0} BPM"));
-                }
-                if let Some(k) = t.tags.initial_key_tag.as_deref() {
-                    meta.push(k.to_string());
-                }
-                if let Some(size) = t.src_size {
-                    meta.push(format!("{:.1} MB", size as f64 / 1_000_000.0));
-                }
-                let rel_path = file
-                    .strip_prefix(vol)
-                    .unwrap_or(file)
-                    .display()
-                    .to_string();
-                UsbRow {
-                    title,
-                    meta: meta.join("  ·  "),
-                    rel_path,
-                }
-            })
-            .collect();
-
-        let selected = self.usb_selected;
-        let mut clicked: Option<usize> = None;
+        // ── Track table ──────────────────────────────────────────────────
+        // The same table as the library — sorting, filters, per-row play,
+        // ⌥-drag file drag-out — fed by `usb_rows` (built in `reload`).
+        let mut native_drag = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show_inside(ui, |ui| {
-                let row_h = 40.0;
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show_rows(ui, row_h, rows.len(), |ui, range| {
-                        for i in range {
-                            let r = &rows[i];
-                            let (rect, resp) = ui.allocate_exact_size(
-                                egui::vec2(ui.available_width(), row_h),
-                                egui::Sense::click(),
-                            );
-                            if resp.clicked() {
-                                clicked = Some(i);
-                            }
-                            if selected == Some(i) {
-                                ui.painter().rect_filled(
-                                    rect,
-                                    egui::Rounding::same(6.0),
-                                    crate::sidebar::NAV_ACCENT.gamma_multiply(0.35),
-                                );
-                            } else if resp.hovered() {
-                                ui.painter().rect_filled(
-                                    rect,
-                                    egui::Rounding::same(6.0),
-                                    egui::Color32::from_gray(50),
-                                );
-                            }
-                            let p = ui.painter();
-                            p.text(
-                                egui::pos2(rect.left() + 10.0, rect.top() + 6.0),
-                                egui::Align2::LEFT_TOP,
-                                &r.title,
-                                egui::FontId::proportional(14.0),
-                                egui::Color32::from_gray(230),
-                            );
-                            p.text(
-                                egui::pos2(rect.left() + 10.0, rect.bottom() - 6.0),
-                                egui::Align2::LEFT_BOTTOM,
-                                &r.rel_path,
-                                egui::FontId::monospace(10.5),
-                                egui::Color32::from_gray(130),
-                            );
-                            p.text(
-                                egui::pos2(rect.right() - 10.0, rect.center().y),
-                                egui::Align2::RIGHT_CENTER,
-                                &r.meta,
-                                egui::FontId::proportional(11.5),
-                                egui::Color32::from_gray(160),
-                            );
-                        }
-                    });
+                native_drag = self.draw_table(ui);
             });
-        if let Some(i) = clicked {
-            // Re-clicking the selected row closes the editor; a new row loads
-            // its tags into fresh edit buffers.
-            if self.usb_selected == Some(i) {
-                self.usb_selected = None;
-            } else {
-                self.usb_selected = Some(i);
-                self.usb_edit = UsbEdit::from_tags(&self.usb_tracks[i].tags);
-                self.usb_edit_saved = self.usb_edit.clone();
-            }
-        }
+        native_drag
     }
 }
