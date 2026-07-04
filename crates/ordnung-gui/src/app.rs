@@ -350,10 +350,23 @@ impl App {
             self.vinyl = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_vinyl())
                 .unwrap_or_default();
-            // Drop cover textures for records no longer present.
+            // Evict cover textures for records no longer present. Like the
+            // track-cover eviction above, the handles go to the graveyard —
+            // `reload` can run mid-frame (e.g. from the vinyl grid's badge
+            // click) and a same-frame free panics wgpu (see `tex_graveyard`).
             let live: std::collections::BTreeSet<u64> =
                 self.vinyl.iter().map(|v| v.instance_id).collect();
-            self.vinyl_covers.retain(|id, _| live.contains(id));
+            let dead: Vec<u64> = self
+                .vinyl_covers
+                .keys()
+                .filter(|id| !live.contains(id))
+                .copied()
+                .collect();
+            for id in dead {
+                if let Some(ThumbState::Ready(Some(tex))) = self.vinyl_covers.remove(&id) {
+                    self.tex_graveyard.push(tex);
+                }
+            }
             // Cross-reference the catalog: which records do we already own a
             // digital copy of? Build release_id → [track_id] once for the grid.
             // Exact release-id links first, metadata matching as a fallback.
@@ -369,7 +382,18 @@ impl App {
                 .unwrap_or_default();
         } else if !self.vinyl.is_empty() {
             self.vinyl = Vec::new();
-            self.vinyl_covers.clear();
+            // Park the cover textures until next frame, never drop in place:
+            // this branch runs mid-frame when the grid's "in catalog" badge
+            // jumps to the Library (the grid painted these covers this very
+            // frame), and a same-frame free panics wgpu (see `tex_graveyard`).
+            self.tex_graveyard.extend(
+                self.vinyl_covers
+                    .drain()
+                    .filter_map(|(_, s)| match s {
+                        ThumbState::Ready(tex) => tex,
+                        ThumbState::Loading => None,
+                    }),
+            );
             self.vinyl_links = HashMap::new();
         }
     }
