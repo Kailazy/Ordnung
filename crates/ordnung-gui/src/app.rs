@@ -413,13 +413,17 @@ impl App {
     /// Pulling the viewed stick falls the view back to the Library.
     fn poll_usb(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
-        if now - self.usb_last_poll > 2.0 || self.usb_last_poll == 0.0 {
+        if now - self.usb_last_poll >= 2.0 || self.usb_last_poll == 0.0 {
             self.usb_last_poll = now;
             self.usb_volumes = ordnung_core::usb::detect_volumes();
-            // Keep polling even when idle so a plugged-in stick appears without
-            // the user having to wiggle the mouse to force a frame.
-            ctx.request_repaint_after(std::time::Duration::from_secs(2));
         }
+        // Keep a frame scheduled ~2s out even when the app is idle, so a
+        // plugged-in stick appears without the user having to wiggle the mouse
+        // to force a frame. Re-armed unconditionally every frame (egui
+        // coalesces these): if it were only re-armed when a poll runs, the
+        // scheduled frame could land a hair before the 2s threshold, skip the
+        // poll, and the wake-up chain would die until the next input event.
+        ctx.request_repaint_after(std::time::Duration::from_secs(2));
         // Surface a finished eject's outcome, and re-detect right away so a
         // successful eject drops the volume from the sidebar this frame.
         if let Some(rx) = &self.usb_eject_rx {
