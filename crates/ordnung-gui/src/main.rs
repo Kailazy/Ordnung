@@ -34,7 +34,7 @@ use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
     Analysis, Format, Id, Playlist, Tags, Track, TranscodeVerdict, VinylRecord,
 };
-use ordnung_core::{best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind};
+use ordnung_core::{best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind, ScannedTrack};
 use player::*;
 use rayon::prelude::*;
 use sidebar::*;
@@ -208,6 +208,10 @@ enum LibraryView {
     /// The user's Discogs vinyl collection — rendered as a grid of cover art,
     /// not the flat track table. Backed by the local `vinyl_collection` cache.
     Vinyl,
+    /// A mounted removable volume (USB stick / external drive), keyed by its
+    /// mount path. Rendered as its own file browser — the tracks live on the
+    /// device, not in the catalog. Backed by `usb_tracks`.
+    Usb(PathBuf),
 }
 
 /// A sortable table column. The cover column isn't sortable, so it has no
@@ -952,6 +956,30 @@ struct App {
     /// row ids to drop from the catalog (their files are already gone — removal never
     /// touches a real file). `None` when no confirmation is pending.
     missing_pending_remove: Option<Vec<Id>>,
+    /// Mounted removable volumes for the sidebar's DEVICES section. Re-detected
+    /// every couple of seconds (a cheap `/Volumes` readdir) so plugging or
+    /// pulling a stick updates the sidebar live. See [`App::poll_usb`].
+    usb_volumes: Vec<ordnung_core::usb::UsbVolume>,
+    /// `ctx.input().time` of the last volume re-detection, throttling the poll.
+    usb_last_poll: f64,
+    /// Tracks found on the viewed USB volume — scanned off-thread straight from
+    /// the device (these are NOT catalog tracks and have no ids). Cleared when
+    /// the view leaves the volume.
+    usb_tracks: Vec<ScannedTrack>,
+    /// Which volume `usb_tracks` was scanned from, so switching volumes (or an
+    /// explicit Rescan setting this to `None`) triggers a fresh scan.
+    usb_loaded_for: Option<PathBuf>,
+    /// A background USB scan is in flight; drives the view's spinner and gates
+    /// re-spawning. The result arrives over `usb_rx` tagged with its volume.
+    usb_loading: bool,
+    /// Receives `(volume, tracks)` from the background USB scan worker.
+    usb_rx: Option<std::sync::mpsc::Receiver<(PathBuf, Vec<ScannedTrack>)>>,
+    /// Index into `usb_tracks` of the row selected for direct tag editing.
+    usb_selected: Option<usize>,
+    /// Live edit buffers for the selected USB track's core tags, and the
+    /// snapshot as loaded — differing means unsaved edits (enables Save).
+    usb_edit: UsbEdit,
+    usb_edit_saved: UsbEdit,
     /// Which track set the table shows — the whole library or one playlist.
     view: LibraryView,
     /// Inline rename in progress for a sidebar entry, or `None` when no row is
@@ -1009,6 +1037,43 @@ struct NowPlaying {
     /// Set once the off-thread hi-res analysis has been kicked off, so we don't
     /// respawn it every frame while it runs (or the PCM is still decoding).
     hires_requested: bool,
+}
+
+/// Edit buffers for a USB track's core tags — written straight to the file on
+/// the device (never into the catalog). Empty string means "no value".
+#[derive(Clone, Default, PartialEq)]
+struct UsbEdit {
+    title: String,
+    artist: String,
+    album: String,
+    genre: String,
+    comment: String,
+}
+
+impl UsbEdit {
+    fn from_tags(t: &Tags) -> Self {
+        let s = |v: &Option<String>| v.clone().unwrap_or_default();
+        Self {
+            title: s(&t.title),
+            artist: s(&t.artist),
+            album: s(&t.album),
+            genre: s(&t.genre),
+            comment: s(&t.comment),
+        }
+    }
+
+    /// Fold the buffers back into `tags` (trimmed; blank clears the field).
+    fn apply_to(&self, tags: &mut Tags) {
+        let v = |s: &str| {
+            let s = s.trim();
+            (!s.is_empty()).then(|| s.to_string())
+        };
+        tags.title = v(&self.title);
+        tags.artist = v(&self.artist);
+        tags.album = v(&self.album);
+        tags.genre = v(&self.genre);
+        tags.comment = v(&self.comment);
+    }
 }
 
 /// State for the inline text box that names a sidebar playlist.

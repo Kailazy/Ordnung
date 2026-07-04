@@ -15,6 +15,7 @@ pub mod model;
 pub mod scan;
 pub mod tag;
 pub mod update;
+pub mod usb;
 
 pub use catalog::{
     best_copy_index, AlbumSibling, Catalog, DuplicateGroup, DuplicateKind, MissingArtwork,

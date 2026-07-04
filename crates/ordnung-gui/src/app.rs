@@ -130,6 +130,15 @@ impl App {
             dup_confirm_pos: None,
             missing_list: Vec::new(),
             missing_pending_remove: None,
+            usb_volumes: ordnung_core::usb::detect_volumes(),
+            usb_last_poll: 0.0,
+            usb_tracks: Vec::new(),
+            usb_loaded_for: None,
+            usb_loading: false,
+            usb_rx: None,
+            usb_selected: None,
+            usb_edit: UsbEdit::default(),
+            usb_edit_saved: UsbEdit::default(),
             view: LibraryView::Library,
             renaming: None,
             sort: None,
@@ -392,6 +401,70 @@ impl App {
                 .and_then(|c| c.find_duplicates())
                 .unwrap_or_default();
             let _ = tx.send(groups);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Keep the sidebar's device list live and the USB view's track list
+    /// loaded. Volumes are re-detected every couple of seconds (a cheap
+    /// `/Volumes` readdir); the per-volume track scan walks the whole device
+    /// reading tags, so it runs on a worker thread like the duplicate scan.
+    /// Pulling the viewed stick falls the view back to the Library.
+    fn poll_usb(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if now - self.usb_last_poll > 2.0 || self.usb_last_poll == 0.0 {
+            self.usb_last_poll = now;
+            self.usb_volumes = ordnung_core::usb::detect_volumes();
+            // Keep polling even when idle so a plugged-in stick appears without
+            // the user having to wiggle the mouse to force a frame.
+            ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        }
+        // Adopt a finished scan; results are tagged with their volume so a
+        // stale scan (user already switched sticks) can't fill the wrong view.
+        if let Some(rx) = &self.usb_rx {
+            if let Ok((vol, tracks)) = rx.try_recv() {
+                self.usb_loading = false;
+                self.usb_rx = None;
+                if self.usb_loaded_for.as_deref() == Some(vol.as_path()) {
+                    self.usb_tracks = tracks;
+                }
+            }
+        }
+        let LibraryView::Usb(vol) = &self.view else {
+            // Free the device's track list once the view moves elsewhere.
+            if !self.usb_tracks.is_empty() {
+                self.usb_tracks = Vec::new();
+            }
+            self.usb_loaded_for = None;
+            self.usb_selected = None;
+            return;
+        };
+        let vol = vol.clone();
+        if !self.usb_volumes.iter().any(|v| v.path == vol) {
+            self.view = LibraryView::Library;
+            self.reload();
+            return;
+        }
+        if self.usb_loading || self.usb_loaded_for.as_deref() == Some(vol.as_path()) {
+            return;
+        }
+        self.usb_loaded_for = Some(vol.clone());
+        self.usb_tracks = Vec::new();
+        self.usb_selected = None;
+        self.usb_loading = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.usb_rx = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let files = scan::discover(&vol);
+            // Tag reads are per-file and independent; rayon keeps a big stick
+            // from taking minutes. Unreadable files are skipped, not fatal.
+            let mut tracks: Vec<ScannedTrack> = files
+                .par_iter()
+                .filter_map(|p| scan::scan_file(p).ok())
+                .collect();
+            tracks.sort_by(|a, b| a.source_path.cmp(&b.source_path));
+            let _ = tx.send((vol, tracks));
             ctx.request_repaint();
         });
     }
@@ -718,7 +791,8 @@ impl eframe::App for App {
                         | LibraryView::RecentlyAdded
                         | LibraryView::Duplicates
                         | LibraryView::Missing
-                        | LibraryView::Vinyl => None,
+                        | LibraryView::Vinyl
+                        | LibraryView::Usb(_) => None,
                     };
                     if let Some(pid) = playlist_view {
                         if !self.selection.is_empty() {
@@ -1108,6 +1182,43 @@ impl eframe::App for App {
                         ui.add_space(8.0);
                         ui.separator();
                         ui.add_space(6.0);
+                        // ── Devices ──
+                        // Mounted removable volumes, rekordbox-style: plug a
+                        // stick in and it appears here, pull it and it's gone
+                        // (kept live by `poll_usb`). Hidden when nothing is
+                        // mounted so the sidebar doesn't carry an empty header.
+                        if !self.usb_volumes.is_empty() {
+                            section_caption(ui, "DEVICES");
+                            ui.add_space(4.0);
+                            for v in self.usb_volumes.clone() {
+                                let label = if v.is_rekordbox_export {
+                                    format!("⏏  {}  (rekordbox)", v.name)
+                                } else {
+                                    format!("⏏  {}", v.name)
+                                };
+                                if nav_button(
+                                    ui,
+                                    &label,
+                                    self.view == LibraryView::Usb(v.path.clone()),
+                                    34.0,
+                                    14.0,
+                                )
+                                .on_hover_note(if v.is_rekordbox_export {
+                                    "Removable volume with a rekordbox export. \
+                                     Browse and edit its files directly."
+                                } else {
+                                    "Removable volume. Browse and edit its files directly."
+                                })
+                                .clicked()
+                                {
+                                    self.view = LibraryView::Usb(v.path.clone());
+                                }
+                                ui.add_space(3.0);
+                            }
+                            ui.add_space(3.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                        }
                         // ── Sources ──
                         let vinyl_label = if self.vinyl_count > 0 {
                             format!("💿  My Vinyl Collection ({})", self.vinyl_count)
@@ -1241,6 +1352,8 @@ impl eframe::App for App {
         // settled, so clicking the Duplicates tab starts the scan this same frame
         // (the view shows a spinner instead of a stale "no duplicates" flash).
         self.poll_duplicates(ctx);
+        // Same deal for the USB device list and the viewed volume's track scan.
+        self.poll_usb(ctx);
 
         // Source files for a ⌥-drag started this frame inside the table (see
         // `draw_table`); the native drag-out is begun after the panel closes.
@@ -1259,6 +1372,8 @@ impl eframe::App for App {
                     self.draw_missing(ui);
                 } else if self.view == LibraryView::Vinyl {
                     self.draw_vinyl(ui, ctx);
+                } else if let LibraryView::Usb(vol) = self.view.clone() {
+                    self.draw_usb(ui, &vol);
                 } else if self.rows.is_empty()
                     && self.load_error.is_none()
                     && (!self.filter.trim().is_empty()

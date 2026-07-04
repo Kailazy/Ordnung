@@ -728,7 +728,8 @@ impl App {
             | LibraryView::RecentlyAdded
             | LibraryView::Duplicates
             | LibraryView::Missing
-            | LibraryView::Vinyl => None,
+            | LibraryView::Vinyl
+            | LibraryView::Usb(_) => None,
         };
         // Reordering ("Move to top/bottom") rewrites the whole playlist order, so
         // only offer it on an unfiltered view where the visible rows are the full
@@ -799,7 +800,8 @@ impl App {
             | LibraryView::RecentlyAdded
             | LibraryView::Duplicates
             | LibraryView::Missing
-            | LibraryView::Vinyl => None,
+            | LibraryView::Vinyl
+            | LibraryView::Usb(_) => None,
         };
         // The leading order gutter is RESERVED in EVERY view — the library and every
         // playlist — at one fixed width, so the data columns line up at the same x
@@ -2030,9 +2032,13 @@ pub(crate) fn load_rows(
                 })
         }
         LibraryView::Playlist(id) => catalog.list_playlist_tracks(*id, q),
-        // The Duplicates, Missing and Vinyl views render from their own caches
-        // (`dup_groups` / `missing_list` / `vinyl`), not the flat track table.
-        LibraryView::Duplicates | LibraryView::Missing | LibraryView::Vinyl => Ok(Vec::new()),
+        // The Duplicates, Missing, Vinyl and USB views render from their own
+        // caches (`dup_groups` / `missing_list` / `vinyl` / `usb_tracks`), not
+        // the flat track table.
+        LibraryView::Duplicates
+        | LibraryView::Missing
+        | LibraryView::Vinyl
+        | LibraryView::Usb(_) => Ok(Vec::new()),
     }
     .map_err(|e| e.to_string())?;
     let ext_art: HashSet<Id> = catalog
