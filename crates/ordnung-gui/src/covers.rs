@@ -18,11 +18,11 @@ impl App {
     pub(crate) fn poll_thumbs(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.thumb_rx.try_recv() {
             let tex = msg.image.map(|img| {
-                ctx.load_texture(
+                self.tex_graveyard.wrap(ctx.load_texture(
                     format!("cover-{}", msg.id),
                     img,
                     egui::TextureOptions::LINEAR,
-                )
+                ))
             });
             self.cover_cache.insert(msg.id, ThumbState::Ready(tex));
         }
@@ -43,11 +43,11 @@ impl App {
     pub(crate) fn poll_vinyl_covers(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.vinyl_cover_rx.try_recv() {
             let tex = msg.image.map(|img| {
-                ctx.load_texture(
+                self.tex_graveyard.wrap(ctx.load_texture(
                     format!("vinyl-{}", msg.id),
                     img,
                     egui::TextureOptions::LINEAR,
-                )
+                ))
             });
             self.vinyl_covers.insert(msg.id, ThumbState::Ready(tex));
         }
@@ -65,7 +65,7 @@ impl App {
         ctx: &egui::Context,
         id: Id,
         source_path: &str,
-    ) -> Option<egui::TextureHandle> {
+    ) -> Option<Tex> {
         if let Some(entry) = self.cover_full_cache.get(&id) {
             return entry.clone();
         }
@@ -128,7 +128,11 @@ impl App {
             let rgba = thumb_img.to_rgba8();
             let size = [rgba.width() as usize, rgba.height() as usize];
             let color = egui::ColorImage::from_rgba_unmultiplied(size, &rgba.into_raw());
-            Some(ctx.load_texture("cover-drop-preview", color, egui::TextureOptions::LINEAR))
+            Some(self.tex_graveyard.wrap(ctx.load_texture(
+                "cover-drop-preview",
+                color,
+                egui::TextureOptions::LINEAR,
+            )))
         };
 
         // Pull the target track's label + album, then its album-mates so the modal
@@ -219,16 +223,10 @@ impl App {
         }
 
         // Evict cached textures for every touched track so each re-decodes the
-        // new cover on the next render. Parked in the graveyard, not dropped —
-        // this runs mid-frame and a same-frame texture free panics wgpu (see
-        // `tex_graveyard`).
+        // new cover on the next render (`Tex` defers the frees to next frame).
         for id in &touched {
-            if let Some(ThumbState::Ready(Some(tex))) = self.cover_cache.remove(id) {
-                self.tex_graveyard.push(tex);
-            }
-            if let Some(Some(tex)) = self.cover_full_cache.remove(id) {
-                self.tex_graveyard.push(tex);
-            }
+            self.cover_cache.remove(id);
+            self.cover_full_cache.remove(id);
             self.cover_inflight.remove(id);
         }
         self.status = if mates.is_empty() {
@@ -250,11 +248,11 @@ impl App {
         while let Ok(msg) = self.cover_rx.try_recv() {
             self.cover_inflight.remove(&msg.id);
             let tex = msg.image.map(|img| {
-                ctx.load_texture(
+                self.tex_graveyard.wrap(ctx.load_texture(
                     format!("cover-full-{}", msg.id),
                     img,
                     egui::TextureOptions::LINEAR,
-                )
+                ))
             });
             self.cover_full_cache.insert(msg.id, tex);
         }

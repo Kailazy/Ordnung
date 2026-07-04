@@ -18,6 +18,7 @@ mod modals;
 mod player;
 mod sidebar;
 mod table;
+mod tex;
 mod ui;
 mod util;
 mod views;
@@ -40,6 +41,7 @@ use rayon::prelude::*;
 use sidebar::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use tex::{Tex, TexGraveyard};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -174,8 +176,9 @@ impl TrackRow {
 }
 
 /// Cached thumbnail status — `Some(texture)` = ready, `None` = no cover or
-/// decode failed (cached so we don't retry every frame).
-type CoverEntry = Option<egui::TextureHandle>;
+/// decode failed (cached so we don't retry every frame). Stored as [`Tex`]
+/// so eviction from anywhere in the frame is safe (see `tex.rs`).
+type CoverEntry = Option<Tex>;
 
 /// Load state of a table-row thumbnail. A *missing* `cover_cache` entry means
 /// "not requested yet"; `Loading` means a background decode is in flight (so we
@@ -527,7 +530,7 @@ struct CoverDrop {
     /// Re-encoded, downscaled PNG used as the table thumbnail.
     thumb_png: Vec<u8>,
     /// Decoded preview texture for the modal (built lazily on first draw).
-    preview: Option<egui::TextureHandle>,
+    preview: Option<Tex>,
     /// Other tracks on the same album, each with a checkbox to also receive the
     /// cover. Cover-less mates are pre-checked; mates that already have art start
     /// unchecked so an existing cover isn't clobbered without an explicit tick.
@@ -691,15 +694,13 @@ struct App {
     /// Track ids whose full cover is currently decoding on a background thread.
     /// Prevents spawning duplicate loaders and drives the "loading…" placeholder.
     cover_inflight: HashSet<Id>,
-    /// Cover textures evicted mid-frame (e.g. a filter keystroke narrowing the
-    /// visible rows during `reload`), parked here and dropped at the top of the
-    /// NEXT frame. Dropping a `TextureHandle` mid-frame frees the GPU texture in
-    /// the same frame that may have painted or just uploaded it — egui-wgpu
-    /// destroys freed textures *before* submitting the frame's commands, so the
-    /// submit hits a destroyed texture and panics (fast typing into the filter
-    /// crashed exactly this way). Holding evicted handles one extra frame keeps
-    /// the texture alive until every command referencing it has been submitted.
-    tex_graveyard: Vec<egui::TextureHandle>,
+    /// Shared parking lot behind every cached [`Tex`]: dropping a `Tex`
+    /// anywhere parks its GPU texture here instead of freeing it mid-frame
+    /// (which would panic wgpu — see `tex.rs` for the full story). Emptied at
+    /// the top of each `update()`, once the frame that painted the parked
+    /// textures has been submitted. Wrap every cached `ctx.load_texture`
+    /// result with `self.tex_graveyard.wrap(...)`.
+    tex_graveyard: TexGraveyard,
     /// Persistent channel for finished cover decodes. Loader threads clone the
     /// sender; the UI drains the receiver each frame and builds textures.
     cover_tx: Sender<CoverLoaded>,
@@ -779,7 +780,7 @@ struct App {
     artwork_selected: usize,
     /// Decoded preview thumbnails for the front track's candidates, keyed by
     /// track id so we only re-decode when the front track changes.
-    artwork_previews: Option<(Id, Vec<Option<egui::TextureHandle>>)>,
+    artwork_previews: Option<(Id, Vec<Option<Tex>>)>,
     /// True while the chosen cover's full-resolution image is downloading and
     /// being written on a background thread. Drives the Save button's spinner
     /// and blocks the picker's controls so the front track can't change until

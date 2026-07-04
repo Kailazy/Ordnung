@@ -1509,20 +1509,17 @@ impl App {
                         .candidates
                         .iter()
                         .enumerate()
-                        .map(|(i, c)| decode_thumb(ctx, choices.id, i, &c.thumb_png))
+                        .map(|(i, c)| {
+                            decode_thumb(ctx, choices.id, i, &c.thumb_png)
+                                .map(|h| self.tex_graveyard.wrap(h))
+                        })
                         .collect();
-                    let old = std::mem::replace(
-                        &mut self.artwork_previews,
-                        Some((choices.id, texs)),
-                    );
-                    if let Some((_, old_texs)) = old {
-                        self.tex_graveyard.extend(old_texs.into_iter().flatten());
-                    }
+                    self.artwork_previews = Some((choices.id, texs));
                     self.artwork_selected = 0;
                 }
             }
             None => {
-                self.park_artwork_previews();
+                self.artwork_previews = None;
                 self.artwork_selected = 0;
                 return;
             }
@@ -1997,7 +1994,7 @@ impl App {
 
         if skip_all {
             self.artwork_queue.clear();
-            self.park_artwork_previews();
+            self.artwork_previews = None;
             self.artwork_selected = 0;
         } else if save {
             // The commit runs on a background thread; the queue advances in
@@ -2032,26 +2029,16 @@ impl App {
                 }
             }
             self.artwork_queue.pop_front();
-            self.park_artwork_previews();
+            self.artwork_previews = None;
             self.artwork_selected = 0;
             self.reload();
         } else if skip {
             self.artwork_queue.pop_front();
-            self.park_artwork_previews();
+            self.artwork_previews = None;
             self.artwork_selected = 0;
         }
     }
 
-    /// Retire the candidate-thumbnail textures without freeing them this frame.
-    /// The picker paints them earlier in the same `update()` pass, and freeing a
-    /// texture the current frame already painted panics wgpu at `Queue::submit`
-    /// ("texture has been destroyed") — so park the handles in `tex_graveyard`,
-    /// which drops them at the top of the next frame (see `tex_graveyard`).
-    fn park_artwork_previews(&mut self) {
-        if let Some((_, texs)) = self.artwork_previews.take() {
-            self.tex_graveyard.extend(texs.into_iter().flatten());
-        }
-    }
 
     /// Ensure a field preview for `(track_id, release_id)` is loading or loaded.
     /// Spawns a background lookup (fetch the release detail, diff it against the

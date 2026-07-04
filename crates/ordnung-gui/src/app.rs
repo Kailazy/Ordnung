@@ -97,7 +97,7 @@ impl App {
             column_menu: None,
             col_filters: HashMap::new(),
             col_filter_open: None,
-            tex_graveyard: Vec::new(),
+            tex_graveyard: TexGraveyard::default(),
             settings_open: false,
             settings_tab: SettingsTab::default(),
             token_input: String::new(),
@@ -221,29 +221,11 @@ impl App {
                 let rows = self.apply_col_filters(rows);
                 // Evict cover textures for tracks that are no longer in the
                 // visible set; keep the ones still present (the texture id is
-                // stable since track ids don't change). Evicted handles go to
-                // the graveyard (dropped next frame), not straight to drop —
-                // `reload` runs mid-frame and a same-frame free panics wgpu
-                // (see `tex_graveyard`).
+                // stable since track ids don't change). Safe mid-frame: `Tex`
+                // defers the actual GPU frees to the next frame (see `tex.rs`).
                 let live: std::collections::BTreeSet<Id> = rows.iter().map(|r| r.id).collect();
-                let dead: Vec<Id> =
-                    self.cover_cache.keys().filter(|id| !live.contains(id)).copied().collect();
-                for id in dead {
-                    if let Some(ThumbState::Ready(Some(tex))) = self.cover_cache.remove(&id) {
-                        self.tex_graveyard.push(tex);
-                    }
-                }
-                let dead: Vec<Id> = self
-                    .cover_full_cache
-                    .keys()
-                    .filter(|id| !live.contains(id))
-                    .copied()
-                    .collect();
-                for id in dead {
-                    if let Some(Some(tex)) = self.cover_full_cache.remove(&id) {
-                        self.tex_graveyard.push(tex);
-                    }
-                }
+                self.cover_cache.retain(|id, _| live.contains(id));
+                self.cover_full_cache.retain(|id, _| live.contains(id));
                 self.cover_inflight.retain(|id| live.contains(id));
                 // Drop any selected/anchor ids that filtered out of the view so a
                 // drag-out never references a row the user can't see.
@@ -265,18 +247,8 @@ impl App {
             }
             Err(e) => {
                 self.rows.clear();
-                // Park the cleared textures until next frame — same mid-frame
-                // free hazard as the eviction above (see `tex_graveyard`).
-                self.tex_graveyard.extend(
-                    self.cover_cache
-                        .drain()
-                        .filter_map(|(_, s)| match s {
-                            ThumbState::Ready(tex) => tex,
-                            ThumbState::Loading => None,
-                        }),
-                );
-                self.tex_graveyard
-                    .extend(self.cover_full_cache.drain().filter_map(|(_, tex)| tex));
+                self.cover_cache.clear();
+                self.cover_full_cache.clear();
                 self.cover_inflight.clear();
                 self.selection.clear();
                 self.select_anchor = None;
@@ -350,23 +322,11 @@ impl App {
             self.vinyl = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_vinyl())
                 .unwrap_or_default();
-            // Evict cover textures for records no longer present. Like the
-            // track-cover eviction above, the handles go to the graveyard —
-            // `reload` can run mid-frame (e.g. from the vinyl grid's badge
-            // click) and a same-frame free panics wgpu (see `tex_graveyard`).
+            // Evict cover textures for records no longer present (`Tex` makes
+            // the mid-frame eviction safe — see `tex.rs`).
             let live: std::collections::BTreeSet<u64> =
                 self.vinyl.iter().map(|v| v.instance_id).collect();
-            let dead: Vec<u64> = self
-                .vinyl_covers
-                .keys()
-                .filter(|id| !live.contains(id))
-                .copied()
-                .collect();
-            for id in dead {
-                if let Some(ThumbState::Ready(Some(tex))) = self.vinyl_covers.remove(&id) {
-                    self.tex_graveyard.push(tex);
-                }
-            }
+            self.vinyl_covers.retain(|id, _| live.contains(id));
             // Cross-reference the catalog: which records do we already own a
             // digital copy of? Build release_id → [track_id] once for the grid.
             // Exact release-id links first, metadata matching as a fallback.
@@ -382,18 +342,10 @@ impl App {
                 .unwrap_or_default();
         } else if !self.vinyl.is_empty() {
             self.vinyl = Vec::new();
-            // Park the cover textures until next frame, never drop in place:
-            // this branch runs mid-frame when the grid's "in catalog" badge
-            // jumps to the Library (the grid painted these covers this very
-            // frame), and a same-frame free panics wgpu (see `tex_graveyard`).
-            self.tex_graveyard.extend(
-                self.vinyl_covers
-                    .drain()
-                    .filter_map(|(_, s)| match s {
-                        ThumbState::Ready(tex) => tex,
-                        ThumbState::Loading => None,
-                    }),
-            );
+            // Runs mid-frame when the grid's "in catalog" badge jumps to the
+            // Library after painting these covers; safe because `Tex` defers
+            // the frees to the next frame (see `tex.rs`).
+            self.vinyl_covers.clear();
             self.vinyl_links = HashMap::new();
         }
     }
