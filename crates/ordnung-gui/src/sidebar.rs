@@ -279,6 +279,20 @@ pub(crate) fn draw_playlist_leaf(
     let selected = *view == LibraryView::Playlist(p.id);
     let resp = nav_button(ui, &format!("♪  {}", p.name), selected, 30.0, 13.5)
         .on_hover_note("Click to view. Drag tracks here to add them.");
+    // Small right-aligned track count inside the tile. Muted so the name stays
+    // the focus; brighter on the accent fill so it's still readable when selected.
+    let count_color = if selected {
+        egui::Color32::from_white_alpha(170)
+    } else {
+        egui::Color32::from_gray(130)
+    };
+    ui.painter().text(
+        egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        p.track_ids.len().to_string(),
+        egui::FontId::proportional(11.0),
+        count_color,
+    );
     if resp.dnd_hover_payload::<DraggedTracks>().is_some() {
         // Inset the highlight so the stroke sits inside the tile's rounded box
         // (drawn on the edge, not floating outside it) and the corners stay round.
