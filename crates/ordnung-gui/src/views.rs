@@ -1295,9 +1295,38 @@ impl App {
         }
 
         if eject {
-            // Hand the unmount to diskutil; the sidebar poll notices the volume
-            // disappear and drops the view back to the Library.
-            let _ = std::process::Command::new("diskutil").arg("eject").arg(vol).spawn();
+            // Hand the unmount to diskutil on a worker (it can take seconds)
+            // and report its actual outcome — an eject refused because a file
+            // is open would otherwise look like a dead button. On success the
+            // sidebar poll notices the volume disappear and the view drops
+            // back to the Library.
+            let vol = vol.to_path_buf();
+            let n = name.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.usb_eject_rx = Some(rx);
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let msg = match std::process::Command::new("diskutil")
+                    .arg("eject")
+                    .arg(&vol)
+                    .output()
+                {
+                    Ok(o) if o.status.success() => format!("Ejected {n}. Safe to unplug."),
+                    Ok(o) => {
+                        // diskutil writes some refusals to stdout, not stderr.
+                        let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                        let err = if err.is_empty() {
+                            String::from_utf8_lossy(&o.stdout).trim().to_string()
+                        } else {
+                            err
+                        };
+                        format!("Couldn't eject {n}: {err}")
+                    }
+                    Err(e) => format!("Couldn't eject {n}: {e}"),
+                };
+                let _ = tx.send(msg);
+                ctx.request_repaint();
+            });
             self.status = format!("Ejecting {name}…");
         }
         if rescan {

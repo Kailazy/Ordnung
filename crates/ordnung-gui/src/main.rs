@@ -974,6 +974,10 @@ struct App {
     usb_loading: bool,
     /// Receives `(volume, tracks)` from the background USB scan worker.
     usb_rx: Option<std::sync::mpsc::Receiver<(PathBuf, Vec<ScannedTrack>)>>,
+    /// Receives the result message of a background `diskutil eject`, surfaced
+    /// in the status bar (ejecting can fail, e.g. Finder holding a file open,
+    /// and a silent failure looks like a broken button). `None` when idle.
+    usb_eject_rx: Option<std::sync::mpsc::Receiver<String>>,
     /// Index into `usb_tracks` of the row selected for direct tag editing.
     usb_selected: Option<usize>,
     /// Live edit buffers for the selected USB track's core tags, and the

@@ -136,6 +136,7 @@ impl App {
             usb_loaded_for: None,
             usb_loading: false,
             usb_rx: None,
+            usb_eject_rx: None,
             usb_selected: None,
             usb_edit: UsbEdit::default(),
             usb_edit_saved: UsbEdit::default(),
@@ -418,6 +419,15 @@ impl App {
             // Keep polling even when idle so a plugged-in stick appears without
             // the user having to wiggle the mouse to force a frame.
             ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        }
+        // Surface a finished eject's outcome, and re-detect right away so a
+        // successful eject drops the volume from the sidebar this frame.
+        if let Some(rx) = &self.usb_eject_rx {
+            if let Ok(msg) = rx.try_recv() {
+                self.status = msg;
+                self.usb_eject_rx = None;
+                self.usb_volumes = ordnung_core::usb::detect_volumes();
+            }
         }
         // Adopt a finished scan; results are tagged with their volume so a
         // stale scan (user already switched sticks) can't fill the wrong view.
