@@ -91,6 +91,107 @@ pub(crate) fn open_url(url: &str) {
     let _ = std::process::Command::new("open").arg(url).spawn();
 }
 
+/// Names of the apps that currently have files open on `vol`, via `lsof`
+/// (field output, so command names aren't truncated). Deduplicated in first
+/// seen order; our own process reads as "Ordnung (this app)" so the eject
+/// message can point at, say, a track still loaded in the player. Empty on
+/// any failure or when nothing holds the volume.
+pub(crate) fn volume_users(vol: &Path) -> Vec<String> {
+    let Ok(out) = std::process::Command::new("lsof")
+        .args(["-Fc", "+f", "--"])
+        .arg(vol)
+        .output()
+    else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Some(name) = line.strip_prefix('c') else {
+            continue;
+        };
+        let name = if name == "Ordnung" {
+            "Ordnung (this app)".to_string()
+        } else {
+            name.to_string()
+        };
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Join names for prose: "Music", "Music and Finder", "Music, Finder and X".
+fn join_and(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [head @ .., last] => format!("{} and {last}", head.join(", ")),
+    }
+}
+
+/// Turn a failed `diskutil eject` into a message a non-technical user can act
+/// on. `raw` is diskutil's own output (jargon like "dissented by PID 501");
+/// `users` is who `lsof` says still holds files open on the volume. The common
+/// case by far is "some app is still using the drive", so that's said plainly,
+/// naming the apps when known.
+pub(crate) fn eject_failure_message(name: &str, raw: &str, users: &[String]) -> String {
+    let raw_lc = raw.to_lowercase();
+    let busy = !users.is_empty()
+        || raw_lc.contains("in use")
+        || raw_lc.contains("busy")
+        || raw_lc.contains("dissent");
+    if busy {
+        if users.is_empty() {
+            format!(
+                "Can't eject {name} yet: another app is still using it. Close any \
+                 windows or apps showing files from the drive, then click Eject again."
+            )
+        } else {
+            let apps = join_and(users);
+            let verb = if users.len() == 1 { "is" } else { "are" };
+            format!(
+                "Can't eject {name} yet: {apps} {verb} still using it. \
+                 Quit or close {} and click Eject again.",
+                if users.len() == 1 { "that app" } else { "those apps" }
+            )
+        }
+    } else {
+        format!(
+            "Couldn't eject {name}. Wait a few seconds and try again; keep it \
+             plugged in until you see \"Safe to unplug\"."
+        )
+    }
+}
+
+#[cfg(test)]
+mod eject_msg_tests {
+    use super::*;
+
+    #[test]
+    fn busy_messages_name_the_apps() {
+        let m = eject_failure_message("EYEBAGS", "", &["Music".into()]);
+        assert!(m.contains("Music is still using it"), "{m}");
+        let m = eject_failure_message("EYEBAGS", "", &["Music".into(), "Finder".into()]);
+        assert!(m.contains("Music and Finder are still using it"), "{m}");
+        // diskutil says busy but lsof found nothing: still explained plainly.
+        let m = eject_failure_message(
+            "EYEBAGS",
+            "Volume EYEBAGS on disk4s1 failed to unmount: dissented by PID 501",
+            &[],
+        );
+        assert!(m.contains("another app is still using it"), "{m}");
+        assert!(!m.contains("dissented"), "no jargon: {m}");
+    }
+
+    #[test]
+    fn other_failures_stay_calm_and_jargon_free() {
+        let m = eject_failure_message("EYEBAGS", "Failed to find disk /Volumes/EYEBAGS", &[]);
+        assert!(m.contains("Couldn't eject EYEBAGS"), "{m}");
+        assert!(!m.to_lowercase().contains("disk4"), "{m}");
+    }
+}
+
 /// Build the free-text query for a Discogs release search from a track's tags.
 /// Joins artist with album (preferred) or title so the search lands on the right
 /// release even when we have no exact release id on file.

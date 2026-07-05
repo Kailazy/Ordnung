@@ -1330,7 +1330,10 @@ impl App {
                         } else {
                             err
                         };
-                        format!("Couldn't eject {n}: {err}")
+                        // Translate diskutil's jargon ("dissented by PID 501")
+                        // into something actionable, asking lsof which apps
+                        // actually hold files open on the drive.
+                        eject_failure_message(&n, &err, &volume_users(&vol))
                     }
                     Err(e) => format!("Couldn't eject {n}: {e}"),
                 };
