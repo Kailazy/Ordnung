@@ -533,7 +533,10 @@ impl App {
                     waveform: Vec::new(),
                     waveform_bands: Vec::new(),
                     source_path: PathBuf::from(&t.source_path),
-                    has_cover: false,
+                    // The scan already extracted the file's embedded art into
+                    // `cover_thumb`; the cover cell decodes it straight from
+                    // there (see `load_usb_thumb`) instead of the catalog.
+                    has_cover: t.cover_thumb.is_some(),
                     has_external_cover: false,
                     dur_ms: Some(t.properties.duration_ms),
                     bpm_val,

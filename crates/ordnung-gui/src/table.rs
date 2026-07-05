@@ -1857,8 +1857,14 @@ impl App {
         // Hand the visible rows' missing covers to the worker thread. No per-frame
         // cap is needed — only on-screen rows enqueue, and the disk read + decode
         // run off the UI thread, so even flinging the scrollbar stays smooth.
+        // USB rows bypass the worker (it reads the catalog, which they aren't
+        // in): their art was already pulled off the device by the scan.
         for id in needs_cover_load {
-            self.request_thumb(id);
+            if is_usb && usb_track_index(id).is_some() {
+                self.load_usb_thumb(&ctx_clone, id);
+            } else {
+                self.request_thumb(id);
+            }
         }
 
         // While an in-app row-drag is live, float a "N track(s)" chip at the

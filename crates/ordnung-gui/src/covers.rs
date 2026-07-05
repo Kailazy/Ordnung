@@ -13,6 +13,22 @@ impl App {
         let _ = self.thumb_req_tx.send(id);
     }
 
+    /// Cache a USB row's cover straight from the scanned track's in-memory
+    /// thumbnail PNG — device tracks aren't in the catalog, so the worker (a
+    /// catalog reader) can't serve them. The decode is a small downscaled PNG
+    /// and only runs once per visible row, so doing it on the UI thread is fine.
+    pub(crate) fn load_usb_thumb(&mut self, ctx: &egui::Context, id: Id) {
+        if self.cover_cache.contains_key(&id) {
+            return;
+        }
+        let tex = usb_track_index(id)
+            .and_then(|i| self.usb_tracks.get(i))
+            .and_then(|t| t.cover_thumb.as_deref())
+            .and_then(|png| decode_thumb(ctx, id, 0, png))
+            .map(|h| self.tex_graveyard.wrap(h));
+        self.cover_cache.insert(id, ThumbState::Ready(tex));
+    }
+
     /// Drain finished thumbnail decodes from the worker, uploading each to a GPU
     /// texture (a UI-thread-only op) and caching it. Called once per frame.
     pub(crate) fn poll_thumbs(&mut self, ctx: &egui::Context) {
