@@ -1,5 +1,25 @@
 # Ordnung vs rekordbox — key/BPM check (79-track sample)
 
+## Update — analyzer v16 (2026-07-10): BPM/beatgrid re-enabled + regression harness
+
+BPM/tempo detection (disabled at v8) is back on. `analyze_file` now runs
+`tempo::detect` and emits a constant-tempo (static) beatgrid — beats spaced
+`60000/bpm` from the first detected beat, spanning the full track. Downbeat
+numbering is provisional (first beat = 1) until dedicated downbeat detection lands.
+
+New accuracy harness `tests/bpm_eval.rs` (mirrors `key_eval`) grades production
+`tempo::detect` against the rekordbox BPM in the `BPM↣rb` column below:
+`cargo test -p ordnung-core --test bpm_eval --release -- --ignored --nocapture`.
+
+Baseline on this same 79-track set: **72/79 within 2 BPM (91%)**, **73/79 modulo
+octave (92%)** — above the v4 table's 64/66 because that predates the current
+harmonic-comb + fractional-refine tempo path. Floors (regression guard): 68 within
+2 BPM, 70 modulo octave. The 6 misses are hard genre cases or rekordbox's own
+octave picks (Toasty→141, Requiem→75, Elevation, Ifeksa, Birmingham, Point of Entry).
+
+The table below is the original **v4** baseline (detected↣rekordbox); the detected
+column is stale vs the current path, but the `↣rb` ground truth still drives the harness.
+
 ## Update — analyzer v9 (2026-06-12): key 21%→34% exact, 43%→50% compatible
 
 Three changes, calibrated on this same 79-track set via the new accuracy harness

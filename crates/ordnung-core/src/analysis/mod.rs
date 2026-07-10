@@ -15,7 +15,7 @@ pub mod waveform;
 pub use decode::{decode_mono, decode_mono_capped, DecodedAudio};
 
 use crate::error::Result;
-use crate::model::{Analysis, Beatgrid};
+use crate::model::{Analysis, Beat, Beatgrid};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
@@ -58,7 +58,13 @@ use std::path::Path;
 ///     it. Compressed masters sit within a few dB of peak throughout, so the
 ///     old loudness-only byte was a structureless wall; occupancy recovers the
 ///     intro/breakdown/drop contour (see `tests/energy_probe.rs`).
-pub const ANALYZER_VERSION: u32 = 15;
+/// v16: re-enable BPM/tempo (undoes v8). `tempo::detect` runs again and
+///     `analyze_file` emits a constant-tempo (static) beatgrid: beats spaced
+///     `60000/bpm` ms from the first detected beat, spanning the full track and
+///     each carrying the global BPM. Downbeat numbering is provisional (the first
+///     detected beat is numbered 1) until dedicated downbeat detection lands.
+///     Baseline vs rekordbox on the 79-track set is guarded by `tests/bpm_eval.rs`.
+pub const ANALYZER_VERSION: u32 = 16;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key
@@ -104,18 +110,32 @@ pub fn analyze_file(path: impl AsRef<Path>, params: AnalysisParams) -> Result<An
         .max(1);
     let key_slice = &audio.samples[..audio.samples.len().min(key_cap)];
     let spec = dsp::spectrogram(key_slice, audio.sample_rate);
-    // BPM/tempo detection is disabled for now. Leave `bpm` empty and the beatgrid
-    // anchorless until it's re-enabled. See `tempo::detect`.
     let detected_key = key::detect(&spec);
     let quality = quality::detect(&spec);
+    // BPM/beatgrid: a constant-tempo (static) grid extrapolated across the whole
+    // track from the tempo lock over the key window. Steady 4/4 club material has
+    // one tempo, so the window is representative; variable-tempo (dynamic) grids
+    // come later. `beat_offset_ms` anchors the phase; the grid spans `duration_ms`.
+    let tempo = tempo::detect(&spec);
+    let duration_ms = if audio.sample_rate > 0 {
+        audio.samples.len() as u64 * 1000 / audio.sample_rate as u64
+    } else {
+        0
+    };
+    let (bpm, beatgrid) = if tempo.bpm > 0.0 {
+        (
+            Some(tempo.bpm),
+            build_static_grid(tempo.bpm, tempo.beat_offset_ms, duration_ms),
+        )
+    } else {
+        (None, Beatgrid::default())
+    };
     // Waveform + levels span the full decoded track (not just the key window).
     let lv = waveform::levels(&audio.samples);
     let waveform_bands = waveform::color_bands(&audio.samples, audio.sample_rate);
 
-    let beatgrid = Beatgrid { beats: Vec::new() };
-
     Ok(Analysis {
-        bpm: None,
+        bpm,
         key: detected_key,
         beatgrid,
         cues: Vec::new(),
@@ -129,6 +149,57 @@ pub fn analyze_file(path: impl AsRef<Path>, params: AnalysisParams) -> Result<An
         lowpass_edge_db_per_khz: quality.edge_db_per_khz,
         analyzer_version: ANALYZER_VERSION,
     })
+}
+
+/// Expand a constant-tempo lock into an anchored beatgrid spanning the track.
+///
+/// Beats are spaced `60000/bpm` ms starting at `first_beat_ms`, one per beat up to
+/// `duration_ms`, each tagged with the global `bpm` — a static grid, which is what
+/// steady 4/4 club material wants and what rekordbox emits by default. `number`
+/// cycles 1..=4 as the position within the bar; **which** beat is the true downbeat
+/// is not yet detected, so the first detected beat is provisionally numbered 1.
+fn build_static_grid(bpm: f32, first_beat_ms: u64, duration_ms: u64) -> Beatgrid {
+    if bpm <= 0.0 || duration_ms == 0 {
+        return Beatgrid::default();
+    }
+    let period_ms = 60_000.0 / bpm as f64;
+    let mut beats = Vec::new();
+    let mut pos = first_beat_ms as f64;
+    let mut number: u32 = 1;
+    while pos.round() as u64 <= duration_ms {
+        beats.push(Beat {
+            number,
+            position_ms: pos.round() as u64,
+            bpm,
+        });
+        number = if number == 4 { 1 } else { number + 1 };
+        pos += period_ms;
+    }
+    Beatgrid { beats }
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::*;
+
+    #[test]
+    fn static_grid_spacing_and_span() {
+        // 120 BPM → 500 ms per beat, phase 250 ms, over a 4 s track.
+        let g = build_static_grid(120.0, 250, 4_000);
+        assert_eq!(g.beats.len(), 8); // 250,750,...,3750
+        assert_eq!(g.beats[0].position_ms, 250);
+        assert_eq!(g.beats[1].position_ms, 750);
+        assert!(g.beats.iter().all(|b| (b.bpm - 120.0).abs() < 1e-6));
+        // number cycles 1..=4 as bar position.
+        let nums: Vec<u32> = g.beats.iter().take(5).map(|b| b.number).collect();
+        assert_eq!(nums, vec![1, 2, 3, 4, 1]);
+    }
+
+    #[test]
+    fn static_grid_degenerate_inputs() {
+        assert!(build_static_grid(0.0, 0, 4_000).beats.is_empty());
+        assert!(build_static_grid(120.0, 0, 0).beats.is_empty());
+    }
 }
 
 fn content_hash(samples: &[f32]) -> String {
