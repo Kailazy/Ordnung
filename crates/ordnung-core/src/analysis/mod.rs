@@ -74,7 +74,11 @@ use std::path::Path;
 ///     energy per tap. Fixes the "3:2"/"5:4" slow folds the autocorrelation comb
 ///     settled on for fast techno (e.g. 89→134, 107→134), validated against a
 ///     200-track rekordbox comparison (~15 tracks recovered).
-pub const ANALYZER_VERSION: u32 = 18;
+/// v19: persist the downbeat — the catalog now stores the beatgrid's first-beat bar
+///     number (`first_beat_number`), so the player can draw downbeat ("1") markers on
+///     the moving waveform. No algorithm change; the bump backfills the phase, which
+///     earlier versions computed (v17) but discarded on save.
+pub const ANALYZER_VERSION: u32 = 19;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key

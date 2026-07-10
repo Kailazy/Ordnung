@@ -44,20 +44,34 @@ impl App {
             // Load the waveform for the bar. One small catalog row read, like the
             // other inline reads in the GUI; cover art is the only thing worth
             // offloading. Empty vecs (unanalyzed track) just render a flat line.
-            let (waveform, waveform_bands) = Catalog::open(&self.db_path)
+            let analysis = Catalog::open(&self.db_path)
                 .and_then(|c| c.get_analysis(id))
                 .ok()
-                .flatten()
+                .flatten();
+            let (waveform, waveform_bands) = analysis
+                .as_ref()
                 .map(|a| {
                     // Only the v11+ 4-byte stride is what the renderer expects.
                     let bands = if a.analyzer_version >= 11 {
-                        a.waveform_bands
+                        a.waveform_bands.clone()
                     } else {
                         Vec::new()
                     };
-                    (a.waveform_preview, bands)
+                    (a.waveform_preview.clone(), bands)
                 })
                 .unwrap_or_default();
+            // Beatgrid for the moving lane: bpm + first-beat position + downbeat
+            // phase (from the anchor beat's bar number). `get_analysis` returns the
+            // grid as one anchor beat, so the phase is `1 - number` (mod 4).
+            let grid = analysis.as_ref().and_then(|a| {
+                let bpm = a.bpm?;
+                let b0 = a.beatgrid.beats.first()?;
+                Some(PlayerGrid {
+                    bpm,
+                    first_beat_ms: b0.position_ms as f64,
+                    downbeat_phase: (1 - b0.number as i64).rem_euclid(4) as u32,
+                })
+            });
             self.now_playing = Some(NowPlaying {
                 id,
                 artist,
@@ -68,6 +82,7 @@ impl App {
                 waveform_bands,
                 hires_bands: None,
                 hires_requested: false,
+                grid,
             });
             self.scrub = None;
         }
@@ -192,6 +207,7 @@ impl App {
         // High-res bands for the zoom lane; fall back to the coarse preview until
         // the PCM has been analyzed (or for tracks the engine never decoded).
         let hires = np.hires_bands.clone().unwrap_or_default();
+        let grid = np.grid;
         let wave_style = WaveformStyle::from_config(&self.config);
 
         const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
@@ -242,6 +258,7 @@ impl App {
                         &wave_style,
                         shown_frac,
                         dur,
+                        grid,
                         &mut seek_to,
                     );
                     ui.add_space(8.0);
@@ -604,6 +621,7 @@ impl App {
         wave_style: &WaveformStyle,
         shown_frac: f32,
         dur: f32,
+        grid: Option<PlayerGrid>,
         seek_to: &mut Option<f32>,
     ) {
         const MARGIN: f32 = 10.0;
@@ -673,6 +691,15 @@ impl App {
                     shown_frac,
                     (w0, w1),
                 );
+            }
+
+            // Beatgrid overlay: vertical lines at each beat in the visible window,
+            // downbeats (bar "1") drawn brighter and thicker like rekordbox's red
+            // bar markers. Drawn over the waveform, under the playhead.
+            if let Some(g) = grid {
+                if g.bpm > 0.0 && dur > 0.0 {
+                    draw_beatgrid(painter, draw_rect, g, dur, (w0, w1));
+                }
             }
 
             // Fixed playhead line at the window's mapping of the live position.
@@ -755,6 +782,116 @@ impl App {
                 self.scrub = None;
             }
         });
+    }
+}
+
+/// Draw the beatgrid over the zoom lane: a vertical line at every beat inside the
+/// visible window `(w0, w1)` (track-fraction), with downbeats (bar "1") brighter and
+/// thicker — rekordbox's white-beats / accented-bar look. Beat `i` sits at
+/// `first_beat_ms/1000 + i·60/bpm` seconds (any integer `i`, so the grid fills the
+/// lane even before the anchor beat). To stay readable when zoomed out, plain beats
+/// drop out once they'd crowd below a few pixels apart; downbeats persist longer.
+fn draw_beatgrid(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    grid: PlayerGrid,
+    dur: f32,
+    window: (f32, f32),
+) {
+    let beat_col = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 55);
+    let downbeat_col = egui::Color32::from_rgba_unmultiplied(255, 120, 40, 210);
+    for (x, is_downbeat) in beat_lines(grid, dur, window, rect.left(), rect.width()) {
+        let (col, w) = if is_downbeat {
+            (downbeat_col, 1.6)
+        } else {
+            (beat_col, 1.0)
+        };
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(w, col),
+        );
+    }
+}
+
+/// Pure geometry for [`draw_beatgrid`]: the `(x, is_downbeat)` of every grid line
+/// inside the visible window `(w0, w1)` (track-fraction), mapped onto `[left,
+/// left+width]`. Plain beats drop out once they'd crowd below ~6 px apart; below
+/// ~2 px even bars are omitted (too dense to read). Beat `i` is at
+/// `first_beat_ms/1000 + i·60/bpm` seconds and is a downbeat when
+/// `(i - downbeat_phase).rem_euclid(4) == 0`.
+fn beat_lines(
+    grid: PlayerGrid,
+    dur: f32,
+    window: (f32, f32),
+    left: f32,
+    width: f32,
+) -> Vec<(f32, bool)> {
+    let (w0, w1) = window;
+    let (t0, t1) = (w0 * dur, w1 * dur);
+    let span = (t1 - t0).max(f32::EPSILON);
+    let period = 60.0 / grid.bpm.max(1.0);
+    if grid.bpm <= 0.0 || dur <= 0.0 {
+        return Vec::new();
+    }
+    let px_per_beat = period / span * width;
+    if px_per_beat < 2.0 {
+        return Vec::new();
+    }
+    let beats_visible = px_per_beat >= 6.0;
+
+    let first = grid.first_beat_ms as f32 / 1000.0;
+    let i0 = ((t0 - first) / period).floor() as i64;
+    let i1 = ((t1 - first) / period).ceil() as i64;
+
+    let mut out = Vec::new();
+    for i in i0..=i1 {
+        let is_downbeat = (i - grid.downbeat_phase as i64).rem_euclid(4) == 0;
+        if !is_downbeat && !beats_visible {
+            continue;
+        }
+        let t = first + i as f32 * period;
+        if t < t0 || t > t1 {
+            continue;
+        }
+        out.push((left + (t - t0) / span * width, is_downbeat));
+    }
+    out
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::*;
+
+    #[test]
+    fn beat_lines_spacing_downbeats_and_window() {
+        // 120 BPM → 0.5 s/beat. First beat at 0.25 s, downbeat phase 1 (the 2nd
+        // detected beat is the "1"). Window 0..4 s over a 4 s track, 400 px wide.
+        let g = PlayerGrid { bpm: 120.0, first_beat_ms: 250.0, downbeat_phase: 1 };
+        let lines = beat_lines(g, 4.0, (0.0, 1.0), 0.0, 400.0);
+        // Beats at 0.25,0.75,...,3.75 → 8 lines across 4 s.
+        assert_eq!(lines.len(), 8);
+        // 0.5 s = 50 px at 100 px/s; first at 0.25 s = 25 px.
+        assert!((lines[0].0 - 25.0).abs() < 0.5);
+        assert!((lines[1].0 - 75.0).abs() < 0.5);
+        // Downbeats: i where (i-1)%4==0 → i=1,5 → the 2nd and 6th lines.
+        let downs: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.1).map(|(k, _)| k).collect();
+        assert_eq!(downs, vec![1, 5]);
+    }
+
+    #[test]
+    fn beat_lines_density_gating() {
+        let g = PlayerGrid { bpm: 128.0, first_beat_ms: 0.0, downbeat_phase: 0 };
+        // Whole 600 s track in 400 px: ~0.03 px/beat → nothing drawn.
+        assert!(beat_lines(g, 600.0, (0.0, 1.0), 0.0, 400.0).is_empty());
+        // Zoomed to ~8 s window: beats ~10 px apart → beats show, incl. non-downbeats.
+        let win = beat_lines(g, 600.0, (0.10, 0.10 + 8.0 / 600.0), 0.0, 400.0);
+        assert!(win.iter().any(|l| !l.1), "plain beats visible when zoomed in");
+    }
+
+    #[test]
+    fn beat_lines_absent_without_tempo() {
+        let g = PlayerGrid { bpm: 0.0, first_beat_ms: 0.0, downbeat_phase: 0 };
+        assert!(beat_lines(g, 300.0, (0.0, 1.0), 0.0, 400.0).is_empty());
     }
 }
 

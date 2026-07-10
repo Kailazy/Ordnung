@@ -501,6 +501,11 @@ impl Catalog {
              CREATE INDEX IF NOT EXISTS idx_tracks_isrc         ON tracks(isrc);
              CREATE INDEX IF NOT EXISTS idx_tracks_fingerprint  ON tracks(fingerprint);",
         )?;
+        // Bar position (1..4) of the beatgrid's first beat, so the persisted grid
+        // knows which beat is the downbeat ("1"). NULL on rows analyzed before
+        // downbeat detection (v17); the player then falls back to plain beats.
+        self.add_column_if_missing("analysis", "first_beat_number", "INTEGER")?;
+
         // Full-resolution external artwork kept for tag embedding (`tag --write
         // --art`). Older catalogs only had the small `png_bytes` thumbnail.
         self.add_column_if_missing("track_external_artwork", "full_bytes", "BLOB")?;
@@ -1996,18 +2001,19 @@ impl Catalog {
             None => (None, None),
         };
         let beat_offset = a.beatgrid.beats.first().map(|b| b.position_ms as i64);
+        let first_beat_number = a.beatgrid.beats.first().map(|b| b.number as i64);
         self.conn.execute(
             "INSERT INTO analysis (track_id, bpm, key_tonic, key_mode, beat_offset_ms,
                  peak, loudness, waveform, content_hash, audio_fingerprint,
                  lowpass_hz, lowpass_edge, analyzer_version, src_size, src_mtime,
-                 waveform_bands)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+                 waveform_bands, first_beat_number)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
              ON CONFLICT(track_id) DO UPDATE SET
                  bpm=?2, key_tonic=?3, key_mode=?4, beat_offset_ms=?5, peak=?6,
                  loudness=?7, waveform=?8, content_hash=?9, audio_fingerprint=?10,
                  lowpass_hz=?11, lowpass_edge=?12, analyzer_version=?13,
                  src_size=?14, src_mtime=?15, waveform_bands=?16,
-                 analyzed_at=unixepoch()",
+                 first_beat_number=?17, analyzed_at=unixepoch()",
             params![
                 id as i64,
                 a.bpm,
@@ -2025,6 +2031,7 @@ impl Catalog {
                 src_size as i64,
                 src_mtime,
                 a.waveform_bands,
+                first_beat_number,
             ],
         )?;
         Ok(())
@@ -2037,7 +2044,7 @@ impl Catalog {
             .query_row(
                 "SELECT bpm, key_tonic, key_mode, beat_offset_ms, peak, loudness,
                      waveform, content_hash, analyzer_version, audio_fingerprint,
-                     lowpass_hz, lowpass_edge, waveform_bands
+                     lowpass_hz, lowpass_edge, waveform_bands, first_beat_number
                  FROM analysis WHERE track_id=?1",
                 params![id as i64],
                 |r| {
@@ -2049,10 +2056,14 @@ impl Catalog {
                             }
                             _ => None,
                         },
+                        // A single anchor beat carrying bpm + first-beat position and
+                        // its bar number (the downbeat phase); the player extrapolates
+                        // the full grid from these. Number defaults to 1 for pre-v17
+                        // rows that predate downbeat detection.
                         beatgrid: match (r.get::<_, Option<i64>>(3)?, r.get::<_, Option<f64>>(0)?) {
                             (Some(off), Some(bpm)) => Beatgrid {
                                 beats: vec![Beat {
-                                    number: 1,
+                                    number: r.get::<_, Option<i64>>(13)?.unwrap_or(1) as u32,
                                     position_ms: off as u64,
                                     bpm: bpm as f32,
                                 }],
@@ -3237,6 +3248,28 @@ mod tests {
         assert!(cat.get_external_artwork(id1).unwrap().is_none(), "artwork cascaded");
         // Playlist row survives but holds no tracks.
         assert!(cat.get_playlist(pl).unwrap().track_ids.is_empty(), "playlist emptied");
+    }
+
+    #[test]
+    fn analysis_round_trips_bpm_and_downbeat() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let (id, _) = cat.upsert_scanned(&scanned("/a.mp3", "A", "Techno", 1000)).unwrap();
+
+        // First beat is bar position 3, i.e. the second beat is the downbeat "1".
+        let a = Analysis {
+            bpm: Some(128.0),
+            beatgrid: Beatgrid {
+                beats: vec![Beat { number: 3, position_ms: 250, bpm: 128.0 }],
+            },
+            ..Default::default()
+        };
+        cat.save_analysis(id, &a, 0, 0).unwrap();
+
+        let got = cat.get_analysis(id).unwrap().unwrap();
+        assert_eq!(got.bpm, Some(128.0));
+        let b0 = got.beatgrid.beats.first().expect("anchor beat");
+        assert_eq!(b0.position_ms, 250);
+        assert_eq!(b0.number, 3, "downbeat phase (first-beat bar number) persists");
     }
 
     #[test]

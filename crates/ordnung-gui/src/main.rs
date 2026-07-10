@@ -1051,6 +1051,20 @@ struct NowPlaying {
     /// Set once the off-thread hi-res analysis has been kicked off, so we don't
     /// respawn it every frame while it runs (or the PCM is still decoding).
     hires_requested: bool,
+    /// Detected beatgrid for the moving lane's beat lines. `None` for unanalyzed
+    /// tracks or ones with no confident tempo.
+    grid: Option<PlayerGrid>,
+}
+
+/// The constant-tempo beatgrid the player overlays on the zoom lane. Beats are at
+/// `first_beat_ms + i·(60000/bpm)`; beat `i` is a downbeat (bar "1") when
+/// `(i - downbeat_phase).rem_euclid(4) == 0`.
+#[derive(Clone, Copy)]
+struct PlayerGrid {
+    bpm: f32,
+    first_beat_ms: f64,
+    /// Index of the first downbeat within the beat run (0..3).
+    downbeat_phase: u32,
 }
 
 /// Everything one background USB device scan produces: the audio files found
