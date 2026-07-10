@@ -118,7 +118,13 @@ pub fn detect(spec: &Spectrogram) -> TempoResult {
     let coarse_bpm = (60.0 * frame_rate / coarse_lag).clamp(BPM_MIN, BPM_MAX);
 
     // Fine period + phase: phase-lock a fractional comb against the whole envelope.
-    let (bpm, phase_frames) = refine(&env, frame_rate, coarse_bpm);
+    let (bpm0, phase0) = refine(&env, frame_rate, coarse_bpm);
+    // Metrical correction: the autocorrelation comb can settle on a *slower* fold of
+    // the true tempo (2/3× → a "3:2/triplet" read, 4/5× → "5:4"), because that fold's
+    // comb teeth still hit every 2nd/3rd true beat. The true, faster tempo phase-locks
+    // with more energy per tap (all taps on beats, not alternating on/off), so promote
+    // a faster metrical relative when its aligned energy clearly beats the current lock.
+    let (bpm, phase_frames) = correct_metrical(&env, frame_rate, bpm0, phase0);
     let beat_offset_ms = (phase_frames / frame_rate * 1000.0).round().max(0.0) as u64;
 
     TempoResult {
@@ -213,6 +219,42 @@ fn refine(env: &[f32], frame_rate: f32, coarse_bpm: f32) -> (f32, f32) {
     let period = 60.0 / best_bpm * frame_rate;
     let (phase, _) = comb_align(env, period, 0.25);
     (best_bpm, phase)
+}
+
+/// Faster metrical relatives to test against the detected tempo. `2/3` and `4/5`
+/// folds are what the comb settles on, so their inverses (`3/2`, `5/4`) plus the
+/// neighbouring `4/3` and the octave `2` recover the true tempo.
+const METRICAL_MULTIPLES: [f32; 4] = [5.0 / 4.0, 4.0 / 3.0, 3.0 / 2.0, 2.0];
+
+/// A faster relative must beat the current lock's aligned-energy×prior score by this
+/// margin to win — so only a *clearly* better tempo overrides, leaving correct locks
+/// (and genuinely slow tracks) untouched.
+const OVERRIDE_MARGIN: f32 = 1.05;
+
+/// Promote a faster metrical relative of `(bpm, phase)` when it phase-locks with more
+/// energy per tap (weighted by the tempo prior). Returns the chosen `(bpm, phase)`.
+fn correct_metrical(env: &[f32], frame_rate: f32, bpm: f32, phase: f32) -> (f32, f32) {
+    let aligned_energy = |b: f32| comb_align(env, 60.0 / b * frame_rate, 0.25).1;
+    let base_score = aligned_energy(bpm) * tempo_prior(bpm);
+
+    let mut best = (bpm, phase);
+    let mut best_score = base_score;
+    for m in METRICAL_MULTIPLES {
+        let cand = bpm * m;
+        if cand > BPM_MAX || cand < BPM_MIN {
+            continue;
+        }
+        // Fine-lock period + phase around the relative, then score its alignment.
+        let (cbpm, cphase) = refine(env, frame_rate, cand);
+        let score = aligned_energy(cbpm) * tempo_prior(cbpm);
+        // Compare every relative against the *original* lock, not the running best, so
+        // one clear winner is required rather than a chain of marginal step-ups.
+        if score > base_score * OVERRIDE_MARGIN && score > best_score {
+            best = (cbpm, cphase);
+            best_score = score;
+        }
+    }
+    best
 }
 
 /// Best phase of a comb with `period` frames over the envelope, scanning phases in
@@ -349,6 +391,24 @@ mod tests {
                 "expected ~{target}, got {got}"
             );
         }
+    }
+
+    #[test]
+    fn recovers_true_tempo_from_three_two_fold() {
+        // A 138 BPM track with a strong accent every 3rd beat (46 BPM bar pulse)
+        // tempts the comb toward 92 BPM (= 2/3 × 138), a "3:2" fold. The metrical
+        // correction must climb back to 138.
+        let sr = 44_100;
+        let mut s = click_train(sr, 138.0, 40);
+        let accent = click_train(sr, 46.0, 40); // every 3rd beat, louder
+        for (i, &v) in accent.iter().enumerate() {
+            if i < s.len() {
+                s[i] += 0.9 * v;
+            }
+        }
+        let spec = spectrogram(&s, sr);
+        let got = detect(&spec).bpm;
+        assert!((got - 138.0).abs() < 1.5, "expected ~138, got {got}");
     }
 
     #[test]

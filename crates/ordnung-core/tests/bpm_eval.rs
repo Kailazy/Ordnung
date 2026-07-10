@@ -126,14 +126,13 @@ fn grade(got: f32, want: f32) -> Grade {
     }
 }
 
-/// Calibrated floors on analyzer v16 (the re-enabled high-resolution tempo path).
-/// Measured baseline on this 79-track set: 72 within 2 BPM, 73 modulo octave — well
-/// above the v4 numbers recorded in KEY_CHECK.md (64 / 66) because that table
-/// predates the harmonic-comb + fractional-refine tempo path. Floors sit a few
-/// tracks below the baseline (float/decoder cushion); assert `>=` so accuracy can
-/// improve freely but a regression fails the build.
-const MIN_OK: usize = 68;
-const MIN_MODULO_OCTAVE: usize = 70;
+/// Calibrated floors. v16 (re-enabled tempo path) measured 72 within 2 BPM / 73
+/// modulo octave here; v18 (metrical correction, `tempo::correct_metrical`) lifted it
+/// to 75 / 76 by recovering the 3:2 & 5:4 slow folds. Floors sit a few tracks below
+/// the v18 baseline (float/decoder cushion); assert `>=` so accuracy can improve
+/// freely but a regression fails the build.
+const MIN_OK: usize = 72;
+const MIN_MODULO_OCTAVE: usize = 74;
 
 #[test]
 #[ignore = "decodes the sample set; run with --ignored --nocapture"]

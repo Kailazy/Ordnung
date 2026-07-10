@@ -69,7 +69,12 @@ use std::path::Path;
 ///     starts the bar (backbeat clap on 2 & 4 + harmonic novelty on the "1"), so the
 ///     grid's beat numbers put the downbeat where rekordbox's red bar marker sits
 ///     instead of assuming the first detected beat is the "1".
-pub const ANALYZER_VERSION: u32 = 17;
+/// v18: metrical tempo correction — `tempo::correct_metrical` promotes a faster
+///     metrical relative (3/2, 4/3, 5/4, 2×) when it phase-locks with clearly more
+///     energy per tap. Fixes the "3:2"/"5:4" slow folds the autocorrelation comb
+///     settled on for fast techno (e.g. 89→134, 107→134), validated against a
+///     200-track rekordbox comparison (~15 tracks recovered).
+pub const ANALYZER_VERSION: u32 = 18;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key

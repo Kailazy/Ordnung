@@ -1,5 +1,18 @@
 # Ordnung vs rekordbox — key/BPM check (79-track sample)
 
+## Update — analyzer v18 (2026-07-10): metrical tempo correction (3:2 / 5:4 folds)
+
+`tempo::correct_metrical` promotes a faster metrical relative (3/2, 4/3, 5/4, 2×)
+when it phase-locks with clearly more energy per tap, fixing the slow folds the
+autocorrelation comb settled on for fast techno (89→134, 107→134, etc.).
+
+- **79-track set:** 72→**75/79 within 2 BPM (94%)**, 73→**76 modulo octave (96%)**.
+  Floors raised to 72 / 74.
+- **Separate 200-track rekordbox comparison** (random library sample, dragged into
+  rekordbox for ground truth): **179→190/200 within 2 BPM (89%→95%)**, 177→188 within
+  0.5 BPM. 11 folds recovered; residual misses are 3 sub-minute fragments, one beatless
+  ambient dub, and ~4 genuinely ambiguous breaks/live tracks.
+
 ## Update — analyzer v16 (2026-07-10): BPM/beatgrid re-enabled + regression harness
 
 BPM/tempo detection (disabled at v8) is back on. `analyze_file` now runs
