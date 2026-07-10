@@ -14,6 +14,7 @@ mod covers;
 mod inspector;
 mod jobs;
 mod macos_drag;
+mod macos_pasteboard;
 mod modals;
 mod player;
 mod sidebar;

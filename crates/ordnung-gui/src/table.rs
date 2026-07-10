@@ -1946,20 +1946,36 @@ impl App {
             Some(TrackMenuAction::CopyForSoulseek(ids)) => {
                 // Resolve each id back to its visible row so the copy reflects the
                 // current (possibly tag-edited) artist/title. Preserve row order.
-                let lines: Vec<String> = self
-                    .rows
+                let sel: Vec<&TrackRow> =
+                    self.rows.iter().filter(|r| ids.contains(&r.id)).collect();
+                let lines: Vec<String> = sel
                     .iter()
-                    .filter(|r| ids.contains(&r.id))
                     .map(|r| soulseek_query(&r.artist, &r.title))
                     .filter(|q| !q.is_empty())
                     .collect();
                 let n = lines.len();
-                ctx_clone.copy_text(lines.join("\n"));
-                self.status = if n == 1 {
-                    "Copied for Soulseek — paste into the search box.".into()
+                let text = lines.join("\n");
+                // One pasteboard write carries both representations: the audio
+                // files (paste in Finder copies them) and the Artist – Title
+                // lines (paste in any text box). Off-macOS, fall back to a
+                // plain text copy through egui.
+                let paths: Vec<&Path> = sel.iter().map(|r| r.source_path.as_path()).collect();
+                if crate::macos_pasteboard::copy_files_and_text(&paths, &text) {
+                    self.status = if n == 1 {
+                        "Copied — paste the file in Finder or the name in a search box.".into()
+                    } else {
+                        format!(
+                            "Copied {n} tracks — paste the files in Finder or the names in a search box."
+                        )
+                    };
                 } else {
-                    format!("Copied {n} tracks for Soulseek (one per line).")
-                };
+                    ctx_clone.copy_text(text);
+                    self.status = if n == 1 {
+                        "Copied for Soulseek — paste into the search box.".into()
+                    } else {
+                        format!("Copied {n} tracks for Soulseek (one per line).")
+                    };
+                }
             }
             Some(TrackMenuAction::OpenDiscogs(id, query)) => {
                 // Prefer the exact release the artwork run picked; fall back to
