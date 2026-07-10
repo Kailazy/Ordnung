@@ -17,7 +17,7 @@
 //!
 //! Run: cargo test -p ordnung-core --test bpm_eval --release -- --ignored --nocapture
 
-use ordnung_core::analysis::{decode_mono_capped, dsp, tempo};
+use ordnung_core::analysis::{decode_mono_capped, downbeat, dsp, tempo};
 use std::path::PathBuf;
 
 /// (filename substring, rekordbox BPM). Needles match `key_eval`; BPM is the value
@@ -203,6 +203,40 @@ fn bpm_accuracy_regression() {
         modulo_octave >= MIN_MODULO_OCTAVE,
         "BPM modulo-octave regressed: {modulo_octave} < {MIN_MODULO_OCTAVE} (floor)"
     );
+}
+
+/// Diagnostic (not a pass/fail gate): print the detected bar phase for a spread of
+/// real tracks, so a regression that collapses `detect_phase` to a constant is
+/// visible by eye. Real downbeat *accuracy* needs rekordbox anchor ground truth
+/// (not in KEY_CHECK.md) — this only sanity-checks that the cue responds to audio.
+#[test]
+#[ignore = "decodes sample tracks; run with --ignored --nocapture"]
+fn downbeat_phase_probe() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/seeker-sample");
+    if !dir.is_dir() {
+        eprintln!("skip: no sample dir");
+        return;
+    }
+    let mut counts = [0usize; 4];
+    println!("\n--- detected bar phase (0 = first detected beat is the downbeat) ---");
+    for &(needle, _) in GROUND_TRUTH {
+        let path = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.file_name().map_or(false, |n| n.to_string_lossy().contains(needle)));
+        let Some(path) = path else { continue };
+        let Ok(audio) = decode_mono_capped(&path, Some(150 * 48_000)) else { continue };
+        let spec = dsp::spectrogram(&audio.samples, audio.sample_rate);
+        let t = tempo::detect(&spec);
+        if t.bpm <= 0.0 {
+            continue;
+        }
+        let phase = downbeat::detect_phase(&spec, t.bpm, t.beat_offset_ms);
+        counts[phase as usize] += 1;
+        println!("  phase {} {:<28} ({:.0} bpm)", phase, needle, t.bpm);
+    }
+    println!("\nphase distribution: {counts:?}  (a healthy detector is not all one bucket)");
 }
 
 /// End-to-end wiring check: `analyze_file` (decode → tempo → grid) emits a BPM and a

@@ -5,6 +5,7 @@
 //! results invalidate.
 
 pub mod decode;
+pub mod downbeat;
 pub mod dsp;
 pub mod fingerprint;
 pub mod key;
@@ -64,7 +65,11 @@ use std::path::Path;
 ///     each carrying the global BPM. Downbeat numbering is provisional (the first
 ///     detected beat is numbered 1) until dedicated downbeat detection lands.
 ///     Baseline vs rekordbox on the 79-track set is guarded by `tests/bpm_eval.rs`.
-pub const ANALYZER_VERSION: u32 = 16;
+/// v17: downbeat detection — `downbeat::detect_phase` picks which of the four beats
+///     starts the bar (backbeat clap on 2 & 4 + harmonic novelty on the "1"), so the
+///     grid's beat numbers put the downbeat where rekordbox's red bar marker sits
+///     instead of assuming the first detected beat is the "1".
+pub const ANALYZER_VERSION: u32 = 17;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key
@@ -123,9 +128,18 @@ pub fn analyze_file(path: impl AsRef<Path>, params: AnalysisParams) -> Result<An
         0
     };
     let (bpm, beatgrid) = if tempo.bpm > 0.0 {
+        // Which of the four beats starts the bar, so the grid's downbeats ("1")
+        // land where rekordbox would put its red bar marker.
+        let phase = downbeat::detect_phase(&spec, tempo.bpm, tempo.beat_offset_ms);
+        let first_beat_number = ((BAR - phase % BAR) % BAR) + 1; // bar position of beat 0
         (
             Some(tempo.bpm),
-            build_static_grid(tempo.bpm, tempo.beat_offset_ms, duration_ms),
+            build_static_grid(
+                tempo.bpm,
+                tempo.beat_offset_ms,
+                duration_ms,
+                first_beat_number,
+            ),
         )
     } else {
         (None, Beatgrid::default())
@@ -151,28 +165,36 @@ pub fn analyze_file(path: impl AsRef<Path>, params: AnalysisParams) -> Result<An
     })
 }
 
+/// Beats per bar (4/4 assumed for DJ material).
+const BAR: u32 = 4;
+
 /// Expand a constant-tempo lock into an anchored beatgrid spanning the track.
 ///
 /// Beats are spaced `60000/bpm` ms starting at `first_beat_ms`, one per beat up to
 /// `duration_ms`, each tagged with the global `bpm` — a static grid, which is what
 /// steady 4/4 club material wants and what rekordbox emits by default. `number`
-/// cycles 1..=4 as the position within the bar; **which** beat is the true downbeat
-/// is not yet detected, so the first detected beat is provisionally numbered 1.
-fn build_static_grid(bpm: f32, first_beat_ms: u64, duration_ms: u64) -> Beatgrid {
+/// cycles 1..=4 as the position within the bar, starting from `first_beat_number`
+/// (the detected bar position of the first beat) so downbeats land on the true "1".
+fn build_static_grid(
+    bpm: f32,
+    first_beat_ms: u64,
+    duration_ms: u64,
+    first_beat_number: u32,
+) -> Beatgrid {
     if bpm <= 0.0 || duration_ms == 0 {
         return Beatgrid::default();
     }
     let period_ms = 60_000.0 / bpm as f64;
     let mut beats = Vec::new();
     let mut pos = first_beat_ms as f64;
-    let mut number: u32 = 1;
+    let mut number: u32 = first_beat_number.clamp(1, BAR);
     while pos.round() as u64 <= duration_ms {
         beats.push(Beat {
             number,
             position_ms: pos.round() as u64,
             bpm,
         });
-        number = if number == 4 { 1 } else { number + 1 };
+        number = if number == BAR { 1 } else { number + 1 };
         pos += period_ms;
     }
     Beatgrid { beats }
@@ -184,8 +206,8 @@ mod grid_tests {
 
     #[test]
     fn static_grid_spacing_and_span() {
-        // 120 BPM → 500 ms per beat, phase 250 ms, over a 4 s track.
-        let g = build_static_grid(120.0, 250, 4_000);
+        // 120 BPM → 500 ms per beat, phase 250 ms, over a 4 s track, downbeat first.
+        let g = build_static_grid(120.0, 250, 4_000, 1);
         assert_eq!(g.beats.len(), 8); // 250,750,...,3750
         assert_eq!(g.beats[0].position_ms, 250);
         assert_eq!(g.beats[1].position_ms, 750);
@@ -196,9 +218,17 @@ mod grid_tests {
     }
 
     #[test]
+    fn static_grid_downbeat_offset() {
+        // First beat is bar position 4, so the *second* beat is the downbeat "1".
+        let g = build_static_grid(120.0, 250, 4_000, 4);
+        let nums: Vec<u32> = g.beats.iter().take(5).map(|b| b.number).collect();
+        assert_eq!(nums, vec![4, 1, 2, 3, 4]);
+    }
+
+    #[test]
     fn static_grid_degenerate_inputs() {
-        assert!(build_static_grid(0.0, 0, 4_000).beats.is_empty());
-        assert!(build_static_grid(120.0, 0, 0).beats.is_empty());
+        assert!(build_static_grid(0.0, 0, 4_000, 1).beats.is_empty());
+        assert!(build_static_grid(120.0, 0, 0, 1).beats.is_empty());
     }
 }
 
