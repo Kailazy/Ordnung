@@ -67,6 +67,8 @@ impl App {
             vinyl_cover_rx,
             vinyl_links: HashMap::new(),
             track_releases: HashMap::new(),
+            vinyl_owned: HashSet::new(),
+            vinyl_wanted: HashSet::new(),
             confirm_vinyl_edit: None,
             scroll_to_track: None,
             row_screen_rects: Vec::new(),
@@ -338,6 +340,17 @@ impl App {
             .and_then(|c| c.release_track_links())
             .map(|pairs| pairs.into_iter().map(|(rid, tid)| (tid, rid)).collect())
             .unwrap_or_default();
+        // …and which of those releases are already yours, so that menu can say
+        // where a record already is instead of offering to want it again.
+        for (list, dest) in [
+            (VinylList::Collection, &mut self.vinyl_owned),
+            (VinylList::Wantlist, &mut self.vinyl_wanted),
+        ] {
+            *dest = Catalog::open(&self.db_path)
+                .and_then(|c| c.vinyl_release_ids(list))
+                .map(|ids| ids.into_iter().collect())
+                .unwrap_or_default();
+        }
         if self.view == LibraryView::Vinyl {
             self.vinyl = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_vinyl(VinylList::Collection))

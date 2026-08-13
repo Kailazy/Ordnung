@@ -693,8 +693,11 @@ impl App {
         // show without borrowing `self` mutably inside the closure.
         let mut menu_action: Option<TrackMenuAction> = None;
         // track → Discogs release, so the menu can offer "Add to Discogs
-        // wantlist" only for tracks whose release is actually known.
+        // wantlist" only for tracks whose release is actually known — and the
+        // two membership sets, so it can say when that record is already yours.
         let track_releases = &self.track_releases;
+        let vinyl_owned = &self.vinyl_owned;
+        let vinyl_wanted = &self.vinyl_wanted;
         // The track ids of a ⌥-drag that started this frame, set in a row closure
         // below. Resolved to source-file paths and returned at the end so the
         // caller can begin the native macOS drag-out *after* these closures (and
@@ -1620,22 +1623,77 @@ impl App {
                                         // Only the tracks with a fetched release can
                                         // go, and several tracks off one record
                                         // collapse to a single want.
-                                        let mut want: Vec<u64> = drag_ids
+                                        let mut releases: Vec<u64> = drag_ids
                                             .iter()
                                             .filter_map(|id| track_releases.get(id).copied())
                                             .collect();
-                                        want.sort_unstable();
-                                        want.dedup();
-                                        let want_label = match want.len() {
-                                            0 | 1 => "Add to Discogs wantlist".to_string(),
-                                            n => format!("Add to Discogs wantlist ({n} releases)"),
-                                        };
-                                        let want_tip = if want.is_empty() {
-                                            "No Discogs release on file for this \
-                                             selection. Run Edit release… first."
-                                                .to_string()
+                                        releases.sort_unstable();
+                                        releases.dedup();
+                                        // Split by where each record already is.
+                                        // Only what's in neither list is worth
+                                        // wanting; the rest becomes the "you
+                                        // already have this" readout.
+                                        let owned =
+                                            releases.iter().filter(|r| vinyl_owned.contains(r)).count();
+                                        let wanted = releases
+                                            .iter()
+                                            .filter(|r| {
+                                                !vinyl_owned.contains(r) && vinyl_wanted.contains(r)
+                                            })
+                                            .count();
+                                        let want: Vec<u64> = releases
+                                            .iter()
+                                            .copied()
+                                            .filter(|r| {
+                                                !vinyl_owned.contains(r) && !vinyl_wanted.contains(r)
+                                            })
+                                            .collect();
+                                        let held = owned + wanted;
+                                        // Three states: nothing to want (no
+                                        // release on file), everything already
+                                        // yours (checked + darkened, naming the
+                                        // list), or something left to add.
+                                        let (want_label, want_tip) = if releases.is_empty() {
+                                            (
+                                                "Add to Discogs wantlist".to_string(),
+                                                "No Discogs release on file for this \
+                                                 selection. Run Edit release… first."
+                                                    .to_string(),
+                                            )
+                                        } else if want.is_empty() {
+                                            let (label, tip) = match (owned, wanted) {
+                                                (0, _) => (
+                                                    "✓  In your wantlist",
+                                                    "Already on your Discogs wantlist",
+                                                ),
+                                                (_, 0) => (
+                                                    "✓  In your collection",
+                                                    "You already own this on Discogs",
+                                                ),
+                                                _ => (
+                                                    "✓  Already in your collection and wantlist",
+                                                    "Every record here is already yours",
+                                                ),
+                                            };
+                                            (label.to_string(), tip.to_string())
                                         } else {
-                                            "Want these records on Discogs".to_string()
+                                            let label = match want.len() {
+                                                1 => "Add to Discogs wantlist".to_string(),
+                                                n => {
+                                                    format!("Add to Discogs wantlist ({n} releases)")
+                                                }
+                                            };
+                                            // With a mixed selection, say what's
+                                            // being skipped so the count adds up.
+                                            let tip = if held > 0 {
+                                                format!(
+                                                    "Want these records on Discogs. \
+                                                     {held} already yours, skipped."
+                                                )
+                                            } else {
+                                                "Want these records on Discogs".to_string()
+                                            };
+                                            (label, tip)
                                         };
                                         if ui
                                             .add_enabled(

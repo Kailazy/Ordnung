@@ -2297,6 +2297,22 @@ impl Catalog {
             })? as u64)
     }
 
+    /// Every Discogs release id cached in `list`. Deliberately release ids rather
+    /// than row keys: this answers "do I already have this record?", and the two
+    /// lists key their rows differently. Owning two pressings of one release
+    /// yields it once. Cheap enough to load on every reload, which is what lets
+    /// the library tell you a track's record is already yours.
+    pub fn vinyl_release_ids(&self, list: VinylList) -> Result<Vec<u64>> {
+        let table = vinyl_table(list);
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT DISTINCT release_id FROM {table}"))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.into_iter().map(|id| id as u64).collect())
+    }
+
     /// `(instance_id, cover_url)` for every record in `list` that has a cover URL
     /// but no cached image yet — the work list a refresh downloads covers for.
     pub fn vinyl_missing_covers(&self, list: VinylList) -> Result<Vec<(u64, String)>> {
@@ -3791,6 +3807,24 @@ mod tests {
         assert_eq!(list[0].instance_id, 55);
         assert_eq!(list[0].folder_id, Some(1));
         assert!(list[0].has_cover);
+    }
+
+    #[test]
+    fn vinyl_release_ids_collapse_duplicate_pressings() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let (own, want) = (VinylList::Collection, VinylList::Wantlist);
+        // Two copies of one release (different instances) plus a second release.
+        let mut second_copy = vinyl(2, "Plastikman", "Sheet One");
+        second_copy.release_id = 9001; // same release as instance 1
+        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One")).unwrap();
+        cat.upsert_vinyl(own, &second_copy).unwrap();
+        cat.upsert_vinyl(own, &vinyl(3, "Surgeon", "Force + Form")).unwrap();
+        cat.upsert_vinyl(want, &vinyl(4, "Jeff Mills", "Waveform")).unwrap();
+
+        let mut owned = cat.vinyl_release_ids(own).unwrap();
+        owned.sort_unstable();
+        assert_eq!(owned, vec![9001, 9003], "two pressings of 9001 count once");
+        assert_eq!(cat.vinyl_release_ids(want).unwrap(), vec![9004]);
     }
 
     #[test]

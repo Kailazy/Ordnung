@@ -792,6 +792,12 @@ struct App {
     /// which is only offered for tracks that actually have a release to want.
     /// Rebuilt on every reload (one indexed scan of the artwork table).
     track_releases: HashMap<Id, u64>,
+    /// Release ids already in the user's Discogs collection and wantlist. Kept
+    /// in every view (unlike the full record lists, which the vinyl grid holds
+    /// only while it's showing) so the library can say a track's record is
+    /// already yours instead of offering to want it twice.
+    vinyl_owned: HashSet<u64>,
+    vinyl_wanted: HashSet<u64>,
     /// A pending Discogs list change awaiting confirmation, because it would
     /// destroy collection metadata on the user's account (see [`VinylEdit`]).
     /// `Some` shows the confirm modal; the edit only runs if they say yes.

@@ -38,6 +38,10 @@ struct VinylCell {
     /// Catalog track ids linked to this release — empty if you don't own a
     /// digital copy. Drives the "in catalog" badge and the jump-to.
     linked: Vec<Id>,
+    /// True when this release is *also* in the other Discogs list. Moving it
+    /// there would ask Discogs for a second copy (collection adds aren't
+    /// idempotent), so the move is shown as already done instead.
+    also_in_other: bool,
 }
 
 /// What a click or right-click in the vinyl grid asked for. Returned from the
@@ -986,6 +990,10 @@ impl App {
                         .get(&v.release_id)
                         .cloned()
                         .unwrap_or_default(),
+                    also_in_other: match list {
+                        VinylList::Collection => self.vinyl_wanted.contains(&v.release_id),
+                        VinylList::Wantlist => self.vinyl_owned.contains(&v.release_id),
+                    },
                 }
             })
             .collect()
@@ -1131,7 +1139,29 @@ impl App {
                                     "Remove from wantlist",
                                 ),
                             };
-                            if ui.button(move_label).on_hover_note(move_tip).clicked() {
+                            // Already in both lists: the move has nothing to do,
+                            // and running it would ask Discogs for a duplicate
+                            // copy. Say where it already is instead.
+                            let (move_label, move_tip) = if c.also_in_other {
+                                match list {
+                                    VinylList::Collection => (
+                                        "✓  Already in your wantlist",
+                                        "This record is in both lists on Discogs",
+                                    ),
+                                    VinylList::Wantlist => (
+                                        "✓  Already in your collection",
+                                        "You already own this on Discogs",
+                                    ),
+                                }
+                            } else {
+                                (move_label, move_tip)
+                            };
+                            if ui
+                                .add_enabled(!c.also_in_other, egui::Button::new(move_label))
+                                .on_hover_note(move_tip)
+                                .on_disabled_hover_text(move_tip)
+                                .clicked()
+                            {
                                 action = Some(VinylGridAction::Move(c.key));
                                 ui.close_menu();
                             }
