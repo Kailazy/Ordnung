@@ -302,9 +302,58 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.job_rx = Some(rx);
         self.job_cancel = None; // a collection sync runs to completion
-        self.status = "Syncing vinyl collection…".into();
+        self.status = "Syncing vinyl collection and wantlist…".into();
         let db = self.db_path.clone();
         thread::spawn(move || run_refresh_vinyl(db, token, tx, ctx));
+    }
+
+    /// Run one user-requested change to a Discogs list — the vinyl grid's
+    /// move/remove actions and the library's "Add to Discogs wantlist". Writes
+    /// to the user's Discogs account off the UI thread, then mirrors the change
+    /// into the local cache so the grid updates on the reload `Done` triggers.
+    ///
+    /// Edits that destroy a collection copy are routed through a confirmation
+    /// first (see [`VinylEdit::destroys_collection_copy`]) — call this only once
+    /// the user has agreed, or for edits that don't need it.
+    pub(crate) fn spawn_vinyl_edit(&mut self, ctx: egui::Context, edit: VinylEdit) {
+        // One job channel serves the whole app, so starting an edit mid-job
+        // would orphan the running one. These are one-click actions from a menu
+        // (nothing queues them), so declining is enough.
+        if self.is_busy() {
+            self.status = "Busy — wait for the current job to finish.".into();
+            return;
+        }
+        let token = self.discogs_token();
+        if token.trim().is_empty() {
+            self.status = "No Discogs token set. Add one in Settings \
+                (https://www.discogs.com/settings/developers)."
+                .into();
+            self.settings_open = true;
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.job_rx = Some(rx);
+        self.job_cancel = None; // a handful of API calls; runs to completion
+        self.status = match &edit {
+            VinylEdit::Want { release_ids, .. } if release_ids.len() > 1 => {
+                format!("Adding {} releases to your wantlist…", release_ids.len())
+            }
+            VinylEdit::Want { .. } => "Adding to your wantlist…".into(),
+            VinylEdit::Move { from, .. } => match from {
+                VinylList::Collection => "Moving to your wantlist…".into(),
+                VinylList::Wantlist => "Moving to your collection…".into(),
+            },
+            VinylEdit::Remove { list, .. } => match list {
+                VinylList::Collection => "Removing from your collection…".into(),
+                VinylList::Wantlist => "Removing from your wantlist…".into(),
+            },
+        };
+        let db = self.db_path.clone();
+        // The username keys every collection/wantlist endpoint. Reuse the one a
+        // previous sync resolved when we have it; the worker falls back to an
+        // identity lookup (one extra request) when it's still blank.
+        let username = self.config.discogs_username.trim().to_string();
+        thread::spawn(move || run_vinyl_edit(db, token, username, edit, tx, ctx));
     }
 
     /// Walk every track that has no embedded *and* no external cover, ask
@@ -1183,20 +1232,43 @@ pub(crate) fn run_refresh_vinyl(
         }
     };
 
-    // Upsert metadata and prune records dropped from the collection, so the
-    // cache mirrors Discogs exactly. Cover bytes survive the metadata upsert.
-    let mut keep = Vec::with_capacity(records.len());
-    for rec in &records {
-        let _ = catalog.upsert_vinyl(rec);
-        keep.push(rec.instance_id);
-    }
-    let removed = catalog.prune_vinyl_not_in(&keep).unwrap_or(0);
+    let _ = tx.send(JobMsg::Status("Fetching Discogs wantlist…".into()));
+    ctx.request_repaint();
+    // The wantlist is a bonus section, not the point of the sync: if it fails
+    // (or the account has none), keep the collection we just fetched rather than
+    // failing the whole run.
+    let wants = client.fetch_wantlist_for(&username).unwrap_or_default();
 
-    // Download covers we don't already have, reporting progress as we go.
-    let missing = catalog.vinyl_missing_covers().unwrap_or_default();
+    // Upsert metadata and prune records dropped from each list, so the caches
+    // mirror Discogs exactly. Cover bytes survive the metadata upsert.
+    let mut removed = 0usize;
+    for (list, recs) in [
+        (VinylList::Collection, &records),
+        (VinylList::Wantlist, &wants),
+    ] {
+        let mut keep = Vec::with_capacity(recs.len());
+        for rec in recs.iter() {
+            let _ = catalog.upsert_vinyl(list, rec);
+            keep.push(rec.instance_id);
+        }
+        removed += catalog.prune_vinyl_not_in(list, &keep).unwrap_or(0);
+    }
+
+    // Download covers we don't already have, reporting progress across both
+    // lists as one run so the grid fills top to bottom.
+    let missing: Vec<(VinylList, u64, String)> = [VinylList::Collection, VinylList::Wantlist]
+        .into_iter()
+        .flat_map(|list| {
+            catalog
+                .vinyl_missing_covers(list)
+                .unwrap_or_default()
+                .into_iter()
+                .map(move |(id, url)| (list, id, url))
+        })
+        .collect();
     let total = missing.len();
     let mut fetched = 0usize;
-    for (i, (instance_id, url)) in missing.iter().enumerate() {
+    for (i, (list, instance_id, url)) in missing.iter().enumerate() {
         let _ = tx.send(JobMsg::Status(format!(
             "Downloading vinyl covers… ({}/{total})",
             i + 1
@@ -1204,7 +1276,7 @@ pub(crate) fn run_refresh_vinyl(
         let _ = tx.send(JobMsg::Progress { done: i, total });
         ctx.request_repaint();
         if let Some(png) = client.fetch_cover(url) {
-            if catalog.set_vinyl_cover(*instance_id, &png).is_ok() {
+            if catalog.set_vinyl_cover(*list, *instance_id, &png).is_ok() {
                 fetched += 1;
             }
         }
@@ -1219,10 +1291,232 @@ pub(crate) fn run_refresh_vinyl(
         String::new()
     };
     let _ = tx.send(JobMsg::Done(format!(
-        "Vinyl collection synced: {} record(s){removed_note}, {fetched} new cover(s).",
-        records.len()
+        "Vinyl synced: {} record(s), {} wantlisted{removed_note}, {fetched} new cover(s).",
+        records.len(),
+        wants.len()
     )));
     ctx.request_repaint();
+}
+
+/// Apply one [`VinylEdit`] to the user's Discogs account, then mirror it into
+/// the local cache so the grid reflects it immediately instead of waiting for
+/// the next full sync.
+///
+/// Discogs is always written first: if a call fails, the local cache is left
+/// untouched and still matches the account. Moves add to the destination list
+/// *before* removing from the source, so a half-failed move leaves the record in
+/// both lists (visible, and fixable) rather than in neither.
+pub(crate) fn run_vinyl_edit(
+    db: PathBuf,
+    token: String,
+    username: String,
+    edit: VinylEdit,
+    tx: Sender<JobMsg>,
+    ctx: egui::Context,
+) {
+    let catalog = match Catalog::open(&db) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            ctx.request_repaint();
+            return;
+        }
+    };
+    let client = discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
+
+    // Every collection/wantlist endpoint is keyed by username. Resolve it once
+    // if a previous sync hasn't already, and report it back so the next edit
+    // skips the lookup.
+    let username = if username.is_empty() {
+        match client.identity() {
+            Ok(u) => {
+                let _ = tx.send(JobMsg::VinylUsername(u.clone()));
+                u
+            }
+            Err(e) => {
+                let _ = tx.send(JobMsg::Failed(format!("resolving Discogs account: {e}")));
+                ctx.request_repaint();
+                return;
+            }
+        }
+    } else {
+        username
+    };
+
+    let done = match edit {
+        VinylEdit::Want { release_ids, label } => {
+            let total = release_ids.len();
+            // Added to Discogs but not cached locally: the vinyl view is
+            // records only, so a CD/digital release the user wanted from the
+            // library has nowhere to show. Counted so we can say so plainly
+            // rather than looking like the add silently did nothing.
+            let mut non_vinyl = 0usize;
+            let mut wanted = 0usize;
+            let mut failures: Vec<(String, String)> = Vec::new();
+            for (i, release_id) in release_ids.into_iter().enumerate() {
+                if total > 1 {
+                    let _ = tx.send(JobMsg::Progress { done: i, total });
+                    let _ = tx.send(JobMsg::Status(format!(
+                        "Adding to your wantlist… ({}/{total})",
+                        i + 1
+                    )));
+                    ctx.request_repaint();
+                }
+                match client.add_to_wantlist(&username, release_id) {
+                    Ok(Some(rec)) => {
+                        let _ = catalog.upsert_vinyl(VinylList::Wantlist, &rec);
+                        // Pull the cover now so the record isn't a blank tile
+                        // until the next sync. Best-effort: a failed image
+                        // download doesn't fail the want.
+                        if let Some(url) = rec.cover_url.as_deref() {
+                            if let Some(png) = client.fetch_cover(url) {
+                                let _ = catalog.set_vinyl_cover(
+                                    VinylList::Wantlist,
+                                    rec.instance_id,
+                                    &png,
+                                );
+                            }
+                        }
+                        wanted += 1;
+                    }
+                    Ok(None) => non_vinyl += 1,
+                    Err(e) => failures.push((format!("Release {release_id}"), e.to_string())),
+                }
+            }
+            if total > 1 {
+                let _ = tx.send(JobMsg::Progress { done: total, total });
+            }
+            if !failures.is_empty() {
+                let _ = tx.send(JobMsg::Failures {
+                    title: "Add to wantlist".into(),
+                    items: failures,
+                });
+            }
+            let non_vinyl_note = match non_vinyl {
+                0 => String::new(),
+                1 => " 1 isn't a vinyl pressing, so it won't show in the grid.".into(),
+                n => format!(" {n} aren't vinyl pressings, so they won't show in the grid."),
+            };
+            match (wanted, non_vinyl, total) {
+                // Every one failed; the failure report says why.
+                (0, 0, _) => "Nothing added to your wantlist.".to_string(),
+                // The common case: one release, wanted. Name it.
+                (1, 0, 1) => format!("Added {label} to your wantlist."),
+                _ => format!(
+                    "Added {} of {total} to your wantlist.{non_vinyl_note}",
+                    wanted + non_vinyl
+                ),
+            }
+        }
+
+        VinylEdit::Move { from, record } => {
+            let to = match from {
+                VinylList::Collection => VinylList::Wantlist,
+                VinylList::Wantlist => VinylList::Collection,
+            };
+            // Build the destination row first: the two lists key rows
+            // differently, so the record is re-keyed as part of the move. The
+            // `added` date belongs to the list it's leaving, so drop it — the
+            // next sync fills in the real one.
+            let mut moved = (*record).clone();
+            moved.added = None;
+            let result = match to {
+                VinylList::Wantlist => client.add_to_wantlist(&username, record.release_id).map(|_| {
+                    moved.instance_id = record.release_id;
+                    moved.folder_id = None;
+                }),
+                VinylList::Collection => {
+                    client
+                        .add_to_collection(&username, record.release_id)
+                        .map(|instance_id| {
+                            moved.instance_id = instance_id;
+                            moved.folder_id = Some(discogs::UNCATEGORIZED_FOLDER);
+                        })
+                }
+            };
+            if let Err(e) = result {
+                let _ = tx.send(JobMsg::Failed(format!(
+                    "adding {} to your {}: {e}",
+                    record.title,
+                    list_name(to)
+                )));
+                ctx.request_repaint();
+                return;
+            }
+            // Now drop the source copy. If this fails the record is in both
+            // lists on Discogs — say so, and leave the local cache alone so a
+            // sync shows the user exactly that state.
+            if let Err(e) = remove_from(&client, &username, from, &record) {
+                let _ = tx.send(JobMsg::Failed(format!(
+                    "{} is now in your {}, but removing it from your {} failed: {e}",
+                    record.title,
+                    list_name(to),
+                    list_name(from)
+                )));
+                ctx.request_repaint();
+                return;
+            }
+            let _ = catalog.move_vinyl(from, record.instance_id, to, &moved);
+            format!("Moved {} to your {}.", record.title, list_name(to))
+        }
+
+        VinylEdit::Remove { list, record } => {
+            if let Err(e) = remove_from(&client, &username, list, &record) {
+                let _ = tx.send(JobMsg::Failed(format!(
+                    "removing {} from your {}: {e}",
+                    record.title,
+                    list_name(list)
+                )));
+                ctx.request_repaint();
+                return;
+            }
+            let _ = catalog.delete_vinyl(list, record.instance_id);
+            format!("Removed {} from your {}.", record.title, list_name(list))
+        }
+    };
+
+    let _ = tx.send(JobMsg::Done(done));
+    ctx.request_repaint();
+}
+
+/// Drop one record from `list` on Discogs. A want is addressed by release id; a
+/// collection copy by the folder that holds it plus its instance id.
+///
+/// Rows cached before folders were recorded have no folder on file, so those ask
+/// Discogs which folder holds the copy rather than guessing — guessing would fail
+/// for anyone who files records into folders of their own. Everything synced
+/// since already knows its folder and removes in one call.
+fn remove_from(
+    client: &discogs::Client,
+    username: &str,
+    list: VinylList,
+    record: &VinylRecord,
+) -> Result<(), ordnung_core::Error> {
+    match list {
+        VinylList::Wantlist => client.remove_from_wantlist(username, record.release_id),
+        VinylList::Collection => {
+            let folder = match record.folder_id {
+                Some(f) => Some(f),
+                None => {
+                    client.collection_folder_of(username, record.release_id, record.instance_id)?
+                }
+            };
+            client.remove_from_collection(
+                username,
+                folder,
+                record.release_id,
+                record.instance_id,
+            )
+        }
+    }
+}
+
+/// How to name a Discogs list in a status message ("Moved X to your collection").
+fn list_name(list: VinylList) -> &'static str {
+    match list {
+        VinylList::Collection => "collection",
+        VinylList::Wantlist => "wantlist",
+    }
 }
 
 /// Discogs artwork lookup for every track that has neither an embedded cover

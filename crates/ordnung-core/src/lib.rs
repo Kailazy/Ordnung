@@ -23,4 +23,4 @@ pub use catalog::{
 };
 pub use error::{Error, Result};
 pub use model::key::{Camelot, Key, Mode, PitchClass};
-pub use model::{AudioProperties, Format, Playlist, Tags, Track, VinylRecord};
+pub use model::{AudioProperties, Format, Playlist, Tags, Track, VinylList, VinylRecord};

@@ -28,8 +28,14 @@ const RELEASE_URL: &str = "https://api.discogs.com/releases";
 const IDENTITY_URL: &str = "https://api.discogs.com/oauth/identity";
 /// Discogs returns at most 100 collection items per page; we walk every page.
 const COLLECTION_PER_PAGE: u32 = 100;
+/// Discogs's built-in "Uncategorized" collection folder. Folder `0` ("All") is a
+/// read-only view — adds must name a real folder — so a record added by Ordnung
+/// lands here, exactly where the discogs.com "Add to collection" button puts it.
+/// Also the fallback folder for deleting a cached copy whose folder wasn't
+/// recorded (rows cached before [`VinylRecord::folder_id`] existed).
+pub const UNCATEGORIZED_FOLDER: u32 = 1;
 /// Max side of a cached vinyl cover PNG. Bigger than the table thumbnail
-/// ([`THUMB_MAX_SIDE`]) because the "My Vinyl Collection" grid renders large
+/// ([`THUMB_MAX_SIDE`]) because the "Vinyl Collection" grid renders large
 /// album icons, but well under [`FULL_MAX_SIDE`] since these are display-only.
 const VINYL_COVER_MAX_SIDE: u32 = 400;
 /// Minimum spacing between Discogs *API* requests (search + release detail).
@@ -524,6 +530,160 @@ impl Client {
         Ok(out)
     }
 
+    /// Fetch the token owner's wantlist (`GET /users/{u}/wants`), keeping only
+    /// vinyl pressings — the same filter the collection fetch applies, since both
+    /// feed the records-only vinyl view. Wantlist items have no per-copy instance
+    /// id, so each record's `instance_id` mirrors its `release_id`. Paging and
+    /// pacing match [`Client::fetch_collection_for`].
+    pub fn fetch_wantlist_for(&self, username: &str) -> Result<Vec<VinylRecord>> {
+        let base = format!("https://api.discogs.com/users/{username}/wants");
+        let mut out = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let page_str = page.to_string();
+            let per_page = COLLECTION_PER_PAGE.to_string();
+            let resp = self.call_with_retry(|| {
+                self.agent
+                    .get(&base)
+                    .set("User-Agent", &self.user_agent)
+                    .set("Authorization", &format!("Discogs token={}", self.token))
+                    .query("page", &page_str)
+                    .query("per_page", &per_page)
+                    .query("sort", "added")
+                    .query("sort_order", "desc")
+            })?;
+            let body: WantlistResponse = resp.into_json().map_err(|e| {
+                Error::Network(format!("decoding Discogs wantlist response: {e}"))
+            })?;
+            for item in body.wants {
+                if let Some(rec) = item.into_record() {
+                    out.push(rec);
+                }
+            }
+            if page >= body.pagination.pages.max(1) {
+                break;
+            }
+            page += 1;
+        }
+        Ok(out)
+    }
+
+    // --- Writes -------------------------------------------------------------
+    //
+    // Everything above reads. The four methods below are the only calls that
+    // change the user's Discogs account, and each maps to exactly one explicit
+    // user action in the front-end — nothing here runs as a side effect of a
+    // sync. Each returns the metadata the caller needs to update its local cache
+    // without re-fetching the whole list.
+
+    /// Add `release_id` to `username`'s wantlist (`PUT /users/{u}/wants/{id}`).
+    /// Discogs treats this as idempotent: re-adding a release already wanted
+    /// succeeds and simply returns the existing want.
+    ///
+    /// Returns the created want as a [`VinylRecord`], or `Ok(None)` when the
+    /// release isn't a vinyl pressing — the want *was* added to Discogs either
+    /// way, but a CD/digital release has no place in the records-only vinyl
+    /// view, so the caller must not cache it (and should say so).
+    pub fn add_to_wantlist(&self, username: &str, release_id: u64) -> Result<Option<VinylRecord>> {
+        let url = format!("https://api.discogs.com/users/{username}/wants/{release_id}");
+        let resp = self.call_with_retry(|| self.authed(self.agent.put(&url)))?;
+        let item: WantItem = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs wantlist add response: {e}")))?;
+        Ok(item.into_record())
+    }
+
+    /// Drop `release_id` from `username`'s wantlist
+    /// (`DELETE /users/{u}/wants/{id}`). Wants aren't foldered, so the release id
+    /// alone addresses the item.
+    pub fn remove_from_wantlist(&self, username: &str, release_id: u64) -> Result<()> {
+        let url = format!("https://api.discogs.com/users/{username}/wants/{release_id}");
+        self.call_with_retry(|| self.authed(self.agent.delete(&url)))?;
+        Ok(())
+    }
+
+    /// Add `release_id` to `username`'s collection, in the folder that
+    /// discogs.com's own "Add to collection" button uses
+    /// ([`UNCATEGORIZED_FOLDER`]). Returns the new copy's `instance_id`, which
+    /// the caller needs both to key the local cache row and to remove the copy
+    /// later. Unlike the wantlist this is *not* idempotent — Discogs happily
+    /// records a second copy of a release you already own, so callers should
+    /// only offer this for releases not already in the collection.
+    pub fn add_to_collection(&self, username: &str, release_id: u64) -> Result<u64> {
+        let url = format!(
+            "https://api.discogs.com/users/{username}/collection/folders/\
+             {UNCATEGORIZED_FOLDER}/releases/{release_id}"
+        );
+        let resp = self.call_with_retry(|| self.authed(self.agent.post(&url)))?;
+        let added: CollectionAdd = resp.into_json().map_err(|e| {
+            Error::Network(format!("decoding Discogs collection add response: {e}"))
+        })?;
+        if added.instance_id == 0 {
+            return Err(Error::Network(
+                "Discogs accepted the collection add but returned no instance id".into(),
+            ));
+        }
+        Ok(added.instance_id)
+    }
+
+    /// Which collection folder holds a given copy
+    /// (`GET /users/{u}/collection/releases/{r}`, which lists every instance of
+    /// one release with its folder). `Ok(None)` means Discogs doesn't have that
+    /// instance — the copy is already gone.
+    ///
+    /// Only needed to repair a cache row that predates
+    /// [`VinylRecord::folder_id`]: a removal reaches for this rather than
+    /// guessing a folder and 404ing on anyone who files records into their own
+    /// folders. One extra request, and only in that case.
+    pub fn collection_folder_of(
+        &self,
+        username: &str,
+        release_id: u64,
+        instance_id: u64,
+    ) -> Result<Option<u32>> {
+        let url =
+            format!("https://api.discogs.com/users/{username}/collection/releases/{release_id}");
+        let resp = self.call_with_retry(|| self.authed(self.agent.get(&url)))?;
+        let body: CollectionResponse = resp.into_json().map_err(|e| {
+            Error::Network(format!("decoding Discogs collection lookup response: {e}"))
+        })?;
+        Ok(body
+            .releases
+            .iter()
+            .find(|item| item.instance_id == instance_id)
+            .map(|item| item.folder_id))
+    }
+
+    /// Remove one copy from `username`'s collection
+    /// (`DELETE /users/{u}/collection/folders/{f}/releases/{r}/instances/{i}`).
+    /// The copy is addressed through the folder that holds it, so pass the
+    /// record's own [`VinylRecord::folder_id`]; `None` falls back to
+    /// [`UNCATEGORIZED_FOLDER`]. This drops that copy's collection metadata
+    /// (date added, rating, notes) on Discogs and cannot be undone from here.
+    pub fn remove_from_collection(
+        &self,
+        username: &str,
+        folder_id: Option<u32>,
+        release_id: u64,
+        instance_id: u64,
+    ) -> Result<()> {
+        let folder = folder_id.unwrap_or(UNCATEGORIZED_FOLDER);
+        let url = format!(
+            "https://api.discogs.com/users/{username}/collection/folders/\
+             {folder}/releases/{release_id}/instances/{instance_id}"
+        );
+        self.call_with_retry(|| self.authed(self.agent.delete(&url)))?;
+        Ok(())
+    }
+
+    /// Attach the token + User-Agent every Discogs API request needs. The read
+    /// paths above set these inline (alongside their query parameters); the
+    /// writes carry no query string, so they share this one helper.
+    fn authed(&self, req: ureq::Request) -> ureq::Request {
+        req.set("User-Agent", &self.user_agent)
+            .set("Authorization", &format!("Discogs token={}", self.token))
+    }
+
     /// Download + downscale a vinyl cover image URL into a display PNG for the
     /// collection grid. `None` on any network/decode failure (the grid then shows
     /// a placeholder). CDN image downloads don't count against the API rate limit.
@@ -675,6 +835,11 @@ struct CollectionItem {
     id: u64,
     #[serde(default)]
     instance_id: u64,
+    /// Which folder holds this copy. Present on every item even though we fetch
+    /// through folder 0 ("All"), which is what makes deleting the instance later
+    /// possible — the delete endpoint is addressed through the *real* folder.
+    #[serde(default)]
+    folder_id: u32,
     #[serde(default)]
     date_added: String,
     #[serde(default)]
@@ -698,6 +863,45 @@ struct BasicInformation {
     formats: Vec<CollectionFormat>,
 }
 
+/// Response to `POST .../collection/folders/{f}/releases/{r}`. Discogs echoes
+/// back only the new copy's identity — no `basic_information` — so the caller
+/// rebuilds the cache row from metadata it already has plus this instance id.
+#[derive(Debug, Default, Deserialize)]
+struct CollectionAdd {
+    #[serde(default)]
+    instance_id: u64,
+}
+
+/// One page of `GET /users/{u}/wants`. Same pagination shape as the collection;
+/// the items live under `wants` and carry no `instance_id`.
+#[derive(Debug, Deserialize)]
+struct WantlistResponse {
+    #[serde(default)]
+    pagination: CollectionPagination,
+    #[serde(default)]
+    wants: Vec<WantItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WantItem {
+    #[serde(default)]
+    id: u64,
+    #[serde(default)]
+    date_added: String,
+    #[serde(default)]
+    basic_information: BasicInformation,
+}
+
+impl WantItem {
+    /// Build a [`VinylRecord`], or `None` if the wanted release isn't vinyl.
+    /// A want has no per-copy instance, so `instance_id` mirrors the release id
+    /// (which is what keys the wantlist cache).
+    fn into_record(self) -> Option<VinylRecord> {
+        self.basic_information
+            .into_record(self.id, self.id, None, self.date_added)
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct CollectionArtist {
     #[serde(default)]
@@ -714,10 +918,25 @@ struct CollectionFormat {
 
 impl CollectionItem {
     /// Build a [`VinylRecord`], or `None` if this item isn't a vinyl pressing.
-    /// Discogs lists CDs, files and cassettes in the same collection; the "My
-    /// Vinyl Collection" view is records only, so non-vinyl formats are dropped.
     fn into_record(self) -> Option<VinylRecord> {
-        let bi = self.basic_information;
+        self.basic_information
+            .into_record(self.instance_id, self.id, Some(self.folder_id), self.date_added)
+    }
+}
+
+impl BasicInformation {
+    /// Build a [`VinylRecord`] from the release metadata a collection *or*
+    /// wantlist item carries, or `None` if it isn't a vinyl pressing. Discogs
+    /// lists CDs, files and cassettes in both; the "Vinyl Collection" view is
+    /// records only, so non-vinyl formats are dropped.
+    fn into_record(
+        self,
+        instance_id: u64,
+        release_id: u64,
+        folder_id: Option<u32>,
+        date_added: String,
+    ) -> Option<VinylRecord> {
+        let bi = self;
         let is_vinyl = bi
             .formats
             .iter()
@@ -745,8 +964,8 @@ impl CollectionItem {
             None => (None, None),
         };
         Some(VinylRecord {
-            instance_id: self.instance_id,
-            release_id: self.id,
+            instance_id,
+            release_id,
             title: bi.title,
             artist,
             year: bi.year.filter(|y| *y > 0),
@@ -755,7 +974,8 @@ impl CollectionItem {
             format,
             thumb_url: none_if_empty(bi.thumb),
             cover_url: none_if_empty(bi.cover_image),
-            added: none_if_empty(self.date_added),
+            added: none_if_empty(date_added),
+            folder_id,
             has_cover: false,
         })
     }
@@ -982,6 +1202,7 @@ mod tests {
         CollectionItem {
             id: 42,
             instance_id: 1001,
+            folder_id: 3,
             date_added: "2021-03-04T12:00:00-08:00".into(),
             basic_information: BasicInformation {
                 title: "Plastikman EP".into(),
@@ -1014,6 +1235,36 @@ mod tests {
         assert_eq!(rec.format.as_deref(), Some("Vinyl, 12\", 45 RPM"));
         assert_eq!(rec.cover_url.as_deref(), Some("https://img/cover.jpg"));
         assert!(!rec.has_cover);
+    }
+
+    #[test]
+    fn wantlist_item_keys_on_release_id() {
+        let item = WantItem {
+            id: 42,
+            date_added: "2024-01-02T00:00:00-08:00".into(),
+            basic_information: vinyl_item().basic_information,
+        };
+        let rec = item.into_record().expect("want item -> record");
+        // A want has no per-copy instance; the release id keys it.
+        assert_eq!(rec.release_id, 42);
+        assert_eq!(rec.instance_id, 42);
+        assert_eq!(rec.artist, "Plastikman");
+        assert_eq!(rec.added.as_deref(), Some("2024-01-02T00:00:00-08:00"));
+    }
+
+    #[test]
+    fn wantlist_item_skips_non_vinyl() {
+        let mut bi = vinyl_item().basic_information;
+        bi.formats = vec![CollectionFormat {
+            name: "File".into(),
+            descriptions: vec!["WAV".into()],
+        }];
+        let item = WantItem {
+            id: 42,
+            date_added: String::new(),
+            basic_information: bi,
+        };
+        assert!(item.into_record().is_none());
     }
 
     #[test]

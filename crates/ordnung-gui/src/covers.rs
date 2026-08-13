@@ -44,28 +44,30 @@ impl App {
         }
     }
 
-    /// Ask the vinyl-cover worker to decode `instance_id`'s cached cover unless
-    /// it's already loaded or in flight. Mirrors `request_thumb` for table rows.
-    pub(crate) fn request_vinyl_cover(&mut self, instance_id: u64) {
-        if self.vinyl_covers.contains_key(&instance_id) {
+    /// Ask the vinyl-cover worker to decode one record's cached cover unless it's
+    /// already loaded or in flight. Mirrors `request_thumb` for table rows.
+    pub(crate) fn request_vinyl_cover(&mut self, key: VinylCoverKey) {
+        if self.vinyl_covers.contains_key(&key) {
             return;
         }
-        self.vinyl_covers.insert(instance_id, ThumbState::Loading);
-        let _ = self.vinyl_cover_req_tx.send(instance_id);
+        self.vinyl_covers.insert(key, ThumbState::Loading);
+        let _ = self.vinyl_cover_req_tx.send(key);
     }
 
     /// Drain finished vinyl-cover decodes, uploading each to a texture. Called
     /// once per frame alongside `poll_thumbs`.
     pub(crate) fn poll_vinyl_covers(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.vinyl_cover_rx.try_recv() {
+            let (list, id) = msg.key;
             let tex = msg.image.map(|img| {
-                self.tex_graveyard.wrap(ctx.load_texture(
-                    format!("vinyl-{}", msg.id),
-                    img,
-                    egui::TextureOptions::LINEAR,
-                ))
+                let name = match list {
+                    VinylList::Collection => format!("vinyl-{id}"),
+                    VinylList::Wantlist => format!("vinyl-want-{id}"),
+                };
+                self.tex_graveyard
+                    .wrap(ctx.load_texture(name, img, egui::TextureOptions::LINEAR))
             });
-            self.vinyl_covers.insert(msg.id, ThumbState::Ready(tex));
+            self.vinyl_covers.insert(msg.key, ThumbState::Ready(tex));
         }
     }
 
@@ -461,23 +463,24 @@ pub(crate) fn spawn_thumb_loader(
     });
 }
 
-/// Persistent loader for vinyl-collection cover art: one long-lived catalog
-/// connection decodes each record's cached cover PNG off the UI thread, keyed by
-/// Discogs `instance_id` (carried in `CoverLoaded::id`).
+/// Persistent loader for vinyl cover art: one long-lived catalog connection
+/// decodes each record's cached cover PNG off the UI thread. Serves both the
+/// collection and the wantlist — the request key says which cache to read.
 pub(crate) fn spawn_vinyl_cover_loader(
     db: PathBuf,
     ctx: egui::Context,
-    req_rx: Receiver<u64>,
-    tx: Sender<CoverLoaded>,
+    req_rx: Receiver<VinylCoverKey>,
+    tx: Sender<VinylCoverLoaded>,
 ) {
     thread::spawn(move || {
         let catalog = match Catalog::open(&db) {
             Ok(c) => c,
             Err(_) => return,
         };
-        while let Ok(instance_id) = req_rx.recv() {
+        while let Ok(key) = req_rx.recv() {
+            let (list, id) = key;
             let image = catalog
-                .vinyl_cover(instance_id)
+                .vinyl_cover(list, id)
                 .ok()
                 .flatten()
                 .and_then(|bytes| image::load_from_memory(&bytes).ok())
@@ -486,13 +489,7 @@ pub(crate) fn spawn_vinyl_cover_loader(
                     let size = [rgba.width() as usize, rgba.height() as usize];
                     egui::ColorImage::from_rgba_unmultiplied(size, &rgba.into_raw())
                 });
-            if tx
-                .send(CoverLoaded {
-                    id: instance_id,
-                    image,
-                })
-                .is_err()
-            {
+            if tx.send(VinylCoverLoaded { key, image }).is_err() {
                 break;
             }
             ctx.request_repaint();

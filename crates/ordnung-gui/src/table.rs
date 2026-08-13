@@ -94,6 +94,7 @@ impl App {
             || self.convert_modal.is_some()
             || self.batch_convert.is_some()
             || self.confirm_delete.is_some()
+            || self.confirm_vinyl_edit.is_some()
             || self.settings_open
             || !self.artwork_queue.is_empty()
     }
@@ -691,6 +692,9 @@ impl App {
         // its "Add to playlist" submenu and decide which playlist-only items to
         // show without borrowing `self` mutably inside the closure.
         let mut menu_action: Option<TrackMenuAction> = None;
+        // track → Discogs release, so the menu can offer "Add to Discogs
+        // wantlist" only for tracks whose release is actually known.
+        let track_releases = &self.track_releases;
         // The track ids of a ⌥-drag that started this frame, set in a row closure
         // below. Resolved to source-file paths and returned at the end so the
         // caller can begin the native macOS drag-out *after* these closures (and
@@ -1611,6 +1615,51 @@ impl App {
                                             menu_action = Some(TrackMenuAction::EditRelease(r.id));
                                             ui.close_menu();
                                         }
+                                        // Wantlist the release behind the selection —
+                                        // "I have the file, now I want the record".
+                                        // Only the tracks with a fetched release can
+                                        // go, and several tracks off one record
+                                        // collapse to a single want.
+                                        let mut want: Vec<u64> = drag_ids
+                                            .iter()
+                                            .filter_map(|id| track_releases.get(id).copied())
+                                            .collect();
+                                        want.sort_unstable();
+                                        want.dedup();
+                                        let want_label = match want.len() {
+                                            0 | 1 => "Add to Discogs wantlist".to_string(),
+                                            n => format!("Add to Discogs wantlist ({n} releases)"),
+                                        };
+                                        let want_tip = if want.is_empty() {
+                                            "No Discogs release on file for this \
+                                             selection. Run Edit release… first."
+                                                .to_string()
+                                        } else {
+                                            "Want these records on Discogs".to_string()
+                                        };
+                                        if ui
+                                            .add_enabled(
+                                                !want.is_empty(),
+                                                egui::Button::new(want_label),
+                                            )
+                                            .on_hover_note(want_tip.clone())
+                                            .on_disabled_hover_text(want_tip)
+                                            .clicked()
+                                        {
+                                            // Name the *release* in the status
+                                            // line — that's what gets wanted, not
+                                            // the track that pointed at it.
+                                            let named = if r.album.trim().is_empty() {
+                                                short(&r.title, "this release")
+                                            } else {
+                                                short(&r.album, "this release")
+                                            };
+                                            menu_action = Some(TrackMenuAction::AddToWantlist(
+                                                want,
+                                                named.to_string(),
+                                            ));
+                                            ui.close_menu();
+                                        }
                                         // Fetch from Discogs for the whole selection (or just
                                         // this row when it isn't part of the selection), using
                                         // the same per-track release picker as the toolbar.
@@ -1996,6 +2045,12 @@ impl App {
             }
             Some(TrackMenuAction::FetchSongDetails(ids)) => {
                 self.spawn_fetch_tracks(ctx_clone.clone(), ids, true);
+            }
+            Some(TrackMenuAction::AddToWantlist(release_ids, label)) => {
+                self.spawn_vinyl_edit(
+                    ctx_clone.clone(),
+                    VinylEdit::Want { release_ids, label },
+                );
             }
             None => {}
         }

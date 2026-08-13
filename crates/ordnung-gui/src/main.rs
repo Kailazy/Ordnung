@@ -34,7 +34,7 @@ use ordnung_core::convert::{self, ConvertSpec};
 use ordnung_core::discogs;
 use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
-    Analysis, Format, Id, Playlist, Tags, Track, TranscodeVerdict, VinylRecord,
+    Analysis, Format, Id, Playlist, Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
 };
 use ordnung_core::{best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind, ScannedTrack};
 use player::*;
@@ -590,6 +590,61 @@ struct CoverLoaded {
     image: Option<egui::ColorImage>,
 }
 
+/// Identity of one vinyl cover: which Discogs list it belongs to and that list's
+/// row key (`instance_id` for the collection, `release_id` for the wantlist).
+type VinylCoverKey = (VinylList, u64);
+
+/// Result of a background vinyl cover decode, carrying the key that asked for it
+/// so the collection and wantlist grids never cross wires.
+struct VinylCoverLoaded {
+    key: VinylCoverKey,
+    image: Option<egui::ColorImage>,
+}
+
+/// One user-requested change to a Discogs list. Every variant writes to the
+/// user's actual Discogs account and then mirrors the change into the local
+/// cache, so the grid reflects it without waiting for a full sync. Built by the
+/// vinyl grid's right-click menu and the library's "Add to Discogs wantlist",
+/// then run off the UI thread by `run_vinyl_edit`.
+#[derive(Debug, Clone)]
+pub(crate) enum VinylEdit {
+    /// Want these releases, named from the library rather than the grid — so
+    /// there's no cached record yet and Discogs's response supplies the metadata.
+    /// Carries a label for the status line, since the ids mean nothing to the user.
+    Want { release_ids: Vec<u64>, label: String },
+    /// Move one cached record to the other list. Two Discogs calls (add to the
+    /// destination, remove from the source), then one local re-key.
+    Move {
+        from: VinylList,
+        record: Box<VinylRecord>,
+    },
+    /// Drop one cached record from its list entirely.
+    Remove {
+        list: VinylList,
+        record: Box<VinylRecord>,
+    },
+}
+
+impl VinylEdit {
+    /// Whether this edit destroys a collection copy on Discogs — its date added,
+    /// rating and notes go with it, and Ordnung can't put them back. True for
+    /// both an outright removal from the collection and a move out of it; those
+    /// are the edits worth a confirmation step. Wantlist edits are cheap to undo
+    /// (re-adding a want costs nothing but the release id), so they just run.
+    pub(crate) fn destroys_collection_copy(&self) -> bool {
+        matches!(
+            self,
+            VinylEdit::Move {
+                from: VinylList::Collection,
+                ..
+            } | VinylEdit::Remove {
+                list: VinylList::Collection,
+                ..
+            }
+        )
+    }
+}
+
 /// Result of a background "what would this release fill in?" lookup, computed for
 /// the "Fetch song data" picker so the user can see the data before committing.
 /// Carries the human-readable (field, value) rows to display and the underlying
@@ -711,22 +766,36 @@ struct App {
     /// The user's cached Discogs vinyl collection, shown in the `Vinyl` grid view.
     /// Repopulated from the `vinyl_collection` table on every `reload`.
     vinyl: Vec<VinylRecord>,
+    /// The user's cached Discogs wantlist — records they want but don't own —
+    /// rendered as its own section below the collection in the same view.
+    /// Repopulated from the `vinyl_wantlist` table alongside `vinyl`.
+    wantlist: Vec<VinylRecord>,
     /// Count of cached vinyl records, for the sidebar label. Kept fresh on reload
     /// so the badge is right even when the grid isn't the active view.
     vinyl_count: u64,
-    /// Decoded vinyl cover textures keyed by Discogs `instance_id` (reuses
+    /// Decoded vinyl cover textures keyed by list + Discogs `instance_id` (reuses
     /// `ThumbState`). Loaded lazily by the vinyl-cover worker as cells render,
-    /// mirroring `cover_cache` for table rows.
-    vinyl_covers: HashMap<u64, ThumbState>,
+    /// mirroring `cover_cache` for table rows. The list is part of the key because
+    /// collection instance ids and wantlist release ids are separate id spaces.
+    vinyl_covers: HashMap<VinylCoverKey, ThumbState>,
     /// Asks the vinyl-cover worker to load + decode one record's cached cover.
-    vinyl_cover_req_tx: Sender<u64>,
-    /// Finished vinyl-cover decodes (reuses `CoverLoaded`; `id` carries the
-    /// `instance_id`). Drained each frame, uploaded to a texture, and cached.
-    vinyl_cover_rx: Receiver<CoverLoaded>,
+    vinyl_cover_req_tx: Sender<VinylCoverKey>,
+    /// Finished vinyl-cover decodes. Drained each frame, uploaded to a texture,
+    /// and cached under the same key that requested them.
+    vinyl_cover_rx: Receiver<VinylCoverLoaded>,
     /// Discogs `release_id` → catalog track ids that link to it (via fetched
     /// artwork/metadata). Lets the vinyl grid flag records you already own a
     /// digital copy of and jump to them. Rebuilt with `vinyl` on reload.
     vinyl_links: HashMap<u64, Vec<Id>>,
+    /// The reverse map: catalog track id → the Discogs `release_id` its artwork
+    /// fetch settled on. Drives the library's "Add to Discogs wantlist" action,
+    /// which is only offered for tracks that actually have a release to want.
+    /// Rebuilt on every reload (one indexed scan of the artwork table).
+    track_releases: HashMap<Id, u64>,
+    /// A pending Discogs list change awaiting confirmation, because it would
+    /// destroy collection metadata on the user's account (see [`VinylEdit`]).
+    /// `Some` shows the confirm modal; the edit only runs if they say yes.
+    confirm_vinyl_edit: Option<VinylEdit>,
     /// A track the table should scroll to and reveal on the next frame, set when
     /// jumping into the catalog from the vinyl grid. Cleared once honoured.
     scroll_to_track: Option<Id>,
@@ -1201,6 +1270,10 @@ enum TrackMenuAction {
     /// Fetch full song details for the target track(s): search Discogs, pick a
     /// release per track, cache its cover and fill the track's empty tag fields.
     FetchSongDetails(Vec<Id>),
+    /// Add the Discogs releases behind the target track(s) to the user's
+    /// wantlist. Carries the deduplicated release ids (several tracks off one
+    /// record are one want) and a label naming the release for the status line.
+    AddToWantlist(Vec<u64>, String),
 }
 
 fn default_db_path() -> Option<PathBuf> {

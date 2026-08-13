@@ -20,9 +20,9 @@ impl App {
         let (thumb_req_tx, thumb_req_rx) = mpsc::channel::<Id>();
         let (thumb_tx, thumb_rx) = mpsc::channel();
         spawn_thumb_loader(db_path.clone(), egui_ctx.clone(), thumb_req_rx, thumb_tx);
-        // A second long-lived loader for vinyl-collection cover art, keyed by
-        // Discogs instance_id (reusing the `CoverLoaded` carrier).
-        let (vinyl_cover_req_tx, vinyl_cover_req_rx) = mpsc::channel::<u64>();
+        // A second long-lived loader for vinyl cover art (collection + wantlist),
+        // keyed by list and that list's row id.
+        let (vinyl_cover_req_tx, vinyl_cover_req_rx) = mpsc::channel::<VinylCoverKey>();
         let (vinyl_cover_tx, vinyl_cover_rx) = mpsc::channel();
         spawn_vinyl_cover_loader(
             db_path.clone(),
@@ -60,11 +60,14 @@ impl App {
             cover_tx,
             cover_rx,
             vinyl: Vec::new(),
+            wantlist: Vec::new(),
             vinyl_count: 0,
             vinyl_covers: HashMap::new(),
             vinyl_cover_req_tx,
             vinyl_cover_rx,
             vinyl_links: HashMap::new(),
+            track_releases: HashMap::new(),
+            confirm_vinyl_edit: None,
             scroll_to_track: None,
             row_screen_rects: Vec::new(),
             cover_drop: None,
@@ -326,22 +329,48 @@ impl App {
         // of the active view; only hold the full record list (and its cover
         // textures) while the grid is actually showing.
         self.vinyl_count = Catalog::open(&self.db_path)
-            .and_then(|c| c.vinyl_count())
+            .and_then(|c| c.vinyl_count(VinylList::Collection))
             .unwrap_or(0);
+        // track → Discogs release, so the library's right-click menu knows which
+        // tracks have a release worth wantlisting. Loaded in every view (unlike
+        // the grid's reverse map below) because that menu is the library's.
+        self.track_releases = Catalog::open(&self.db_path)
+            .and_then(|c| c.release_track_links())
+            .map(|pairs| pairs.into_iter().map(|(rid, tid)| (tid, rid)).collect())
+            .unwrap_or_default();
         if self.view == LibraryView::Vinyl {
             self.vinyl = Catalog::open(&self.db_path)
-                .and_then(|c| c.list_vinyl())
+                .and_then(|c| c.list_vinyl(VinylList::Collection))
+                .unwrap_or_default();
+            self.wantlist = Catalog::open(&self.db_path)
+                .and_then(|c| c.list_vinyl(VinylList::Wantlist))
                 .unwrap_or_default();
             // Evict cover textures for records no longer present (`Tex` makes
             // the mid-frame eviction safe — see `tex.rs`).
-            let live: std::collections::BTreeSet<u64> =
-                self.vinyl.iter().map(|v| v.instance_id).collect();
-            self.vinyl_covers.retain(|id, _| live.contains(id));
+            let live: HashSet<VinylCoverKey> = self
+                .vinyl
+                .iter()
+                .map(|v| (VinylList::Collection, v.instance_id))
+                .chain(
+                    self.wantlist
+                        .iter()
+                        .map(|v| (VinylList::Wantlist, v.instance_id)),
+                )
+                .collect();
+            self.vinyl_covers.retain(|key, _| live.contains(key));
             // Cross-reference the catalog: which records do we already own a
             // digital copy of? Build release_id → [track_id] once for the grid.
             // Exact release-id links first, metadata matching as a fallback.
+            // Both lists are cross-referenced: a wanted record you already have
+            // digitally is worth flagging too.
+            let records: Vec<VinylRecord> = self
+                .vinyl
+                .iter()
+                .chain(self.wantlist.iter())
+                .cloned()
+                .collect();
             self.vinyl_links = Catalog::open(&self.db_path)
-                .and_then(|c| c.vinyl_catalog_links(&self.vinyl))
+                .and_then(|c| c.vinyl_catalog_links(&records))
                 .map(|pairs| {
                     let mut m: HashMap<u64, Vec<Id>> = HashMap::new();
                     for (rid, tid) in pairs {
@@ -350,8 +379,9 @@ impl App {
                     m
                 })
                 .unwrap_or_default();
-        } else if !self.vinyl.is_empty() {
+        } else if !self.vinyl.is_empty() || !self.wantlist.is_empty() {
             self.vinyl = Vec::new();
+            self.wantlist = Vec::new();
             // Runs mid-frame when the grid's "in catalog" badge jumps to the
             // Library after painting these covers; safe because `Tex` defers
             // the frees to the next frame (see `tex.rs`).
@@ -1344,9 +1374,9 @@ impl eframe::App for App {
                         }
                         // ── Sources ──
                         let vinyl_label = if self.vinyl_count > 0 {
-                            format!("💿  My Vinyl Collection ({})", self.vinyl_count)
+                            format!("💿  Vinyl Collection ({})", self.vinyl_count)
                         } else {
-                            "💿  My Vinyl Collection".to_string()
+                            "💿  Vinyl Collection".to_string()
                         };
                         if nav_button(
                             ui,
@@ -1810,6 +1840,7 @@ impl eframe::App for App {
         self.draw_clear_db_confirm(ctx);
         self.draw_bulk_write_confirm(ctx);
         self.draw_delete_confirm(ctx);
+        self.draw_vinyl_edit_confirm(ctx);
         self.draw_failure_report(ctx);
 
         // Keep the UI moving while a worker thread is active, or while there are

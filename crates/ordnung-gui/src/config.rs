@@ -16,7 +16,7 @@ pub struct Config {
     #[serde(default)]
     pub discogs_token: String,
     /// Discogs username of the token owner, captured on the first collection
-    /// sync. Lets the "My Vinyl Collection" view link to the user's collection
+    /// sync. Lets the "Vinyl Collection" view link to the user's collection
     /// page across launches without re-resolving it. Empty until a sync runs.
     #[serde(default)]
     pub discogs_username: String,

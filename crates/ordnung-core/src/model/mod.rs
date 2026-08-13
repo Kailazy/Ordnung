@@ -281,12 +281,26 @@ pub struct Playlist {
     pub track_ids: Vec<Id>,
 }
 
+/// Which Discogs list a [`VinylRecord`] came from: records the user owns, or
+/// records they want. Both are cached in the catalog with the same shape and
+/// rendered by the same grid, so every vinyl cache call takes one of these
+/// rather than duplicating the API per list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VinylList {
+    /// The Discogs collection — records the user owns.
+    Collection,
+    /// The Discogs wantlist — records the user wants.
+    Wantlist,
+}
+
 /// One record in the user's Discogs vinyl collection, cached locally so the
-/// "My Vinyl Collection" view renders offline and a refresh only fetches what's
+/// "Vinyl Collection" view renders offline and a refresh only fetches what's
 /// new. `instance_id` is Discogs's per-copy id (unique even when you own two
-/// pressings of the same release), so it's the stable primary key. Cover image
-/// bytes are stored separately in the catalog (fetched lazily) and are not
-/// carried on this metadata shape.
+/// pressings of the same release), so it's the stable primary key. Wantlist
+/// items have no per-copy instance — Discogs keys them by release alone — so
+/// there `instance_id` mirrors `release_id`. Cover image bytes are stored
+/// separately in the catalog (fetched lazily) and are not carried on this
+/// metadata shape.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VinylRecord {
     pub instance_id: u64,
@@ -303,6 +317,12 @@ pub struct VinylRecord {
     pub cover_url: Option<String>,
     /// Discogs `date_added` for the collection item, as listed (e.g. ISO 8601).
     pub added: Option<String>,
+    /// Which Discogs collection folder holds this copy. Deleting a collection
+    /// instance is addressed *through* its folder, so the id has to survive the
+    /// round trip through the local cache. `None` for wantlist items (wants
+    /// aren't foldered) and for collection rows cached before folders were
+    /// recorded — see [`crate::discogs::UNCATEGORIZED_FOLDER`] for the fallback.
+    pub folder_id: Option<u32>,
     /// True once a cover image has been downloaded and cached for this record.
     pub has_cover: bool,
 }

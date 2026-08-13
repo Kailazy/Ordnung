@@ -1495,6 +1495,84 @@ impl App {
         }
     }
 
+    /// "Remove this record from your Discogs collection?" confirmation. Gates the
+    /// two vinyl-grid actions that destroy a collection copy on the user's actual
+    /// Discogs account — an outright removal and a move to the wantlist. Both
+    /// take that copy's date added, rating and notes with them, and Ordnung has
+    /// no way to restore them. Wantlist-only edits skip this: re-wanting a
+    /// release costs nothing.
+    pub(crate) fn draw_vinyl_edit_confirm(&mut self, ctx: &egui::Context) {
+        let Some(edit) = self.confirm_vinyl_edit.clone() else {
+            return;
+        };
+        // Only collection-destroying edits are parked here (see
+        // `request_vinyl_edit`), so both arms describe leaving the collection.
+        let (record, moving) = match &edit {
+            VinylEdit::Move { record, .. } => (record, true),
+            VinylEdit::Remove { record, .. } => (record, false),
+            VinylEdit::Want { .. } => return,
+        };
+        let title = if moving {
+            "Move out of your collection?"
+        } else {
+            "Remove from your collection?"
+        };
+        let mut open = true;
+        let mut confirm = false;
+        egui::Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.set_min_width(400.0);
+                ui.label(
+                    egui::RichText::new(format!("{} — {}", record.artist, record.title)).strong(),
+                );
+                ui.add_space(4.0);
+                let detail = if moving {
+                    "This gives up your copy on Discogs and adds the release to your \
+                     wantlist instead. The copy's date added, rating and notes are lost."
+                } else {
+                    "This deletes your copy from your Discogs collection, along with its \
+                     date added, rating and notes."
+                };
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{detail} It changes your real Discogs account and can't be undone \
+                         from Ordnung."
+                    ))
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_vinyl_edit = None;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let btn = egui::Button::new(
+                            egui::RichText::new(if moving { "Move" } else { "Remove" })
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(150, 60, 60));
+                        if ui.add(btn).clicked() {
+                            confirm = true;
+                        }
+                    });
+                });
+            });
+
+        if confirm {
+            self.confirm_vinyl_edit = None;
+            self.spawn_vinyl_edit(ctx.clone(), edit);
+        }
+        if !open {
+            self.confirm_vinyl_edit = None;
+        }
+    }
+
     /// Modal picker: shows every Discogs release candidate found for the front
     /// track and lets the user choose one (or skip). Nothing is written to the
     /// catalog until Save; the full-resolution image for the chosen release is

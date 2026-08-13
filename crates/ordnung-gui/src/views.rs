@@ -23,6 +23,38 @@ fn confirm_window(
     win.show(ctx, add_contents);
 }
 
+/// One cell of a vinyl grid: everything the cover tile draws, snapshotted from a
+/// `VinylRecord` so the render closure never borrows the record lists. Shared by
+/// the collection and wantlist sections of the vinyl view.
+struct VinylCell {
+    /// Cover cache key: which list this belongs to, plus that list's row id.
+    key: VinylCoverKey,
+    release_id: u64,
+    title: String,
+    artist: String,
+    /// Second caption line, e.g. `1993 · Vinyl, 12"`.
+    sub: String,
+    has_cover: bool,
+    /// Catalog track ids linked to this release — empty if you don't own a
+    /// digital copy. Drives the "in catalog" badge and the jump-to.
+    linked: Vec<Id>,
+}
+
+/// What a click or right-click in the vinyl grid asked for. Returned from the
+/// render closure and applied by the caller, once the borrows the grid holds on
+/// the record lists are released. Edits name their record by cache key
+/// (`list` + `instance_id`) rather than carrying it, so the caller resolves it
+/// against the live lists.
+enum VinylGridAction {
+    /// Show the catalog tracks linked to this release: the release title (to
+    /// narrow the library by album) and the track ids to select.
+    Goto(String, Vec<Id>),
+    /// Move this record to the other Discogs list.
+    Move(VinylCoverKey),
+    /// Drop this record from the list it's in.
+    Remove(VinylCoverKey),
+}
+
 impl App {
     /// Recount tracks with a missing source file (drives the toolbar's relocate
     /// button). Kept out of `reload` so filter keystrokes don't stat the whole
@@ -734,15 +766,11 @@ impl App {
     /// stale catalog row (and its playlist/analysis links), never a real file, since
     /// the file is already gone. Mirrors the Duplicates view's staged-action +
     /// confirmation pattern.
-    /// The "My Vinyl Collection" view: a grid of large cover icons backed by the
+    /// The "Vinyl Collection" view: a grid of large cover icons backed by the
     /// local Discogs cache, with a Refresh button that re-syncs from Discogs.
+    /// Records the user *wants* follow in their own Wantlist section below,
+    /// rendered by the same grid from the same sync.
     pub(crate) fn draw_vinyl(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        /// Side length of each cover icon in points — deliberately large so the
-        /// grid reads as a record wall rather than a list.
-        const COVER: f32 = 150.0;
-        /// Gap between cells (and the width budget for the caption under each).
-        const GAP: f32 = 14.0;
-
         let busy = self.is_busy();
         let mut refresh = false;
         // The user's Discogs collection page, known once a sync has resolved the
@@ -754,7 +782,7 @@ impl App {
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.heading("My Vinyl Collection");
+            ui.heading("Vinyl Collection");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_enabled_ui(!busy, |ui| {
                     if ui
@@ -778,12 +806,12 @@ impl App {
         });
         ui.separator();
 
-        if self.vinyl.is_empty() {
+        if self.vinyl.is_empty() && self.wantlist.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.vertical_centered(|ui| {
                     ui.heading("No vinyl synced yet");
                     ui.add_space(6.0);
-                    ui.label("Pull your record collection straight from Discogs.");
+                    ui.label("Pull your record collection and wantlist straight from Discogs.");
                     ui.add_space(4.0);
                     ui.label(
                         egui::RichText::new(
@@ -811,22 +839,129 @@ impl App {
             return;
         }
 
-        // Snapshot what we render so the scroll closure doesn't borrow `self.vinyl`
-        // while we read the cover cache. Kick off cover decodes up front (the
-        // request is deduplicated, so doing it every frame is cheap).
-        struct Cell {
-            instance_id: u64,
-            release_id: u64,
-            title: String,
-            artist: String,
-            sub: String,
-            has_cover: bool,
-            /// Catalog track ids linked to this release — empty if you don't own
-            /// a digital copy. Drives the "in catalog" badge and the jump-to.
-            linked: Vec<Id>,
+        // Snapshot what we render so the scroll closure doesn't borrow the record
+        // lists while we read the cover cache. Kick off cover decodes up front
+        // (the request is deduplicated, so doing it every frame is cheap).
+        let owned = self.vinyl_cells(VinylList::Collection, &self.vinyl);
+        let wanted = self.vinyl_cells(VinylList::Wantlist, &self.wantlist);
+        for c in owned.iter().chain(wanted.iter()) {
+            if c.has_cover {
+                self.request_vinyl_cover(c.key);
+            }
         }
-        let cells: Vec<Cell> = self
-            .vinyl
+        // The user's Discogs wantlist page, for the section's own link out.
+        let wantlist_url = {
+            let u = self.config.discogs_username.trim();
+            (!u.is_empty()).then(|| format!("https://www.discogs.com/user/{u}/wants"))
+        };
+
+        ui.add_space(4.0);
+        // What the user asked of a cell (jump to the catalog, or a list edit).
+        // Applied after the grid so we don't mutate `self` mid-render.
+        let mut action: Option<VinylGridAction> = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.add_space(4.0);
+            if owned.is_empty() {
+                ui.label(
+                    egui::RichText::new("Nothing in your Discogs collection yet.").weak(),
+                );
+            } else if let Some(a) = self.vinyl_grid(ui, &owned) {
+                action = Some(a);
+            }
+            // Wantlist: the same grid under its own header, so records you want
+            // read as a distinct shelf rather than blending into what you own.
+            if !wanted.is_empty() {
+                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    ui.heading(format!("Wantlist ({})", wanted.len()));
+                    if let Some(url) = &wantlist_url {
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if ui
+                                    .button("↗ Open in Discogs")
+                                    .on_hover_note("Open your wantlist on discogs.com")
+                                    .clicked()
+                                {
+                                    open_url(url);
+                                }
+                            },
+                        );
+                    }
+                });
+                ui.label(egui::RichText::new("Records you want but don't own yet.").weak());
+                ui.separator();
+                ui.add_space(4.0);
+                if let Some(a) = self.vinyl_grid(ui, &wanted) {
+                    action = Some(a);
+                }
+            }
+            ui.add_space(8.0);
+        });
+
+        if refresh {
+            self.spawn_refresh_vinyl(ctx.clone());
+        }
+        match action {
+            Some(VinylGridAction::Goto(album, tracks)) => {
+                self.jump_to_catalog_tracks(album, tracks)
+            }
+            Some(VinylGridAction::Move(key)) => {
+                if let Some(record) = self.vinyl_record(key) {
+                    self.request_vinyl_edit(
+                        ctx.clone(),
+                        VinylEdit::Move {
+                            from: key.0,
+                            record: Box::new(record),
+                        },
+                    );
+                }
+            }
+            Some(VinylGridAction::Remove(key)) => {
+                if let Some(record) = self.vinyl_record(key) {
+                    self.request_vinyl_edit(
+                        ctx.clone(),
+                        VinylEdit::Remove {
+                            list: key.0,
+                            record: Box::new(record),
+                        },
+                    );
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Look up the cached record a grid cell stands for. `None` if the lists
+    /// changed under the click (a sync landing mid-frame), in which case the
+    /// action is simply dropped rather than applied to the wrong record.
+    fn vinyl_record(&self, (list, instance_id): VinylCoverKey) -> Option<VinylRecord> {
+        let records = match list {
+            VinylList::Collection => &self.vinyl,
+            VinylList::Wantlist => &self.wantlist,
+        };
+        records
+            .iter()
+            .find(|r| r.instance_id == instance_id)
+            .cloned()
+    }
+
+    /// Run a vinyl list edit, or park it for confirmation first when it would
+    /// destroy a collection copy on Discogs — that copy's date added, rating and
+    /// notes go with it, and Ordnung can't put them back.
+    pub(crate) fn request_vinyl_edit(&mut self, ctx: egui::Context, edit: VinylEdit) {
+        if edit.destroys_collection_copy() {
+            self.confirm_vinyl_edit = Some(edit);
+        } else {
+            self.spawn_vinyl_edit(ctx, edit);
+        }
+    }
+
+    /// Build the render-ready cells for one vinyl list: display strings resolved
+    /// and catalog links looked up, so the grid closure never borrows the record
+    /// lists themselves.
+    fn vinyl_cells(&self, list: VinylList, records: &[VinylRecord]) -> Vec<VinylCell> {
+        records
             .iter()
             .map(|v| {
                 let sub = match (v.year, v.format.as_deref()) {
@@ -835,8 +970,8 @@ impl App {
                     (None, Some(f)) => f.to_string(),
                     (None, None) => String::new(),
                 };
-                Cell {
-                    instance_id: v.instance_id,
+                VinylCell {
+                    key: (list, v.instance_id),
                     release_id: v.release_id,
                     title: if v.title.trim().is_empty() {
                         "Untitled".to_string()
@@ -853,154 +988,189 @@ impl App {
                         .unwrap_or_default(),
                 }
             })
-            .collect();
-        for c in &cells {
-            if c.has_cover {
-                self.request_vinyl_cover(c.instance_id);
-            }
-        }
+            .collect()
+    }
 
-        ui.add_space(4.0);
-        // Set when a cell's "in catalog" badge is clicked: the release title (to
-        // filter the catalog by that album) and the linked track ids (to select).
-        // Applied after the grid so we don't mutate `self` mid-render.
-        let mut goto: Option<(String, Vec<Id>)> = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
-                for c in &cells {
-                    let tex = match self.vinyl_covers.get(&c.instance_id) {
-                        Some(ThumbState::Ready(Some(t))) => Some(t.clone()),
-                        _ => None,
-                    };
-                    // One cell: cover icon + two caption lines, all clipped to the
-                    // cover width so long titles don't break the grid alignment.
-                    let release_url = format!("https://www.discogs.com/release/{}", c.release_id);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(COVER, COVER + 42.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            // The cover is a link to the release page on Discogs —
-                            // click-sensing, with a hand cursor on hover.
-                            let (rect, resp) = ui.allocate_exact_size(
-                                egui::vec2(COVER, COVER),
-                                egui::Sense::click(),
-                            );
-                            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                            match &tex {
-                                Some(h) => {
-                                    egui::Image::new(h)
-                                        .fit_to_exact_size(egui::vec2(COVER, COVER))
-                                        .rounding(egui::Rounding::same(6.0))
-                                        .paint_at(ui, rect);
-                                }
-                                None => {
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        egui::Rounding::same(6.0),
-                                        egui::Color32::from_gray(34),
-                                    );
-                                    ui.painter().text(
-                                        rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        "💿",
-                                        egui::FontId::proportional(40.0),
-                                        egui::Color32::from_gray(90),
-                                    );
-                                }
+    /// Paint one wrapping grid of vinyl covers. Returns whatever the user asked
+    /// for by clicking a cell's badge or picking from its right-click menu, for
+    /// the caller to apply after the frame's borrows are released.
+    fn vinyl_grid(&self, ui: &mut egui::Ui, cells: &[VinylCell]) -> Option<VinylGridAction> {
+        /// Side length of each cover icon in points — deliberately large so the
+        /// grid reads as a record wall rather than a list.
+        const COVER: f32 = 150.0;
+        /// Gap between cells (and the width budget for the caption under each).
+        const GAP: f32 = 14.0;
+
+        let mut action: Option<VinylGridAction> = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+            for c in cells {
+                let tex = match self.vinyl_covers.get(&c.key) {
+                    Some(ThumbState::Ready(Some(t))) => Some(t.clone()),
+                    _ => None,
+                };
+                // One cell: cover icon + two caption lines, all clipped to the
+                // cover width so long titles don't break the grid alignment.
+                let release_url = format!("https://www.discogs.com/release/{}", c.release_id);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(COVER, COVER + 42.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        // The cover is a link to the release page on Discogs —
+                        // click-sensing, with a hand cursor on hover.
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(COVER, COVER),
+                            egui::Sense::click(),
+                        );
+                        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        match &tex {
+                            Some(h) => {
+                                egui::Image::new(h)
+                                    .fit_to_exact_size(egui::vec2(COVER, COVER))
+                                    .rounding(egui::Rounding::same(6.0))
+                                    .paint_at(ui, rect);
                             }
-                            // Subtle hover frame to signal the cover is clickable.
-                            if resp.hovered() {
-                                ui.painter().rect_stroke(
+                            None => {
+                                ui.painter().rect_filled(
                                     rect,
                                     egui::Rounding::same(6.0),
-                                    egui::Stroke::new(2.0, egui::Color32::from_rgb(90, 200, 120)),
+                                    egui::Color32::from_gray(34),
                                 );
-                            }
-                            // "In your catalog" badge: a small chip pinned to the
-                            // top-right corner of records you already own a digital
-                            // copy of. Sits on top of the cover and takes click
-                            // priority so tapping it jumps to the catalog instead of
-                            // opening Discogs.
-                            let mut badge_clicked = false;
-                            if !c.linked.is_empty() {
-                                const B: f32 = 22.0;
-                                let badge_rect = egui::Rect::from_min_size(
-                                    egui::pos2(rect.right() - B - 4.0, rect.top() + 4.0),
-                                    egui::vec2(B, B),
-                                );
-                                let badge = ui.interact(
-                                    badge_rect,
-                                    ui.id().with(("vinyl-cat", c.instance_id)),
-                                    egui::Sense::click(),
-                                );
-                                let bg = if badge.hovered() {
-                                    egui::Color32::from_rgb(120, 220, 150)
-                                } else {
-                                    egui::Color32::from_rgb(90, 200, 120)
-                                };
-                                ui.painter()
-                                    .rect_filled(badge_rect, egui::Rounding::same(5.0), bg);
                                 ui.painter().text(
-                                    badge_rect.center(),
+                                    rect.center(),
                                     egui::Align2::CENTER_CENTER,
-                                    "♪",
-                                    egui::FontId::proportional(14.0),
-                                    egui::Color32::from_gray(20),
+                                    "💿",
+                                    egui::FontId::proportional(40.0),
+                                    egui::Color32::from_gray(90),
                                 );
-                                let n = c.linked.len();
-                                let tip = if n > 1 {
-                                    format!("In your catalog ({n} tracks). Click to show.")
-                                } else {
-                                    "In your catalog. Click to show.".to_string()
-                                };
-                                let badge = badge.on_hover_cursor(egui::CursorIcon::PointingHand);
-                                if badge.on_hover_note(tip).clicked() {
-                                    badge_clicked = true;
-                                    goto = Some((c.title.clone(), c.linked.clone()));
-                                }
                             }
-                            let tip = if c.sub.is_empty() {
-                                format!("{}\n{}\n\nOpen on Discogs ↗", c.artist, c.title)
-                            } else {
-                                format!("{}\n{}\n{}\n\nOpen on Discogs ↗", c.artist, c.title, c.sub)
-                            };
-                            // The cover opens Discogs — but not when the click landed
-                            // on the catalog badge layered above it.
-                            if resp.on_hover_note(tip).clicked() && !badge_clicked {
-                                open_url(&release_url);
-                            }
-                            ui.set_max_width(COVER);
-                            ui.add_space(4.0);
-                            // Title doubles as the textual link to the release page.
-                            let title = ui.add(
-                                egui::Label::new(egui::RichText::new(&c.title).strong())
-                                    .truncate()
-                                    .sense(egui::Sense::click()),
+                        }
+                        // Subtle hover frame to signal the cover is clickable.
+                        if resp.hovered() {
+                            ui.painter().rect_stroke(
+                                rect,
+                                egui::Rounding::same(6.0),
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(90, 200, 120)),
                             );
-                            if title
-                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        }
+                        // "In your catalog" badge: a small chip pinned to the
+                        // top-right corner of records you already own a digital
+                        // copy of. Sits on top of the cover and takes click
+                        // priority so tapping it jumps to the catalog instead of
+                        // opening Discogs.
+                        let mut badge_clicked = false;
+                        if !c.linked.is_empty() {
+                            const B: f32 = 22.0;
+                            let badge_rect = egui::Rect::from_min_size(
+                                egui::pos2(rect.right() - B - 4.0, rect.top() + 4.0),
+                                egui::vec2(B, B),
+                            );
+                            let badge = ui.interact(
+                                badge_rect,
+                                ui.id().with(("vinyl-cat", c.key)),
+                                egui::Sense::click(),
+                            );
+                            let bg = if badge.hovered() {
+                                egui::Color32::from_rgb(120, 220, 150)
+                            } else {
+                                egui::Color32::from_rgb(90, 200, 120)
+                            };
+                            ui.painter()
+                                .rect_filled(badge_rect, egui::Rounding::same(5.0), bg);
+                            ui.painter().text(
+                                badge_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "♪",
+                                egui::FontId::proportional(14.0),
+                                egui::Color32::from_gray(20),
+                            );
+                            let n = c.linked.len();
+                            let tip = if n > 1 {
+                                format!("In your catalog ({n} tracks). Click to show.")
+                            } else {
+                                "In your catalog. Click to show.".to_string()
+                            };
+                            let badge = badge.on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if badge.on_hover_note(tip).clicked() {
+                                badge_clicked = true;
+                                action = Some(VinylGridAction::Goto(
+                                    c.title.clone(),
+                                    c.linked.clone(),
+                                ));
+                            }
+                        }
+                        let tip = if c.sub.is_empty() {
+                            format!("{}\n{}\n\nOpen on Discogs ↗", c.artist, c.title)
+                        } else {
+                            format!("{}\n{}\n{}\n\nOpen on Discogs ↗", c.artist, c.title, c.sub)
+                        };
+                        // The cover opens Discogs — but not when the click landed
+                        // on the catalog badge layered above it.
+                        let resp = resp.on_hover_note(tip);
+                        if resp.clicked() && !badge_clicked {
+                            open_url(&release_url);
+                        }
+                        // Right-click: move this record between the two lists, or
+                        // drop it. Both write straight to the user's Discogs
+                        // account, so the wording says which list is which rather
+                        // than a bare "Move".
+                        let (list, _) = c.key;
+                        resp.context_menu(|ui| {
+                            ui.label(egui::RichText::new(&c.title).strong());
+                            ui.label(egui::RichText::new(&c.artist).weak());
+                            ui.separator();
+                            let (move_label, move_tip, remove_label) = match list {
+                                VinylList::Collection => (
+                                    "Move to wantlist",
+                                    "Give up this copy on Discogs and want it instead",
+                                    "Remove from collection",
+                                ),
+                                VinylList::Wantlist => (
+                                    "Move to collection",
+                                    "Mark this record as owned on Discogs",
+                                    "Remove from wantlist",
+                                ),
+                            };
+                            if ui.button(move_label).on_hover_note(move_tip).clicked() {
+                                action = Some(VinylGridAction::Move(c.key));
+                                ui.close_menu();
+                            }
+                            if ui
+                                .button(remove_label)
+                                .on_hover_note("Delete it from this Discogs list")
                                 .clicked()
                             {
-                                open_url(&release_url);
+                                action = Some(VinylGridAction::Remove(c.key));
+                                ui.close_menu();
                             }
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(&c.artist).weak()).truncate(),
-                            );
-                        },
-                    );
-                }
-            });
-            ui.add_space(8.0);
+                            ui.separator();
+                            if ui.button("Open on Discogs ↗").clicked() {
+                                open_url(&release_url);
+                                ui.close_menu();
+                            }
+                        });
+                        ui.set_max_width(COVER);
+                        ui.add_space(4.0);
+                        // Title doubles as the textual link to the release page.
+                        let title = ui.add(
+                            egui::Label::new(egui::RichText::new(&c.title).strong())
+                                .truncate()
+                                .sense(egui::Sense::click()),
+                        );
+                        if title
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            open_url(&release_url);
+                        }
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&c.artist).weak()).truncate(),
+                        );
+                    },
+                );
+            }
         });
-
-        if refresh {
-            self.spawn_refresh_vinyl(ctx.clone());
-        }
-        if let Some((album, tracks)) = goto {
-            self.jump_to_catalog_tracks(album, tracks);
-        }
+        action
     }
 
     /// Jump from the vinyl grid into the catalog: show the full library narrowed

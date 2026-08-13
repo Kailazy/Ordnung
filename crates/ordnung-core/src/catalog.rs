@@ -8,10 +8,21 @@ use crate::error::{Error, Result};
 use crate::model::key::{Key, Mode, PitchClass};
 use crate::model::{
     Analysis, AudioProperties, Beat, Beatgrid, Format, Id, Playlist, Tags, Track, TranscodeVerdict,
-    VinylRecord,
+    VinylList, VinylRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
+
+/// Which table backs a vinyl list. The two caches share an identical schema and
+/// every query below, so the list only ever picks the table name — never its own
+/// copy of the SQL. Names are compile-time constants, so interpolating one into
+/// a query is not user input.
+fn vinyl_table(list: VinylList) -> &'static str {
+    match list {
+        VinylList::Collection => "vinyl_collection",
+        VinylList::Wantlist => "vinyl_wantlist",
+    }
+}
 
 fn mode_int(m: Mode) -> i64 {
     match m {
@@ -365,7 +376,7 @@ impl Catalog {
                 created_at INTEGER NOT NULL DEFAULT (unixepoch())
             );
 
-            -- The user's Discogs vinyl collection, cached locally so the \"My Vinyl
+            -- The user's Discogs vinyl collection, cached locally so the \"Vinyl
             -- Collection\" view renders offline and a refresh only downloads covers
             -- it doesn't already have. instance_id is Discogs's per-copy id (stable
             -- across refreshes). cover_png is the downscaled grid image, NULL until
@@ -384,6 +395,31 @@ impl Catalog {
                 cover_url      TEXT,
                 cover_png      BLOB,
                 added          TEXT,
+                folder_id      INTEGER,
+                fetched_at     INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+
+            -- The user's Discogs wantlist, cached exactly like the collection
+            -- above and rendered by the same grid (its own section in the vinyl
+            -- view). Wantlist items have no per-copy instance id, so instance_id
+            -- mirrors release_id here; the schema is otherwise identical so both
+            -- lists share one set of cache queries (see `vinyl_table`). A separate
+            -- table (rather than a flag column) keeps the two id spaces from
+            -- colliding on the primary key.
+            CREATE TABLE IF NOT EXISTS vinyl_wantlist (
+                instance_id    INTEGER PRIMARY KEY,
+                release_id     INTEGER NOT NULL,
+                title          TEXT NOT NULL,
+                artist         TEXT NOT NULL,
+                year           INTEGER,
+                label          TEXT,
+                catalog_number TEXT,
+                format         TEXT,
+                thumb_url      TEXT,
+                cover_url      TEXT,
+                cover_png      BLOB,
+                added          TEXT,
+                folder_id      INTEGER,
                 fetched_at     INTEGER NOT NULL DEFAULT (unixepoch())
             );
 
@@ -520,6 +556,17 @@ impl Catalog {
             "prefer_external",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+
+        // Which Discogs collection folder holds each cached copy. Needed to
+        // remove a copy from the collection (the delete endpoint is addressed
+        // through its folder). NULL on rows cached before this column existed;
+        // removal then falls back to Uncategorized, and the next vinyl sync
+        // backfills the real folder. Added to the wantlist table too so both
+        // lists keep sharing one set of cache queries, though wants are never
+        // foldered and always store NULL.
+        for table in ["vinyl_collection", "vinyl_wantlist"] {
+            self.add_column_if_missing(table, "folder_id", "INTEGER")?;
+        }
 
         // Perceptual acoustic fingerprint, added in analyzer v5. Empty on older
         // catalogs until tracks are re-analyzed (the version bump invalidates the
@@ -2160,18 +2207,21 @@ impl Catalog {
         Ok(removed)
     }
 
-    // --- Vinyl collection (Discogs-backed cache) -----------------------------
+    // --- Vinyl collection + wantlist (Discogs-backed cache) ------------------
 
-    /// Insert or update a vinyl-collection record's metadata. Keyed on
+    /// Insert or update one vinyl record's metadata in `list`'s cache. Keyed on
     /// `instance_id`; a refresh re-runs this for every item, so the cached
     /// `cover_png` is deliberately left untouched here (covers are downloaded
     /// once and survive metadata refreshes — see [`Catalog::set_vinyl_cover`]).
-    pub fn upsert_vinyl(&self, rec: &VinylRecord) -> Result<()> {
+    pub fn upsert_vinyl(&self, list: VinylList, rec: &VinylRecord) -> Result<()> {
+        let table = vinyl_table(list);
         self.conn.execute(
-            "INSERT INTO vinyl_collection
+            &format!(
+                "INSERT INTO {table}
                  (instance_id, release_id, title, artist, year, label,
-                  catalog_number, format, thumb_url, cover_url, added, fetched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, unixepoch())
+                  catalog_number, format, thumb_url, cover_url, added, folder_id,
+                  fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, unixepoch())
              ON CONFLICT(instance_id) DO UPDATE SET
                  release_id     = excluded.release_id,
                  title          = excluded.title,
@@ -2183,7 +2233,9 @@ impl Catalog {
                  thumb_url      = excluded.thumb_url,
                  cover_url      = excluded.cover_url,
                  added          = excluded.added,
-                 fetched_at     = excluded.fetched_at",
+                 folder_id      = excluded.folder_id,
+                 fetched_at     = excluded.fetched_at"
+            ),
             params![
                 rec.instance_id as i64,
                 rec.release_id as i64,
@@ -2196,21 +2248,23 @@ impl Catalog {
                 rec.thumb_url,
                 rec.cover_url,
                 rec.added,
+                rec.folder_id.map(|f| f as i64),
             ],
         )?;
         Ok(())
     }
 
-    /// Every cached vinyl record, ordered for the collection grid (artist, then
-    /// title). `has_cover` reflects whether a cover image is cached.
-    pub fn list_vinyl(&self) -> Result<Vec<VinylRecord>> {
-        let mut stmt = self.conn.prepare(
+    /// Every cached record in `list`, ordered for the grid (artist, then title).
+    /// `has_cover` reflects whether a cover image is cached.
+    pub fn list_vinyl(&self, list: VinylList) -> Result<Vec<VinylRecord>> {
+        let table = vinyl_table(list);
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT instance_id, release_id, title, artist, year, label,
-                    catalog_number, format, thumb_url, cover_url, added,
+                    catalog_number, format, thumb_url, cover_url, added, folder_id,
                     cover_png IS NOT NULL
-             FROM vinyl_collection
-             ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE, instance_id",
-        )?;
+             FROM {table}
+             ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE, instance_id"
+        ))?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(VinylRecord {
@@ -2225,29 +2279,32 @@ impl Catalog {
                     thumb_url: r.get(8)?,
                     cover_url: r.get(9)?,
                     added: r.get(10)?,
-                    has_cover: r.get::<_, i64>(11)? != 0,
+                    folder_id: r.get::<_, Option<i64>>(11)?.map(|f| f as u32),
+                    has_cover: r.get::<_, i64>(12)? != 0,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
-    /// Number of cached vinyl records (drives the sidebar count).
-    pub fn vinyl_count(&self) -> Result<u64> {
+    /// Number of cached records in `list` (drives the sidebar count).
+    pub fn vinyl_count(&self, list: VinylList) -> Result<u64> {
+        let table = vinyl_table(list);
         Ok(self
             .conn
-            .query_row("SELECT COUNT(*) FROM vinyl_collection", [], |r| {
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
                 r.get::<_, i64>(0)
             })? as u64)
     }
 
-    /// `(instance_id, cover_url)` for every record that has a cover URL but no
-    /// cached image yet — the work list a refresh downloads covers for.
-    pub fn vinyl_missing_covers(&self) -> Result<Vec<(u64, String)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT instance_id, cover_url FROM vinyl_collection
-             WHERE cover_png IS NULL AND cover_url IS NOT NULL AND cover_url <> ''",
-        )?;
+    /// `(instance_id, cover_url)` for every record in `list` that has a cover URL
+    /// but no cached image yet — the work list a refresh downloads covers for.
+    pub fn vinyl_missing_covers(&self, list: VinylList) -> Result<Vec<(u64, String)>> {
+        let table = vinyl_table(list);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT instance_id, cover_url FROM {table}
+             WHERE cover_png IS NULL AND cover_url IS NOT NULL AND cover_url <> ''"
+        ))?;
         let rows = stmt
             .query_map([], |r| {
                 Ok((r.get::<_, i64>(0)? as u64, r.get::<_, String>(1)?))
@@ -2257,20 +2314,22 @@ impl Catalog {
     }
 
     /// Store a downloaded cover image (downscaled PNG) for one record.
-    pub fn set_vinyl_cover(&self, instance_id: u64, png: &[u8]) -> Result<()> {
+    pub fn set_vinyl_cover(&self, list: VinylList, instance_id: u64, png: &[u8]) -> Result<()> {
+        let table = vinyl_table(list);
         self.conn.execute(
-            "UPDATE vinyl_collection SET cover_png=?2 WHERE instance_id=?1",
+            &format!("UPDATE {table} SET cover_png=?2 WHERE instance_id=?1"),
             params![instance_id as i64, png],
         )?;
         Ok(())
     }
 
     /// Cached cover image bytes for one record, if downloaded.
-    pub fn vinyl_cover(&self, instance_id: u64) -> Result<Option<Vec<u8>>> {
+    pub fn vinyl_cover(&self, list: VinylList, instance_id: u64) -> Result<Option<Vec<u8>>> {
+        let table = vinyl_table(list);
         Ok(self
             .conn
             .query_row(
-                "SELECT cover_png FROM vinyl_collection WHERE instance_id=?1",
+                &format!("SELECT cover_png FROM {table} WHERE instance_id=?1"),
                 params![instance_id as i64],
                 |r| r.get::<_, Option<Vec<u8>>>(0),
             )
@@ -2278,23 +2337,65 @@ impl Catalog {
             .flatten())
     }
 
-    /// Drop cached records whose `instance_id` isn't in `keep` — i.e. items the
-    /// user removed from their Discogs collection since the last refresh. Call
+    /// Drop one record from `list`'s cache. Returns whether a row was there to
+    /// remove. Mirrors a removal the caller already made on Discogs, so the grid
+    /// updates without waiting for the next full sync.
+    pub fn delete_vinyl(&self, list: VinylList, instance_id: u64) -> Result<bool> {
+        let table = vinyl_table(list);
+        let n = self.conn.execute(
+            &format!("DELETE FROM {table} WHERE instance_id=?1"),
+            params![instance_id as i64],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Move a cached record between the two lists: insert `rec` into `to`, carry
+    /// its cover image across, and delete `from_instance_id` from `from`. Mirrors
+    /// a move the caller already made on Discogs (the two lists are separate
+    /// endpoints there, so a move is an add plus a remove on both sides).
+    ///
+    /// `rec` carries the *destination* row's identity — the two lists key rows
+    /// differently (a collection copy has its own `instance_id`; a want is keyed
+    /// by release id), so the caller re-keys the record before calling. Both
+    /// writes run in one transaction, so a failure can't leave the record in
+    /// neither list. Carrying the cover across means the grid doesn't flash a
+    /// placeholder and the next sync has nothing to re-download.
+    pub fn move_vinyl(
+        &self,
+        from: VinylList,
+        from_instance_id: u64,
+        to: VinylList,
+        rec: &VinylRecord,
+    ) -> Result<()> {
+        let cover = self.vinyl_cover(from, from_instance_id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        self.upsert_vinyl(to, rec)?;
+        if let Some(png) = &cover {
+            self.set_vinyl_cover(to, rec.instance_id, png)?;
+        }
+        self.delete_vinyl(from, from_instance_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Drop cached records in `list` whose `instance_id` isn't in `keep` — i.e.
+    /// items the user removed from that Discogs list since the last refresh. Call
     /// after upserting a fresh fetch so the local cache mirrors Discogs exactly.
-    pub fn prune_vinyl_not_in(&self, keep: &[u64]) -> Result<usize> {
-        // No fetched items → the collection is empty (or the fetch returned
-        // nothing); clear the cache wholesale.
+    pub fn prune_vinyl_not_in(&self, list: VinylList, keep: &[u64]) -> Result<usize> {
+        let table = vinyl_table(list);
+        // No fetched items → the list is empty (or the fetch returned nothing);
+        // clear the cache wholesale.
         if keep.is_empty() {
-            let n = self.conn.execute("DELETE FROM vinyl_collection", [])?;
+            let n = self.conn.execute(&format!("DELETE FROM {table}"), [])?;
             return Ok(n);
         }
-        let list = keep
+        let ids = keep
             .iter()
             .map(|id| (*id as i64).to_string())
             .collect::<Vec<_>>()
             .join(",");
         let n = self.conn.execute(
-            &format!("DELETE FROM vinyl_collection WHERE instance_id NOT IN ({list})"),
+            &format!("DELETE FROM {table} WHERE instance_id NOT IN ({ids})"),
             [],
         )?;
         Ok(n)
@@ -3593,6 +3694,7 @@ mod tests {
             thumb_url: Some("https://img/thumb.jpg".into()),
             cover_url: Some("https://img/cover.jpg".into()),
             added: Some("2021-03-04".into()),
+            folder_id: Some(1),
             has_cover: false,
         }
     }
@@ -3600,37 +3702,105 @@ mod tests {
     #[test]
     fn vinyl_cache_roundtrips_upsert_cover_and_prune() {
         let cat = Catalog::open(":memory:").unwrap();
-        cat.upsert_vinyl(&vinyl(1, "Plastikman", "Sheet One")).unwrap();
-        cat.upsert_vinyl(&vinyl(2, "Surgeon", "Force + Form")).unwrap();
-        assert_eq!(cat.vinyl_count().unwrap(), 2);
+        let own = VinylList::Collection;
+        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One")).unwrap();
+        cat.upsert_vinyl(own, &vinyl(2, "Surgeon", "Force + Form")).unwrap();
+        assert_eq!(cat.vinyl_count(own).unwrap(), 2);
 
         // Ordered by artist, then title.
-        let list = cat.list_vinyl().unwrap();
+        let list = cat.list_vinyl(own).unwrap();
         assert_eq!(list.iter().map(|v| v.instance_id).collect::<Vec<_>>(), vec![1, 2]);
         assert!(!list[0].has_cover);
 
         // Both records start out needing a cover; storing one flips its flag and
         // drops it from the missing-cover work list.
-        assert_eq!(cat.vinyl_missing_covers().unwrap().len(), 2);
-        cat.set_vinyl_cover(1, &[1, 2, 3]).unwrap();
-        assert_eq!(cat.vinyl_cover(1).unwrap().as_deref(), Some(&[1, 2, 3][..]));
-        assert_eq!(cat.vinyl_missing_covers().unwrap().len(), 1);
-        assert!(cat.list_vinyl().unwrap()[0].has_cover);
+        assert_eq!(cat.vinyl_missing_covers(own).unwrap().len(), 2);
+        cat.set_vinyl_cover(own, 1, &[1, 2, 3]).unwrap();
+        assert_eq!(cat.vinyl_cover(own, 1).unwrap().as_deref(), Some(&[1, 2, 3][..]));
+        assert_eq!(cat.vinyl_missing_covers(own).unwrap().len(), 1);
+        assert!(cat.list_vinyl(own).unwrap()[0].has_cover);
 
         // A metadata refresh (re-upsert) must not wipe the cached cover.
         let mut updated = vinyl(1, "Plastikman", "Sheet One");
         updated.year = Some(1993);
-        cat.upsert_vinyl(&updated).unwrap();
-        assert_eq!(cat.vinyl_cover(1).unwrap().as_deref(), Some(&[1, 2, 3][..]));
+        cat.upsert_vinyl(own, &updated).unwrap();
+        assert_eq!(cat.vinyl_cover(own, 1).unwrap().as_deref(), Some(&[1, 2, 3][..]));
 
         // Pruning to the set still in the Discogs collection drops the rest.
-        let removed = cat.prune_vinyl_not_in(&[1]).unwrap();
+        let removed = cat.prune_vinyl_not_in(own, &[1]).unwrap();
         assert_eq!(removed, 1);
-        assert_eq!(cat.vinyl_count().unwrap(), 1);
+        assert_eq!(cat.vinyl_count(own).unwrap(), 1);
 
         // An empty keep-set clears the cache wholesale.
-        assert_eq!(cat.prune_vinyl_not_in(&[]).unwrap(), 1);
-        assert_eq!(cat.vinyl_count().unwrap(), 0);
+        assert_eq!(cat.prune_vinyl_not_in(own, &[]).unwrap(), 1);
+        assert_eq!(cat.vinyl_count(own).unwrap(), 0);
+    }
+
+    #[test]
+    fn wantlist_cache_is_independent_of_the_collection() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let (own, want) = (VinylList::Collection, VinylList::Wantlist);
+        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One")).unwrap();
+        // Same id in the other list: the two caches never share a row.
+        cat.upsert_vinyl(want, &vinyl(1, "Surgeon", "Force + Form")).unwrap();
+        assert_eq!(cat.vinyl_count(own).unwrap(), 1);
+        assert_eq!(cat.vinyl_count(want).unwrap(), 1);
+        assert_eq!(cat.list_vinyl(want).unwrap()[0].artist, "Surgeon");
+
+        // Covers, and pruning, are per-list too.
+        cat.set_vinyl_cover(want, 1, &[9]).unwrap();
+        assert_eq!(cat.vinyl_cover(want, 1).unwrap().as_deref(), Some(&[9][..]));
+        assert!(cat.vinyl_cover(own, 1).unwrap().is_none());
+        cat.prune_vinyl_not_in(want, &[]).unwrap();
+        assert_eq!(cat.vinyl_count(want).unwrap(), 0);
+        assert_eq!(cat.vinyl_count(own).unwrap(), 1);
+    }
+
+    #[test]
+    fn move_vinyl_rekeys_the_row_and_carries_its_cover() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let (own, want) = (VinylList::Collection, VinylList::Wantlist);
+        // A collection copy: instance 1, release 9001, with a cached cover.
+        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One")).unwrap();
+        cat.set_vinyl_cover(own, 1, &[7, 7, 7]).unwrap();
+
+        // Moving it to the wantlist re-keys it on the release id, the way a
+        // want is keyed, and drops the folder (wants aren't foldered).
+        let mut wanted = vinyl(1, "Plastikman", "Sheet One");
+        wanted.instance_id = wanted.release_id;
+        wanted.folder_id = None;
+        cat.move_vinyl(own, 1, want, &wanted).unwrap();
+
+        assert_eq!(cat.vinyl_count(own).unwrap(), 0, "left the collection");
+        let list = cat.list_vinyl(want).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].instance_id, 9001, "keyed by release id in the wantlist");
+        assert_eq!(list[0].folder_id, None);
+        // The cover came along, so the grid doesn't flash a placeholder and the
+        // next sync has nothing to re-download.
+        assert!(list[0].has_cover);
+        assert_eq!(cat.vinyl_cover(want, 9001).unwrap().as_deref(), Some(&[7, 7, 7][..]));
+
+        // And back again, this time landing on a fresh collection instance id.
+        let mut owned = wanted.clone();
+        owned.instance_id = 55;
+        owned.folder_id = Some(1);
+        cat.move_vinyl(want, 9001, own, &owned).unwrap();
+        assert_eq!(cat.vinyl_count(want).unwrap(), 0);
+        let list = cat.list_vinyl(own).unwrap();
+        assert_eq!(list[0].instance_id, 55);
+        assert_eq!(list[0].folder_id, Some(1));
+        assert!(list[0].has_cover);
+    }
+
+    #[test]
+    fn delete_vinyl_reports_whether_a_row_was_there() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let own = VinylList::Collection;
+        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One")).unwrap();
+        assert!(cat.delete_vinyl(own, 1).unwrap());
+        assert!(!cat.delete_vinyl(own, 1).unwrap(), "already gone");
+        assert_eq!(cat.vinyl_count(own).unwrap(), 0);
     }
 
     #[test]
@@ -3760,3 +3930,4 @@ mod tests {
         assert!(cat.cached_release("7").unwrap().is_none(), "failures aren't cached");
     }
 }
+

@@ -52,7 +52,7 @@ Legend: ⬜ not started · 🔶 in progress · ✅ done
 - **Goal:** establish hierarchy — make `Add songs…` the visible primary; group the analysis trio (`Analyze`/`Re-analyze`/`Fetch song data`) as one cluster (possibly a split/▾ button); push utility (`Refresh`, `Settings`) to the right near the counts; keep contextual buttons appearing only when relevant. Preserve every existing action and its busy-state gating.
 
 ### 4 — Sidebar redesign
-- **Now:** one-line `selectable_label` rows (app.rs:682–752): `♪ All songs`, `⧉ Duplicates`, `⚠ Missing`, then the playlist tree (`draw_playlist_nodes`, sidebar.rs:110), then a pinned `💿 My Vinyl Collection`.
+- **Now:** one-line `selectable_label` rows (app.rs:682–752): `♪ All songs`, `⧉ Duplicates`, `⚠ Missing`, then the playlist tree (`draw_playlist_nodes`, sidebar.rs:110), then a pinned `💿 Vinyl Collection`.
 - **Goal (per user):**
   - **Big rectangular buttons** instead of thin one-line rows.
   - **Library** ("All songs") visually **largest**.
