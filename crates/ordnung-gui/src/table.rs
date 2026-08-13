@@ -696,8 +696,8 @@ impl App {
         // wantlist" only for tracks whose release is actually known — and the
         // two membership sets, so it can say when that record is already yours.
         let track_releases = &self.track_releases;
-        let vinyl_owned = &self.vinyl_owned;
-        let vinyl_wanted = &self.vinyl_wanted;
+        let vinyl_owned_tracks = &self.vinyl_owned_tracks;
+        let vinyl_wanted_tracks = &self.vinyl_wanted_tracks;
         // The track ids of a ⌥-drag that started this frame, set in a row closure
         // below. Resolved to source-file paths and returned at the end so the
         // caller can begin the native macOS drag-out *after* these closures (and
@@ -1623,37 +1623,47 @@ impl App {
                                         // Only the tracks with a fetched release can
                                         // go, and several tracks off one record
                                         // collapse to a single want.
-                                        let mut releases: Vec<u64> = drag_ids
+                                        // Where each selected track's record
+                                        // already sits. Asked per *track*, not
+                                        // per release id: most of the library
+                                        // was never Discogs-fetched, and those
+                                        // tracks still match a record you own by
+                                        // album/artist (same matching as the
+                                        // grid's "in catalog" badge).
+                                        let owned = drag_ids
                                             .iter()
-                                            .filter_map(|id| track_releases.get(id).copied())
-                                            .collect();
-                                        releases.sort_unstable();
-                                        releases.dedup();
-                                        // Split by where each record already is.
-                                        // Only what's in neither list is worth
-                                        // wanting; the rest becomes the "you
-                                        // already have this" readout.
-                                        let owned =
-                                            releases.iter().filter(|r| vinyl_owned.contains(r)).count();
-                                        let wanted = releases
+                                            .filter(|id| vinyl_owned_tracks.contains(id))
+                                            .count();
+                                        let wanted = drag_ids
                                             .iter()
-                                            .filter(|r| {
-                                                !vinyl_owned.contains(r) && vinyl_wanted.contains(r)
+                                            .filter(|id| {
+                                                !vinyl_owned_tracks.contains(id)
+                                                    && vinyl_wanted_tracks.contains(id)
                                             })
                                             .count();
-                                        let want: Vec<u64> = releases
-                                            .iter()
-                                            .copied()
-                                            .filter(|r| {
-                                                !vinyl_owned.contains(r) && !vinyl_wanted.contains(r)
-                                            })
-                                            .collect();
                                         let held = owned + wanted;
-                                        // Three states: nothing to want (no
-                                        // release on file), everything already
-                                        // yours (checked + darkened, naming the
-                                        // list), or something left to add.
-                                        let (want_label, want_tip) = if releases.is_empty() {
+                                        // Only tracks in neither list are worth
+                                        // wanting, and only those with a release
+                                        // id can actually be addressed on
+                                        // Discogs. Several tracks off one record
+                                        // collapse to a single want.
+                                        let mut want: Vec<u64> = drag_ids
+                                            .iter()
+                                            .filter(|id| {
+                                                !vinyl_owned_tracks.contains(id)
+                                                    && !vinyl_wanted_tracks.contains(id)
+                                            })
+                                            .filter_map(|id| track_releases.get(id).copied())
+                                            .collect();
+                                        want.sort_unstable();
+                                        want.dedup();
+                                        // Three states: nothing Discogs can act
+                                        // on, everything already yours (checked
+                                        // + darkened, naming the list), or
+                                        // something left to add.
+                                        let nothing_addressable =
+                                            held == 0 && want.is_empty();
+                                        let (want_label, want_tip) = if nothing_addressable {
                                             (
                                                 "Add to Discogs wantlist".to_string(),
                                                 "No Discogs release on file for this \

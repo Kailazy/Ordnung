@@ -2297,6 +2297,35 @@ impl Catalog {
             })? as u64)
     }
 
+    /// Which catalog tracks you already have on vinyl in `list`, by the same
+    /// matching the vinyl grid's "in catalog" badge uses (see
+    /// [`Self::vinyl_catalog_links`]): the exact Discogs release id first,
+    /// falling back to album/artist metadata.
+    ///
+    /// The fallback is the point. Plenty of tracks never had their artwork
+    /// fetched from Discogs and so carry no release id at all, yet the record is
+    /// plainly sitting in the collection under the same album name. Keying on the
+    /// release id alone would tell those tracks they aren't yours.
+    pub fn vinyl_tracks_in(&self, list: VinylList) -> Result<Vec<Id>> {
+        let records = self.list_vinyl(list)?;
+        // `vinyl_catalog_links` folds in *every* release-id link in the catalog,
+        // not just this list's (harmless for the grid, which looks up by a
+        // record's own release id). Here the result is the answer, so narrow it
+        // to the releases actually in `list` — otherwise every Discogs-fetched
+        // track would read as one you own on vinyl.
+        let in_list: std::collections::HashSet<u64> =
+            records.iter().map(|r| r.release_id).collect();
+        let mut ids: Vec<Id> = self
+            .vinyl_catalog_links(&records)?
+            .into_iter()
+            .filter(|(release_id, _)| in_list.contains(release_id))
+            .map(|(_, track_id)| track_id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ids)
+    }
+
     /// Every Discogs release id cached in `list`. Deliberately release ids rather
     /// than row keys: this answers "do I already have this record?", and the two
     /// lists key their rows differently. Owning two pressings of one release
@@ -3810,6 +3839,38 @@ mod tests {
     }
 
     #[test]
+    fn vinyl_tracks_in_matches_on_metadata_and_stays_within_its_list() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let (own, want) = (VinylList::Collection, VinylList::Wantlist);
+
+        // Track A: never Discogs-fetched, but its album is the record's title.
+        // This is the case that matters — most of the library has no release id.
+        let mut a = scanned("/m/a.mp3", "11:68PM", "Techno", 1000);
+        a.tags.album = Some("Craft Services 001".into());
+        a.tags.title = Some("Lessons".into());
+        let (a, _) = cat.upsert_scanned(&a).unwrap();
+        // Track B: linked by exact release id to a record in the wantlist.
+        let (b, _) = cat.upsert_scanned(&scanned("/m/b.mp3", "Surgeon", "Techno", 1000)).unwrap();
+        cat.set_external_artwork(b, "discogs", Some("7000"), None, Some(&[1]), None).unwrap();
+        // Track C: linked by exact release id to a record in NEITHER list. It
+        // must not leak into either answer.
+        let (c, _) = cat.upsert_scanned(&scanned("/m/c.mp3", "Jeff Mills", "Techno", 1000)).unwrap();
+        cat.set_external_artwork(c, "discogs", Some("8000"), None, Some(&[1]), None).unwrap();
+
+        cat.upsert_vinyl(own, &vinyl(1, "11:68PM", "Craft Services 001")).unwrap();
+        let mut wanted_rec = vinyl(2, "Surgeon", "Some EP");
+        wanted_rec.release_id = 7000;
+        cat.upsert_vinyl(want, &wanted_rec).unwrap();
+
+        assert_eq!(cat.vinyl_tracks_in(own).unwrap(), vec![a], "matched on album name alone");
+        assert_eq!(cat.vinyl_tracks_in(want).unwrap(), vec![b], "matched on release id");
+        // Track c's release is in no list, so it belongs to neither answer.
+        for list in [own, want] {
+            assert!(!cat.vinyl_tracks_in(list).unwrap().contains(&c));
+        }
+    }
+
+    #[test]
     fn vinyl_release_ids_collapse_duplicate_pressings() {
         let cat = Catalog::open(":memory:").unwrap();
         let (own, want) = (VinylList::Collection, VinylList::Wantlist);
@@ -3964,4 +4025,5 @@ mod tests {
         assert!(cat.cached_release("7").unwrap().is_none(), "failures aren't cached");
     }
 }
+
 
