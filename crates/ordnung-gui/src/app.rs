@@ -1122,7 +1122,6 @@ impl eframe::App for App {
                         let w = (ui.available_width() - reserved).clamp(120.0, 320.0);
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut self.filter)
-                                .hint_text("artist / title / album / genre")
                                 .desired_width(w),
                         );
                         if resp.changed() {
@@ -1268,7 +1267,7 @@ impl eframe::App for App {
                         // fetch. Recent gets a fixed, narrower width; All songs flexes
                         // to fill the rest so the pair always spans the sidebar.
                         ui.horizontal(|ui| {
-                            const RECENT_W: f32 = 76.0;
+                            const RECENT_W: f32 = 100.0;
                             let gap = ui.spacing().item_spacing.x;
                             let all_w = (ui.available_width() - RECENT_W - gap).max(60.0);
                             if nav_button_sized(
@@ -1284,10 +1283,12 @@ impl eframe::App for App {
                             {
                                 self.view = LibraryView::Library;
                             }
+                            // Named, not just a glyph: on its own the ✦ tile gave no
+                            // clue it holds freshly imported songs.
                             let recent_label = if self.recent_count > 0 {
-                                format!("✦ {}", self.recent_count)
+                                format!("✦ New  {}", self.recent_count)
                             } else {
-                                "✦".to_string()
+                                "✦ New".to_string()
                             };
                             if nav_button_sized(
                                 ui,
@@ -1295,7 +1296,7 @@ impl eframe::App for App {
                                 self.view == LibraryView::RecentlyAdded,
                                 RECENT_W,
                                 46.0,
-                                17.0,
+                                14.0,
                             )
                             .on_hover_note(
                                 "New imports awaiting analysis or a Discogs fetch. \
