@@ -667,84 +667,78 @@ impl App {
             .pivot(egui::Align2::RIGHT_BOTTOM)
             .fixed_pos(egui::pos2(lane.right(), lane.top() - 6.0))
             .show(ui.ctx(), |ui| {
+                const W: f32 = 200.0;
+                ui.set_width(W);
+                ui.spacing_mut().item_spacing.y = crate::ui::tokens::space::S2;
+
+                // Header: what this is, and the tempo every control below acts on.
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new("BEATGRID")
                             .font(crate::ui::tokens::font::caption())
                             .color(crate::ui::tokens::color::LABEL_3),
                     );
-                    ui.add_space(crate::ui::tokens::space::S3);
-                    ui.label(
-                        egui::RichText::new(format!("{:.1} BPM", g.bpm))
-                            .font(crate::ui::tokens::font::footnote())
-                            .color(crate::ui::tokens::color::LABEL_2),
-                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{:.1} BPM", g.bpm))
+                                .font(crate::ui::tokens::font::footnote())
+                                .color(crate::ui::tokens::color::LABEL),
+                        );
+                    });
                 });
 
-                // Shift the whole grid. Coarse first, then fine — the same
-                // pairing rekordbox puts either side of its grid readout.
+                // Shift the whole grid — coarse chevrons outside, fine inside, so
+                // the row reads as one nudge dial running -10 … +10 ms.
+                let nudge = segmented(
+                    ui,
+                    W,
+                    "grid_nudge",
+                    &[
+                        (GridGlyph::Chevron { dir: -1.0, double: true }, "Slide the grid -10 ms"),
+                        (GridGlyph::Chevron { dir: -1.0, double: false }, "Slide the grid -1 ms"),
+                        (GridGlyph::Chevron { dir: 1.0, double: false }, "Slide the grid +1 ms"),
+                        (GridGlyph::Chevron { dir: 1.0, double: true }, "Slide the grid +10 ms"),
+                    ],
+                );
+                if let Some(i) = nudge {
+                    edited = Some(shift_grid(g, [-10.0, -1.0, 1.0, 10.0][i]));
+                }
+
+                // Anchor + tempo actions: plant beat 1, snap the nearest beat, or
+                // fix an octave-off tempo.
+                let act = segmented(
+                    ui,
+                    W,
+                    "grid_actions",
+                    &[
+                        (GridGlyph::Downbeat, "Put the downbeat on the playhead"),
+                        (GridGlyph::Snap, "Move the nearest beat onto the playhead"),
+                        (GridGlyph::Half, "Halve the tempo the grid is drawn at"),
+                        (GridGlyph::Double, "Double the tempo the grid is drawn at"),
+                    ],
+                );
+                match act {
+                    Some(0) => edited = Some(set_beat_one_at(g, playhead_ms as f64)),
+                    Some(1) => edited = Some(snap_grid_to(g, playhead_ms as f64)),
+                    Some(2) => edited = Some(scale_grid_tempo(g, 0.5)),
+                    Some(3) => edited = Some(scale_grid_tempo(g, 2.0)),
+                    _ => {}
+                }
+
+                // Footer: the drag hint, with reset parked at the far edge.
                 ui.horizontal(|ui| {
-                    for (label, ms) in [("-10", -10.0), ("-1", -1.0), ("+1", 1.0), ("+10", 10.0)] {
-                        if ui
-                            .small_button(label)
-                            .on_hover_note(format!("Slide the grid {label} ms"))
-                            .clicked()
+                    ui.label(
+                        egui::RichText::new("Drag the lane to slide")
+                            .font(crate::ui::tokens::font::caption())
+                            .color(crate::ui::tokens::color::LABEL_3),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if segmented(ui, CELL_H, "grid_reset", &[(GridGlyph::Reset, "Go back to the detected grid")])
+                            .is_some()
                         {
-                            edited = Some(shift_grid(g, ms));
+                            reset = true;
                         }
-                    }
-                    ui.label(
-                        egui::RichText::new("ms")
-                            .font(crate::ui::tokens::font::caption())
-                            .color(crate::ui::tokens::color::LABEL_3),
-                    );
-                });
-
-                ui.horizontal(|ui| {
-                    if ui
-                        .small_button("Beat 1 here")
-                        .on_hover_note("Put the downbeat on the playhead")
-                        .clicked()
-                    {
-                        edited = Some(set_beat_one_at(g, playhead_ms as f64));
-                    }
-                    if ui
-                        .small_button("Snap")
-                        .on_hover_note("Move the nearest beat onto the playhead")
-                        .clicked()
-                    {
-                        edited = Some(snap_grid_to(g, playhead_ms as f64));
-                    }
-                    if ui
-                        .small_button("1/2")
-                        .on_hover_note("Halve the tempo the grid is drawn at")
-                        .clicked()
-                    {
-                        edited = Some(scale_grid_tempo(g, 0.5));
-                    }
-                    if ui
-                        .small_button("x2")
-                        .on_hover_note("Double the tempo the grid is drawn at")
-                        .clicked()
-                    {
-                        edited = Some(scale_grid_tempo(g, 2.0));
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("Drag the lane to slide the grid")
-                            .font(crate::ui::tokens::font::caption())
-                            .color(crate::ui::tokens::color::LABEL_3),
-                    );
-                    ui.add_space(crate::ui::tokens::space::S3);
-                    if ui
-                        .small_button("Reset")
-                        .on_hover_note("Go back to the detected grid")
-                        .clicked()
-                    {
-                        reset = true;
-                    }
+                    });
                 });
             });
 
@@ -1428,6 +1422,194 @@ fn draw_vinyl_glyph(
         accent,
         egui::Stroke::NONE,
     ));
+}
+
+/// Height of one cell in the beatgrid editor's segmented controls — also its
+/// width when a control holds a single square button (reset).
+pub(crate) const CELL_H: f32 = 26.0;
+
+/// The hand-drawn glyphs on the beatgrid editor's buttons. Drawn with the
+/// painter rather than typed as text, so the controls read as icons and don't
+/// depend on which fonts happen to be installed.
+#[derive(Clone, Copy)]
+pub(crate) enum GridGlyph {
+    /// Nudge arrow; `dir` is -1 (left) or +1 (right), `double` marks the coarse step.
+    Chevron { dir: f32, double: bool },
+    /// Plant beat 1: a flag on a pole, the pole standing in for the playhead.
+    Downbeat,
+    /// Snap: two arrowheads closing in on a beat line.
+    Snap,
+    /// Halve the tempo: beat ticks spread apart.
+    Half,
+    /// Double the tempo: beat ticks packed together.
+    Double,
+    /// Reset: a circular arrow back to the detected grid.
+    Reset,
+}
+
+/// A row of icon buttons fused into one pill — iOS-style segmented control.
+/// Cells are equal width, hairline-divided, and only the pill's outer corners
+/// are rounded, so a row reads as a single object instead of four loose
+/// rectangles. Returns the index of the cell clicked this frame.
+pub(crate) fn segmented(
+    ui: &mut egui::Ui,
+    width: f32,
+    salt: &str,
+    cells: &[(GridGlyph, &str)],
+) -> Option<usize> {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, CELL_H), egui::Sense::hover());
+    let r = crate::ui::tokens::radius::SM;
+    ui.painter()
+        .rect_filled(rect, egui::Rounding::same(r), crate::ui::tokens::color::SURFACE_HI);
+
+    let mut hit = None;
+    let w = rect.width() / cells.len() as f32;
+    for (i, (glyph, note)) in cells.iter().enumerate() {
+        let cell = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + w * i as f32, rect.top()),
+            egui::vec2(w, rect.height()),
+        );
+        let resp = ui
+            .interact(cell, ui.id().with((salt, i)), egui::Sense::click())
+            .on_hover_note(*note);
+        // Only the pill's end cells carry the outer curve; inner cells stay square
+        // so their hover fill butts up against its neighbours.
+        let first = i == 0;
+        let last = i + 1 == cells.len();
+        let rounding = egui::Rounding {
+            nw: if first { r } else { 0.0 },
+            sw: if first { r } else { 0.0 },
+            ne: if last { r } else { 0.0 },
+            se: if last { r } else { 0.0 },
+        };
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            ui.painter().rect_filled(
+                cell,
+                rounding,
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+            );
+        }
+        if resp.is_pointer_button_down_on() {
+            ui.painter().rect_filled(cell, rounding, crate::ui::tokens::color::ACCENT_SOFT);
+        }
+        if !first {
+            ui.painter().line_segment(
+                [
+                    egui::pos2(cell.left(), cell.top() + 5.0),
+                    egui::pos2(cell.left(), cell.bottom() - 5.0),
+                ],
+                egui::Stroke::new(1.0, crate::ui::tokens::color::SEPARATOR_OPAQUE),
+            );
+        }
+        let color = if resp.hovered() {
+            crate::ui::tokens::color::LABEL
+        } else {
+            crate::ui::tokens::color::LABEL_2
+        };
+        draw_grid_glyph(ui.painter(), cell.center(), color, *glyph);
+        if resp.clicked() {
+            hit = Some(i);
+        }
+    }
+    hit
+}
+
+/// Paint one [`GridGlyph`] centred on `c`, sized to sit inside a [`CELL_H`] cell.
+fn draw_grid_glyph(painter: &egui::Painter, c: egui::Pos2, color: egui::Color32, g: GridGlyph) {
+    let stroke = egui::Stroke::new(1.5, color);
+    match g {
+        GridGlyph::Chevron { dir, double } => {
+            let arm = |x: f32| {
+                painter.add(egui::Shape::line(
+                    vec![
+                        egui::pos2(c.x + x - 2.0 * dir, c.y - 4.0),
+                        egui::pos2(c.x + x + 2.0 * dir, c.y),
+                        egui::pos2(c.x + x - 2.0 * dir, c.y + 4.0),
+                    ],
+                    stroke,
+                ));
+            };
+            if double {
+                arm(2.5 * dir);
+                arm(-2.5 * dir);
+            } else {
+                arm(0.0);
+            }
+        }
+        GridGlyph::Downbeat => {
+            // Flagpole on the playhead, pennant flying right off its top.
+            painter.line_segment(
+                [egui::pos2(c.x - 4.0, c.y - 7.0), egui::pos2(c.x - 4.0, c.y + 7.0)],
+                stroke,
+            );
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(c.x - 4.0, c.y - 7.0),
+                    egui::pos2(c.x + 6.0, c.y - 4.0),
+                    egui::pos2(c.x - 4.0, c.y - 1.0),
+                ],
+                color,
+                egui::Stroke::NONE,
+            ));
+        }
+        GridGlyph::Snap => {
+            // The beat line, with two arrowheads driving onto it from either side.
+            painter.line_segment(
+                [egui::pos2(c.x, c.y - 7.0), egui::pos2(c.x, c.y + 7.0)],
+                egui::Stroke::new(1.5, color),
+            );
+            for dir in [-1.0_f32, 1.0] {
+                let tip = c.x + 2.0 * dir;
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        egui::pos2(tip, c.y),
+                        egui::pos2(tip + 5.0 * dir, c.y - 4.0),
+                        egui::pos2(tip + 5.0 * dir, c.y + 4.0),
+                    ],
+                    color,
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
+        GridGlyph::Half | GridGlyph::Double => {
+            // Beat ticks at the tempo the press would produce: spread for ½,
+            // packed for ×2. The tallest tick is the downbeat.
+            let (gap, n) = if matches!(g, GridGlyph::Half) { (7.0, 2) } else { (3.5, 4) };
+            for i in -(n / 2)..=(n / 2) {
+                let x = c.x + i as f32 * gap;
+                let h = if i == 0 { 7.0 } else { 4.5 };
+                painter.line_segment(
+                    [egui::pos2(x, c.y - h), egui::pos2(x, c.y + h)],
+                    egui::Stroke::new(if i == 0 { 1.6 } else { 1.2 }, color),
+                );
+            }
+        }
+        GridGlyph::Reset => {
+            // Three-quarter circle with an arrowhead on the open end.
+            let radius = 5.5;
+            let at = |t: f32| egui::pos2(c.x + radius * t.cos(), c.y + radius * t.sin());
+            // Swept counter-clockwise, the way an undo arrow runs.
+            let (t0, t1) = (std::f32::consts::TAU * 0.88, std::f32::consts::TAU * 0.10);
+            let pts: Vec<egui::Pos2> = (0..=24)
+                .map(|i| at(t0 + (t1 - t0) * i as f32 / 24.0))
+                .collect();
+            painter.add(egui::Shape::line(pts.clone(), stroke));
+            // Arrowhead on the open end, aimed along the arc's direction of travel.
+            let end = at(t1);
+            let tan = (end - pts[pts.len() - 2]).normalized();
+            let nor = egui::vec2(-tan.y, tan.x);
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    end + tan * 3.4,
+                    end - tan * 1.4 + nor * 3.0,
+                    end - tan * 1.4 - nor * 3.0,
+                ],
+                color,
+                egui::Stroke::NONE,
+            ));
+        }
+    }
 }
 
 /// Live, user-tunable rendering parameters for the waveform, built each frame
