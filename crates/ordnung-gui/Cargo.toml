@@ -89,9 +89,10 @@ objc2-app-kit = { version = "0.2.2", features = [
 ] }
 raw-window-handle = "0.6.2"
 # The video mini-player: a WKWebView in a floating NSPanel that plays a release's
-# YouTube videos without leaving the app (see src/webview.rs). Uses YouTube's own
-# embedded player, so nothing is downloaded or re-hosted. Same objc2 0.5 family
-# as the AppKit bindings above so the framework crates aren't duplicated.
+# YouTube videos without leaving the app (see src/webview.rs). Loads the YouTube
+# watch page with the page's own chrome styled away — embeds are refused inside
+# app web views — so nothing is downloaded or re-hosted. Same objc2 0.5 family as
+# the AppKit bindings above so the framework crates aren't duplicated.
 block2 = "0.5"
 objc2-web-kit = { version = "0.2.2", features = [
     "objc2-app-kit",

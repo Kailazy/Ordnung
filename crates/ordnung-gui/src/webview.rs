@@ -111,14 +111,17 @@ mod imp {
 
     use super::PlayerStatus;
 
-    /// Content size of the panel. Bigger than a bare 16:9 frame because the
-    /// watch page brings YouTube's own chrome with it.
-    const W: f64 = 620.0;
-    const H: f64 = 400.0;
+    /// Content size of the panel: 16:9, since the page's own chrome is styled
+    /// away and only the player is left (see `ISOLATION_CSS`).
+    const W: f64 = 480.0;
+    const H: f64 = 270.0;
+    const MIN_W: f64 = 320.0;
+    const MIN_H: f64 = 180.0;
     /// Inset from the main window's bottom-right corner on first show.
     const MARGIN: f64 = 24.0;
-    /// How often the page is asked what it's doing. The answer only drives
-    /// queue advance and a fallback, so once a second is plenty.
+    /// How often the page is asked what it's doing. The answer drives queue
+    /// advance, the stuck fallback and the style injection, so once a second is
+    /// plenty — the first tick after a load runs immediately (see `load`).
     const POLL_EVERY: Duration = Duration::from_millis(900);
     /// How long a page may sit with no video element before it counts as stuck.
     /// Generous: a cold watch page on a slow link takes a few seconds.
@@ -283,7 +286,7 @@ mod imp {
             // would kill the video the moment the user switched to a browser.
             panel.setHidesOnDeactivate(false);
             panel.setFloatingPanel(true);
-            panel.setMinSize(NSSize::new(360.0, 240.0));
+            panel.setMinSize(NSSize::new(MIN_W, MIN_H));
         }
 
         let config = unsafe { WKWebViewConfiguration::new() };
@@ -314,7 +317,12 @@ mod imp {
         let url = format!("https://www.youtube.com/watch?v={id}");
         mini.state.clear();
         mini.loaded_at = Instant::now();
-        mini.polled_at = Instant::now();
+        // Due immediately: the same tick that reads the player's state also
+        // injects the styling, and waiting a full period would show YouTube's
+        // chrome for most of a second before it collapses to the video.
+        mini.polled_at = Instant::now()
+            .checked_sub(POLL_EVERY)
+            .unwrap_or_else(Instant::now);
         if !mini.title.is_empty() {
             mini.panel.setTitle(&NSString::from_str(&mini.title));
         }
@@ -336,13 +344,60 @@ mod imp {
         navigate(web, "about:blank");
     }
 
-    /// Ask the page what its video element is doing. The answer lands
-    /// asynchronously in `Mini::state`; nothing waits on it.
+    /// Styling that strips the watch page down to its player: pin the player
+    /// containers to the viewport, let the video letterbox inside them, and hide
+    /// the masthead, sidebar, comments, end screens and overlays.
+    ///
+    /// This is YouTube's own DOM, so a redesign can stop it matching. That is a
+    /// cosmetic failure by design — nothing here touches playback, so the worst
+    /// case is the chrome reappearing in a small window, never a dead player.
+    /// Kept as plain CSS (no JS layout) for the same reason.
+    ///
+    /// Must contain no backtick or `${`, since it is embedded in a JS template
+    /// literal below.
+    const ISOLATION_CSS: &str = "\
+        html, body { overflow: hidden !important; background: #000 !important; \
+          margin: 0 !important; padding: 0 !important; \
+          width: 100vw !important; height: 100vh !important; } \
+        #player, #player-container-outer, #player-container-inner, \
+        ytd-player, #movie_player, .html5-video-player { \
+          position: fixed !important; top: 0 !important; left: 0 !important; \
+          width: 100vw !important; height: 100vh !important; \
+          max-width: 100vw !important; max-height: 100vh !important; \
+          z-index: 999999 !important; margin: 0 !important; padding: 0 !important; } \
+        video.video-stream.html5-main-video { width: 100% !important; \
+          height: 100% !important; top: 0 !important; left: 0 !important; \
+          object-fit: contain !important; } \
+        #masthead-container, #masthead, #secondary, #below, #comments, #chat, \
+        #related, ytd-miniplayer, .ytp-endscreen-content, .ytp-ce-element, \
+        .ytp-pause-overlay-container, tp-yt-paper-dialog, ytd-popup-container { \
+          display: none !important; visibility: hidden !important; }";
+
+    /// Ask the page what its video element is doing, and (re)apply the styling
+    /// while we're in there. The answer lands asynchronously in `Mini::state`;
+    /// nothing waits on it.
+    ///
+    /// Injection rides along with the state poll rather than using a
+    /// `WKUserScript` so it re-applies itself on every navigation for free —
+    /// the queue advancing, and YouTube's own SPA transitions, both leave the
+    /// style behind otherwise. Inserting is idempotent: the `<style>` carries an
+    /// id, and a tick that finds it does nothing.
     fn ask_state(web: &WKWebView) {
-        const JS: &str = "(function(){var v=document.querySelector('video');\
-             if(!v)return 'novideo';\
-             if(v.ended)return 'ended';\
-             return v.paused?'paused':'playing';})()";
+        let js = format!(
+            "(function(){{\
+               if(!document.getElementById('ordnung-player-style')){{\
+                 var s=document.createElement('style');\
+                 s.id='ordnung-player-style';\
+                 s.textContent=`{ISOLATION_CSS}`;\
+                 (document.head||document.documentElement).appendChild(s);\
+               }}\
+               var v=document.querySelector('video');\
+               if(!v)return 'novideo';\
+               if(v.ended)return 'ended';\
+               return v.paused?'paused':'playing';\
+             }})()"
+        );
+        let js: &str = &js;
         let handler = block2::RcBlock::new(move |res: *mut AnyObject, _err: *mut NSError| {
             let state = if res.is_null() {
                 String::new()
@@ -360,7 +415,7 @@ mod imp {
             });
         });
         unsafe {
-            web.evaluateJavaScript_completionHandler(&NSString::from_str(JS), Some(&handler));
+            web.evaluateJavaScript_completionHandler(&NSString::from_str(js), Some(&handler));
         }
     }
 
