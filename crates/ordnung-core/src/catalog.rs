@@ -542,6 +542,15 @@ impl Catalog {
         // downbeat detection (v17); the player then falls back to plain beats.
         self.add_column_if_missing("analysis", "first_beat_number", "INTEGER")?;
 
+        // Hand-adjusted beatgrids (the player's grid editor). `grid_edited` marks a
+        // track whose grid the user moved; the `grid_auto_*` columns snapshot the
+        // detected grid it replaced, so the edit can be reverted and so a later
+        // re-analysis can refresh the fallback without clobbering the manual grid.
+        self.add_column_if_missing("analysis", "grid_edited", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("analysis", "grid_auto_offset_ms", "INTEGER")?;
+        self.add_column_if_missing("analysis", "grid_auto_bpm", "REAL")?;
+        self.add_column_if_missing("analysis", "grid_auto_beat_number", "INTEGER")?;
+
         // Full-resolution external artwork kept for tag embedding (`tag --write
         // --art`). Older catalogs only had the small `png_bytes` thumbnail.
         self.add_column_if_missing("track_external_artwork", "full_bytes", "BLOB")?;
@@ -2036,6 +2045,11 @@ impl Catalog {
 
     /// Insert or replace a track's analysis, recording source size/mtime so the
     /// cache can detect file changes.
+    ///
+    /// A hand-adjusted beatgrid (see [`set_manual_beatgrid`](Self::set_manual_beatgrid))
+    /// survives: tempo, anchor and bar phase stay as the user placed them, and the
+    /// freshly detected grid is parked in the `grid_auto_*` columns so
+    /// [`reset_beatgrid`](Self::reset_beatgrid) reverts to the *latest* detection.
     pub fn save_analysis(
         &self,
         id: Id,
@@ -2056,11 +2070,20 @@ impl Catalog {
                  waveform_bands, first_beat_number)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
              ON CONFLICT(track_id) DO UPDATE SET
-                 bpm=?2, key_tonic=?3, key_mode=?4, beat_offset_ms=?5, peak=?6,
+                 bpm=CASE WHEN analysis.grid_edited=1 THEN analysis.bpm ELSE ?2 END,
+                 key_tonic=?3, key_mode=?4,
+                 beat_offset_ms=CASE WHEN analysis.grid_edited=1
+                     THEN analysis.beat_offset_ms ELSE ?5 END,
+                 first_beat_number=CASE WHEN analysis.grid_edited=1
+                     THEN analysis.first_beat_number ELSE ?17 END,
+                 grid_auto_bpm=CASE WHEN analysis.grid_edited=1 THEN ?2 END,
+                 grid_auto_offset_ms=CASE WHEN analysis.grid_edited=1 THEN ?5 END,
+                 grid_auto_beat_number=CASE WHEN analysis.grid_edited=1 THEN ?17 END,
+                 peak=?6,
                  loudness=?7, waveform=?8, content_hash=?9, audio_fingerprint=?10,
                  lowpass_hz=?11, lowpass_edge=?12, analyzer_version=?13,
                  src_size=?14, src_mtime=?15, waveform_bands=?16,
-                 first_beat_number=?17, analyzed_at=unixepoch()",
+                 analyzed_at=unixepoch()",
             params![
                 id as i64,
                 a.bpm,
@@ -2132,6 +2155,68 @@ impl Catalog {
             )
             .optional()?;
         Ok(row)
+    }
+
+    /// Persist a hand-adjusted beatgrid: the anchor beat's position, its bar
+    /// position (1..=4) and the tempo the grid is drawn at. The first edit
+    /// snapshots the detected grid into the `grid_auto_*` columns so
+    /// [`reset_beatgrid`](Self::reset_beatgrid) can put it back; later edits keep
+    /// that original snapshot. No-op for a track with no analysis row — there is no
+    /// grid to move until it has been analyzed.
+    pub fn set_manual_beatgrid(
+        &self,
+        id: Id,
+        offset_ms: u64,
+        first_beat_number: u32,
+        bpm: f32,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE analysis SET
+                 grid_auto_bpm = CASE WHEN grid_edited=1 THEN grid_auto_bpm ELSE bpm END,
+                 grid_auto_offset_ms = CASE WHEN grid_edited=1
+                     THEN grid_auto_offset_ms ELSE beat_offset_ms END,
+                 grid_auto_beat_number = CASE WHEN grid_edited=1
+                     THEN grid_auto_beat_number ELSE first_beat_number END,
+                 bpm=?2, beat_offset_ms=?3, first_beat_number=?4, grid_edited=1
+             WHERE track_id=?1",
+            params![
+                id as i64,
+                bpm as f64,
+                offset_ms as i64,
+                first_beat_number as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Revert a hand-adjusted beatgrid to the detected one. Returns whether a
+    /// manual grid was actually replaced (false when the grid was never edited).
+    pub fn reset_beatgrid(&self, id: Id) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE analysis SET
+                 bpm = COALESCE(grid_auto_bpm, bpm),
+                 beat_offset_ms = grid_auto_offset_ms,
+                 first_beat_number = grid_auto_beat_number,
+                 grid_auto_bpm = NULL, grid_auto_offset_ms = NULL,
+                 grid_auto_beat_number = NULL, grid_edited = 0
+             WHERE track_id=?1 AND grid_edited=1",
+            params![id as i64],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Whether this track's beatgrid was hand-adjusted rather than detected.
+    pub fn beatgrid_is_manual(&self, id: Id) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT grid_edited FROM analysis WHERE track_id=?1",
+                params![id as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+            == 1)
     }
 
     pub fn count(&self) -> Result<u64> {
@@ -3416,6 +3501,45 @@ mod tests {
         let b0 = got.beatgrid.beats.first().expect("anchor beat");
         assert_eq!(b0.position_ms, 250);
         assert_eq!(b0.number, 3, "downbeat phase (first-beat bar number) persists");
+    }
+
+    #[test]
+    fn manual_beatgrid_survives_reanalysis_and_resets() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let (id, _) = cat.upsert_scanned(&scanned("/a.mp3", "A", "Techno", 1000)).unwrap();
+        let detected = |bpm: f32, off: u64, num: u32| Analysis {
+            bpm: Some(bpm),
+            beatgrid: Beatgrid {
+                beats: vec![Beat { number: num, position_ms: off, bpm }],
+            },
+            ..Default::default()
+        };
+        cat.save_analysis(id, &detected(128.0, 250, 1), 0, 0).unwrap();
+        assert!(!cat.beatgrid_is_manual(id).unwrap(), "detected grid isn't manual");
+
+        // Nudge the grid 30 ms later and make the anchor the bar's third beat.
+        cat.set_manual_beatgrid(id, 280, 3, 128.0).unwrap();
+        assert!(cat.beatgrid_is_manual(id).unwrap());
+        let b0 = |a: &Analysis| *a.beatgrid.beats.first().expect("anchor beat");
+        let got = b0(&cat.get_analysis(id).unwrap().unwrap());
+        assert_eq!((got.position_ms, got.number), (280, 3));
+
+        // Re-analysis refreshes everything else but leaves the hand-placed grid.
+        let mut fresh = detected(64.0, 900, 2);
+        fresh.peak = Some(0.9);
+        cat.save_analysis(id, &fresh, 1, 1).unwrap();
+        let after = cat.get_analysis(id).unwrap().unwrap();
+        assert_eq!(after.peak, Some(0.9), "non-grid fields still refresh");
+        assert_eq!(after.bpm, Some(128.0), "manual tempo kept");
+        assert_eq!((b0(&after).position_ms, b0(&after).number), (280, 3));
+
+        // Reset falls back to the *latest* detection, not the stale first one.
+        assert!(cat.reset_beatgrid(id).unwrap(), "a manual grid was replaced");
+        let reset = cat.get_analysis(id).unwrap().unwrap();
+        assert_eq!(reset.bpm, Some(64.0));
+        assert_eq!((b0(&reset).position_ms, b0(&reset).number), (900, 2));
+        assert!(!cat.beatgrid_is_manual(id).unwrap());
+        assert!(!cat.reset_beatgrid(id).unwrap(), "nothing left to reset");
     }
 
     #[test]

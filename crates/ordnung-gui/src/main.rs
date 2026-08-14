@@ -1101,6 +1101,10 @@ struct App {
     /// handle above the lane; the bottom player panel grows to match. See
     /// [`player`].
     wave_lane_h: f32,
+    /// The zoom lane's beatgrid editor is open — its tab is lit, its panel of
+    /// nudge controls shows above the lane, and dragging the lane slides the grid
+    /// instead of seeking. See [`player`].
+    grid_edit_open: bool,
     /// Receives the one-shot startup update check's result off the network
     /// thread. `Some(info)` → a newer release exists; `None` → up to date or the
     /// check failed (we stay silent). Consumed once in `update()`, then dropped.

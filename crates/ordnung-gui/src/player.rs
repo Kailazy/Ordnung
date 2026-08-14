@@ -60,18 +60,8 @@ impl App {
                     (a.waveform_preview.clone(), bands)
                 })
                 .unwrap_or_default();
-            // Beatgrid for the moving lane: bpm + first-beat position + downbeat
-            // phase (from the anchor beat's bar number). `get_analysis` returns the
-            // grid as one anchor beat, so the phase is `1 - number` (mod 4).
-            let grid = analysis.as_ref().and_then(|a| {
-                let bpm = a.bpm?;
-                let b0 = a.beatgrid.beats.first()?;
-                Some(PlayerGrid {
-                    bpm,
-                    first_beat_ms: b0.position_ms as f64,
-                    downbeat_phase: (1 - b0.number as i64).rem_euclid(4) as u32,
-                })
-            });
+            // Beatgrid for the moving lane.
+            let grid = analysis.as_ref().and_then(player_grid);
             self.now_playing = Some(NowPlaying {
                 id,
                 artist,
@@ -608,6 +598,222 @@ impl App {
         }
     }
 
+    /// The zoom lane's beatgrid editor. Paints the "GRID" tab on the lane's
+    /// top-right corner and, while it's open, a compact panel of controls above the
+    /// lane: fine/coarse nudges, "beat 1 here" to pin the downbeat at the playhead,
+    /// ½ / ×2 for an octave-off tempo, and a reset back to what analysis detected.
+    /// Returns whether edit mode is on — which is what turns a lane drag into a
+    /// grid slide rather than a seek. Every edit is written straight to the catalog
+    /// (see [`Catalog::set_manual_beatgrid`]), so it survives the track being
+    /// reloaded and later re-analyzed.
+    fn draw_grid_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        lane: egui::Rect,
+        playhead_ms: f32,
+    ) -> bool {
+        let Some(g) = self.now_playing.as_ref().and_then(|n| n.grid) else {
+            return false;
+        };
+
+        // The tab itself: a small pill tucked into the lane's top-right corner,
+        // quiet until hovered and lit while the editor is open.
+        let tab_rect = egui::Rect::from_min_size(
+            egui::pos2(lane.right() - 46.0, lane.top() + 3.0),
+            egui::vec2(42.0, 15.0),
+        );
+        let tab = ui
+            .interact(tab_rect, ui.id().with("grid_edit_tab"), egui::Sense::click())
+            .on_hover_note("Adjust the beatgrid");
+        if tab.clicked() {
+            self.grid_edit_open = !self.grid_edit_open;
+        }
+        if tab.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let (fill, text) = match (self.grid_edit_open, tab.hovered()) {
+            (true, _) => (crate::ui::tokens::color::ACCENT, crate::ui::tokens::color::LABEL),
+            (false, true) => (
+                egui::Color32::from_rgba_unmultiplied(150, 150, 150, 120),
+                crate::ui::tokens::color::LABEL,
+            ),
+            (false, false) => (
+                egui::Color32::from_rgba_unmultiplied(150, 150, 150, 70),
+                crate::ui::tokens::color::LABEL_2,
+            ),
+        };
+        ui.painter()
+            .rect_filled(tab_rect, egui::Rounding::same(crate::ui::tokens::radius::XS), fill);
+        ui.painter().text(
+            tab_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "GRID",
+            crate::ui::tokens::font::caption(),
+            text,
+        );
+        if !self.grid_edit_open {
+            return false;
+        }
+
+        // The panel, floating just above the lane's right edge so it never covers
+        // the beats being adjusted.
+        let mut edited: Option<PlayerGrid> = None;
+        let mut reset = false;
+        egui::Window::new("Beatgrid")
+            .id(egui::Id::new("grid_edit_panel"))
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::RIGHT_BOTTOM)
+            .fixed_pos(egui::pos2(lane.right(), lane.top() - 6.0))
+            .show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("BEATGRID")
+                            .font(crate::ui::tokens::font::caption())
+                            .color(crate::ui::tokens::color::LABEL_3),
+                    );
+                    ui.add_space(crate::ui::tokens::space::S3);
+                    ui.label(
+                        egui::RichText::new(format!("{:.1} BPM", g.bpm))
+                            .font(crate::ui::tokens::font::footnote())
+                            .color(crate::ui::tokens::color::LABEL_2),
+                    );
+                });
+
+                // Shift the whole grid. Coarse first, then fine — the same
+                // pairing rekordbox puts either side of its grid readout.
+                ui.horizontal(|ui| {
+                    for (label, ms) in [("-10", -10.0), ("-1", -1.0), ("+1", 1.0), ("+10", 10.0)] {
+                        if ui
+                            .small_button(label)
+                            .on_hover_note(format!("Slide the grid {label} ms"))
+                            .clicked()
+                        {
+                            edited = Some(shift_grid(g, ms));
+                        }
+                    }
+                    ui.label(
+                        egui::RichText::new("ms")
+                            .font(crate::ui::tokens::font::caption())
+                            .color(crate::ui::tokens::color::LABEL_3),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("Beat 1 here")
+                        .on_hover_note("Put the downbeat on the playhead")
+                        .clicked()
+                    {
+                        edited = Some(set_beat_one_at(g, playhead_ms as f64));
+                    }
+                    if ui
+                        .small_button("Snap")
+                        .on_hover_note("Move the nearest beat onto the playhead")
+                        .clicked()
+                    {
+                        edited = Some(snap_grid_to(g, playhead_ms as f64));
+                    }
+                    if ui
+                        .small_button("1/2")
+                        .on_hover_note("Halve the tempo the grid is drawn at")
+                        .clicked()
+                    {
+                        edited = Some(scale_grid_tempo(g, 0.5));
+                    }
+                    if ui
+                        .small_button("x2")
+                        .on_hover_note("Double the tempo the grid is drawn at")
+                        .clicked()
+                    {
+                        edited = Some(scale_grid_tempo(g, 2.0));
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Drag the lane to slide the grid")
+                            .font(crate::ui::tokens::font::caption())
+                            .color(crate::ui::tokens::color::LABEL_3),
+                    );
+                    ui.add_space(crate::ui::tokens::space::S3);
+                    if ui
+                        .small_button("Reset")
+                        .on_hover_note("Go back to the detected grid")
+                        .clicked()
+                    {
+                        reset = true;
+                    }
+                });
+            });
+
+        if let Some(g) = edited {
+            if let Some(np) = self.now_playing.as_mut() {
+                np.grid = Some(g);
+            }
+            self.commit_grid_edit();
+        }
+        if reset {
+            self.reset_player_grid();
+        }
+        true
+    }
+
+    /// Write the player's hand-adjusted grid to the catalog, and mirror its tempo
+    /// into the visible table row so the BPM column agrees with the lines on
+    /// screen. Called when an edit settles — a button click, or a drag release —
+    /// rather than every frame of a drag.
+    fn commit_grid_edit(&mut self) {
+        let Some((id, g)) = self
+            .now_playing
+            .as_ref()
+            .and_then(|n| n.grid.map(|g| (n.id, g)))
+        else {
+            return;
+        };
+        if let Ok(cat) = Catalog::open(&self.db_path) {
+            let _ = cat.set_manual_beatgrid(
+                id,
+                g.first_beat_ms.max(0.0).round() as u64,
+                anchor_beat_number(g.downbeat_phase),
+                g.bpm,
+            );
+        }
+        self.set_row_bpm(id, g.bpm);
+    }
+
+    /// Throw away a hand-adjusted grid and go back to the detected one, re-reading
+    /// it from the catalog so the lane shows exactly what was restored.
+    fn reset_player_grid(&mut self) {
+        let Some(id) = self.now_playing.as_ref().map(|n| n.id) else {
+            return;
+        };
+        let Ok(cat) = Catalog::open(&self.db_path) else {
+            return;
+        };
+        if cat.reset_beatgrid(id).is_err() {
+            return;
+        }
+        let analysis = cat.get_analysis(id).ok().flatten();
+        let grid = analysis.as_ref().and_then(player_grid);
+        if let Some(np) = self.now_playing.as_mut() {
+            np.grid = grid;
+        }
+        if let Some(bpm) = grid.map(|g| g.bpm) {
+            self.set_row_bpm(id, bpm);
+        }
+    }
+
+    /// Keep the table's BPM cell in step with a tempo the grid editor just
+    /// changed — the column reads the analysis row the edit rewrote.
+    fn set_row_bpm(&mut self, id: Id, bpm: f32) {
+        if let Some(r) = self.rows.iter_mut().find(|r| r.id == id) {
+            r.bpm_val = Some(bpm);
+            r.bpm = format!("{bpm:.0}");
+        }
+    }
+
     /// Draw the zoomed detail lane: a `wave_zoom_secs`-wide window of the track,
     /// centered on the playhead and scrolling under it during playback. The window
     /// is clamped to the track bounds, so near the ends the playhead drifts off
@@ -760,12 +966,48 @@ impl App {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
 
+            // Grid editor: a tab on the lane's top-right corner, and — while it's
+            // open — the panel of nudge controls above the lane. Only offered once
+            // there's a grid to move (an analyzed track with a tempo).
+            let editing = if grid.is_some() {
+                self.draw_grid_editor(ui, rect, shown_frac * dur)
+            } else {
+                false
+            };
+
             // Click/drag to seek — map pointer x back through the window.
             let frac_at = |p: egui::Pos2| {
                 (w0 + ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * span)
                     .clamp(0.0, 1.0)
             };
-            if (resp.dragged() || resp.drag_started()) && dur > 0.0 {
+            // ...except in grid-edit mode, where dragging the lane slides the grid
+            // under the waveform instead — the direct-manipulation version of the
+            // nudge buttons, and the reason the editor is anchored to this lane.
+            if editing {
+                if resp.hovered() || resp.dragged() {
+                    ui.ctx().set_cursor_icon(if resp.dragged() {
+                        egui::CursorIcon::Grabbing
+                    } else {
+                        egui::CursorIcon::Grab
+                    });
+                }
+                // Read the grid back off the track rather than reusing this frame's
+                // copy — a nudge button in the panel above may have just moved it.
+                let live = self.now_playing.as_ref().and_then(|n| n.grid);
+                if let (Some(g), true) = (live, resp.dragged() && dur > 0.0) {
+                    let ms_per_px = (span * dur) as f64 * 1000.0 / rect.width().max(1.0) as f64;
+                    let dx = resp.drag_delta().x as f64;
+                    if dx != 0.0 {
+                        if let Some(np) = self.now_playing.as_mut() {
+                            np.grid = Some(shift_grid(g, dx * ms_per_px));
+                        }
+                    }
+                }
+                // One catalog write per gesture, on release — not per frame.
+                if resp.drag_stopped() {
+                    self.commit_grid_edit();
+                }
+            } else if (resp.dragged() || resp.drag_started()) && dur > 0.0 {
                 if let Some(p) = resp.interact_pointer_pos() {
                     self.scrub = Some(frac_at(p));
                 }
@@ -812,6 +1054,90 @@ fn draw_beatgrid(
         );
     }
 }
+
+/// The lane's beatgrid for a cached analysis: bpm + first-beat position + downbeat
+/// phase (from the anchor beat's bar number). `get_analysis` returns the grid as
+/// one anchor beat, so the phase is `1 - number` (mod 4). `None` for a track with
+/// no tempo — there's nothing to draw or adjust.
+fn player_grid(a: &Analysis) -> Option<PlayerGrid> {
+    let bpm = a.bpm?;
+    let b0 = a.beatgrid.beats.first()?;
+    Some(PlayerGrid {
+        bpm,
+        first_beat_ms: b0.position_ms as f64,
+        downbeat_phase: (1 - b0.number as i64).rem_euclid(4) as u32,
+    })
+}
+
+/// Bar position (1..=4) of a grid's anchor beat — the inverse of the
+/// `downbeat_phase` the lane draws with, and the form the catalog persists
+/// (`first_beat_number`). Phase 0 means the anchor *is* the "1".
+fn anchor_beat_number(phase: u32) -> u32 {
+    match (1i64 - phase as i64).rem_euclid(4) as u32 {
+        0 => 4,
+        n => n,
+    }
+}
+
+/// Slide the whole grid by `delta_ms`. The anchor only ever rolls onto a
+/// neighbouring beat when the shift would push it before the track start (the
+/// catalog stores it unsigned), and the bar phase is re-based when it does, so
+/// the downbeats never jump a beat just because the anchor wrapped.
+fn shift_grid(g: PlayerGrid, delta_ms: f64) -> PlayerGrid {
+    let period = 60_000.0 / g.bpm.max(1.0) as f64;
+    let mut first = g.first_beat_ms + delta_ms;
+    let mut phase = g.downbeat_phase as i64;
+    // Anchor moves forward one beat → what was beat i is now beat i-1, so the
+    // phase counts down with it.
+    while first < 0.0 {
+        first += period;
+        phase -= 1;
+    }
+    PlayerGrid {
+        bpm: g.bpm,
+        first_beat_ms: first,
+        downbeat_phase: phase.rem_euclid(4) as u32,
+    }
+}
+
+/// Slide the grid so its nearest beat lands exactly on `t_ms`. This is the fix
+/// for a grid that's the right tempo but sitting off the beat.
+fn snap_grid_to(g: PlayerGrid, t_ms: f64) -> PlayerGrid {
+    let period = 60_000.0 / g.bpm.max(1.0) as f64;
+    let i = ((t_ms - g.first_beat_ms) / period).round();
+    shift_grid(g, t_ms - (g.first_beat_ms + i * period))
+}
+
+/// Snap to `t_ms` *and* make that beat the downbeat — rekordbox's "set as beat 1",
+/// which is what fixes a grid whose bars start on the wrong beat of four.
+fn set_beat_one_at(g: PlayerGrid, t_ms: f64) -> PlayerGrid {
+    let g = snap_grid_to(g, t_ms);
+    let period = 60_000.0 / g.bpm.max(1.0) as f64;
+    let i = ((t_ms - g.first_beat_ms) / period).round() as i64;
+    PlayerGrid {
+        downbeat_phase: i.rem_euclid(4) as u32,
+        ..g
+    }
+}
+
+/// Halve or double the grid's tempo — the fix for an octave-off detection, where
+/// the lines came out twice as dense (or half). The current first downbeat keeps
+/// its position in time and stays the "1", so only the spacing changes.
+fn scale_grid_tempo(g: PlayerGrid, factor: f32) -> PlayerGrid {
+    let period = 60_000.0 / g.bpm.max(1.0) as f64;
+    let downbeat_ms = g.first_beat_ms + g.downbeat_phase as f64 * period;
+    let scaled = PlayerGrid {
+        bpm: (g.bpm * factor).clamp(MIN_GRID_BPM, MAX_GRID_BPM),
+        ..g
+    };
+    set_beat_one_at(scaled, downbeat_ms)
+}
+
+/// Tempo bounds for the grid editor's ½/×2 buttons — wide enough for half-time
+/// dub and drum'n'bass, tight enough that repeated taps can't run the grid off
+/// into a solid wall of lines.
+const MIN_GRID_BPM: f32 = 40.0;
+const MAX_GRID_BPM: f32 = 300.0;
 
 /// Pure geometry for [`draw_beatgrid`]: the `(x, is_downbeat)` of every grid line
 /// inside the visible window `(w0, w1)` (track-fraction), mapped onto `[left,
@@ -892,6 +1218,108 @@ mod grid_tests {
     fn beat_lines_absent_without_tempo() {
         let g = PlayerGrid { bpm: 0.0, first_beat_ms: 0.0, downbeat_phase: 0 };
         assert!(beat_lines(g, 300.0, (0.0, 1.0), 0.0, 400.0).is_empty());
+    }
+
+    /// Every beat of `g` that lands inside `[0, 8000)` ms, as `(ms, is_downbeat)` —
+    /// the grid as the lane would actually draw it, so the edit helpers can be
+    /// checked on their output rather than their internal anchor bookkeeping.
+    fn beats_in_first_8s(g: PlayerGrid) -> Vec<(f64, bool)> {
+        let period = 60_000.0 / g.bpm as f64;
+        let i0 = ((0.0 - g.first_beat_ms) / period).ceil() as i64;
+        let mut out = Vec::new();
+        let mut i = i0;
+        loop {
+            let t = g.first_beat_ms + i as f64 * period;
+            if t >= 8000.0 {
+                return out;
+            }
+            out.push((t, (i - g.downbeat_phase as i64).rem_euclid(4) == 0));
+            i += 1;
+        }
+    }
+
+    #[test]
+    fn shift_moves_every_beat_and_keeps_the_bar_phase() {
+        let g = PlayerGrid { bpm: 120.0, first_beat_ms: 250.0, downbeat_phase: 1 };
+        let before = beats_in_first_8s(g);
+        let after = beats_in_first_8s(shift_grid(g, 30.0));
+        assert_eq!(before.len(), after.len());
+        for (b, a) in before.iter().zip(&after) {
+            assert!((a.0 - b.0 - 30.0).abs() < 1e-6, "every beat moved 30 ms later");
+            assert_eq!(a.1, b.1, "downbeats stay downbeats");
+        }
+    }
+
+    #[test]
+    fn shift_before_zero_rolls_the_anchor_without_moving_the_downbeats() {
+        // 120 BPM, anchor at 100 ms: a -300 ms nudge pushes it negative, so the
+        // anchor has to roll forward onto the next beat. The grid itself must
+        // still just be 300 ms earlier, downbeats included.
+        let g = PlayerGrid { bpm: 120.0, first_beat_ms: 100.0, downbeat_phase: 2 };
+        let moved = shift_grid(g, -300.0);
+        assert!(moved.first_beat_ms >= 0.0, "anchor stays storable as unsigned ms");
+        // Every beat that stayed in view must be its old self, 300 ms earlier and
+        // with the same bar position — the anchor roll is bookkeeping, not a move.
+        let before = beats_in_first_8s(g);
+        let after = beats_in_first_8s(moved);
+        let mut matched = 0;
+        for (t, down) in &after {
+            if let Some((_, was)) = before.iter().find(|(u, _)| (u - t - 300.0).abs() < 1e-6) {
+                assert_eq!(down, was, "bar phase survives the anchor roll");
+                matched += 1;
+            }
+        }
+        assert_eq!(matched, before.len() - 1, "all but the beat pushed off the front");
+    }
+
+    #[test]
+    fn beat_one_lands_the_downbeat_on_the_playhead() {
+        // A grid 40 ms off the beat with its "1" in the wrong place — the two
+        // things "Beat 1 here" has to fix at once.
+        let g = PlayerGrid { bpm: 128.0, first_beat_ms: 40.0, downbeat_phase: 3 };
+        let fixed = set_beat_one_at(g, 4000.0);
+        let beats = beats_in_first_8s(fixed);
+        let at_playhead = beats
+            .iter()
+            .find(|(t, _)| (t - 4000.0).abs() < 1e-6)
+            .expect("a beat sits exactly on the playhead");
+        assert!(at_playhead.1, "and it is the downbeat");
+        // Snapping alone moves the beat there but leaves the bar phase alone.
+        let snapped = snap_grid_to(g, 4000.0);
+        assert!(beats_in_first_8s(snapped)
+            .iter()
+            .any(|(t, _)| (t - 4000.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn halving_and_doubling_pivot_on_the_downbeat() {
+        let g = PlayerGrid { bpm: 128.0, first_beat_ms: 500.0, downbeat_phase: 0 };
+        let doubled = scale_grid_tempo(g, 2.0);
+        assert_eq!(doubled.bpm, 256.0);
+        // The "1" at 500 ms is still a downbeat at the new tempo.
+        assert!(beats_in_first_8s(doubled)
+            .iter()
+            .any(|(t, down)| (t - 500.0).abs() < 1e-6 && *down));
+        let halved = scale_grid_tempo(g, 0.5);
+        assert_eq!(halved.bpm, 64.0);
+        assert!(beats_in_first_8s(halved)
+            .iter()
+            .any(|(t, down)| (t - 500.0).abs() < 1e-6 && *down));
+        // Repeated taps can't run the tempo away.
+        let mut slow = g;
+        for _ in 0..6 {
+            slow = scale_grid_tempo(slow, 0.5);
+        }
+        assert_eq!(slow.bpm, MIN_GRID_BPM);
+    }
+
+    #[test]
+    fn anchor_beat_number_inverts_the_downbeat_phase() {
+        // Round-trip against the phase the lane derives from a stored bar number.
+        for number in 1..=4u32 {
+            let phase = (1 - number as i64).rem_euclid(4) as u32;
+            assert_eq!(anchor_beat_number(phase), number);
+        }
     }
 }
 

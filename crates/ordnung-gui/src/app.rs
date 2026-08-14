@@ -156,6 +156,7 @@ impl App {
             scrub: None,
             wave_zoom_secs: crate::player::DEFAULT_ZOOM_SECS,
             wave_lane_h: crate::player::DEFAULT_LANE_H,
+            grid_edit_open: false,
             update_rx: None,
             update_available: None,
         };
