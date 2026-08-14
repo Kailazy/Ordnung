@@ -23,6 +23,8 @@ mod tex;
 mod ui;
 mod util;
 mod views;
+mod vinyl_sheet;
+mod webview;
 
 use audio::{fmt_time, AudioEngine, PlayState};
 use config::Config;
@@ -50,6 +52,7 @@ use std::thread;
 use std::time::Duration;
 use table::*;
 use ui::hover::HoverNoteExt;
+use vinyl_sheet::{SheetFetched, VinylSheet};
 use util::*;
 
 fn main() -> eframe::Result<()> {
@@ -809,6 +812,14 @@ struct App {
     /// destroy collection metadata on the user's account (see [`VinylEdit`]).
     /// `Some` shows the confirm modal; the edit only runs if they say yes.
     confirm_vinyl_edit: Option<VinylEdit>,
+    /// The open record sheet — one record's tracklist, with what can play each
+    /// position (a local file, a Discogs-listed YouTube video, or nothing).
+    /// `None` when no record is open. See [`vinyl_sheet`].
+    vinyl_sheet: Option<VinylSheet>,
+    /// Receives the release detail (tracklist + videos) fetched for the open
+    /// sheet. One release per lookup, off the UI thread; results for a record
+    /// the user has since closed are dropped.
+    sheet_rx: Option<Receiver<SheetFetched>>,
     /// A track the table should scroll to and reveal on the next frame, set when
     /// jumping into the catalog from the vinyl grid. Cleared once honoured.
     scroll_to_track: Option<Id>,

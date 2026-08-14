@@ -67,6 +67,7 @@ objc2 = "0.5.2"
 objc2-foundation = { version = "0.2.2", features = [
     "NSString",
     "NSURL",
+    "NSURLRequest",
     "NSArray",
     "NSGeometry",
     "NSObject",
@@ -80,9 +81,20 @@ objc2-app-kit = { version = "0.2.2", features = [
     "NSImage",
     "NSApplication",
     "NSWindow",
+    "NSPanel",
     "NSResponder",
     "NSPasteboard",
     "NSPasteboardItem",
     "NSWorkspace",
 ] }
 raw-window-handle = "0.6.2"
+# The video mini-player: a WKWebView in a floating NSPanel that plays a release's
+# YouTube videos without leaving the app (see src/webview.rs). Uses YouTube's own
+# embedded player, so nothing is downloaded or re-hosted. Same objc2 0.5 family
+# as the AppKit bindings above so the framework crates aren't duplicated.
+objc2-web-kit = { version = "0.2.2", features = [
+    "objc2-app-kit",
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKNavigation",
+] }

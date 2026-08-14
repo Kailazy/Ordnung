@@ -117,6 +117,69 @@ pub struct ReleaseDetail {
     pub styles: Vec<String>,
     pub label: Option<String>,
     pub catalog_number: Option<String>,
+    /// The release's own track listing, in pressing order. Empty when Discogs
+    /// lists none. `#[serde(default)]` so a `release_cache` row written before
+    /// this field existed still deserializes (the cache's `detail_version`
+    /// guard re-fetches it — see [`crate::catalog::DETAIL_SCHEMA_VERSION`]).
+    #[serde(default)]
+    pub tracklist: Vec<ReleaseTrack>,
+    /// YouTube videos the Discogs community attached to this release — how a
+    /// record with no digital copy in the library can still be listened to.
+    #[serde(default)]
+    pub videos: Vec<ReleaseVideo>,
+}
+
+/// One entry from a release's track listing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReleaseTrack {
+    /// Side/position as pressed, e.g. `A1`. Empty on releases that don't list one.
+    pub position: String,
+    pub title: String,
+    /// Duration as Discogs writes it (`5:18`), not a parsed count of seconds —
+    /// it's display-only and frequently blank or malformed.
+    pub duration: String,
+}
+
+/// A YouTube video attached to a Discogs release.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReleaseVideo {
+    pub uri: String,
+    pub title: String,
+    pub duration_secs: Option<u32>,
+    /// Discogs's own flag for whether the video may be embedded. Uploaders
+    /// clear it for videos the rights holder blocks off-site, which would show
+    /// as a dead player — those open on YouTube itself instead.
+    pub embeddable: bool,
+}
+
+impl ReleaseVideo {
+    /// The YouTube video id from `uri`, for building an embed URL. `None` for
+    /// the occasional non-YouTube link (Vimeo, dead shorteners) — Discogs
+    /// accepts any URL here, so this can't be assumed.
+    pub fn youtube_id(&self) -> Option<&str> {
+        let u = self.uri.trim();
+        let rest = u
+            .strip_prefix("https://")
+            .or_else(|| u.strip_prefix("http://"))
+            .unwrap_or(u);
+        let rest = rest.strip_prefix("www.").unwrap_or(rest);
+        // The two forms Discogs stores: watch links and youtu.be shorteners.
+        let id = if let Some(q) = rest.strip_prefix("youtube.com/watch?") {
+            q.split('&').find_map(|p| p.strip_prefix("v="))?
+        } else if let Some(tail) = rest.strip_prefix("youtu.be/") {
+            tail.split(['?', '/']).next()?
+        } else if let Some(tail) = rest.strip_prefix("youtube.com/embed/") {
+            tail.split(['?', '/']).next()?
+        } else {
+            return None;
+        };
+        // Ids are fixed-alphabet; anything else is a mangled link we can't play.
+        (!id.is_empty()
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .then_some(id)
+    }
 }
 
 /// Which album-level tag field a [`FieldFill`] targets. Kept as an enum (rather
@@ -158,6 +221,96 @@ pub struct FieldFill {
 }
 
 impl ReleaseDetail {
+    /// Which video plays each track: one entry per `tracklist` position, holding
+    /// an index into `videos` (or `None` when nothing on the release matches).
+    ///
+    /// Discogs video titles are free text typed by whoever attached them —
+    /// `"Massive Attack - Safe From Harm"`, `"A1. Safe From Harm"`, or just the
+    /// track name — so matching is deliberately conservative: a video is claimed
+    /// only when its title (or the part after an `Artist -` prefix) *starts with*
+    /// the track's title, or when it opens with the track's pressing position.
+    /// Anything looser makes a short title like "Love" swallow the wrong video.
+    /// Each video is claimed at most once; whatever is left over (album rips,
+    /// live sets) stays available via [`unmatched_videos`](Self::unmatched_videos).
+    pub fn video_matches(&self) -> Vec<Option<usize>> {
+        let candidates: Vec<Vec<String>> = self
+            .videos
+            .iter()
+            .map(|v| video_title_candidates(&v.title))
+            .collect();
+        self.claim_by_title(&candidates, true)
+    }
+
+    /// Which of `titles` (the track titles of local files linked to this
+    /// release) plays each tracklist position. Same conservative matching as
+    /// [`video_matches`](Self::video_matches), minus the positional fallback —
+    /// a file named `A1` is a filename convention, not a title.
+    pub fn file_matches(&self, titles: &[String]) -> Vec<Option<usize>> {
+        let candidates: Vec<Vec<String>> = titles.iter().map(|t| vec![norm_loose(t)]).collect();
+        self.claim_by_title(&candidates, false)
+    }
+
+    /// Assign at most one candidate to each tracklist entry. `candidates[i]` is
+    /// the set of normalized forms item `i` may match under; the first item that
+    /// matches a track claims it and is not offered to later tracks.
+    fn claim_by_title(
+        &self,
+        candidates: &[Vec<String>],
+        allow_position: bool,
+    ) -> Vec<Option<usize>> {
+        let mut used = vec![false; candidates.len()];
+        let mut out = Vec::with_capacity(self.tracklist.len());
+        for t in &self.tracklist {
+            let want = norm_loose(&t.title);
+            let pos = norm_loose(&t.position);
+            let mut hit = None;
+            if !want.is_empty() {
+                // Two passes so an exact title always wins over a positional
+                // guess, even when the positional video comes first in the list.
+                'search: for exact_only in [true, false] {
+                    for (i, cands) in candidates.iter().enumerate() {
+                        if used[i] {
+                            continue;
+                        }
+                        let title_hit = cands.iter().any(|c| {
+                            c == &want || (!exact_only && c.starts_with(&format!("{want} ")))
+                        });
+                        // A position match needs the position to be a real
+                        // side/track marker (`a1`), not a bare digit that would
+                        // collide with any number in a video title.
+                        let pos_hit = allow_position
+                            && !exact_only
+                            && pos.len() >= 2
+                            && pos.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                            && cands.iter().any(|c| {
+                                c == &pos || c.starts_with(&format!("{pos} "))
+                            });
+                        if title_hit || pos_hit {
+                            hit = Some(i);
+                            used[i] = true;
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            out.push(hit);
+        }
+        out
+    }
+
+    /// The videos no track claimed, as `(index, video)` pairs in release order.
+    /// These are the full-album rips, live sets and interviews Discogs carries
+    /// alongside the per-track links.
+    pub fn unmatched_videos(&self) -> Vec<(usize, &ReleaseVideo)> {
+        let claimed: std::collections::HashSet<usize> =
+            self.video_matches().into_iter().flatten().collect();
+        self.videos
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !claimed.contains(i))
+            .collect()
+    }
+
     /// The album-level fields this release *would* write onto `tags`, with their
     /// values. This is the single source of truth for both the preview UI and
     /// [`apply_to_tags`].
@@ -1039,6 +1192,37 @@ impl BasicInformation {
     }
 }
 
+/// Case- and punctuation-insensitive form used to compare video titles against
+/// track titles. Keeps word order (so `starts_with` stays meaningful) but drops
+/// everything that varies between a tag and a YouTube title.
+fn norm_loose(s: &str) -> String {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The forms a Discogs video title might match a track under: the whole title,
+/// and the tail after each separator. Uploaders stack prefixes — `Artist -
+/// Title`, `Label • Artist - Release | A1 Title` — so every tail is a candidate,
+/// and one of them is usually the bare track. Normalizing *after* the split is
+/// what makes the separators survive long enough to be useful.
+fn video_title_candidates(title: &str) -> Vec<String> {
+    const SEPARATORS: [char; 5] = ['-', '–', '—', '|', '•'];
+    let mut out = vec![norm_loose(title)];
+    let mut rest = title;
+    while let Some(i) = rest.find(SEPARATORS) {
+        rest = &rest[i + rest[i..].chars().next().map_or(1, |c| c.len_utf8())..];
+        let cand = norm_loose(rest);
+        if !cand.is_empty() && !out.contains(&cand) {
+            out.push(cand);
+        }
+    }
+    out.retain(|c| !c.is_empty());
+    out
+}
+
 /// Drop a trailing Discogs disambiguation number, e.g. `Surgeon (2)` → `Surgeon`.
 fn strip_discogs_number(name: &str) -> String {
     let trimmed = name.trim();
@@ -1068,6 +1252,10 @@ struct ReleaseResponse {
     styles: Vec<String>,
     #[serde(default)]
     labels: Vec<ReleaseLabel>,
+    #[serde(default)]
+    tracklist: Vec<TracklistEntry>,
+    #[serde(default)]
+    videos: Vec<VideoEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1076,6 +1264,40 @@ struct ReleaseLabel {
     name: String,
     #[serde(default)]
     catno: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TracklistEntry {
+    /// `"track"` for a real track; `"heading"` and `"index"` rows are section
+    /// titles ("Side A", a medley header) with nothing to play, and are dropped.
+    #[serde(default, rename = "type_")]
+    kind: String,
+    #[serde(default)]
+    position: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    duration: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VideoEntry {
+    #[serde(default)]
+    uri: String,
+    #[serde(default)]
+    title: String,
+    /// Seconds, as Discogs reports it. 0 shows up for videos whose length was
+    /// never resolved, and reads the same as absent.
+    #[serde(default)]
+    duration: u32,
+    /// Discogs defaults this to true when the uploader never touched it, so an
+    /// absent field must not read as "blocked".
+    #[serde(default = "yes")]
+    embed: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl ReleaseResponse {
@@ -1096,6 +1318,30 @@ impl ReleaseResponse {
             styles: self.styles,
             label,
             catalog_number,
+            tracklist: self
+                .tracklist
+                .into_iter()
+                // Keep real tracks only. Discogs leaves `type_` empty on some
+                // older releases, so an absent kind counts as a track rather
+                // than silently emptying those listings.
+                .filter(|t| (t.kind.is_empty() || t.kind == "track") && !t.title.trim().is_empty())
+                .map(|t| ReleaseTrack {
+                    position: t.position,
+                    title: t.title,
+                    duration: t.duration,
+                })
+                .collect(),
+            videos: self
+                .videos
+                .into_iter()
+                .filter(|v| !v.uri.trim().is_empty())
+                .map(|v| ReleaseVideo {
+                    uri: v.uri,
+                    title: v.title,
+                    duration_secs: (v.duration > 0).then_some(v.duration),
+                    embeddable: v.embed,
+                })
+                .collect(),
         }
     }
 }
@@ -1165,7 +1411,122 @@ mod tests {
             styles: vec!["Acid".into(), "Techno".into()],
             label: Some("Plus 8".into()),
             catalog_number: Some("PLUS8 024".into()),
+            tracklist: Vec::new(),
+            videos: Vec::new(),
         }
+    }
+
+    fn video(uri: &str, title: &str) -> ReleaseVideo {
+        ReleaseVideo {
+            uri: uri.into(),
+            title: title.into(),
+            duration_secs: Some(300),
+            embeddable: true,
+        }
+    }
+
+    fn track(position: &str, title: &str) -> ReleaseTrack {
+        ReleaseTrack {
+            position: position.into(),
+            title: title.into(),
+            duration: "5:00".into(),
+        }
+    }
+
+    #[test]
+    fn youtube_ids_parse_from_every_form_discogs_stores() {
+        let id = |u: &str| video(u, "").youtube_id().map(str::to_string);
+        assert_eq!(id("https://www.youtube.com/watch?v=dQw4w9WgXcQ").as_deref(), Some("dQw4w9WgXcQ"));
+        assert_eq!(id("http://youtube.com/watch?v=abc_-123&t=42").as_deref(), Some("abc_-123"));
+        // The `v=` parameter isn't always first.
+        assert_eq!(id("https://www.youtube.com/watch?t=9&v=xyz789").as_deref(), Some("xyz789"));
+        assert_eq!(id("https://youtu.be/dQw4w9WgXcQ?t=30").as_deref(), Some("dQw4w9WgXcQ"));
+        // Anything that isn't YouTube has no embeddable id.
+        assert_eq!(id("https://vimeo.com/12345"), None);
+        assert_eq!(id("https://www.youtube.com/watch?list=PL123"), None);
+    }
+
+    #[test]
+    fn videos_match_tracks_by_title_position_and_nothing_looser() {
+        let mut d = detail();
+        d.tracklist = vec![
+            track("A1", "Safe From Harm"),
+            track("A2", "One Love"),
+            track("B1", "Lately"),
+            track("B2", "Hymn Of The Big Wheel"),
+        ];
+        d.videos = vec![
+            video("https://youtu.be/v1", "Massive Attack - One Love"),
+            video("https://youtu.be/v2", "Safe From Harm (Perfecto Mix)"),
+            video("https://youtu.be/v3", "B1. Lately"),
+            video("https://youtu.be/v4", "Blue Lines - Full Album"),
+        ];
+        let m = d.video_matches();
+        // Title after an "Artist - " prefix, a trailing mix suffix, and a
+        // leading pressing position all resolve.
+        assert_eq!(m, vec![Some(1), Some(0), Some(2), None]);
+        // The album rip claimed by no track stays available on its own.
+        let left: Vec<&str> = d.unmatched_videos().iter().map(|(_, v)| v.uri.as_str()).collect();
+        assert_eq!(left, vec!["https://youtu.be/v4"]);
+    }
+
+    #[test]
+    fn videos_match_through_stacked_uploader_prefixes() {
+        // Real shape from a Discogs release: catalogue number, bullet, artist,
+        // release title, then the position and track after a pipe.
+        let mut d = detail();
+        d.tracklist = vec![
+            track("A1", "Meadow"),
+            track("B1", "Break2"),
+            track("B2", "Break2 (KW Refix)"),
+        ];
+        d.videos = vec![
+            video("https://youtu.be/v1", "DIFF006 • Skudge - Meadow | A1 Meadow"),
+            video("https://youtu.be/v2", "DIFF006 • Skudge - Meadow | B1 Break2"),
+            video("https://youtu.be/v3", "DIFF006 • Skudge - Meadow | B2 Break2 KW Refix"),
+        ];
+        assert_eq!(d.video_matches(), vec![Some(0), Some(1), Some(2)]);
+        assert!(d.unmatched_videos().is_empty());
+    }
+
+    #[test]
+    fn a_short_track_title_does_not_swallow_a_longer_video() {
+        let mut d = detail();
+        d.tracklist = vec![track("A1", "Love")];
+        d.videos = vec![video("https://youtu.be/v1", "One Love")];
+        // "One Love" merely *contains* "Love" — claiming it would play the
+        // wrong track, so the row stays empty.
+        assert_eq!(d.video_matches(), vec![None]);
+    }
+
+    #[test]
+    fn release_json_parses_tracklist_and_videos() {
+        let json = r#"{
+            "id": 123,
+            "title": "Blue Lines",
+            "tracklist": [
+                {"type_": "heading", "position": "", "title": "Side A", "duration": ""},
+                {"type_": "track", "position": "A1", "title": "Safe From Harm", "duration": "5:18"},
+                {"type_": "track", "position": "A2", "title": "One Love", "duration": "4:48"}
+            ],
+            "videos": [
+                {"uri": "https://youtu.be/v1", "title": "Safe From Harm", "duration": 318},
+                {"uri": "https://youtu.be/v2", "title": "One Love", "duration": 0, "embed": false}
+            ]
+        }"#;
+        let d: ReleaseResponse = serde_json::from_str(json).unwrap();
+        let d = d.into_detail();
+        // The "Side A" heading is not a track.
+        assert_eq!(d.tracklist.len(), 2);
+        assert_eq!(d.tracklist[0].position, "A1");
+        assert_eq!(d.tracklist[0].title, "Safe From Harm");
+        assert_eq!(d.tracklist[0].duration, "5:18");
+        assert_eq!(d.tracklist[1].duration, "4:48");
+        // Duration 0 means "unknown", and an absent `embed` is not "blocked".
+        assert_eq!(d.videos[0].duration_secs, Some(318));
+        assert!(d.videos[0].embeddable);
+        assert_eq!(d.videos[1].duration_secs, None);
+        assert!(!d.videos[1].embeddable);
     }
 
     #[test]

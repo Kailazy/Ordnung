@@ -72,6 +72,8 @@ impl App {
             vinyl_owned_tracks: HashSet::new(),
             vinyl_wanted_tracks: HashSet::new(),
             confirm_vinyl_edit: None,
+            vinyl_sheet: None,
+            sheet_rx: None,
             scroll_to_track: None,
             row_screen_rects: Vec::new(),
             cover_drop: None,
@@ -645,6 +647,7 @@ impl eframe::App for App {
         self.poll_vinyl_covers(ctx);
         self.poll_artwork_save();
         self.poll_metadata_preview();
+        self.poll_vinyl_sheet();
 
         // Fade an idle status message out of the bottom-left bar after a short
         // while, so a one-off "Synced…/Done…" note doesn't linger forever. We
@@ -1873,6 +1876,7 @@ impl eframe::App for App {
         self.draw_bulk_write_confirm(ctx);
         self.draw_delete_confirm(ctx);
         self.draw_vinyl_edit_confirm(ctx);
+        self.draw_vinyl_sheet(ctx, frame);
         self.draw_failure_report(ctx);
 
         // Keep the UI moving while a worker thread is active, or while there are

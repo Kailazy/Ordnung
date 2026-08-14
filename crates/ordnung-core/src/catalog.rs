@@ -13,6 +13,13 @@ use crate::model::{
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
 
+/// Shape of the [`ReleaseDetail`](crate::discogs::ReleaseDetail) JSON held in
+/// `release_cache`. Bumped whenever a new field means an already-cached row is
+/// missing data the app now needs — rows below the current version read as a
+/// cache miss and are re-fetched. Version 2 added the tracklist and the release's
+/// YouTube videos, which the vinyl record sheet plays from.
+pub const DETAIL_SCHEMA_VERSION: i64 = 2;
+
 /// Which table backs a vinyl list. The two caches share an identical schema and
 /// every query below, so the list only ever picks the table name — never its own
 /// copy of the SQL. Names are compile-time constants, so interpolating one into
@@ -431,9 +438,10 @@ impl Catalog {
             -- there's no TTL; detail_json is the serialized ReleaseDetail. Keyed by
             -- Discogs release id (TEXT, matching the external-id plumbing elsewhere).
             CREATE TABLE IF NOT EXISTS release_cache (
-                release_id  TEXT PRIMARY KEY,
-                detail_json TEXT NOT NULL,
-                fetched_at  INTEGER NOT NULL DEFAULT (unixepoch())
+                release_id     TEXT PRIMARY KEY,
+                detail_json    TEXT NOT NULL,
+                detail_version INTEGER NOT NULL DEFAULT 1,
+                fetched_at     INTEGER NOT NULL DEFAULT (unixepoch())
             );",
         )?;
         self.migrate()?;
@@ -589,6 +597,16 @@ impl Catalog {
             self.add_column_if_missing(table, "price_currency", "TEXT")?;
             self.add_column_if_missing(table, "price_checked_at", "INTEGER")?;
         }
+
+        // Which ReleaseDetail shape a cached release was stored under. Rows
+        // written before this column existed default to 1 — i.e. no tracklist
+        // and no videos — so `cached_release` treats them as a miss and the
+        // next lookup re-fetches the full detail. See `DETAIL_SCHEMA_VERSION`.
+        self.add_column_if_missing(
+            "release_cache",
+            "detail_version",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
 
         // Perceptual acoustic fingerprint, added in analyzer v5. Empty on older
         // catalogs until tracks are re-analyzed (the version bump invalidates the
@@ -1067,8 +1085,9 @@ impl Catalog {
         let json: Option<String> = self
             .conn
             .query_row(
-                "SELECT detail_json FROM release_cache WHERE release_id=?1",
-                params![release_id],
+                "SELECT detail_json FROM release_cache
+                 WHERE release_id=?1 AND detail_version >= ?2",
+                params![release_id, DETAIL_SCHEMA_VERSION],
                 |r| r.get(0),
             )
             .optional()?;
@@ -1082,10 +1101,12 @@ impl Catalog {
         let json = serde_json::to_string(detail)
             .map_err(|e| Error::Invalid(format!("serializing release detail: {e}")))?;
         self.conn.execute(
-            "INSERT INTO release_cache (release_id, detail_json) VALUES (?1, ?2)
+            "INSERT INTO release_cache (release_id, detail_json, detail_version)
+             VALUES (?1, ?2, ?3)
              ON CONFLICT(release_id) DO UPDATE SET detail_json=excluded.detail_json,
+                                                   detail_version=excluded.detail_version,
                                                    fetched_at=unixepoch()",
-            params![detail.release_id, json],
+            params![detail.release_id, json, DETAIL_SCHEMA_VERSION],
         )?;
         Ok(())
     }
@@ -4202,6 +4223,8 @@ mod tests {
             styles: vec!["Techno".into()],
             label: Some("Downwards".into()),
             catalog_number: Some("DN-01".into()),
+            tracklist: Vec::new(),
+            videos: Vec::new(),
         }
     }
 

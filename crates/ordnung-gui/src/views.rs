@@ -193,6 +193,10 @@ enum VinylGridAction {
     Move(VinylCoverKey),
     /// Drop this record from the list it's in.
     Remove(VinylCoverKey),
+    /// Open this record's sheet — its tracklist and everything that can play it.
+    Open(VinylCoverKey),
+    /// Open the sheet *and* start the record from its first playable track.
+    Play(VinylCoverKey),
 }
 
 impl App {
@@ -1109,6 +1113,15 @@ impl App {
                     );
                 }
             }
+            Some(VinylGridAction::Open(key)) => self.open_vinyl_sheet(key, ctx),
+            Some(VinylGridAction::Play(key)) => {
+                // The tracklist may still be loading; the sheet starts playback
+                // itself once it has one (see `pending_play`).
+                self.open_vinyl_sheet(key, ctx);
+                if let Some(sheet) = self.vinyl_sheet.as_mut() {
+                    sheet.pending_play = true;
+                }
+            }
             None => {}
         }
     }
@@ -1116,7 +1129,7 @@ impl App {
     /// Look up the cached record a grid cell stands for. `None` if the lists
     /// changed under the click (a sync landing mid-frame), in which case the
     /// action is simply dropped rather than applied to the wrong record.
-    fn vinyl_record(&self, (list, instance_id): VinylCoverKey) -> Option<VinylRecord> {
+    pub(crate) fn vinyl_record(&self, (list, instance_id): VinylCoverKey) -> Option<VinylRecord> {
         let records = match list {
             VinylList::Collection => &self.vinyl,
             VinylList::Wantlist => &self.wantlist,
@@ -1207,6 +1220,14 @@ impl App {
         const COVER: f32 = 150.0;
         /// Gap between cells (and the width budget for the caption under each).
         const GAP: f32 = 14.0;
+
+        // The record whose video is playing in the mini-player, so its cover
+        // keeps a visible pause disc while the wall scrolls.
+        let playing_key = self
+            .vinyl_sheet
+            .as_ref()
+            .filter(|s| s.playing_video.is_some())
+            .map(|s| s.key);
 
         let mut action: Option<VinylGridAction> = None;
         ui.horizontal_wrapped(|ui| {
@@ -1306,6 +1327,45 @@ impl App {
                                 ));
                             }
                         }
+                        // Play disc, bottom-right: start the record. Only on
+                        // hover, so the wall stays a wall until you reach for it.
+                        let mut play_clicked = false;
+                        if resp.hovered() || playing_key == Some(c.key) {
+                            const D: f32 = 30.0;
+                            let disc = egui::Rect::from_min_size(
+                                egui::pos2(rect.right() - D - 6.0, rect.bottom() - D - 6.0),
+                                egui::vec2(D, D),
+                            );
+                            let hit = ui.interact(
+                                disc,
+                                ui.id().with(("vinyl-play", c.key)),
+                                egui::Sense::click(),
+                            );
+                            let bg = if hit.hovered() {
+                                egui::Color32::from_rgb(120, 220, 150)
+                            } else {
+                                egui::Color32::from_black_alpha(190)
+                            };
+                            let fg = if hit.hovered() {
+                                egui::Color32::from_gray(20)
+                            } else {
+                                egui::Color32::from_gray(240)
+                            };
+                            ui.painter().circle_filled(disc.center(), D / 2.0, bg);
+                            let glyph = if playing_key == Some(c.key) { "❚❚" } else { "▶" };
+                            ui.painter().text(
+                                disc.center() + egui::vec2(if glyph == "▶" { 1.5 } else { 0.0 }, 0.0),
+                                egui::Align2::CENTER_CENTER,
+                                glyph,
+                                egui::FontId::proportional(13.0),
+                                fg,
+                            );
+                            let hit = hit.on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if hit.on_hover_note("Play this record").clicked() {
+                                play_clicked = true;
+                                action = Some(VinylGridAction::Play(c.key));
+                            }
+                        }
                         // Price chip, bottom-left of the cover: what the sort is
                         // ordering by, shown where it can't push the caption
                         // around. Absent until a sync has priced this record.
@@ -1337,18 +1397,20 @@ impl App {
                             None => String::new(),
                         };
                         let tip = if c.sub.is_empty() {
-                            format!("{}\n{}{price_line}\n\nOpen on Discogs ↗", c.artist, c.title)
+                            format!("{}\n{}{price_line}\n\nShow the tracklist", c.artist, c.title)
                         } else {
                             format!(
-                                "{}\n{}\n{}{price_line}\n\nOpen on Discogs ↗",
+                                "{}\n{}\n{}{price_line}\n\nShow the tracklist",
                                 c.artist, c.title, c.sub
                             )
                         };
-                        // The cover opens Discogs — but not when the click landed
-                        // on the catalog badge layered above it.
+                        // The cover opens the record sheet — but not when the
+                        // click landed on the catalog badge or the play disc
+                        // layered above it. Discogs itself is one click further
+                        // in, from the sheet or the menu below.
                         let resp = resp.on_hover_note(tip);
-                        if resp.clicked() && !badge_clicked {
-                            open_url(&release_url);
+                        if resp.clicked() && !badge_clicked && !play_clicked {
+                            action = Some(VinylGridAction::Open(c.key));
                         }
                         // Right-click: move this record between the two lists, or
                         // drop it. Both write straight to the user's Discogs
@@ -1359,6 +1421,14 @@ impl App {
                             ui.label(egui::RichText::new(&c.title).strong());
                             ui.label(egui::RichText::new(&c.artist).weak());
                             ui.separator();
+                            if ui
+                                .button("Open on Discogs ↗")
+                                .on_hover_note("Open this release on discogs.com")
+                                .clicked()
+                            {
+                                open_url(&release_url);
+                                ui.close_menu();
+                            }
                             let (move_label, move_tip, remove_label) = match list {
                                 VinylList::Collection => (
                                     "Move to wantlist",
