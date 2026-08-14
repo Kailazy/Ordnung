@@ -1292,7 +1292,12 @@ impl App {
             .map(|s| s.key);
 
         let mut action: Option<VinylGridAction> = None;
-        ui.horizontal_wrapped(|ui| {
+        // Top-aligned wrapping rather than `horizontal_wrapped`: that helper
+        // centres cells vertically in the row, and egui snaps only the first
+        // cell of a row to the row's top — so any row taller than a cell left
+        // the leading cover sitting higher than its neighbours.
+        let wrap = egui::Layout::left_to_right(egui::Align::TOP).with_main_wrap(true);
+        ui.with_layout(wrap, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
             for c in cells {
                 let tex = match self.vinyl_covers.get(&c.key) {
@@ -1389,20 +1394,29 @@ impl App {
                                 ));
                             }
                         }
-                        // Play disc, bottom-right: start the record. Only on
+                        // Play disc, bottom-right: start the record. Shown on
                         // hover, so the wall stays a wall until you reach for it.
+                        //
+                        // The hit area is registered every frame, not only while
+                        // the disc is visible: it sits on top of the cover, so
+                        // pointing at it takes the hover *away* from the cover.
+                        // Gating the whole widget on the cover's hover therefore
+                        // made the disc vanish from under the cursor and dropped
+                        // the click onto the cover behind it. Visibility follows
+                        // either hover instead.
                         let mut play_clicked = false;
-                        if resp.hovered() || playing_key == Some(c.key) {
-                            const D: f32 = 30.0;
-                            let disc = egui::Rect::from_min_size(
-                                egui::pos2(rect.right() - D - 6.0, rect.bottom() - D - 6.0),
-                                egui::vec2(D, D),
-                            );
-                            let hit = ui.interact(
-                                disc,
-                                ui.id().with(("vinyl-play", c.key)),
-                                egui::Sense::click(),
-                            );
+                        const D: f32 = 30.0;
+                        let disc = egui::Rect::from_min_size(
+                            egui::pos2(rect.right() - D - 6.0, rect.bottom() - D - 6.0),
+                            egui::vec2(D, D),
+                        );
+                        let hit = ui.interact(
+                            disc,
+                            ui.id().with(("vinyl-play", c.key)),
+                            egui::Sense::click(),
+                        );
+                        let playing_this = playing_key == Some(c.key);
+                        if resp.hovered() || hit.hovered() || playing_this {
                             let bg = if hit.hovered() {
                                 egui::Color32::from_rgb(120, 220, 150)
                             } else {
@@ -1414,7 +1428,7 @@ impl App {
                                 egui::Color32::from_gray(240)
                             };
                             ui.painter().circle_filled(disc.center(), D / 2.0, bg);
-                            let glyph = if playing_key == Some(c.key) { "❚❚" } else { "▶" };
+                            let glyph = if playing_this { "❚❚" } else { "▶" };
                             ui.painter().text(
                                 disc.center() + egui::vec2(if glyph == "▶" { 1.5 } else { 0.0 }, 0.0),
                                 egui::Align2::CENTER_CENTER,
