@@ -89,6 +89,10 @@ impl App {
         let Some(record) = self.vinyl_record(key) else {
             return;
         };
+        // Opening a different record replaces the sheet; its video would
+        // otherwise play on under a tracklist it doesn't belong to (and
+        // `playing_video` indexes the old release's videos).
+        self.stop_sheet_video();
         let sub = [
             record.year.map(|y| y.to_string()),
             record.format.clone(),
@@ -637,14 +641,19 @@ impl App {
                     let s = self.vinyl_sheet.as_ref().unwrap();
                     (s.title.clone(), s.local.iter().map(|l| l.id).collect())
                 };
+                // Same rule as closing it: leaving the record's sheet stops the
+                // record's video, and the library is where the files play.
+                self.stop_sheet_video();
                 self.vinyl_sheet = None;
                 self.jump_to_catalog_tracks(album, tracks);
             }
             None => {}
         }
         if !open {
-            // Closing the sheet leaves the mini-player alone: a video you started
-            // keeps playing in its own window until you close that.
+            // Closing the record takes its video with it: the panel is that
+            // record's player, so leaving it playing over a closed sheet is
+            // sound with nothing on screen to explain it.
+            self.stop_sheet_video();
             self.vinyl_sheet = None;
         }
     }
