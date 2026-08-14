@@ -285,12 +285,20 @@ impl App {
         if self.discogs_token().trim().is_empty() {
             return;
         }
-        self.spawn_refresh_vinyl(ctx);
+        self.spawn_refresh_vinyl_inner(ctx, true);
     }
 
     /// download covers we don't already have. Token resolution is policy and lives
     /// here; the worker only talks to Discogs and the catalog.
     pub(crate) fn spawn_refresh_vinyl(&mut self, ctx: egui::Context) {
+        self.spawn_refresh_vinyl_inner(ctx, false);
+    }
+
+    /// Shared body of the two vinyl-sync entry points. `quiet` suppresses the
+    /// closing tally: nobody asked for the startup sync, so it shouldn't leave a
+    /// summary sitting in the status bar every launch. An explicit Sync click
+    /// still reports what it did — that one the user is waiting on.
+    fn spawn_refresh_vinyl_inner(&mut self, ctx: egui::Context, quiet: bool) {
         let token = self.discogs_token();
         if token.trim().is_empty() {
             self.status = "No Discogs token set. Add one in Settings \
@@ -308,7 +316,7 @@ impl App {
         self.job_cancel = Some(cancel.clone());
         self.status = "Syncing vinyl collection and wantlist…".into();
         let db = self.db_path.clone();
-        thread::spawn(move || run_refresh_vinyl(db, token, cancel, tx, ctx));
+        thread::spawn(move || run_refresh_vinyl(db, token, cancel, quiet, tx, ctx));
     }
 
     /// Run one user-requested change to a Discogs list — the vinyl grid's
@@ -1210,10 +1218,14 @@ const VINYL_PRICE_MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
 /// one rate-limited request per record, so it's the long pole on a first sync —
 /// hence `cancel`: stopping there keeps everything already fetched, and the next
 /// refresh picks up the records that never got a price.
+///
+/// `quiet` drops the closing tally (the job still reports `Done` so the grid
+/// reloads) — used by the startup sync, which runs unasked.
 pub(crate) fn run_refresh_vinyl(
     db: PathBuf,
     token: String,
     cancel: Arc<AtomicBool>,
+    quiet: bool,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
 ) {
@@ -1365,12 +1377,17 @@ pub(crate) fn run_refresh_vinyl(
     } else {
         ""
     };
-    let _ = tx.send(JobMsg::Done(format!(
-        "Vinyl synced: {} record(s), {} wantlisted{removed_note}, \
-         {fetched} new cover(s), {priced} price(s){stopped}.",
-        records.len(),
-        wants.len()
-    )));
+    let done = if quiet {
+        String::new()
+    } else {
+        format!(
+            "Vinyl synced: {} record(s), {} wantlisted{removed_note}, \
+             {fetched} new cover(s), {priced} price(s){stopped}.",
+            records.len(),
+            wants.len()
+        )
+    };
+    let _ = tx.send(JobMsg::Done(done));
     ctx.request_repaint();
 }
 
