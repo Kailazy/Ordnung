@@ -138,6 +138,7 @@ impl App {
             dup_pending_bulk: None,
             dup_confirm_pos: None,
             missing_list: Vec::new(),
+            health_tab: LibraryView::Duplicates,
             missing_pending_remove: None,
             usb_volumes: ordnung_core::usb::detect_volumes(),
             usb_last_poll: 0.0,
@@ -1429,37 +1430,28 @@ impl eframe::App for App {
                         ui.separator();
                         ui.add_space(6.0);
                         // ── Library health ──
-                        if nav_button(
-                            ui,
-                            "⧉  Duplicates",
-                            self.view == LibraryView::Duplicates,
-                            34.0,
-                            14.0,
-                        )
-                        .on_hover_note("Find identical imports and same-song format variants")
-                        .clicked()
-                        {
-                            self.view = LibraryView::Duplicates;
-                        }
-                        ui.add_space(4.0);
-                        let missing_label = if self.missing_count > 0 {
-                            format!("⚠  Missing ({})", self.missing_count)
+                        // Duplicates and Missing are two readings of the same
+                        // question ("what's wrong with the catalog?"), so they
+                        // share one sidebar entry and one window; the view itself
+                        // carries the tabs. Opening it returns to whichever tab
+                        // was last used.
+                        let health_label = if self.missing_count > 0 {
+                            format!("⚕  Library Health ({})", self.missing_count)
                         } else {
-                            "⚠  Missing".to_string()
+                            "⚕  Library Health".to_string()
                         };
                         if nav_button(
                             ui,
-                            &missing_label,
-                            self.view == LibraryView::Missing,
+                            &health_label,
+                            self.view == LibraryView::Duplicates
+                                || self.view == LibraryView::Missing,
                             34.0,
                             14.0,
                         )
-                        .on_hover_note(
-                            "Tracks whose source file is gone. Relocate or remove them.",
-                        )
+                        .on_hover_note("Duplicate copies and missing files")
                         .clicked()
                         {
-                            self.view = LibraryView::Missing;
+                            self.view = self.health_tab.clone();
                         }
                         ui.add_space(8.0);
                     });

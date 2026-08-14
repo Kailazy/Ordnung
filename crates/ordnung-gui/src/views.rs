@@ -16,6 +16,41 @@ fn cmp_direction(ord: CmpOrdering, ascending: bool) -> CmpOrdering {
     }
 }
 
+/// The Library Health header: one window, two tabs. Duplicate copies and missing
+/// source files are two readings of the same question, so they share a view (and
+/// a single sidebar entry) instead of competing for two. Drawn in place of each
+/// view's own heading, left of that view's action buttons. Returns the tab the
+/// user clicked, if any — the caller owns the switch, since `self` is borrowed
+/// by the surrounding layout closure.
+fn health_tabs(
+    ui: &mut egui::Ui,
+    current: &LibraryView,
+    dup_count: Option<usize>,
+    missing_count: u64,
+) -> Option<LibraryView> {
+    let mut switch = None;
+    let tab = |ui: &mut egui::Ui, label: String, active: bool| {
+        ui.selectable_label(active, egui::RichText::new(label).size(15.0).strong())
+            .clicked()
+    };
+    let dup_label = match dup_count {
+        Some(n) if n > 0 => format!("⧉  Duplicates ({n})"),
+        _ => "⧉  Duplicates".to_string(),
+    };
+    if tab(ui, dup_label, *current == LibraryView::Duplicates) {
+        switch = Some(LibraryView::Duplicates);
+    }
+    let missing_label = if missing_count > 0 {
+        format!("⚠  Missing ({missing_count})")
+    } else {
+        "⚠  Missing".to_string()
+    };
+    if tab(ui, missing_label, *current == LibraryView::Missing) {
+        switch = Some(LibraryView::Missing);
+    }
+    switch
+}
+
 /// Show a small confirmation dialog. When `pos` is set (the screen point where
 /// the user clicked the action), the dialog opens right there so the confirm
 /// button lands under the cursor — no swipe across the window. Without a
@@ -210,6 +245,20 @@ impl App {
         self.missing_count = self.missing_labels.len() as u64;
     }
 
+    /// Switch the Library Health window to one of its two tabs and remember the
+    /// choice, so reopening the section from the sidebar lands back here. The
+    /// reload is explicit: the view-change hook in `update` runs before the content
+    /// panel is drawn, so a switch made *inside* the panel would otherwise leave
+    /// the new tab's data (the duplicate scan, the missing-file stat) unloaded.
+    pub(crate) fn open_health_tab(&mut self, tab: LibraryView, ctx: &egui::Context) {
+        self.view = tab.clone();
+        self.health_tab = tab;
+        self.reload();
+        // `poll_duplicates` also runs before the content panel, so a fresh scan
+        // needs one more frame to start.
+        ctx.request_repaint();
+    }
+
     /// Render the Duplicates view: grouped blocks (identical audio first, then
     /// same-song variants). Each group proposes keeping the ★ best copy and
     /// deleting the rest; every copy carries an instant keep/delete toggle (pure
@@ -400,9 +449,16 @@ impl App {
         // loop so this frame's toggles are already applied.
         let mut request_commit = false;
 
+        // The tab the user clicked in the shared Library Health header, applied
+        // after the layout closure releases its borrow of `self`.
+        let mut switch_tab = None;
+        // A count is only honest once a scan has settled; while one is pending the
+        // tab shows no number rather than a stale one.
+        let dup_count = (!self.dup_dirty && !self.dup_loading).then(|| self.dup_groups.len());
+
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.heading("Duplicates");
+            switch_tab = health_tabs(ui, &self.view, dup_count, self.missing_count);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("↻ Recompute")
@@ -444,6 +500,12 @@ impl App {
                 }
             });
         });
+
+        // Switching tabs swaps the whole body, so stop drawing this one's.
+        if let Some(tab) = switch_tab {
+            self.open_health_tab(tab, ui.ctx());
+            return;
+        }
 
         if groups.is_empty() {
             ui.add_space(24.0);
@@ -1564,10 +1626,16 @@ impl App {
         let mut recompute = false;
         let mut remove_one: Option<Id> = None;
         let mut remove_all = false;
+        // The tab the user clicked in the shared Library Health header, applied
+        // after the layout closure releases its borrow of `self`.
+        let mut switch_tab = None;
+        // The duplicate cache is dropped while this view is up, so this tab has no
+        // trustworthy group count to show.
+        let dup_count = None;
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.heading("Missing files");
+            switch_tab = health_tabs(ui, &self.view, dup_count, self.missing_count);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("↻ Recheck")
@@ -1595,6 +1663,12 @@ impl App {
                 }
             });
         });
+
+        // Switching tabs swaps the whole body, so stop drawing this one's.
+        if let Some(tab) = switch_tab {
+            self.open_health_tab(tab, ui.ctx());
+            return;
+        }
 
         if items.is_empty() {
             ui.add_space(24.0);

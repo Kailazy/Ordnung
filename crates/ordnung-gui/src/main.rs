@@ -1049,6 +1049,10 @@ struct App {
     /// Tracks whose source file is gone, for the Missing files view. Recomputed on
     /// `reload` while that view is active (empty otherwise). Drives `draw_missing`.
     missing_list: Vec<Track>,
+    /// Which Library Health tab (Duplicates or Missing — the two share one window
+    /// and one sidebar entry) was last open, so reopening the section returns to
+    /// where the user left it. Always one of those two views.
+    health_tab: LibraryView,
     /// Missing tracks the user clicked "Remove" on, awaiting confirmation. Holds the
     /// row ids to drop from the catalog (their files are already gone — removal never
     /// touches a real file). `None` when no confirmation is pending.
