@@ -70,6 +70,9 @@ pub(crate) struct VinylSheet {
     pub error: Option<String>,
     /// The video index currently loaded in the mini-player, for the row marker.
     pub playing_video: Option<usize>,
+    /// That video's YouTube page, kept so a player error can hand it to a
+    /// browser without re-deriving which row it came from.
+    pub video_uri: Option<String>,
     /// Set when the user hit play on the cover rather than opening the sheet:
     /// start the record as soon as there's a tracklist to start it from.
     pub pending_play: bool,
@@ -114,6 +117,7 @@ impl App {
             loading: true,
             error: None,
             playing_video: None,
+            video_uri: None,
             pending_play: false,
         });
         self.spawn_sheet_fetch(record.release_id, ctx.clone());
@@ -277,14 +281,13 @@ impl App {
                 SheetSource::Video(v) => detail.videos.get(v),
                 _ => None,
             })
-            .filter(|v| v.embeddable)
             .filter_map(|v| v.youtube_id().map(str::to_string))
             .collect()
     }
 
     /// Hand a video queue to the native mini-player, pausing local audio first.
-    /// Falls back to opening the video on youtube.com when the panel isn't
-    /// available (non-macOS, or a blocked embed).
+    /// Falls back to opening the video on youtube.com when there's no panel to
+    /// play it in (non-macOS, or no window handle this frame).
     fn start_sheet_video(&mut self, ids: Vec<String>, row: usize, frame: &eframe::Frame) {
         let Some(sheet) = self.vinyl_sheet.as_ref() else {
             return;
@@ -293,11 +296,6 @@ impl App {
             SheetSource::Video(v) => Some(v),
             _ => r.also_video,
         });
-        // An embed the uploader blocked would show a dead player, so send those
-        // straight to YouTube instead of pretending.
-        let blocked = video
-            .and_then(|v| sheet.detail.as_ref()?.videos.get(v))
-            .is_some_and(|v| !v.embeddable);
         let uri = video
             .and_then(|v| sheet.detail.as_ref()?.videos.get(v))
             .map(|v| v.uri.clone());
@@ -306,7 +304,7 @@ impl App {
             None => sheet.title.clone(),
         };
 
-        if ids.is_empty() || blocked {
+        if ids.is_empty() {
             if let Some(uri) = uri {
                 open_url(&uri);
             }
@@ -321,8 +319,30 @@ impl App {
         if webview::play(frame, &ids, &title) {
             if let Some(sheet) = self.vinyl_sheet.as_mut() {
                 sheet.playing_video = video;
+                sheet.video_uri = uri;
             }
         } else if let Some(uri) = uri {
+            open_url(&uri);
+        }
+    }
+
+    /// Drive the mini-player: let it advance its own queue, and notice a page
+    /// that never produced a video — a pulled video, or a consent wall YouTube
+    /// wants clicked through. Those go to a real browser rather than sitting
+    /// there blank. Called every frame; the panel keeps playing a record even
+    /// once the sheet that started it is closed.
+    pub(crate) fn drive_video_player(&mut self) {
+        webview::poll();
+        if self.vinyl_sheet.as_ref().is_none_or(|s| s.playing_video.is_none()) {
+            return;
+        }
+        if webview::status() != webview::PlayerStatus::Stuck {
+            return;
+        }
+        let uri = self.vinyl_sheet.as_ref().and_then(|s| s.video_uri.clone());
+        self.stop_sheet_video();
+        self.status = "That video wouldn't play here. Opening it on YouTube.".into();
+        if let Some(uri) = uri {
             open_url(&uri);
         }
     }
@@ -332,6 +352,7 @@ impl App {
         webview::close();
         if let Some(sheet) = self.vinyl_sheet.as_mut() {
             sheet.playing_video = None;
+            sheet.video_uri = None;
         }
     }
 

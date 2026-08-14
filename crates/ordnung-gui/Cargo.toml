@@ -92,8 +92,10 @@ raw-window-handle = "0.6.2"
 # YouTube videos without leaving the app (see src/webview.rs). Uses YouTube's own
 # embedded player, so nothing is downloaded or re-hosted. Same objc2 0.5 family
 # as the AppKit bindings above so the framework crates aren't duplicated.
+block2 = "0.5"
 objc2-web-kit = { version = "0.2.2", features = [
     "objc2-app-kit",
+    "block2",
     "WKWebView",
     "WKWebViewConfiguration",
     "WKNavigation",

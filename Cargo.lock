@@ -2804,6 +2804,7 @@ name = "ordnung-gui"
 version = "0.16.0"
 dependencies = [
  "anyhow",
+ "block2 0.5.1",
  "dotenvy",
  "eframe",
  "egui",

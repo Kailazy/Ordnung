@@ -4,16 +4,26 @@
 //!
 //! Pure GUI presentation (per `ordnung-architecture`): nothing here touches the
 //! catalog or any engine, and no audio is downloaded or re-hosted — the panel
-//! loads YouTube's own embedded player, exactly as a browser would.
+//! loads youtube.com itself, exactly as a browser would.
 //!
 //! The panel is an AppKit *child window* of the main window, so it follows it
 //! around the screen and stays above it, but is otherwise independent of egui's
 //! render loop. That's what makes video playback possible at all: egui has no
 //! way to composite a live web view into its own surface.
+//!
+//! **Why the watch page and not an embed.** The obvious implementation — the
+//! `youtube.com/embed/…` IFrame player — does not work inside an app web view.
+//! Google refuses it there: the player answers with error 150 ("the owner does
+//! not allow embedding") for *every* video, including their own IFrame-API
+//! sample and Big Buck Bunny, and including when the page is served from a real
+//! loopback origin with a Safari user agent. The same page in Safari plays. So
+//! the panel loads the ordinary watch page, which plays fine; the cost is that
+//! the embed's `playlist=` chaining is gone, and a record's queue is driven from
+//! here instead (see [`poll`]).
 
 /// Start playing `youtube_ids` in order, with `title` on the panel's title bar.
-/// Reuses the existing panel when one is already open, so switching tracks
-/// doesn't flash a new window. Returns false when the platform has no
+/// Reuses the existing panel when one is already open, so moving to the next
+/// track doesn't flash a new window. Returns false when the platform has no
 /// mini-player (non-macOS) or the window handle wasn't available this frame —
 /// callers fall back to opening the video in a browser.
 ///
@@ -49,26 +59,70 @@ pub fn is_open() -> bool {
     false
 }
 
+/// Keep the panel's own playback moving: advance to the next video in the queue
+/// when the current one ends, and refresh what [`status`] reports. Cheap and
+/// idempotent — call it once per frame while the panel is open.
+#[cfg(target_os = "macos")]
+pub fn poll() {
+    imp::poll();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn poll() {}
+
+/// What the mini-player is doing, as of the last [`poll`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlayerStatus {
+    /// Nothing loaded, or the page hasn't reported yet.
+    Unknown,
+    /// A video element exists and is playing, paused or buffering.
+    Running,
+    /// The page has been up a while with no video on it — a removed video, or a
+    /// consent/sign-in wall. The caller hands these to a real browser.
+    Stuck,
+}
+
+/// Ask the mini-player what became of the video it was given.
+#[cfg(target_os = "macos")]
+pub fn status() -> PlayerStatus {
+    imp::status()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn status() -> PlayerStatus {
+    PlayerStatus::Unknown
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use std::cell::RefCell;
+    use std::time::{Duration, Instant};
 
     use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
     use objc2_app_kit::{
         NSBackingStoreType, NSPanel, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
     };
     use objc2_foundation::{
-        MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSURLRequest, NSURL,
+        MainThreadMarker, NSError, NSPoint, NSRect, NSSize, NSString, NSURLRequest, NSURL,
     };
     use objc2_web_kit::{WKAudiovisualMediaTypes, WKWebView, WKWebViewConfiguration};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    /// Content size of the panel: 16:9 at a size that reads as a video without
-    /// covering the record grid it was opened from.
-    const W: f64 = 480.0;
-    const H: f64 = 270.0;
+    use super::PlayerStatus;
+
+    /// Content size of the panel. Bigger than a bare 16:9 frame because the
+    /// watch page brings YouTube's own chrome with it.
+    const W: f64 = 620.0;
+    const H: f64 = 400.0;
     /// Inset from the main window's bottom-right corner on first show.
     const MARGIN: f64 = 24.0;
+    /// How often the page is asked what it's doing. The answer only drives
+    /// queue advance and a fallback, so once a second is plenty.
+    const POLL_EVERY: Duration = Duration::from_millis(900);
+    /// How long a page may sit with no video element before it counts as stuck.
+    /// Generous: a cold watch page on a slow link takes a few seconds.
+    const STUCK_AFTER: Duration = Duration::from_secs(12);
 
     thread_local! {
         /// The one mini-player. Held for the process lifetime (the panel is
@@ -81,15 +135,25 @@ mod imp {
     struct Mini {
         panel: Retained<NSPanel>,
         web: Retained<WKWebView>,
+        /// Videos still to play after the current one, in order.
+        queue: Vec<String>,
+        /// Panel title, reused when the queue advances on its own.
+        title: String,
+        /// What the page last said (`playing`, `paused`, `ended`, `novideo`).
+        state: String,
+        /// When the current video was loaded, for the stuck check.
+        loaded_at: Instant,
+        /// When the page was last asked.
+        polled_at: Instant,
     }
 
     pub fn play(frame: &eframe::Frame, youtube_ids: &[String], title: &str) -> bool {
         let Some(mtm) = MainThreadMarker::new() else {
             return false;
         };
-        if youtube_ids.is_empty() {
+        let Some((first, rest)) = youtube_ids.split_first() else {
             return false;
-        }
+        };
         let Some(parent) = main_window(frame) else {
             return false;
         };
@@ -100,7 +164,6 @@ mod imp {
             let was_visible = mini.panel.isVisible();
 
             unsafe {
-                mini.panel.setTitle(&NSString::from_str(title));
                 // Re-parent every time: eframe can recreate the window, and
                 // AppKit ignores an add for a parent it already has.
                 parent.addChildWindow_ordered(&mini.panel, NSWindowOrderingMode::NSWindowAbove);
@@ -110,7 +173,9 @@ mod imp {
             if !was_visible {
                 position_over(&mini.panel, &parent);
             }
-            load(&mini.web, youtube_ids);
+            mini.queue = rest.to_vec();
+            mini.title = title.to_string();
+            load(mini, first);
             mini.panel.orderFront(None);
             true
         })
@@ -121,7 +186,9 @@ mod imp {
             return;
         }
         PANEL.with(|slot| {
-            if let Some(mini) = slot.borrow().as_ref() {
+            if let Some(mini) = slot.borrow_mut().as_mut() {
+                mini.queue.clear();
+                mini.state.clear();
                 // Navigating away is what actually stops the audio — ordering the
                 // window out on its own leaves the video playing behind it.
                 blank(&mini.web);
@@ -139,6 +206,56 @@ mod imp {
                 .as_ref()
                 .is_some_and(|mini| mini.panel.isVisible())
         })
+    }
+
+    pub fn status() -> PlayerStatus {
+        if MainThreadMarker::new().is_none() {
+            return PlayerStatus::Unknown;
+        }
+        PANEL.with(|slot| {
+            let slot = slot.borrow();
+            let Some(mini) = slot.as_ref() else {
+                return PlayerStatus::Unknown;
+            };
+            if !mini.panel.isVisible() {
+                return PlayerStatus::Unknown;
+            }
+            match mini.state.as_str() {
+                "playing" | "paused" | "ended" => PlayerStatus::Running,
+                // A page with no video on it is only a problem once it's had
+                // time to load one.
+                "novideo" if mini.loaded_at.elapsed() > STUCK_AFTER => PlayerStatus::Stuck,
+                _ => PlayerStatus::Unknown,
+            }
+        })
+    }
+
+    pub fn poll() {
+        if MainThreadMarker::new().is_none() {
+            return;
+        }
+        // The advance is decided under the borrow and applied after it, since
+        // loading the next video borrows the same slot again.
+        let next = PANEL.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let mini = slot.as_mut()?;
+            if !mini.panel.isVisible() {
+                return None;
+            }
+            if mini.polled_at.elapsed() >= POLL_EVERY {
+                mini.polled_at = Instant::now();
+                ask_state(&mini.web);
+            }
+            // Take the next video the moment the current one reports it's done.
+            (mini.state == "ended" && !mini.queue.is_empty()).then(|| mini.queue.remove(0))
+        });
+        if let Some(id) = next {
+            PANEL.with(|slot| {
+                if let Some(mini) = slot.borrow_mut().as_mut() {
+                    load(mini, &id);
+                }
+            });
+        }
     }
 
     /// Create the panel and its web view. Called once, lazily, the first time a
@@ -166,12 +283,12 @@ mod imp {
             // would kill the video the moment the user switched to a browser.
             panel.setHidesOnDeactivate(false);
             panel.setFloatingPanel(true);
-            panel.setMinSize(NSSize::new(320.0, 180.0));
+            panel.setMinSize(NSSize::new(360.0, 240.0));
         }
 
         let config = unsafe { WKWebViewConfiguration::new() };
         unsafe {
-            // Without this, WebKit blocks autoplay and the embed opens paused —
+            // Without this, WebKit blocks autoplay and the page opens paused —
             // the click on the track *is* the user's play action.
             config.setMediaTypesRequiringUserActionForPlayback(WKAudiovisualMediaTypes::empty());
         }
@@ -179,22 +296,33 @@ mod imp {
             unsafe { WKWebView::initWithFrame_configuration(mtm.alloc(), content, &config) };
         panel.setContentView(Some(&web));
 
-        Mini { panel, web }
+        Mini {
+            panel,
+            web,
+            queue: Vec::new(),
+            title: String::new(),
+            state: String::new(),
+            loaded_at: Instant::now(),
+            polled_at: Instant::now(),
+        }
     }
 
-    /// Point the web view at YouTube's embedded player for `ids`, playing the
-    /// first and queueing the rest. The `playlist` parameter is what makes a
-    /// record play through side by side without us driving it.
-    fn load(web: &WKWebView, ids: &[String]) {
-        let mut url = format!(
-            "https://www.youtube.com/embed/{}?autoplay=1&rel=0&playsinline=1",
-            ids[0]
-        );
-        if ids.len() > 1 {
-            url.push_str("&playlist=");
-            url.push_str(&ids[1..].join(","));
+    /// Point the panel at one video's watch page.
+    fn load(mini: &mut Mini, id: &str) {
+        // Ids are `[A-Za-z0-9_-]` (checked by `ReleaseVideo::youtube_id`), so
+        // the URL needs no escaping.
+        let url = format!("https://www.youtube.com/watch?v={id}");
+        mini.state.clear();
+        mini.loaded_at = Instant::now();
+        mini.polled_at = Instant::now();
+        if !mini.title.is_empty() {
+            mini.panel.setTitle(&NSString::from_str(&mini.title));
         }
-        let Some(nsurl) = (unsafe { NSURL::URLWithString(&NSString::from_str(&url)) }) else {
+        navigate(&mini.web, &url);
+    }
+
+    fn navigate(web: &WKWebView, url: &str) {
+        let Some(nsurl) = (unsafe { NSURL::URLWithString(&NSString::from_str(url)) }) else {
             return;
         };
         let req = unsafe { NSURLRequest::requestWithURL(&nsurl) };
@@ -203,14 +331,36 @@ mod imp {
         }
     }
 
-    /// Navigate to a blank page, which unloads the YouTube player and stops the
-    /// sound.
+    /// Navigate to a blank page, which unloads the player and stops the sound.
     fn blank(web: &WKWebView) {
-        if let Some(nsurl) = unsafe { NSURL::URLWithString(&NSString::from_str("about:blank")) } {
-            let req = unsafe { NSURLRequest::requestWithURL(&nsurl) };
-            unsafe {
-                let _ = web.loadRequest(&req);
-            }
+        navigate(web, "about:blank");
+    }
+
+    /// Ask the page what its video element is doing. The answer lands
+    /// asynchronously in `Mini::state`; nothing waits on it.
+    fn ask_state(web: &WKWebView) {
+        const JS: &str = "(function(){var v=document.querySelector('video');\
+             if(!v)return 'novideo';\
+             if(v.ended)return 'ended';\
+             return v.paused?'paused':'playing';})()";
+        let handler = block2::RcBlock::new(move |res: *mut AnyObject, _err: *mut NSError| {
+            let state = if res.is_null() {
+                String::new()
+            } else {
+                let obj: &AnyObject = unsafe { &*res };
+                let s: Retained<NSString> = unsafe { objc2::msg_send_id![obj, description] };
+                s.to_string()
+            };
+            // WebKit runs completion handlers on the main thread, which is the
+            // thread that owns `PANEL`.
+            PANEL.with(|slot| {
+                if let Some(mini) = slot.borrow_mut().as_mut() {
+                    mini.state = state;
+                }
+            });
+        });
+        unsafe {
+            web.evaluateJavaScript_completionHandler(&NSString::from_str(JS), Some(&handler));
         }
     }
 

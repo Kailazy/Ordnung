@@ -649,6 +649,7 @@ impl eframe::App for App {
         self.poll_artwork_save();
         self.poll_metadata_preview();
         self.poll_vinyl_sheet();
+        self.drive_video_player();
 
         // Fade an idle status message out of the bottom-left bar after a short
         // while, so a one-off "Synced…/Done…" note doesn't linger forever. We

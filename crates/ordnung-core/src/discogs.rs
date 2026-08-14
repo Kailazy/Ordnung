@@ -146,9 +146,10 @@ pub struct ReleaseVideo {
     pub uri: String,
     pub title: String,
     pub duration_secs: Option<u32>,
-    /// Discogs's own flag for whether the video may be embedded. Uploaders
-    /// clear it for videos the rights holder blocks off-site, which would show
-    /// as a dead player — those open on YouTube itself instead.
+    /// Discogs's own flag for whether the video may be embedded elsewhere.
+    /// Informational: Ordnung plays videos on their YouTube watch page rather
+    /// than through the embed player (see the GUI's `webview` module), so this
+    /// doesn't gate playback.
     pub embeddable: bool,
 }
 
