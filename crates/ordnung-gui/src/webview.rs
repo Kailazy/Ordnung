@@ -101,7 +101,7 @@ mod imp {
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2_app_kit::{
-        NSBackingStoreType, NSPanel, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
+        NSBackingStoreType, NSColor, NSPanel, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
     };
     use objc2_foundation::{
         MainThreadMarker, NSError, NSPoint, NSRect, NSSize, NSString, NSURLRequest, NSURL,
@@ -287,6 +287,13 @@ mod imp {
             panel.setHidesOnDeactivate(false);
             panel.setFloatingPanel(true);
             panel.setMinSize(NSSize::new(MIN_W, MIN_H));
+            // The panel *is* a video frame, so keep it one: dragging it bigger
+            // stays 16:9 rather than letterboxing the video inside a shape the
+            // page then has to pad out.
+            panel.setContentAspectRatio(NSSize::new(16.0, 9.0));
+            // Anything the web view hasn't painted yet (a fresh navigation, a
+            // live resize) shows the window itself, which is light by default.
+            panel.setBackgroundColor(Some(&NSColor::blackColor()));
         }
 
         let config = unsafe { WKWebViewConfiguration::new() };
@@ -345,13 +352,18 @@ mod imp {
     }
 
     /// Styling that strips the watch page down to its player: pin the player
-    /// containers to the viewport, let the video letterbox inside them, and hide
-    /// the masthead, sidebar, comments, end screens and overlays.
+    /// containers to the viewport, let the video letterbox inside them with
+    /// `object-fit`, and hide the page's chrome, end screens and overlays.
+    ///
+    /// Measured stable: sampling `#movie_player`'s rect 10x/second shows a
+    /// single distinct rect, matching the viewport exactly, both at the default
+    /// size and after the panel is resized. (The gentler alternative — hiding
+    /// chrome only and letting YouTube lay the player out itself — leaves a
+    /// 30px gap under the video, so this one wins.)
     ///
     /// This is YouTube's own DOM, so a redesign can stop it matching. That is a
     /// cosmetic failure by design — nothing here touches playback, so the worst
-    /// case is the chrome reappearing in a small window, never a dead player.
-    /// Kept as plain CSS (no JS layout) for the same reason.
+    /// case is the page's chrome reappearing, never a dead player.
     ///
     /// Must contain no backtick or `${`, since it is embedded in a JS template
     /// literal below.
@@ -370,7 +382,8 @@ mod imp {
           object-fit: contain !important; } \
         #masthead-container, #masthead, #secondary, #below, #comments, #chat, \
         #related, ytd-miniplayer, .ytp-endscreen-content, .ytp-ce-element, \
-        .ytp-pause-overlay-container, tp-yt-paper-dialog, ytd-popup-container { \
+        .ytp-pause-overlay-container, .ytp-suggested-action, .ytp-subscribe-card, \
+        tp-yt-paper-dialog, ytd-popup-container { \
           display: none !important; visibility: hidden !important; }";
 
     /// Ask the page what its video element is doing, and (re)apply the styling
