@@ -125,22 +125,51 @@ cat >"$out_app/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key>      <string>11.0</string>
     <key>NSHighResolutionCapable</key>     <true/>
     <key>LSApplicationCategoryType</key>   <string>public.app-category.music</string>
+
+    <!-- Shown in the macOS permission prompts. Required: without a usage string
+         the app can be killed outright when it touches a protected location. -->
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Ordnung needs access to read music files and playlists stored on your Desktop.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Ordnung needs access to read music files and playlists stored in your Documents folder.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Ordnung needs access to read music files you have downloaded.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>Ordnung needs access to removable drives to export your library to a rekordbox USB.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>Ordnung needs access to network volumes that hold your music library.</string>
 </dict>
 </plist>
 PLIST
 
 rm -rf "$work"
 
-# Deep ad-hoc codesign with a STABLE identifier. Without this the bundle carries
-# only the linker's per-build ad-hoc signature, whose identifier changes every
-# rebuild — macOS then treats each build as a different app and re-prompts for
-# file-access / media-key permissions and can drop the Dock icon to a generic
-# tile. Pinning `--identifier app.ordnung.gui` keeps one stable identity so
-# permissions and the custom icon persist across rebuilds.
-echo "==> Code signing (ad-hoc, stable identity)"
-codesign --force --deep --sign - \
-  --identifier app.ordnung.gui \
-  "$out_app"
+# Deep codesign with a STABLE identity, so macOS keeps treating each rebuild as
+# the same app (custom Dock icon, media keys, and TCC file-access grants persist).
+#
+# Prefer a real certificate. macOS keys TCC grants to the bundle's designated
+# requirement; with an ad-hoc signature that requirement is only `cdhash H"..."`,
+# which changes on every rebuild and silently drops every granted permission —
+# hence the "would like to access files in your Desktop folder" prompt returning
+# after each `make app`. Signing with a certificate makes the requirement
+# `identifier "app.ordnung.gui" and certificate leaf H"..."`, both halves of
+# which are stable across rebuilds.
+#
+# Run `bash tools/make-signing-cert.sh` once to create the local identity.
+# CI has no keychain, so it falls back to ad-hoc (release DMGs are unaffected).
+sign_id="${ORDNUNG_SIGN_ID:-Ordnung Local Signing}"
+if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$sign_id"; then
+  echo "==> Code signing (identity: $sign_id)"
+  codesign --force --deep --sign "$sign_id" \
+    --identifier app.ordnung.gui \
+    "$out_app"
+else
+  echo "==> Code signing (ad-hoc — permissions reset on every rebuild)"
+  echo "    Run 'bash tools/make-signing-cert.sh' once to make them stick."
+  codesign --force --deep --sign - \
+    --identifier app.ordnung.gui \
+    "$out_app"
+fi
 codesign --verify --deep --strict "$out_app" && echo "    signature OK"
 
 # Nudge LaunchServices/Finder to re-read the bundle icon instead of serving a
