@@ -972,48 +972,48 @@ impl Client {
 
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     results: Vec<SearchHit>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SearchHit {
     id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     thumb: String,
     /// Full-size release image. Empty when Discogs has no high-res cover.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     cover_image: String,
     /// "Artist - Title" as Discogs labels the release.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     title: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     year: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     country: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     label: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     format: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct IdentityResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     username: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct CollectionResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pagination: CollectionPagination,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     releases: Vec<CollectionItem>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct CollectionPagination {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pages: u32,
 }
 
@@ -1021,17 +1021,17 @@ struct CollectionPagination {
 /// for sale, and Discogs also flags releases it won't allow sales of at all.
 #[derive(Debug, Default, Deserialize)]
 struct MarketplaceStats {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     lowest_price: Option<StatsPrice>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     blocked_from_sale: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct StatsPrice {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     value: f64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     currency: String,
 }
 
@@ -1039,35 +1039,35 @@ struct StatsPrice {
 /// `basic_information`; `id`/`instance_id`/`date_added` are on the item itself.
 #[derive(Debug, Deserialize)]
 struct CollectionItem {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     instance_id: u64,
     /// Which folder holds this copy. Present on every item even though we fetch
     /// through folder 0 ("All"), which is what makes deleting the instance later
     /// possible — the delete endpoint is addressed through the *real* folder.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     folder_id: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     date_added: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     basic_information: BasicInformation,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct BasicInformation {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     title: String,
     year: Option<u16>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     thumb: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     cover_image: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     artists: Vec<CollectionArtist>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     labels: Vec<ReleaseLabel>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     formats: Vec<CollectionFormat>,
 }
 
@@ -1076,7 +1076,7 @@ struct BasicInformation {
 /// rebuilds the cache row from metadata it already has plus this instance id.
 #[derive(Debug, Default, Deserialize)]
 struct CollectionAdd {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     instance_id: u64,
 }
 
@@ -1084,19 +1084,19 @@ struct CollectionAdd {
 /// the items live under `wants` and carry no `instance_id`.
 #[derive(Debug, Deserialize)]
 struct WantlistResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pagination: CollectionPagination,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     wants: Vec<WantItem>,
 }
 
 #[derive(Debug, Deserialize)]
 struct WantItem {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     date_added: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     basic_information: BasicInformation,
 }
 
@@ -1112,15 +1112,15 @@ impl WantItem {
 
 #[derive(Debug, Default, Deserialize)]
 struct CollectionArtist {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     name: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct CollectionFormat {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     descriptions: Vec<String>,
 }
 
@@ -1238,32 +1238,32 @@ fn strip_discogs_number(name: &str) -> String {
 
 #[derive(Debug, Deserialize)]
 struct ReleaseResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     title: String,
     year: Option<u16>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     released: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     country: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     genres: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     styles: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     labels: Vec<ReleaseLabel>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     tracklist: Vec<TracklistEntry>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     videos: Vec<VideoEntry>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ReleaseLabel {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     catno: String,
 }
 
@@ -1271,34 +1271,56 @@ struct ReleaseLabel {
 struct TracklistEntry {
     /// `"track"` for a real track; `"heading"` and `"index"` rows are section
     /// titles ("Side A", a medley header) with nothing to play, and are dropped.
-    #[serde(default, rename = "type_")]
+    #[serde(default, rename = "type_", deserialize_with = "null_as_default")]
     kind: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     position: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     title: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     duration: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct VideoEntry {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     uri: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     title: String,
     /// Seconds, as Discogs reports it. 0 shows up for videos whose length was
     /// never resolved, and reads the same as absent.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     duration: u32,
     /// Discogs defaults this to true when the uploader never touched it, so an
     /// absent field must not read as "blocked".
-    #[serde(default = "yes")]
+    #[serde(default = "yes", deserialize_with = "null_as_yes")]
     embed: bool,
 }
 
 fn yes() -> bool {
     true
+}
+
+/// Read a field that Discogs may send as an explicit `null`, falling back to the
+/// type's default. `#[serde(default)]` only covers an *absent* key: a present
+/// `"country": null` (which Discogs sends for releases with no country, and
+/// likewise for catalog numbers, video titles and durations) still fails to
+/// decode into a `String`, taking the whole release down with it.
+fn null_as_default<'de, D, T>(de: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(de)?.unwrap_or_default())
+}
+
+/// Same, for `embed`, where the fallback is `true` rather than `false` — a video
+/// Discogs says nothing about is playable, not blocked.
+fn null_as_yes<'de, D>(de: D) -> std::result::Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(de)?.unwrap_or(true))
 }
 
 impl ReleaseResponse {
@@ -1432,6 +1454,37 @@ mod tests {
             title: title.into(),
             duration: "5:00".into(),
         }
+    }
+
+    /// Discogs sends `"country": null` (and nulls elsewhere) rather than
+    /// omitting the key, which `#[serde(default)]` alone rejects — that failure
+    /// surfaced as "invalid type: null, expected a string" on the record sheet.
+    #[test]
+    fn release_decodes_with_explicit_nulls() {
+        let json = r#"{
+            "id": 32413806,
+            "title": "Lastday Cookie",
+            "year": 2024,
+            "country": null,
+            "released": null,
+            "genres": null,
+            "styles": ["Techno"],
+            "labels": [{"name": "Pin", "catno": null}],
+            "tracklist": [{"type_": null, "position": "A1", "title": "Ma", "duration": null}],
+            "videos": [{"uri": "https://youtu.be/abc", "title": null, "duration": null, "embed": null}]
+        }"#;
+        let detail: ReleaseDetail = serde_json::from_str::<ReleaseResponse>(json).unwrap().into_detail();
+        assert_eq!(detail.country, None);
+        assert_eq!(detail.released, None);
+        assert_eq!(detail.catalog_number, None);
+        assert!(detail.genres.is_empty());
+        assert_eq!(detail.label.as_deref(), Some("Pin"));
+        assert_eq!(detail.tracklist.len(), 1);
+        assert_eq!(detail.tracklist[0].duration, "");
+        assert_eq!(detail.videos.len(), 1);
+        assert_eq!(detail.videos[0].duration_secs, None);
+        // A null `embed` is silence from the uploader, not a block.
+        assert!(detail.videos[0].embeddable);
     }
 
     #[test]
