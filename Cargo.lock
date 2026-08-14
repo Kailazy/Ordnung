@@ -2771,7 +2771,7 @@ dependencies = [
 
 [[package]]
 name = "ordnung-cli"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2783,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "ordnung-core"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "image",
  "lofty",
@@ -2801,7 +2801,7 @@ dependencies = [
 
 [[package]]
 name = "ordnung-gui"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "dotenvy",
@@ -2827,7 +2827,7 @@ dependencies = [
 
 [[package]]
 name = "ordnung-rbdb"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "ordnung-core",
  "thiserror 2.0.18",
