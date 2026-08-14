@@ -45,6 +45,15 @@ pub struct Config {
     /// `default_sort` is empty.
     #[serde(default = "default_true")]
     pub default_sort_ascending: bool,
+    /// How the "Vinyl Collection" grid is ordered: `"added"` (Discogs date
+    /// added), `"price"` (lowest marketplace listing), or `"artist"`. Unknown
+    /// values fall back to artist, the original fixed order. See `VinylSort`.
+    #[serde(default = "default_vinyl_sort")]
+    pub vinyl_sort: String,
+    /// Direction for `vinyl_sort` (`true` = ascending: oldest / cheapest / A–Z
+    /// first). Defaults to descending, so the default view is newest first.
+    #[serde(default)]
+    pub vinyl_sort_ascending: bool,
     /// Run analysis (BPM, key, waveform) automatically on each track as it's
     /// imported, instead of waiting for the explicit "Analyze" action. On by
     /// default; defaults to on for older configs that predate the field too.
@@ -174,6 +183,10 @@ fn default_convert_format() -> String {
     "aiff".to_string()
 }
 
+fn default_vinyl_sort() -> String {
+    "added".to_string()
+}
+
 fn default_waveform_color_mode() -> String {
     "energy".to_string()
 }
@@ -270,6 +283,8 @@ impl Default for Config {
             column_widths: BTreeMap::new(),
             default_sort: String::new(),
             default_sort_ascending: true,
+            vinyl_sort: default_vinyl_sort(),
+            vinyl_sort_ascending: false,
             auto_analyze: true,
             convert_format: default_convert_format(),
             convert_bitrate_kbps: String::new(),

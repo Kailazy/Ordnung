@@ -69,6 +69,16 @@ pub struct ArtworkHit {
     pub full_bytes: Vec<u8>,
 }
 
+/// The cheapest copy of a release currently listed on the Discogs marketplace,
+/// in whatever currency Discogs quoted it (the token owner's, when it has one).
+/// A live market price, not a purchase price — see
+/// [`Client::marketplace_price`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarketPrice {
+    pub value: f64,
+    pub currency: String,
+}
+
 /// One Discogs release candidate: metadata + image URLs, with no bytes
 /// downloaded yet. Powers the GUI multi-candidate picker so the user can choose
 /// among many releases; the caller downloads images on demand via
@@ -676,6 +686,32 @@ impl Client {
         Ok(())
     }
 
+    /// Current lowest marketplace listing for one release
+    /// (`GET /marketplace/stats/{id}`). This is what a copy is going for right
+    /// now, not what the user paid — Discogs doesn't expose a purchase price on
+    /// collection items, so this is the price the vinyl view can sort by.
+    ///
+    /// `Ok(None)` is a normal outcome: nothing for sale, or the release is
+    /// blocked from sale. One authenticated request per release, paced by the
+    /// shared throttle, so callers should fetch these in the background and
+    /// cache what comes back.
+    pub fn marketplace_price(&self, release_id: u64) -> Result<Option<MarketPrice>> {
+        let url = format!("https://api.discogs.com/marketplace/stats/{release_id}");
+        let resp = self.call_with_retry(|| self.authed(self.agent.get(&url)))?;
+        let body: MarketplaceStats = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs marketplace stats: {e}")))?;
+        if body.blocked_from_sale {
+            return Ok(None);
+        }
+        Ok(body.lowest_price.and_then(|p| {
+            (p.value > 0.0).then(|| MarketPrice {
+                value: p.value,
+                currency: p.currency,
+            })
+        }))
+    }
+
     /// Attach the token + User-Agent every Discogs API request needs. The read
     /// paths above set these inline (alongside their query parameters); the
     /// writes carry no query string, so they share this one helper.
@@ -825,6 +861,24 @@ struct CollectionResponse {
 struct CollectionPagination {
     #[serde(default)]
     pages: u32,
+}
+
+/// `GET /marketplace/stats/{release_id}`. `lowest_price` is null when nothing is
+/// for sale, and Discogs also flags releases it won't allow sales of at all.
+#[derive(Debug, Default, Deserialize)]
+struct MarketplaceStats {
+    #[serde(default)]
+    lowest_price: Option<StatsPrice>,
+    #[serde(default)]
+    blocked_from_sale: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct StatsPrice {
+    #[serde(default)]
+    value: f64,
+    #[serde(default)]
+    currency: String,
 }
 
 /// One item in a collection folder. The bulk of the metadata lives under
@@ -977,6 +1031,10 @@ impl BasicInformation {
             added: none_if_empty(date_added),
             folder_id,
             has_cover: false,
+            // Neither list endpoint carries a price; it's looked up per release
+            // and read back from the cache (see `Catalog::set_vinyl_price`).
+            price: None,
+            price_currency: None,
         })
     }
 }

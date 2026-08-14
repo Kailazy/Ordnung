@@ -1,6 +1,21 @@
 //! Split out of `main.rs`; part of the GUI `App`.
 use super::*;
 
+// `Ordering` from the glob import is the atomic one; the vinyl sort wants the
+// comparison enum, so it gets its own name.
+use std::cmp::Ordering as CmpOrdering;
+
+/// Flip a comparison when the sort runs descending. Keeps the "missing values
+/// last" arms of the vinyl comparators out of the direction logic — only the
+/// both-present case is ever reversed.
+fn cmp_direction(ord: CmpOrdering, ascending: bool) -> CmpOrdering {
+    if ascending {
+        ord
+    } else {
+        ord.reverse()
+    }
+}
+
 /// Show a small confirmation dialog. When `pos` is set (the screen point where
 /// the user clicked the action), the dialog opens right there so the confirm
 /// button lands under the cursor — no swipe across the window. Without a
@@ -35,6 +50,13 @@ struct VinylCell {
     /// Second caption line, e.g. `1993 · Vinyl, 12"`.
     sub: String,
     has_cover: bool,
+    /// Discogs `date_added`, ISO 8601 — which sorts correctly as plain text.
+    /// `None` on records cached before Discogs reported one.
+    added: Option<String>,
+    /// Lowest current marketplace listing, and the currency it's quoted in.
+    /// `None` until a sync has priced this record (or when nothing is for sale).
+    price: Option<f64>,
+    price_currency: Option<String>,
     /// Catalog track ids linked to this release — empty if you don't own a
     /// digital copy. Drives the "in catalog" badge and the jump-to.
     linked: Vec<Id>,
@@ -42,6 +64,120 @@ struct VinylCell {
     /// there would ask Discogs for a second copy (collection adds aren't
     /// idempotent), so the move is shown as already done instead.
     also_in_other: bool,
+}
+
+/// How the vinyl grids are ordered. Persisted as a stable key in
+/// [`crate::config::Config::vinyl_sort`], so an unknown key from another build
+/// falls back to `Artist` (the fixed order the view shipped with) rather than
+/// failing to load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VinylSort {
+    /// Discogs `date_added` — when the record joined the collection/wantlist.
+    Added,
+    /// Lowest current marketplace listing (see `Client::marketplace_price`).
+    Price,
+    /// Artist, then title. The catalog's own ordering.
+    Artist,
+}
+
+impl VinylSort {
+    fn from_key(key: &str) -> Self {
+        match key {
+            "added" => VinylSort::Added,
+            "price" => VinylSort::Price,
+            _ => VinylSort::Artist,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            VinylSort::Added => "added",
+            VinylSort::Price => "price",
+            VinylSort::Artist => "artist",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            VinylSort::Added => "Date added",
+            VinylSort::Price => "Price",
+            VinylSort::Artist => "Artist",
+        }
+    }
+
+    /// Direction labels for this field, `(ascending, descending)` — "oldest
+    /// first" says more than "ascending" when the field is a date.
+    fn direction_labels(self) -> (&'static str, &'static str) {
+        match self {
+            VinylSort::Added => ("Oldest first", "Newest first"),
+            VinylSort::Price => ("Cheapest first", "Most expensive first"),
+            VinylSort::Artist => ("A → Z", "Z → A"),
+        }
+    }
+}
+
+/// Order one grid's cells in place. `cells` arrives in catalog order (artist,
+/// then title), which is what `Artist` sorts by — so that case only has to
+/// decide whether to reverse. Ties fall back to artist so the layout is stable
+/// between frames (dates repeat; prices repeat more).
+fn sort_vinyl_cells(cells: &mut [VinylCell], sort: VinylSort, ascending: bool) {
+    match sort {
+        VinylSort::Artist => {
+            if !ascending {
+                cells.reverse();
+            }
+        }
+        VinylSort::Added => cells.sort_by(|a, b| {
+            let ord = match (&a.added, &b.added) {
+                (Some(x), Some(y)) => cmp_direction(x.cmp(y), ascending),
+                (Some(_), None) => CmpOrdering::Less,
+                (None, Some(_)) => CmpOrdering::Greater,
+                (None, None) => CmpOrdering::Equal,
+            };
+            ord.then_with(|| a.artist.cmp(&b.artist))
+        }),
+        VinylSort::Price => cells.sort_by(|a, b| {
+            let ord = match (a.price, b.price) {
+                // Prices are finite (`marketplace_price` rejects anything
+                // non-positive), so a total order is safe here.
+                (Some(x), Some(y)) => {
+                    cmp_direction(x.partial_cmp(&y).unwrap_or(CmpOrdering::Equal), ascending)
+                }
+                (Some(_), None) => CmpOrdering::Less,
+                (None, Some(_)) => CmpOrdering::Greater,
+                (None, None) => CmpOrdering::Equal,
+            };
+            ord.then_with(|| a.artist.cmp(&b.artist))
+        }),
+    }
+}
+
+/// Render a marketplace price the way the grid shows it: symbol for the
+/// currencies a record collection actually turns up, else the bare code.
+/// `decimals` is for the tooltip, where there's room for the exact figure.
+fn format_price(value: f64, currency: Option<&str>, decimals: bool) -> String {
+    let code = currency.unwrap_or("").trim().to_uppercase();
+    let symbol = match code.as_str() {
+        "USD" | "CAD" | "AUD" | "NZD" => "$",
+        "EUR" => "€",
+        "GBP" => "£",
+        "JPY" => "¥",
+        _ => "",
+    };
+    let amount = if decimals {
+        format!("{value:.2}")
+    } else {
+        format!("{}", value.round() as i64)
+    };
+    if symbol.is_empty() {
+        if code.is_empty() {
+            amount
+        } else {
+            format!("{amount} {code}")
+        }
+    } else {
+        format!("{symbol}{amount}")
+    }
 }
 
 /// What a click or right-click in the vinyl grid asked for. Returned from the
@@ -784,6 +920,11 @@ impl App {
             (!u.is_empty()).then(|| format!("https://www.discogs.com/user/{u}/collection"))
         };
 
+        // Sort choice, persisted across launches. Read once per frame so the
+        // menu below can write it back without borrowing the config twice.
+        let mut sort = VinylSort::from_key(&self.config.vinyl_sort);
+        let mut ascending = self.config.vinyl_sort_ascending;
+
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.heading("Vinyl Collection");
@@ -791,7 +932,9 @@ impl App {
                 ui.add_enabled_ui(!busy, |ui| {
                     if ui
                         .button("↻ Refresh")
-                        .on_hover_note("Sync with Discogs and download missing covers")
+                        .on_hover_note(
+                            "Sync with Discogs, download missing covers and check prices",
+                        )
                         .clicked()
                     {
                         refresh = true;
@@ -806,8 +949,42 @@ impl App {
                         open_url(url);
                     }
                 }
+                // Sort: field first, then a direction pair whose wording follows
+                // the field ("Newest first" reads better than "Descending").
+                let arrow = if ascending { "↑" } else { "↓" };
+                ui.menu_button(format!("⇅ {} {arrow}", sort.label()), |ui| {
+                    ui.set_min_width(170.0);
+                    for option in [VinylSort::Added, VinylSort::Price, VinylSort::Artist] {
+                        if ui
+                            .selectable_label(sort == option, option.label())
+                            .clicked()
+                        {
+                            sort = option;
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    let (asc_label, desc_label) = sort.direction_labels();
+                    if ui.selectable_label(!ascending, desc_label).clicked() {
+                        ascending = false;
+                        ui.close_menu();
+                    }
+                    if ui.selectable_label(ascending, asc_label).clicked() {
+                        ascending = true;
+                        ui.close_menu();
+                    }
+                })
+                .response
+                .on_hover_note("Order both shelves by date added, price or artist");
             });
         });
+        if sort.key() != self.config.vinyl_sort || ascending != self.config.vinyl_sort_ascending {
+            self.config.vinyl_sort = sort.key().to_string();
+            self.config.vinyl_sort_ascending = ascending;
+            if let Err(e) = self.config.save() {
+                self.status = format!("Couldn't save settings: {e}");
+            }
+        }
         ui.separator();
 
         if self.vinyl.is_empty() && self.wantlist.is_empty() {
@@ -846,8 +1023,8 @@ impl App {
         // Snapshot what we render so the scroll closure doesn't borrow the record
         // lists while we read the cover cache. Kick off cover decodes up front
         // (the request is deduplicated, so doing it every frame is cheap).
-        let owned = self.vinyl_cells(VinylList::Collection, &self.vinyl);
-        let wanted = self.vinyl_cells(VinylList::Wantlist, &self.wantlist);
+        let owned = self.vinyl_cells(VinylList::Collection, &self.vinyl, sort, ascending);
+        let wanted = self.vinyl_cells(VinylList::Wantlist, &self.wantlist, sort, ascending);
         for c in owned.iter().chain(wanted.iter()) {
             if c.has_cover {
                 self.request_vinyl_cover(c.key);
@@ -963,8 +1140,27 @@ impl App {
 
     /// Build the render-ready cells for one vinyl list: display strings resolved
     /// and catalog links looked up, so the grid closure never borrows the record
-    /// lists themselves.
-    fn vinyl_cells(&self, list: VinylList, records: &[VinylRecord]) -> Vec<VinylCell> {
+    /// lists themselves. Ordered by the view's current sort — the records arrive
+    /// from the catalog in artist order, so that's what `Artist` falls back to.
+    ///
+    /// Records missing the sort field (never priced, or no date added) always
+    /// sink to the end, in either direction: flipping to "cheapest first" should
+    /// surface your cheapest *known* price, not a wall of unpriced sleeves.
+    fn vinyl_cells(
+        &self,
+        list: VinylList,
+        records: &[VinylRecord],
+        sort: VinylSort,
+        ascending: bool,
+    ) -> Vec<VinylCell> {
+        let mut cells = self.vinyl_cells_unsorted(list, records);
+        sort_vinyl_cells(&mut cells, sort, ascending);
+        cells
+    }
+
+    /// The cells for one list in catalog order (artist, then title), before the
+    /// view's sort is applied.
+    fn vinyl_cells_unsorted(&self, list: VinylList, records: &[VinylRecord]) -> Vec<VinylCell> {
         records
             .iter()
             .map(|v| {
@@ -994,6 +1190,9 @@ impl App {
                         VinylList::Collection => self.vinyl_wanted.contains(&v.release_id),
                         VinylList::Wantlist => self.vinyl_owned.contains(&v.release_id),
                     },
+                    added: v.added.clone(),
+                    price: v.price,
+                    price_currency: v.price_currency.clone(),
                 }
             })
             .collect()
@@ -1107,10 +1306,43 @@ impl App {
                                 ));
                             }
                         }
+                        // Price chip, bottom-left of the cover: what the sort is
+                        // ordering by, shown where it can't push the caption
+                        // around. Absent until a sync has priced this record.
+                        if let Some(p) = c.price {
+                            let text = format_price(p, c.price_currency.as_deref(), false);
+                            let galley = ui.painter().layout_no_wrap(
+                                text,
+                                egui::FontId::proportional(12.0),
+                                egui::Color32::from_gray(240),
+                            );
+                            let pad = egui::vec2(6.0, 3.0);
+                            let size = galley.size() + pad * 2.0;
+                            let chip = egui::Rect::from_min_size(
+                                egui::pos2(rect.left() + 4.0, rect.bottom() - size.y - 4.0),
+                                size,
+                            );
+                            ui.painter().rect_filled(
+                                chip,
+                                egui::Rounding::same(5.0),
+                                egui::Color32::from_black_alpha(190),
+                            );
+                            ui.painter().galley(chip.min + pad, galley, egui::Color32::WHITE);
+                        }
+                        let price_line = match c.price {
+                            Some(p) => format!(
+                                "\nFrom {} on Discogs",
+                                format_price(p, c.price_currency.as_deref(), true)
+                            ),
+                            None => String::new(),
+                        };
                         let tip = if c.sub.is_empty() {
-                            format!("{}\n{}\n\nOpen on Discogs ↗", c.artist, c.title)
+                            format!("{}\n{}{price_line}\n\nOpen on Discogs ↗", c.artist, c.title)
                         } else {
-                            format!("{}\n{}\n{}\n\nOpen on Discogs ↗", c.artist, c.title, c.sub)
+                            format!(
+                                "{}\n{}\n{}{price_line}\n\nOpen on Discogs ↗",
+                                c.artist, c.title, c.sub
+                            )
                         };
                         // The cover opens Discogs — but not when the click landed
                         // on the catalog badge layered above it.
@@ -1698,5 +1930,111 @@ impl App {
                 native_drag = self.draw_table(ui);
             });
         native_drag
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cell carrying only what the sort reads.
+    fn cell(artist: &str, added: Option<&str>, price: Option<f64>) -> VinylCell {
+        VinylCell {
+            key: (VinylList::Collection, 1),
+            release_id: 1,
+            title: String::new(),
+            artist: artist.into(),
+            sub: String::new(),
+            has_cover: false,
+            linked: Vec::new(),
+            also_in_other: false,
+            added: added.map(str::to_string),
+            price,
+            price_currency: price.map(|_| "USD".to_string()),
+        }
+    }
+
+    fn artists(cells: &[VinylCell]) -> Vec<&str> {
+        cells.iter().map(|c| c.artist.as_str()).collect()
+    }
+
+    /// The grid arrives in artist order, so `Artist` only flips it.
+    #[test]
+    fn artist_sort_keeps_catalog_order_and_reverses_it() {
+        let mut cells = vec![cell("A", None, None), cell("B", None, None)];
+        sort_vinyl_cells(&mut cells, VinylSort::Artist, true);
+        assert_eq!(artists(&cells), ["A", "B"]);
+        sort_vinyl_cells(&mut cells, VinylSort::Artist, false);
+        assert_eq!(artists(&cells), ["B", "A"]);
+    }
+
+    #[test]
+    fn added_sorts_by_discogs_date_in_both_directions() {
+        let build = || {
+            vec![
+                cell("mid", Some("2022-06-01T00:00:00-07:00"), None),
+                cell("newest", Some("2024-01-02T00:00:00-08:00"), None),
+                cell("oldest", Some("2019-03-04T00:00:00-08:00"), None),
+            ]
+        };
+        let mut cells = build();
+        sort_vinyl_cells(&mut cells, VinylSort::Added, false);
+        assert_eq!(artists(&cells), ["newest", "mid", "oldest"]);
+        let mut cells = build();
+        sort_vinyl_cells(&mut cells, VinylSort::Added, true);
+        assert_eq!(artists(&cells), ["oldest", "mid", "newest"]);
+    }
+
+    #[test]
+    fn price_sorts_by_value_in_both_directions() {
+        let build = || {
+            vec![
+                cell("mid", None, Some(16.09)),
+                cell("dear", None, Some(120.0)),
+                cell("cheap", None, Some(5.03)),
+            ]
+        };
+        let mut cells = build();
+        sort_vinyl_cells(&mut cells, VinylSort::Price, false);
+        assert_eq!(artists(&cells), ["dear", "mid", "cheap"]);
+        let mut cells = build();
+        sort_vinyl_cells(&mut cells, VinylSort::Price, true);
+        assert_eq!(artists(&cells), ["cheap", "mid", "dear"]);
+    }
+
+    /// Records with nothing to sort on sink to the bottom either way — otherwise
+    /// "cheapest first" would open on a page of never-priced sleeves.
+    #[test]
+    fn records_missing_the_sort_field_sink_to_the_end() {
+        for ascending in [true, false] {
+            let mut cells = vec![
+                cell("unpriced", None, None),
+                cell("priced", None, Some(9.0)),
+            ];
+            sort_vinyl_cells(&mut cells, VinylSort::Price, ascending);
+            assert_eq!(artists(&cells), ["priced", "unpriced"]);
+
+            let mut cells = vec![cell("undated", None, None), cell("dated", Some("2020"), None)];
+            sort_vinyl_cells(&mut cells, VinylSort::Added, ascending);
+            assert_eq!(artists(&cells), ["dated", "undated"]);
+        }
+    }
+
+    #[test]
+    fn sort_choice_survives_a_round_trip_through_the_config_key() {
+        for sort in [VinylSort::Added, VinylSort::Price, VinylSort::Artist] {
+            assert_eq!(VinylSort::from_key(sort.key()), sort);
+        }
+        // A key from a build that knows sorts this one doesn't.
+        assert_eq!(VinylSort::from_key("condition"), VinylSort::Artist);
+    }
+
+    #[test]
+    fn prices_render_with_a_symbol_when_the_currency_has_one() {
+        assert_eq!(format_price(24.4, Some("USD"), false), "$24");
+        assert_eq!(format_price(24.4, Some("USD"), true), "$24.40");
+        assert_eq!(format_price(9.5, Some("EUR"), true), "€9.50");
+        assert_eq!(format_price(9.5, Some("SEK"), true), "9.50 SEK");
+        assert_eq!(format_price(9.5, None, true), "9.50");
     }
 }

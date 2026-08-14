@@ -577,6 +577,19 @@ impl Catalog {
             self.add_column_if_missing(table, "folder_id", "INTEGER")?;
         }
 
+        // Lowest current marketplace listing per release, so the vinyl view can
+        // sort by price. Discogs doesn't include prices in the collection or
+        // wantlist payloads — each one costs its own rate-limited request — so
+        // they're fetched in the background and cached here. `price_checked_at`
+        // is stamped even when the lookup found nothing for sale, so a release
+        // with no listings isn't re-queried on every sync; NULL means "never
+        // looked up". See `Catalog::vinyl_prices_to_refresh`.
+        for table in ["vinyl_collection", "vinyl_wantlist"] {
+            self.add_column_if_missing(table, "price", "REAL")?;
+            self.add_column_if_missing(table, "price_currency", "TEXT")?;
+            self.add_column_if_missing(table, "price_checked_at", "INTEGER")?;
+        }
+
         // Perceptual acoustic fingerprint, added in analyzer v5. Empty on older
         // catalogs until tracks are re-analyzed (the version bump invalidates the
         // cache), after which cross-format/-tag duplicates surface.
@@ -2340,13 +2353,14 @@ impl Catalog {
     }
 
     /// Every cached record in `list`, ordered for the grid (artist, then title).
-    /// `has_cover` reflects whether a cover image is cached.
+    /// `has_cover` reflects whether a cover image is cached, and `price` the last
+    /// marketplace lookup (see [`Catalog::set_vinyl_price`]).
     pub fn list_vinyl(&self, list: VinylList) -> Result<Vec<VinylRecord>> {
         let table = vinyl_table(list);
         let mut stmt = self.conn.prepare(&format!(
             "SELECT instance_id, release_id, title, artist, year, label,
                     catalog_number, format, thumb_url, cover_url, added, folder_id,
-                    cover_png IS NOT NULL
+                    cover_png IS NOT NULL, price, price_currency
              FROM {table}
              ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE, instance_id"
         ))?;
@@ -2366,6 +2380,8 @@ impl Catalog {
                     added: r.get(10)?,
                     folder_id: r.get::<_, Option<i64>>(11)?.map(|f| f as u32),
                     has_cover: r.get::<_, i64>(12)? != 0,
+                    price: r.get(13)?,
+                    price_currency: r.get(14)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2449,6 +2465,55 @@ impl Catalog {
         self.conn.execute(
             &format!("UPDATE {table} SET cover_png=?2 WHERE instance_id=?1"),
             params![instance_id as i64, png],
+        )?;
+        Ok(())
+    }
+
+    /// `(instance_id, release_id)` for every record in `list` whose cached price
+    /// is missing or older than `max_age_secs` — the work list a refresh looks up
+    /// marketplace prices for. Each one costs a rate-limited request, so the age
+    /// check is what keeps a routine sync from re-pricing the whole shelf.
+    ///
+    /// Ordered oldest-check-first (never-checked first) so a run that's cancelled
+    /// part way through still made progress on the stalest rows.
+    pub fn vinyl_prices_to_refresh(
+        &self,
+        list: VinylList,
+        max_age_secs: i64,
+    ) -> Result<Vec<(u64, u64)>> {
+        let table = vinyl_table(list);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT instance_id, release_id FROM {table}
+             WHERE price_checked_at IS NULL
+                OR price_checked_at < unixepoch() - ?1
+             ORDER BY price_checked_at IS NOT NULL, price_checked_at, instance_id"
+        ))?;
+        let rows = stmt
+            .query_map(params![max_age_secs], |r| {
+                Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Store the marketplace price looked up for one record. `None` records "we
+    /// asked, nothing was for sale" — the check timestamp is stamped either way,
+    /// so an unlisted release isn't re-queried until the price goes stale.
+    pub fn set_vinyl_price(
+        &self,
+        list: VinylList,
+        instance_id: u64,
+        price: Option<f64>,
+        currency: Option<&str>,
+    ) -> Result<()> {
+        let table = vinyl_table(list);
+        self.conn.execute(
+            &format!(
+                "UPDATE {table}
+                 SET price=?2, price_currency=?3, price_checked_at=unixepoch()
+                 WHERE instance_id=?1"
+            ),
+            params![instance_id as i64, price, currency],
         )?;
         Ok(())
     }
@@ -3865,7 +3930,42 @@ mod tests {
             added: Some("2021-03-04".into()),
             folder_id: Some(1),
             has_cover: false,
+            price: None,
+            price_currency: None,
         }
+    }
+
+    #[test]
+    fn vinyl_price_is_cached_and_survives_a_metadata_refresh() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let own = VinylList::Collection;
+        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One"))
+            .unwrap();
+        cat.upsert_vinyl(own, &vinyl(2, "Surgeon", "Force + Form"))
+            .unwrap();
+
+        // Nothing priced yet: both rows are due a lookup.
+        let due = cat.vinyl_prices_to_refresh(own, 60).unwrap();
+        assert_eq!(due, vec![(1, 9001), (2, 9002)]);
+
+        cat.set_vinyl_price(own, 1, Some(24.5), Some("USD")).unwrap();
+        // "Asked, nothing for sale" still counts as checked.
+        cat.set_vinyl_price(own, 2, None, None).unwrap();
+        assert!(cat.vinyl_prices_to_refresh(own, 60).unwrap().is_empty());
+        // ...but goes stale once the max age has passed.
+        assert_eq!(cat.vinyl_prices_to_refresh(own, -1).unwrap().len(), 2);
+
+        // A metadata re-sync must not wipe prices, exactly like cover bytes.
+        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One"))
+            .unwrap();
+        let rec = cat
+            .list_vinyl(own)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.instance_id == 1)
+            .unwrap();
+        assert_eq!(rec.price, Some(24.5));
+        assert_eq!(rec.price_currency.as_deref(), Some("USD"));
     }
 
     #[test]

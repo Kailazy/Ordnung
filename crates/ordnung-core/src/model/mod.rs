@@ -325,6 +325,16 @@ pub struct VinylRecord {
     pub folder_id: Option<u32>,
     /// True once a cover image has been downloaded and cached for this record.
     pub has_cover: bool,
+    /// Lowest current marketplace listing for this release, as last fetched from
+    /// Discogs. `None` means "never fetched, or nothing is for sale". Like
+    /// `has_cover` this is read back from the local cache rather than carried in
+    /// from a list fetch — collection/wantlist items don't include prices, so it
+    /// comes from a separate per-release lookup (see
+    /// [`crate::discogs::Client::marketplace_price`]).
+    pub price: Option<f64>,
+    /// Currency code the cached `price` is quoted in (e.g. `USD`), as Discogs
+    /// reported it. `None` whenever `price` is.
+    pub price_currency: Option<String>,
 }
 
 /// Conversion target chosen explicitly by the user. Never applied automatically.

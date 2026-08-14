@@ -301,10 +301,14 @@ impl App {
         }
         let (tx, rx) = mpsc::channel();
         self.job_rx = Some(rx);
-        self.job_cancel = None; // a collection sync runs to completion
+        // Cancellable because the price phase is one rate-limited request per
+        // record — minutes on a first sync. Stopping keeps everything fetched so
+        // far; the next refresh resumes with what's still unpriced.
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.job_cancel = Some(cancel.clone());
         self.status = "Syncing vinyl collection and wantlist…".into();
         let db = self.db_path.clone();
-        thread::spawn(move || run_refresh_vinyl(db, token, tx, ctx));
+        thread::spawn(move || run_refresh_vinyl(db, token, cancel, tx, ctx));
     }
 
     /// Run one user-requested change to a Discogs list — the vinyl grid's
@@ -1189,14 +1193,27 @@ fn analyze_tracks(
     ctx.request_repaint();
 }
 
+/// How long a cached marketplace price stays fresh (30 days). Prices are the one
+/// volatile thing in the vinyl cache, but each costs a rate-limited request, so a
+/// routine sync only re-prices what's aged out. See
+/// [`Catalog::vinyl_prices_to_refresh`].
+const VINYL_PRICE_MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
+
 /// Sync the local vinyl-collection cache from the user's Discogs collection.
 /// Fetches the full collection (paced by the Discogs client), upserts every
 /// record, prunes any the user removed since the last sync, then downloads
 /// covers for records that don't have one cached yet. Covers stream in with
 /// determinate progress so the grid fills as the run proceeds.
+///
+/// The last phase looks up each record's lowest marketplace price (what the
+/// vinyl view's price sort reads), skipping any priced recently enough. That's
+/// one rate-limited request per record, so it's the long pole on a first sync —
+/// hence `cancel`: stopping there keeps everything already fetched, and the next
+/// refresh picks up the records that never got a price.
 pub(crate) fn run_refresh_vinyl(
     db: PathBuf,
     token: String,
+    cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
 ) {
@@ -1269,6 +1286,9 @@ pub(crate) fn run_refresh_vinyl(
     let total = missing.len();
     let mut fetched = 0usize;
     for (i, (list, instance_id, url)) in missing.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         let _ = tx.send(JobMsg::Status(format!(
             "Downloading vinyl covers… ({}/{total})",
             i + 1
@@ -1285,13 +1305,69 @@ pub(crate) fn run_refresh_vinyl(
         let _ = tx.send(JobMsg::Progress { done: total, total });
     }
 
+    // Prices last: one rate-limited request each, and everything above is
+    // already usable without them.
+    let stale: Vec<(VinylList, u64, u64)> = [VinylList::Collection, VinylList::Wantlist]
+        .into_iter()
+        .flat_map(|list| {
+            catalog
+                .vinyl_prices_to_refresh(list, VINYL_PRICE_MAX_AGE_SECS)
+                .unwrap_or_default()
+                .into_iter()
+                .map(move |(instance_id, release_id)| (list, instance_id, release_id))
+        })
+        .collect();
+    let price_total = stale.len();
+    let mut priced = 0usize;
+    for (i, (list, instance_id, release_id)) in stale.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let _ = tx.send(JobMsg::Status(format!(
+            "Checking Discogs prices… ({}/{price_total})",
+            i + 1
+        )));
+        let _ = tx.send(JobMsg::Progress {
+            done: i,
+            total: price_total,
+        });
+        ctx.request_repaint();
+        // A failed lookup is left unstamped so the next refresh retries it; a
+        // successful one that found nothing for sale is stamped as checked.
+        if let Ok(price) = client.marketplace_price(*release_id) {
+            let ok = catalog
+                .set_vinyl_price(
+                    *list,
+                    *instance_id,
+                    price.as_ref().map(|p| p.value),
+                    price.as_ref().map(|p| p.currency.as_str()),
+                )
+                .is_ok();
+            if ok && price.is_some() {
+                priced += 1;
+            }
+        }
+    }
+    if price_total > 0 {
+        let _ = tx.send(JobMsg::Progress {
+            done: price_total,
+            total: price_total,
+        });
+    }
+
     let removed_note = if removed > 0 {
         format!(", {removed} removed")
     } else {
         String::new()
     };
+    let stopped = if cancel.load(Ordering::Relaxed) {
+        " (stopped early)"
+    } else {
+        ""
+    };
     let _ = tx.send(JobMsg::Done(format!(
-        "Vinyl synced: {} record(s), {} wantlisted{removed_note}, {fetched} new cover(s).",
+        "Vinyl synced: {} record(s), {} wantlisted{removed_note}, \
+         {fetched} new cover(s), {priced} price(s){stopped}.",
         records.len(),
         wants.len()
     )));
