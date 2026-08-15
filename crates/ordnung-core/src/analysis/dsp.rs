@@ -26,6 +26,23 @@ impl Spectrogram {
     }
 }
 
+/// When does frame `t` *happen*? Its Hann window spans samples `[t·HOP, t·HOP +
+/// WINDOW)`, and the window weights its own centre most, so the audio a frame
+/// describes is centred half a window in — `t·HOP + WINDOW/2`. Timestamping a
+/// frame by its start instead (the tempting `t / frame_rate`) reports every
+/// event `WINDOW/2` = ~46 ms at 44.1 kHz *early*, which is enough to slide a
+/// whole beatgrid off its kicks. Convert with these two, never by hand.
+pub fn frame_to_ms(frame: f32, sample_rate: u32) -> f32 {
+    (frame * HOP as f32 + WINDOW as f32 / 2.0) / sample_rate as f32 * 1000.0
+}
+
+/// Inverse of [`frame_to_ms`] — the (fractional, possibly negative) frame whose
+/// window is centred on `ms`. Negative means the moment sits in the track's
+/// first half-window, before any frame is centred on it.
+pub fn ms_to_frame(ms: f32, sample_rate: u32) -> f32 {
+    (ms / 1000.0 * sample_rate as f32 - WINDOW as f32 / 2.0) / HOP as f32
+}
+
 /// Number of STFT frames [`for_each_frame`] / [`spectrogram`] emit for a signal
 /// of `n_samples` (one Hann window every `HOP`).
 pub fn frame_count(n_samples: usize) -> usize {

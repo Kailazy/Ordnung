@@ -57,15 +57,22 @@ pub fn detect_phase(spec: &Spectrogram, bpm: f32, first_beat_ms: u64) -> u32 {
     // Energy is sampled over the first ~half-beat after each beat, where transients
     // (kick/clap) and note onsets live.
     let win = (beat_frames * 0.5).max(1.0) as usize;
-    let first_frame = first_beat_ms as f32 / 1000.0 * frame_rate;
+    // A beat at `t` ms is described by the frame *centred* there, not the one
+    // starting there (see `dsp::ms_to_frame`).
+    let first_frame = super::dsp::ms_to_frame(first_beat_ms as f32, spec.sample_rate);
     let n_frames = spec.frames.len();
 
+    // Beats in the track's first half-window have no frame centred on them; skip
+    // them, but remember how many, because bar position is counted from the first
+    // *detected* beat and dropping beats silently would rotate every phase.
+    let mut skipped = 0usize;
     let mut clap: Vec<f32> = Vec::new();
     let mut harm_vecs: Vec<Vec<f32>> = Vec::new();
     let mut i = 0;
     loop {
         let f0 = (first_frame + i as f32 * beat_frames).round();
         if f0 < 0.0 {
+            skipped += 1;
             i += 1;
             continue;
         }
@@ -97,12 +104,12 @@ pub fn detect_phase(spec: &Spectrogram, bpm: f32, first_beat_ms: u64) -> u32 {
     let mut best_score = f32::MIN;
     for p in 0..BAR as u32 {
         // Backbeat: high-band energy on 2 & 4 (bar positions 1,3) over 1 & 3 (0,2).
-        let on_24 = mean_at(&clap, p, &[1, 3]);
-        let on_13 = mean_at(&clap, p, &[0, 2]);
+        let on_24 = mean_at(&clap, skipped, p, &[1, 3]);
+        let on_13 = mean_at(&clap, skipped, p, &[0, 2]);
         let backbeat = (on_24 - on_13) / clap_scale;
 
         // Novelty: harmonic change concentrated on the "1" (bar position 0).
-        let nov_on_1 = mean_at(&novelty, p, &[0]);
+        let nov_on_1 = mean_at(&novelty, skipped, p, &[0]);
         let novelty_lift = (nov_on_1 - nov_scale) / nov_scale;
 
         let score = W_BACKBEAT * backbeat + W_NOVELTY * novelty_lift;
@@ -169,12 +176,13 @@ fn mean(xs: &[f32]) -> f32 {
 }
 
 /// Mean of `feat` over beats whose bar position (`(i - phase).rem_euclid(4)`) is one
-/// of `positions`.
-fn mean_at(feat: &[f32], phase: u32, positions: &[i64]) -> f32 {
+/// of `positions`. `skipped` is how many leading beats never made it into `feat`,
+/// so `feat[0]` is beat `skipped` of the detected run.
+fn mean_at(feat: &[f32], skipped: usize, phase: u32, positions: &[i64]) -> f32 {
     let mut sum = 0.0;
     let mut count = 0u32;
     for (i, &v) in feat.iter().enumerate() {
-        let pos = (i as i64 - phase as i64).rem_euclid(BAR as i64);
+        let pos = ((i + skipped) as i64 - phase as i64).rem_euclid(BAR as i64);
         if positions.contains(&pos) {
             sum += v;
             count += 1;

@@ -666,6 +666,7 @@ impl App {
         // The panel, floating just above the lane's right edge so it never covers
         // the beats being adjusted.
         let mut edited: Option<PlayerGrid> = None;
+        let mut held = false;
         let mut reset = false;
         egui::Window::new("Beatgrid")
             .id(egui::Id::new("grid_edit_panel"))
@@ -696,11 +697,13 @@ impl App {
                 });
 
                 // Shift the whole grid — coarse chevrons outside, fine inside, so
-                // the row reads as one nudge dial running -10 … +10 ms.
+                // the row reads as one nudge dial running -10 … +10 ms. Held, they
+                // repeat, so walking the grid a long way is one press.
                 let nudge = segmented(
                     ui,
                     W,
                     "grid_nudge",
+                    true,
                     &[
                         (GridGlyph::Chevron { dir: -1.0, double: true }, "Slide the grid -10 ms"),
                         (GridGlyph::Chevron { dir: -1.0, double: false }, "Slide the grid -1 ms"),
@@ -708,16 +711,18 @@ impl App {
                         (GridGlyph::Chevron { dir: 1.0, double: true }, "Slide the grid +10 ms"),
                     ],
                 );
-                if let Some(i) = nudge {
-                    edited = Some(shift_grid(g, [-10.0, -1.0, 1.0, 10.0][i]));
+                if let Some(f) = nudge {
+                    edited = Some(shift_grid(g, [-10.0, -1.0, 1.0, 10.0][f.index]));
+                    held = f.held;
                 }
 
                 // Anchor + tempo actions: plant beat 1, snap the nearest beat, or
-                // fix an octave-off tempo.
+                // fix an octave-off tempo. One press, one action — no repeat.
                 let act = segmented(
                     ui,
                     W,
                     "grid_actions",
+                    false,
                     &[
                         (GridGlyph::Downbeat, "Put the downbeat on the playhead"),
                         (GridGlyph::Snap, "Move the nearest beat onto the playhead"),
@@ -725,7 +730,7 @@ impl App {
                         (GridGlyph::Double, "Double the tempo the grid is drawn at"),
                     ],
                 );
-                match act {
+                match act.map(|f| f.index) {
                     Some(0) => edited = Some(set_beat_one_at(g, playhead_ms as f64)),
                     Some(1) => edited = Some(snap_grid_to(g, playhead_ms as f64)),
                     Some(2) => edited = Some(scale_grid_tempo(g, 0.5)),
@@ -741,9 +746,8 @@ impl App {
                             .color(crate::ui::tokens::color::LABEL_3),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if segmented(ui, CELL_H, "grid_reset", &[(GridGlyph::Reset, "Go back to the detected grid")])
-                            .is_some()
-                        {
+                        let cells = [(GridGlyph::Reset, "Go back to the detected grid")];
+                        if segmented(ui, CELL_H, "grid_reset", false, &cells).is_some() {
                             reset = true;
                         }
                     });
@@ -754,6 +758,17 @@ impl App {
             if let Some(np) = self.now_playing.as_mut() {
                 np.grid = Some(g);
             }
+            // A held nudge moves the grid on screen every tick but writes to the
+            // catalog once, when the button comes up — the same "commit when the
+            // edit settles" rule the lane drag follows.
+            if held {
+                self.grid_nudge_held = true;
+            } else {
+                self.commit_grid_edit();
+            }
+        }
+        if self.grid_nudge_held && !ui.input(|i| i.pointer.any_down()) {
+            self.grid_nudge_held = false;
             self.commit_grid_edit();
         }
         if reset {
@@ -1193,6 +1208,163 @@ fn beat_lines(
     out
 }
 
+/// Hold-to-repeat on the beatgrid nudge buttons, driven through a real
+/// [`egui::Context`] with synthetic pointer events — the timing lives in
+/// [`segmented`]'s response handling, so mutating state directly wouldn't
+/// exercise it.
+#[cfg(test)]
+mod segmented_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    const CELLS: [(GridGlyph, &str); 2] = [
+        (GridGlyph::Chevron { dir: -1.0, double: false }, "left"),
+        (GridGlyph::Chevron { dir: 1.0, double: false }, "right"),
+    ];
+
+    /// Run one frame at time `t`, with the pointer held (or not) over the first
+    /// cell. Returns whatever the control fired.
+    fn frame(
+        ctx: &egui::Context,
+        t: f64,
+        events: Vec<egui::Event>,
+        pointer_over: bool,
+        repeat: bool,
+        rect: &Rc<Cell<egui::Rect>>,
+    ) -> Option<Fire> {
+        let mut input = egui::RawInput {
+            time: Some(t),
+            events,
+            // Without a screen rect the panel has nowhere to lay out, and every
+            // interaction is clipped away.
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 200.0),
+            )),
+            ..Default::default()
+        };
+        if pointer_over {
+            input.events.insert(0, egui::Event::PointerMoved(hit(rect)));
+        }
+        let out = Rc::new(Cell::new(None));
+        let (o, r) = (out.clone(), rect.clone());
+        ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let fired = segmented(ui, 120.0, "t", repeat, &CELLS);
+                r.set(ui.min_rect());
+                o.set(fired.map(|f| (f.index, f.held)));
+            });
+        });
+        out.take().map(|(index, held)| Fire { index, held })
+    }
+
+    fn press(pos: egui::Pos2) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        }
+    }
+
+    fn release(pos: egui::Pos2) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// Centre of the first cell. The captured rect is the whole panel, and the
+    /// control sits at its top-left corner, 120 wide over two cells.
+    fn hit(rect: &Rc<Cell<egui::Rect>>) -> egui::Pos2 {
+        let r = rect.get();
+        egui::pos2(r.left() + 30.0, r.top() + CELL_H / 2.0)
+    }
+
+    #[test]
+    fn press_fires_once_then_repeats_while_held() {
+        let ctx = egui::Context::default();
+        let rect = Rc::new(Cell::new(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(120.0, CELL_H),
+        )));
+        // Two warm-up frames so the control has a rect to be pressed on.
+        frame(&ctx, 0.0, vec![], false, true, &rect);
+        frame(&ctx, 0.01, vec![], true, true, &rect);
+
+        // Press: fires immediately, and that first fire is not a repeat.
+        let p = hit(&rect);
+        let first = frame(&ctx, 0.02, vec![press(p)], true, true, &rect);
+        let first = first.expect("press should fire immediately");
+        assert_eq!(first.index, 0);
+        assert!(!first.held, "the initial press is a discrete edit, not a repeat");
+
+        // Held but still inside the delay: silent.
+        let mut t = 0.02;
+        let mut during_delay = 0;
+        while t < 0.02 + REPEAT_DELAY - 0.02 {
+            t += 0.016;
+            if frame(&ctx, t, vec![], true, true, &rect).is_some() {
+                during_delay += 1;
+            }
+        }
+        assert_eq!(during_delay, 0, "must not repeat before the hold delay");
+
+        // Past the delay: repeats, all flagged as held so the caller defers its write.
+        let mut repeats = 0;
+        while t < 1.2 {
+            t += 0.016;
+            if let Some(f) = frame(&ctx, t, vec![], true, true, &rect) {
+                assert!(f.held, "a repeat must be marked held");
+                repeats += 1;
+            }
+        }
+        assert!(repeats > 5, "expected a run of repeats, got {repeats}");
+
+        // Release, then hold the pointer still: nothing more fires.
+        frame(&ctx, t + 0.016, vec![release(p)], true, true, &rect);
+        let mut after = 0;
+        for k in 0..30 {
+            if frame(&ctx, t + 0.05 + k as f64 * 0.016, vec![], true, true, &rect).is_some() {
+                after += 1;
+            }
+        }
+        assert_eq!(after, 0, "release must stop the repeat");
+    }
+
+    #[test]
+    fn without_repeat_a_cell_fires_once_per_click() {
+        let ctx = egui::Context::default();
+        let rect = Rc::new(Cell::new(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(120.0, CELL_H),
+        )));
+        frame(&ctx, 0.0, vec![], false, false, &rect);
+        frame(&ctx, 0.01, vec![], true, false, &rect);
+
+        // A click: nothing on the way down, one fire on the way up.
+        let p = hit(&rect);
+        assert!(frame(&ctx, 0.02, vec![press(p)], true, false, &rect).is_none());
+        let up = frame(&ctx, 0.06, vec![release(p)], true, false, &rect);
+        assert!(up.is_some_and(|f| f.index == 0 && !f.held), "click fires once");
+
+        // Holding it must never turn into a repeat — "×2" held is still one ×2.
+        frame(&ctx, 0.1, vec![press(p)], true, false, &rect);
+        let mut fires = 0;
+        let mut t = 0.1;
+        while t < 2.0 {
+            t += 0.016;
+            if frame(&ctx, t, vec![], true, false, &rect).is_some() {
+                fires += 1;
+            }
+        }
+        assert_eq!(fires, 0, "a non-repeating cell must not fire while held");
+    }
+}
+
 #[cfg(test)]
 mod smooth_cache_tests {
     use super::*;
@@ -1533,16 +1705,38 @@ pub(crate) enum GridGlyph {
     Reset,
 }
 
+/// One firing of a [`segmented`] cell. `held` marks a repeat from a button being
+/// held down rather than a discrete click — the caller should apply the edit but
+/// hold off on persisting it until the gesture ends.
+pub(crate) struct Fire {
+    pub index: usize,
+    pub held: bool,
+}
+
+/// Hold-to-repeat timing: how long a press must be held before it starts
+/// repeating, then the interval between repeats, ramping from slow to fast over
+/// `RAMP` seconds so a short hold nudges gently and a long one travels.
+const REPEAT_DELAY: f64 = 0.35;
+const REPEAT_SLOW: f64 = 0.09;
+const REPEAT_FAST: f64 = 0.022;
+const REPEAT_RAMP: f64 = 1.2;
+
 /// A row of icon buttons fused into one pill — iOS-style segmented control.
 /// Cells are equal width, hairline-divided, and only the pill's outer corners
 /// are rounded, so a row reads as a single object instead of four loose
-/// rectangles. Returns the index of the cell clicked this frame.
+/// rectangles.
+///
+/// With `repeat`, a held cell fires once on press and then keeps firing — the
+/// nudge behaviour you want when walking a grid 20 ms sideways. Without it, a
+/// cell fires once on release, since holding "×2" or "reset" should never mean
+/// doing it forty times.
 pub(crate) fn segmented(
     ui: &mut egui::Ui,
     width: f32,
     salt: &str,
+    repeat: bool,
     cells: &[(GridGlyph, &str)],
-) -> Option<usize> {
+) -> Option<Fire> {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, CELL_H), egui::Sense::hover());
     let r = crate::ui::tokens::radius::SM;
     ui.painter()
@@ -1578,6 +1772,34 @@ pub(crate) fn segmented(
         }
         if resp.is_pointer_button_down_on() {
             ui.painter().rect_filled(cell, rounding, crate::ui::tokens::color::ACCENT_SOFT);
+            if repeat {
+                let id = resp.id.with("hold");
+                let now = ui.input(|i| i.time);
+                // (when the press started, when it last fired).
+                let prev: Option<(f64, f64)> = ui.ctx().data(|d| d.get_temp(id));
+                let fired = match prev {
+                    // Press just landed: act immediately, like any button would.
+                    None => Some((now, now)),
+                    Some((start, last)) => {
+                        let held = now - start;
+                        let ramp = ((held - REPEAT_DELAY) / REPEAT_RAMP).clamp(0.0, 1.0);
+                        let interval = REPEAT_SLOW + (REPEAT_FAST - REPEAT_SLOW) * ramp;
+                        (held > REPEAT_DELAY && now - last >= interval)
+                            .then_some((start, now))
+                    }
+                };
+                if let Some(state) = fired {
+                    ui.ctx().data_mut(|d| d.insert_temp(id, state));
+                    hit = Some(Fire {
+                        index: i,
+                        held: prev.is_some(),
+                    });
+                }
+                // The repeat clock only advances if we keep being drawn.
+                ui.ctx().request_repaint();
+            }
+        } else if repeat {
+            ui.ctx().data_mut(|d| d.remove::<(f64, f64)>(resp.id.with("hold")));
         }
         if !first {
             ui.painter().line_segment(
@@ -1594,8 +1816,13 @@ pub(crate) fn segmented(
             crate::ui::tokens::color::LABEL_2
         };
         draw_grid_glyph(ui.painter(), cell.center(), color, *glyph);
-        if resp.clicked() {
-            hit = Some(i);
+        // A repeating cell already fired on press; firing again on release would
+        // double the last step.
+        if !repeat && resp.clicked() {
+            hit = Some(Fire {
+                index: i,
+                held: false,
+            });
         }
     }
     hit

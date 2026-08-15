@@ -136,6 +136,16 @@ pub fn color_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let occ_lo = hz_to_bin(OCCUPANCY_LO_HZ).max(1).min(n_bins - 1);
     let occ_hi = hz_to_bin(OCCUPANCY_HI_HZ).clamp(occ_lo + 1, n_bins);
 
+    // Which time bin a frame belongs to. A frame describes the audio at the centre
+    // of its window (`t·HOP + WINDOW/2`), so binning it by `t/total_frames` would
+    // draw every transient half a window (~46 ms) early — enough to visibly
+    // disagree with the sample-accurate zoom lane and the beatgrid over it.
+    let n_samples = samples.len().max(1);
+    let frame_bin = |t: usize| {
+        let centre = t * dsp::HOP + dsp::WINDOW / 2;
+        (centre * bins / n_samples).min(bins - 1)
+    };
+
     // Pass 1: accumulate raw band power + K-weighted power per time bin, streaming
     // the STFT frame-by-frame and assigning each frame to its bin by position.
     // Also track the hottest single-bin power — the occupancy threshold reference.
@@ -145,7 +155,7 @@ pub fn color_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let mut max_bin_pow = 0.0f64;
     let mut t = 0usize;
     dsp::for_each_frame(samples, |frame| {
-        let k = (t * bins / total_frames).min(bins - 1);
+        let k = frame_bin(t);
         let (mut lo, mut mid, mut hi, mut kw) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
         for (i, &m) in frame.iter().enumerate() {
             let p = (m * m) as f64;
@@ -186,7 +196,7 @@ pub fn color_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let mut occupancy = vec![0.0f64; bins];
     let mut t = 0usize;
     dsp::for_each_frame(samples, |frame| {
-        let k = (t * bins / total_frames).min(bins - 1);
+        let k = frame_bin(t);
         let active = frame[occ_lo..occ_hi]
             .iter()
             .filter(|&&m| (m * m) as f64 > occ_thresh)

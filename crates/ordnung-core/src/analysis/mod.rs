@@ -78,7 +78,15 @@ use std::path::Path;
 ///     number (`first_beat_number`), so the player can draw downbeat ("1") markers on
 ///     the moving waveform. No algorithm change; the bump backfills the phase, which
 ///     earlier versions computed (v17) but discarded on save.
-pub const ANALYZER_VERSION: u32 = 19;
+/// v20: grid anchor timing — STFT frame indices were being read as timestamps,
+///     but a frame describes the audio at the *centre* of its 4096-sample window,
+///     so every beat was reported ~46 ms early; spectral flux peaking mid-attack
+///     added ~28 ms more. `dsp::frame_to_ms`/`ms_to_frame` fix the convention (in
+///     `tempo::detect`, `downbeat::detect_phase`, and `waveform::color_bands`) and
+///     `tempo::snap_anchor` then slides the anchor onto the transient itself at
+///     ~1.5 ms resolution. Measured 74 ms early → within ~3 ms
+///     (`tests/grid_phase.rs`); tempo and downbeat phase are unchanged.
+pub const ANALYZER_VERSION: u32 = 20;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key
@@ -137,6 +145,17 @@ pub fn analyze_file(path: impl AsRef<Path>, params: AnalysisParams) -> Result<An
         0
     };
     let (bpm, beatgrid) = if tempo.bpm > 0.0 {
+        // The comb's anchor is only as sharp as an STFT hop; slide it onto the
+        // actual transient at sample resolution so grid lines sit on the kick.
+        let tempo = tempo::TempoResult {
+            beat_offset_ms: tempo::snap_anchor(
+                key_slice,
+                audio.sample_rate,
+                tempo.bpm,
+                tempo.beat_offset_ms,
+            ),
+            ..tempo
+        };
         // Which of the four beats starts the bar, so the grid's downbeats ("1")
         // land where rekordbox would put its red bar marker.
         let phase = downbeat::detect_phase(&spec, tempo.bpm, tempo.beat_offset_ms);

@@ -125,7 +125,11 @@ pub fn detect(spec: &Spectrogram) -> TempoResult {
     // with more energy per tap (all taps on beats, not alternating on/off), so promote
     // a faster metrical relative when its aligned energy clearly beats the current lock.
     let (bpm, phase_frames) = correct_metrical(&env, frame_rate, bpm0, phase0);
-    let beat_offset_ms = (phase_frames / frame_rate * 1000.0).round().max(0.0) as u64;
+    // Frame → time at the window *centre* (see `dsp::frame_to_ms`); the envelope
+    // index is not a timestamp on its own.
+    let beat_offset_ms = super::dsp::frame_to_ms(phase_frames, spec.sample_rate)
+        .round()
+        .max(0.0) as u64;
 
     TempoResult {
         bpm: (bpm * 100.0).round() / 100.0,
@@ -334,6 +338,175 @@ fn subtract_moving_average(env: &mut [f32], radius: usize) {
     for i in 0..n {
         env[i] = (env[i] - smoothed[i]).max(0.0);
     }
+}
+
+// --- Anchor snapping -------------------------------------------------------
+//
+// The comb lock above is derived from a 4096-sample STFT: it pins the *period*
+// to a fraction of a BPM, but its phase can only ever be as sharp as a hop, and
+// spectral flux peaks while a transient's energy is still climbing into the
+// window — so the anchor lands tens of milliseconds early even after the
+// window-centre correction. That's invisible on the overview and glaring on the
+// zoom lane, where the grid line should sit right on the kick.
+//
+// So the last step leaves the spectrogram behind: re-derive an onset envelope
+// from the samples at ~1.5 ms resolution, and slide the anchor (period fixed)
+// to wherever the beats collect the most transient energy.
+
+/// Block hop / length of the fine onset envelope, in samples at the track's own
+/// rate. 64/256 at 44.1 kHz is ~1.5 ms resolution over a ~5.8 ms window — short
+/// enough to localize an attack, long enough not to chase a 60 Hz kick's own
+/// waveform.
+const SNAP_HOP: usize = 64;
+const SNAP_WIN: usize = 256;
+
+/// Kick band for the snap. Weighted over the broadband flux because a DJ reads
+/// the grid against the kick, and because hi-hats sit on the off-beats often
+/// enough to drag a broadband-only snap half a beat sideways.
+const SNAP_LOW_HZ: f32 = 200.0;
+const SNAP_BROADBAND_WEIGHT: f32 = 0.35;
+
+/// Phase search step, in milliseconds.
+const SNAP_STEP_MS: f32 = 0.5;
+
+/// How far the winning offset must stand above the average candidate before the
+/// snap is trusted. Material with no transients (pads, ambient intros) produces
+/// a flat score curve whose argmax is noise; below this we keep the comb's
+/// answer rather than inventing a sharper-looking wrong one.
+const SNAP_MIN_LIFT: f32 = 1.25;
+
+/// Slide `coarse_ms` (the comb's anchor) onto the nearest real transient, keeping
+/// `bpm` fixed. Searches ±half a beat, so the grid keeps the beats it locked —
+/// only their alignment moves. Returns `coarse_ms` unchanged when the audio
+/// gives the search nothing to lock onto.
+pub fn snap_anchor(samples: &[f32], sample_rate: u32, bpm: f32, coarse_ms: u64) -> u64 {
+    if bpm <= 0.0 || sample_rate == 0 || samples.len() < SNAP_WIN * 4 {
+        return coarse_ms;
+    }
+    let sr = sample_rate as f32;
+    let flux = onset_flux(samples, sr);
+    if flux.len() < 8 {
+        return coarse_ms;
+    }
+
+    // Milliseconds per envelope index, and the offset of index 0. A block's value
+    // is the energy *change* across the step, so it belongs midway between the two
+    // windows' centres.
+    let ms_per = SNAP_HOP as f32 / sr * 1000.0;
+    let ms_0 = (SNAP_WIN as f32 / 2.0 - SNAP_HOP as f32 / 2.0) / sr * 1000.0;
+    let at = |ms: f32| -> f32 {
+        let x = (ms - ms_0) / ms_per;
+        if x < 0.0 {
+            return 0.0;
+        }
+        let i = x as usize;
+        if i + 1 >= flux.len() {
+            return 0.0;
+        }
+        let f = x - i as f32;
+        flux[i] * (1.0 - f) + flux[i + 1] * f
+    };
+
+    let period_ms = 60_000.0 / bpm;
+    let span_ms = flux.len() as f32 * ms_per + ms_0;
+    let score = |offset: f32| -> f32 {
+        let mut sum = 0.0;
+        let mut n = 0u32;
+        // Start at the first beat at/after zero so a negative candidate still
+        // scores the same beats as its positive neighbours.
+        let mut t = offset - (offset / period_ms).floor() * period_ms;
+        while t < span_ms {
+            sum += at(t);
+            n += 1;
+            t += period_ms;
+        }
+        if n == 0 {
+            0.0
+        } else {
+            sum / n as f32
+        }
+    };
+
+    let steps = (period_ms / SNAP_STEP_MS).round().max(1.0) as i32;
+    let mut best = coarse_ms as f32;
+    let mut best_score = f32::MIN;
+    let mut total = 0.0f32;
+    for k in -steps / 2..=steps / 2 {
+        let cand = coarse_ms as f32 + k as f32 * SNAP_STEP_MS;
+        let s = score(cand);
+        total += s;
+        if s > best_score {
+            best_score = s;
+            best = cand;
+        }
+    }
+    let mean = total / (steps + 1) as f32;
+    if !(best_score > mean * SNAP_MIN_LIFT) {
+        return coarse_ms;
+    }
+    // Keep the anchor inside the track: a snap that walks past zero moves up a beat.
+    let mut ms = best;
+    while ms < 0.0 {
+        ms += period_ms;
+    }
+    ms.round() as u64
+}
+
+/// Fine onset envelope for [`snap_anchor`]: positive change in short-block RMS,
+/// computed for a kick-band copy of the signal and for the full band, each
+/// normalized to its own mean before they're mixed. Normalizing first is what
+/// lets one weight (`SNAP_BROADBAND_WEIGHT`) hold across a bass-heavy techno
+/// track and a thin, kickless intro alike.
+fn onset_flux(samples: &[f32], sr: f32) -> Vec<f32> {
+    let n_blocks = samples.len().saturating_sub(SNAP_WIN) / SNAP_HOP + 1;
+    let mut rms_lo = Vec::with_capacity(n_blocks);
+    let mut rms_full = Vec::with_capacity(n_blocks);
+
+    // One-pole low-pass (a = 1 - e^{-2π fc/sr}) run once over the signal; the
+    // block loop below reads the filtered copy.
+    let a = 1.0 - (-std::f32::consts::TAU * SNAP_LOW_HZ / sr).exp();
+    let mut lp = 0.0f32;
+    let low: Vec<f32> = samples
+        .iter()
+        .map(|&s| {
+            lp += a * (s - lp);
+            lp
+        })
+        .collect();
+
+    let mut pos = 0;
+    while pos + SNAP_WIN <= samples.len() {
+        let mut sl = 0.0f64;
+        let mut sf = 0.0f64;
+        for i in pos..pos + SNAP_WIN {
+            sl += (low[i] * low[i]) as f64;
+            sf += (samples[i] * samples[i]) as f64;
+        }
+        let inv = 1.0 / SNAP_WIN as f64;
+        rms_lo.push((sl * inv).sqrt() as f32);
+        rms_full.push((sf * inv).sqrt() as f32);
+        pos += SNAP_HOP;
+    }
+
+    let rise = |xs: &[f32]| -> Vec<f32> {
+        let mut v = vec![0.0f32; xs.len()];
+        for i in 1..xs.len() {
+            v[i] = (xs[i] - xs[i - 1]).max(0.0);
+        }
+        let mean = v.iter().sum::<f32>() / v.len().max(1) as f32;
+        if mean > 0.0 {
+            for x in &mut v {
+                *x /= mean;
+            }
+        }
+        v
+    };
+    let lo = rise(&rms_lo);
+    let full = rise(&rms_full);
+    lo.iter()
+        .zip(&full)
+        .map(|(l, f)| l + SNAP_BROADBAND_WEIGHT * f)
+        .collect()
 }
 
 #[cfg(test)]

@@ -1120,6 +1120,10 @@ struct App {
     /// nudge controls shows above the lane, and dragging the lane slides the grid
     /// instead of seeking. See [`player`].
     grid_edit_open: bool,
+    /// A nudge button in the beatgrid editor is being held down, so its repeats
+    /// are moving the grid live. The catalog write is deferred until the release
+    /// (one write per gesture, not one per repeat tick). See [`player`].
+    grid_nudge_held: bool,
     /// Receives the one-shot startup update check's result off the network
     /// thread. `Some(info)` → a newer release exists; `None` → up to date or the
     /// check failed (we stay silent). Consumed once in `update()`, then dropped.
