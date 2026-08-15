@@ -43,7 +43,7 @@ const MIN_BEATS: usize = 8;
 /// that is a downbeat. Beat `i` then has bar position `((i - phase).rem_euclid(4))`
 /// (0 = the "1"). `first_beat_ms` is the tempo phase; `bpm` the constant tempo.
 pub fn detect_phase(spec: &Spectrogram, bpm: f32, first_beat_ms: u64) -> u32 {
-    if bpm <= 0.0 || spec.frames.is_empty() {
+    if bpm <= 0.0 || spec.is_empty() {
         return 0;
     }
     let frame_rate = spec.frame_rate();
@@ -59,8 +59,8 @@ pub fn detect_phase(spec: &Spectrogram, bpm: f32, first_beat_ms: u64) -> u32 {
     let win = (beat_frames * 0.5).max(1.0) as usize;
     // A beat at `t` ms is described by the frame *centred* there, not the one
     // starting there (see `dsp::ms_to_frame`).
-    let first_frame = super::dsp::ms_to_frame(first_beat_ms as f32, spec.sample_rate);
-    let n_frames = spec.frames.len();
+    let first_frame = super::dsp::ms_to_frame(first_beat_ms as f32, spec.sample_rate());
+    let n_frames = spec.len();
 
     // Beats in the track's first half-window have no frame centred on them; skip
     // them, but remember how many, because bar position is counted from the first
@@ -123,8 +123,8 @@ pub fn detect_phase(spec: &Spectrogram, bpm: f32, first_beat_ms: u64) -> u32 {
 
 /// Inclusive bin range covering `[lo_hz, hi_hz]`, clamped to the spectrum.
 fn bin_range(spec: &Spectrogram, lo_hz: f32, hi_hz: f32) -> (usize, usize) {
-    let n_bins = spec.frames[0].len();
-    let sr = spec.sample_rate as f32;
+    let n_bins = spec.n_bins();
+    let sr = spec.sample_rate() as f32;
     let k = |hz: f32| ((hz * WINDOW as f32 / sr).round() as usize).min(n_bins.saturating_sub(1));
     (k(lo_hz), k(hi_hz))
 }
@@ -135,7 +135,7 @@ fn band_energy(spec: &Spectrogram, f0: usize, f1: usize, lo: usize, hi: usize) -
         return 0.0;
     }
     let mut sum = 0.0;
-    for frame in &spec.frames[f0..f1] {
+    for frame in spec.frames_range(f0, f1) {
         for &m in &frame[lo..=hi.min(frame.len() - 1)] {
             sum += m;
         }
@@ -146,12 +146,12 @@ fn band_energy(spec: &Spectrogram, f0: usize, f1: usize, lo: usize, hi: usize) -
 /// Per-bin mean magnitude in `[lo, hi]` over frames `[f0, f1)` — a beat-synchronous
 /// spectral profile whose frame-to-frame change tracks harmonic motion.
 fn band_profile(spec: &Spectrogram, f0: usize, f1: usize, lo: usize, hi: usize) -> Vec<f32> {
-    let hi = hi.min(spec.frames[0].len() - 1);
+    let hi = hi.min(spec.n_bins() - 1);
     let mut prof = vec![0.0f32; hi.saturating_sub(lo) + 1];
     if f1 <= f0 {
         return prof;
     }
-    for frame in &spec.frames[f0..f1] {
+    for frame in spec.frames_range(f0, f1) {
         for (j, slot) in prof.iter_mut().enumerate() {
             *slot += frame[lo + j];
         }
@@ -274,10 +274,7 @@ mod tests {
 
     #[test]
     fn degenerate_inputs_default_to_zero() {
-        let spec = Spectrogram {
-            frames: Vec::new(),
-            sample_rate: 44_100,
-        };
+        let spec = Spectrogram::from_frames(&[], 44_100);
         assert_eq!(detect_phase(&spec, 128.0, 0), 0);
     }
 }

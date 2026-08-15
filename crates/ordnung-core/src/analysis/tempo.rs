@@ -49,17 +49,17 @@ pub struct TempoResult {
 /// Spectral-flux onset strength per frame: positive changes of the log-compressed
 /// magnitude, then local-mean subtracted and half-wave rectified.
 pub fn onset_envelope(spec: &Spectrogram) -> Vec<f32> {
-    if spec.frames.is_empty() {
+    if spec.is_empty() {
         return Vec::new();
     }
-    let mut env = Vec::with_capacity(spec.frames.len());
+    let mut env = Vec::with_capacity(spec.len());
     env.push(0.0);
     // Reuse last frame's log magnitudes instead of recomputing the ln twice.
-    let mut prev_log: Vec<f32> = spec.frames[0]
+    let mut prev_log: Vec<f32> = spec.frame(0)
         .iter()
         .map(|&m| (1.0 + GAMMA * m).ln())
         .collect();
-    for frame in spec.frames.iter().skip(1) {
+    for frame in spec.frames().skip(1) {
         let mut flux = 0.0;
         for (b, &m) in frame.iter().enumerate() {
             let c = (1.0 + GAMMA * m).ln();
@@ -127,7 +127,7 @@ pub fn detect(spec: &Spectrogram) -> TempoResult {
     let (bpm, phase_frames) = correct_metrical(&env, frame_rate, bpm0, phase0);
     // Frame → time at the window *centre* (see `dsp::frame_to_ms`); the envelope
     // index is not a timestamp on its own.
-    let beat_offset_ms = super::dsp::frame_to_ms(phase_frames, spec.sample_rate)
+    let beat_offset_ms = super::dsp::frame_to_ms(phase_frames, spec.sample_rate())
         .round()
         .max(0.0) as u64;
 

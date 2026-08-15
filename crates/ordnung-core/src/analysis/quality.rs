@@ -43,11 +43,11 @@ const FULLBAND_RATIO: f32 = 0.95;
 
 /// Locate the low-pass cutoff (if any) in a magnitude spectrogram.
 pub fn detect(spec: &Spectrogram) -> Quality {
-    let nyquist = spec.sample_rate as f32 / 2.0;
-    if spec.frames.is_empty() {
+    let nyquist = spec.sample_rate() as f32 / 2.0;
+    if spec.is_empty() {
         return NONE;
     }
-    let n_bins = spec.frames[0].len();
+    let n_bins = spec.n_bins();
     if n_bins < 32 || nyquist <= 0.0 {
         return NONE;
     }
@@ -56,8 +56,7 @@ pub fn detect(spec: &Spectrogram) -> Quality {
     // Quiet intros/breakdowns carry no high-frequency content and would drag the
     // estimate down, so we average only over frames at or above the median energy.
     let mut energies: Vec<f32> = spec
-        .frames
-        .iter()
+        .frames()
         .map(|f| f.iter().map(|m| m * m).sum::<f32>())
         .collect();
     let mut sorted = energies.clone();
@@ -66,7 +65,7 @@ pub fn detect(spec: &Spectrogram) -> Quality {
 
     let mut avg = vec![0.0f32; n_bins];
     let mut count = 0usize;
-    for (frame, &en) in spec.frames.iter().zip(&energies) {
+    for (frame, &en) in spec.frames().zip(&energies) {
         if en >= median && en > 0.0 {
             for (b, &m) in frame.iter().enumerate() {
                 avg[b] += m;
@@ -172,10 +171,7 @@ mod tests {
                 }
             })
             .collect();
-        Spectrogram {
-            frames: vec![frame; 8],
-            sample_rate: SR,
-        }
+        Spectrogram::from_frames(&vec![frame; 8], SR)
     }
 
     #[test]
@@ -217,10 +213,7 @@ mod tests {
 
     #[test]
     fn empty_spectrogram_is_none() {
-        let q = detect(&Spectrogram {
-            frames: vec![],
-            sample_rate: SR,
-        });
+        let q = detect(&Spectrogram::from_frames(&[], SR));
         assert!(q.cutoff_hz.is_none());
     }
 }

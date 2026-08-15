@@ -61,8 +61,8 @@ fn chroma_frames(spec: &Spectrogram) -> Vec<[f32; 12]> {
     const LO_HZ: f32 = 55.0; // ~A1
     const HI_HZ: f32 = 5000.0; // ~D#8
 
-    let mut out = Vec::with_capacity(spec.frames.len());
-    for frame in &spec.frames {
+    let mut out = Vec::with_capacity(spec.len());
+    for frame in spec.frames() {
         let mut c = [0.0f32; 12];
         for (i, &mag) in frame.iter().enumerate() {
             let f = spec.bin_hz(i);

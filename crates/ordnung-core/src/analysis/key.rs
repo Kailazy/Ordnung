@@ -80,8 +80,8 @@ pub fn chromagram(spec: &Spectrogram) -> [f32; 12] {
 /// floor, in the pitched band, mapped to a (MIDI, magnitude) pair. `midi` carries
 /// no tuning offset yet — the caller subtracts the global tuning before binning.
 fn collect_peaks(spec: &Spectrogram) -> Vec<Vec<(f32, f32)>> {
-    let mut frames = Vec::with_capacity(spec.frames.len());
-    for frame in &spec.frames {
+    let mut frames = Vec::with_capacity(spec.len());
+    for frame in spec.frames() {
         let frame_max = frame.iter().cloned().fold(0.0f32, f32::max);
         let mut peaks = Vec::new();
         if frame_max > 0.0 {
@@ -136,7 +136,7 @@ fn peak_freq(spec: &Spectrogram, frame: &[f32], i: usize) -> f32 {
     } else {
         0.0
     };
-    spec.bin_hz(i) + delta * spec.sample_rate as f32 / super::dsp::WINDOW as f32
+    spec.bin_hz(i) + delta * spec.sample_rate() as f32 / super::dsp::WINDOW as f32
 }
 
 /// Detect the key by best profile correlation over all 12 tonics × {major, minor}.
