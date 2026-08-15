@@ -214,6 +214,11 @@ impl App {
     }
 
     pub(crate) fn reload(&mut self) {
+        // Rows are about to be rebuilt from the catalog, so any waveform bytes a
+        // (re)analysis rewrote are now stale in the smoothing cache — and its key
+        // can't see a change that kept the envelope's length. Reload is the one
+        // choke point every catalog write funnels through, so drop it here.
+        crate::player::clear_smooth_cache();
         // Refresh the sidebar's playlist tree first. If the viewed playlist was
         // deleted (or turned out to be a folder), fall back to the Library so the
         // table never queries a playlist that no longer exists.
@@ -747,7 +752,14 @@ impl eframe::App for App {
         while let Ok((id, hires)) = self.hires_rx.try_recv() {
             if let Some(n) = self.now_playing.as_mut() {
                 if n.id == id {
-                    n.hires_bands = Some(hires);
+                    // A recompute triggered by new crossover frequencies (Settings →
+                    // Frequency bands, or a loaded preset) yields a *different*
+                    // envelope of the *same* length for the same track — which the
+                    // smoothing cache's key can't distinguish from the one it already
+                    // holds. Drop it here, where every hi-res result lands, rather
+                    // than at each of the settings paths that clears `hires_bands`.
+                    crate::player::clear_smooth_cache();
+                    n.hires_bands = Some(Arc::new(hires));
                 }
             }
         }

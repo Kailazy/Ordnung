@@ -1140,15 +1140,21 @@ struct NowPlaying {
     source_path: String,
     /// Per-bin peak envelope (`Analysis::waveform_preview`), drives bar heights.
     /// Empty when the track isn't analyzed yet — the bar falls back to a line.
-    waveform: Vec<u8>,
+    ///
+    /// These three envelopes are `Arc`ed because `draw_player` hands them to the
+    /// panel closure every frame (the closure mutably borrows `self.scrub`, so it
+    /// can't also borrow `self.now_playing`). Cloning the `Vec`s there meant
+    /// memcpying the hi-res buffer — ~2.9 MB for a 6-minute track — at the display's
+    /// refresh rate; an `Arc` clone is a refcount bump.
+    waveform: Arc<Vec<u8>>,
     /// Per-bin `[low, mid, high]` band energy (`Analysis::waveform_bands`), drives
     /// the colour. Empty for pre-v10 analyses; colouring then degrades gracefully.
-    waveform_bands: Vec<u8>,
+    waveform_bands: Arc<Vec<u8>>,
     /// High-resolution `[low, mid, high, loudness]` bands (same 4-byte stride as
     /// `waveform_bands`) computed once from the decoded PCM the engine holds — far
     /// finer than the stored ~20/sec preview, so the zoom lane shows rekordbox-level
     /// transient detail. `None` until the samples are available (still decoding).
-    hires_bands: Option<Vec<u8>>,
+    hires_bands: Option<Arc<Vec<u8>>>,
     /// Set once the off-thread hi-res analysis has been kicked off, so we don't
     /// respawn it every frame while it runs (or the PCM is still decoding).
     hires_requested: bool,

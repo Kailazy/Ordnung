@@ -1378,6 +1378,7 @@ impl App {
                                             crate::player::draw_waveform(
                                                 ui.painter(),
                                                 inset,
+                                                r.id,
                                                 &r.waveform,
                                                 &r.waveform_bands,
                                                 &waveform_style,

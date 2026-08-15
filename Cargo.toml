@@ -16,3 +16,16 @@ authors = ["Kai Lazarov"]
 # Dependencies are added per-phase (see PLAN.md / ordnung-roadmap skill).
 # Phase 0 is intentionally std-only so the scaffold builds anywhere.
 [workspace.dependencies]
+
+# Shipped builds are DSP-heavy (STFT/tempo/key over whole libraries) and redraw a
+# 120 Hz UI, so the default release profile leaves speed on the table: cargo ships
+# `lto = false, codegen-units = 16`, which blocks cross-crate inlining of the
+# ordnung-core analysis hot loops into ordnung-gui and splits each crate into 16
+# independently-optimized units. Thin LTO plus a single codegen unit trades build
+# time (the DMG is built once by CI) for a faster binary.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# NOT `panic = "abort"`: analysis decodes arbitrary user files on rayon workers, and
+# a panic there (malformed container, codec edge case) must stay recoverable — today
+# it kills the one background job, and aborting would take the whole app with it.

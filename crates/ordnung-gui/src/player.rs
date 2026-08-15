@@ -60,6 +60,7 @@ impl App {
                     (a.waveform_preview.clone(), bands)
                 })
                 .unwrap_or_default();
+            let (waveform, waveform_bands) = (Arc::new(waveform), Arc::new(waveform_bands));
             // Beatgrid for the moving lane.
             let grid = analysis.as_ref().and_then(player_grid);
             self.now_playing = Some(NowPlaying {
@@ -240,11 +241,17 @@ impl App {
                 if !waveform.is_empty() {
                     // Prefer the high-res envelope; fall back to the coarse preview
                     // bands while the PCM is still decoding.
-                    let detail = if hires.is_empty() { &bands } else { &hires };
+                    let (detail, detail_lane) = if hires.is_empty() {
+                        (&bands, WaveLane::Bands)
+                    } else {
+                        (&hires, WaveLane::Hires)
+                    };
                     self.draw_zoom_lane(
                         ui,
+                        np_id,
                         &waveform,
                         detail,
+                        detail_lane,
                         &wave_style,
                         shown_frac,
                         dur,
@@ -491,6 +498,7 @@ impl App {
                         draw_waveform(
                             painter,
                             rect,
+                            np_id,
                             &waveform,
                             &bands,
                             &wave_style,
@@ -816,8 +824,12 @@ impl App {
     fn draw_zoom_lane(
         &mut self,
         ui: &mut egui::Ui,
+        track: Id,
         waveform: &[u8],
         bands: &[u8],
+        // Which envelope `bands` is, for the smoothing cache (hi-res once the PCM
+        // pass lands, the coarse preview before that).
+        lane: WaveLane,
         wave_style: &WaveformStyle,
         shown_frac: f32,
         dur: f32,
@@ -866,6 +878,7 @@ impl App {
                 draw_waveform(
                     painter,
                     draw_rect,
+                    track,
                     waveform,
                     bands,
                     wave_style,
@@ -885,6 +898,8 @@ impl App {
                 draw_waveform_scrolling(
                     painter,
                     draw_rect,
+                    track,
+                    lane,
                     bands,
                     bins_per_sec,
                     wave_style,
@@ -1176,6 +1191,77 @@ fn beat_lines(
         out.push((left + (t - t0) / span * width, is_downbeat));
     }
     out
+}
+
+#[cfg(test)]
+mod smooth_cache_tests {
+    use super::*;
+
+    fn style(smoothing: f32) -> WaveformStyle {
+        let mut s = WaveformStyle::from_config(&config::Config::default());
+        s.smoothing = smoothing;
+        s
+    }
+
+    /// Sawtooth with sharp rises and slow decays — exercises both the attack and
+    /// release branches of the follower rather than a single constant.
+    fn envelope(bins: usize) -> Vec<u8> {
+        (0..bins * 4).map(|i| ((i * 37) % 256) as u8).collect()
+    }
+
+    #[test]
+    fn cached_smoothing_matches_uncached() {
+        clear_smooth_cache();
+        let data = envelope(2_000);
+        let st = style(0.5);
+        let want = smooth_source(&data, 4, &st, 20.0);
+        // First call populates, second must hit — both have to equal the direct call.
+        let cold = smooth_source_cached(1, WaveLane::Bands, &data, 4, &st, 20.0);
+        let warm = smooth_source_cached(1, WaveLane::Bands, &data, 4, &st, 20.0);
+        assert_eq!(cold.as_slice(), want.as_slice());
+        assert_eq!(warm.as_slice(), want.as_slice());
+    }
+
+    #[test]
+    fn style_and_lane_changes_do_not_serve_a_stale_envelope() {
+        clear_smooth_cache();
+        let data = envelope(2_000);
+        let light = smooth_source_cached(1, WaveLane::Bands, &data, 4, &style(0.2), 20.0);
+        let heavy = smooth_source_cached(1, WaveLane::Bands, &data, 4, &style(0.9), 20.0);
+        assert_ne!(light, heavy, "moving the smoothing slider must re-smooth");
+
+        // Same track and byte length, different lane: the hi-res envelope must not
+        // be served the coarse preview's cached result.
+        let coarse = smooth_source_cached(1, WaveLane::Bands, &data, 4, &style(0.5), 20.0);
+        let hires = smooth_source_cached(1, WaveLane::Hires, &data, 4, &style(0.5), 2_000.0);
+        assert_ne!(coarse, hires, "lane + bin rate are part of the key");
+    }
+
+    #[test]
+    fn clearing_drops_entries_that_the_key_alone_cannot_invalidate() {
+        clear_smooth_cache();
+        let st = style(0.5);
+        let before = smooth_source_cached(7, WaveLane::Hires, &envelope(500), 4, &st, 2_000.0);
+        // A crossover change recomputes the hi-res bands: same track, same lane, same
+        // length, same style — only the *bytes* differ. Without the explicit clear
+        // (see `App::reload` / the hires_rx handler) this would be a stale hit.
+        let mut different = envelope(500);
+        different.iter_mut().for_each(|b| *b = 255 - *b);
+        clear_smooth_cache();
+        let after = smooth_source_cached(7, WaveLane::Hires, &different, 4, &st, 2_000.0);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn cache_stays_bounded() {
+        clear_smooth_cache();
+        let data = envelope(8);
+        let st = style(0.5);
+        for id in 0..(SMOOTH_CACHE_MAX as Id * 2) {
+            smooth_source_cached(id, WaveLane::Bands, &data, 4, &st, 20.0);
+        }
+        SMOOTH_CACHE.with(|c| assert!(c.borrow().len() <= SMOOTH_CACHE_MAX));
+    }
 }
 
 #[cfg(test)]
@@ -1743,12 +1829,12 @@ fn bass_floor_gain(low_norm: f32, threshold: f32, amount: f32) -> f32 {
 /// toward 1.0 left the slider perceptually dead until the very top. O(n) per
 /// channel.
 fn smooth_source(data: &[u8], stride: usize, style: &WaveformStyle, bins_per_sec: f32) -> Vec<u8> {
-    let mut out = data.to_vec();
     let n = data.len() / stride;
     let s = style.smoothing.clamp(0.0, 1.0);
     if s == 0.0 || n == 0 || bins_per_sec <= 0.0 {
-        return out;
+        return data.to_vec();
     }
+    let mut out = data.to_vec();
     // One-pole coefficient for a time constant of `tau_secs * s`: after that span
     // the follower has covered ~63% of a step. `exp` keeps it exact even when the
     // constant spans less than one bin (coarse preview), degrading to ~raw.
@@ -1772,6 +1858,92 @@ fn smooth_source(data: &[u8], stride: usize, style: &WaveformStyle, bins_per_sec
         }
     }
     out
+}
+
+/// Which of a track's three stored envelopes a cached smoothing result belongs to.
+/// They have different lengths and bin rates, so they never share an entry.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum WaveLane {
+    /// The coarse peak preview (`Analysis::waveform_preview`, 1 byte/bin).
+    Preview,
+    /// The stored ~20/sec colour bands (`Analysis::waveform_bands`, 4 bytes/bin).
+    Bands,
+    /// The player's off-thread hi-res envelope (`compute_hires_bands`).
+    Hires,
+}
+
+/// Cache key for one smoothed envelope. The float fields are compared by bit
+/// pattern rather than value: they come straight from the config and only change
+/// when the user moves a Settings slider, so exact equality is both correct and
+/// what we want (a NaN would simply never hit, which is harmless).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct SmoothKey {
+    track: Id,
+    lane: WaveLane,
+    /// Guards against a same-id track whose envelope changed length underneath us
+    /// (re-analysis, or the hi-res buffer replacing the coarse fallback).
+    len: usize,
+    smoothing: u32,
+    attack: u32,
+    release: u32,
+    rate: u32,
+}
+
+/// Above this many live entries the cache is dropped wholesale. The working set is
+/// bounded by what's on screen — at most a screenful of table rows plus the
+/// player's three lanes — so this is only a backstop against unbounded growth
+/// when the user scrolls a long table; a full clear costs one frame of recompute.
+const SMOOTH_CACHE_MAX: usize = 256;
+
+thread_local! {
+    /// Memoized [`smooth_source`] results. Smoothing is a per-frame cost that
+    /// depends only on the stored bytes and the style — neither of which changes
+    /// between frames — but it runs over every visible envelope on every repaint.
+    /// Uncached, the hi-res zoom lane alone (720k bins for a 6-minute track) cost
+    /// ~10 ms per frame against an 8.3 ms budget at 120 Hz, with a screenful of
+    /// table rows adding ~3.7 ms on top. The GUI is single-threaded, so a
+    /// thread-local keeps this out of every drawing signature.
+    static SMOOTH_CACHE: std::cell::RefCell<HashMap<SmoothKey, Arc<Vec<u8>>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// [`smooth_source`], memoized per (track, lane, style). See [`SMOOTH_CACHE`].
+fn smooth_source_cached(
+    track: Id,
+    lane: WaveLane,
+    data: &[u8],
+    stride: usize,
+    style: &WaveformStyle,
+    bins_per_sec: f32,
+) -> Arc<Vec<u8>> {
+    let key = SmoothKey {
+        track,
+        lane,
+        len: data.len(),
+        smoothing: style.smoothing.to_bits(),
+        attack: style.attack_secs.to_bits(),
+        release: style.release_secs.to_bits(),
+        rate: bins_per_sec.to_bits(),
+    };
+    SMOOTH_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some(hit) = c.get(&key) {
+            return Arc::clone(hit);
+        }
+        if c.len() >= SMOOTH_CACHE_MAX {
+            c.clear();
+        }
+        let out = Arc::new(smooth_source(data, stride, style, bins_per_sec));
+        c.insert(key, Arc::clone(&out));
+        out
+    })
+}
+
+/// Drop every memoized envelope. Called from `reload`, which is what runs after a
+/// (re)analysis writes new waveform bytes for a track id the cache may still hold
+/// an entry for under an unchanged length.
+pub(crate) fn clear_smooth_cache() {
+    SMOOTH_CACHE.with(|c| c.borrow_mut().clear());
 }
 
 /// Default span (seconds) shown in the zoomed detail lane.
@@ -1956,6 +2128,8 @@ pub(crate) fn compute_hires_bands(
 pub(crate) fn draw_waveform(
     painter: &egui::Painter,
     rect: egui::Rect,
+    // Identifies the envelopes for the smoothing cache (see `smooth_source_cached`).
+    track: Id,
     waveform: &[u8],
     bands: &[u8],
     style: &WaveformStyle,
@@ -1975,9 +2149,9 @@ pub(crate) fn draw_waveform(
     // Both inputs here are the stored preview envelopes, so the time constants
     // convert through the preview's fixed bin rate.
     let rate = analysis::waveform::COLOR_BINS_PER_SEC;
-    let sbands = smooth_source(bands, STRIDE, style, rate);
+    let sbands = smooth_source_cached(track, WaveLane::Bands, bands, STRIDE, style, rate);
     let bands = sbands.as_slice();
-    let swave = smooth_source(waveform, 1, style, rate);
+    let swave = smooth_source_cached(track, WaveLane::Preview, waveform, 1, style, rate);
     let waveform = swave.as_slice();
 
     let y = rect.center().y;
@@ -2149,6 +2323,11 @@ pub(crate) fn draw_waveform(
 fn draw_waveform_scrolling(
     painter: &egui::Painter,
     rect: egui::Rect,
+    // Identifies the envelope for the smoothing cache.
+    track: Id,
+    // Which envelope `bands` is — the hi-res one, or the coarse fallback while the
+    // PCM is still decoding. They alias the same `track`, so the lane must say which.
+    lane: WaveLane,
     bands: &[u8],
     bins_per_sec: f32,
     style: &WaveformStyle,
@@ -2165,7 +2344,7 @@ fn draw_waveform_scrolling(
     // below are sampled from these smoothed bins with no further per-bar blend.
     // `bins_per_sec` is the caller's actual envelope rate (hi-res or the coarse
     // preview fallback), so the smoothing spans the same time either way.
-    let sbands = smooth_source(bands, STRIDE, style, bins_per_sec);
+    let sbands = smooth_source_cached(track, lane, bands, STRIDE, style, bins_per_sec);
     let bands = sbands.as_slice();
     let y = rect.center().y;
     let x0 = rect.left();
