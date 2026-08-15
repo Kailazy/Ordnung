@@ -6,6 +6,7 @@
 
 use crate::error::{Error, Result};
 use crate::model::key::{Key, Mode, PitchClass};
+use std::collections::HashMap;
 use crate::model::{
     Analysis, AudioProperties, Beat, Beatgrid, Format, Id, Playlist, Tags, Track, TranscodeVerdict,
     VinylList, VinylRecord,
@@ -44,6 +45,51 @@ fn mode_from_int(v: i64) -> Mode {
     } else {
         Mode::Major
     }
+}
+
+/// Build an [`Analysis`] from a row selecting [`Catalog::ANALYSIS_COLS`], whose
+/// first column sits at `base` (0 when the row is exactly those columns, 1 when a
+/// `track_id` is selected ahead of them). Shared by the single-track load and the
+/// whole-table one so the two can't drift apart in column order.
+fn analysis_from_row(r: &rusqlite::Row, base: usize) -> rusqlite::Result<Analysis> {
+    let c = |i: usize| base + i;
+    Ok(Analysis {
+        bpm: r.get::<_, Option<f64>>(c(0))?.map(|v| v as f32),
+        key: match (
+            r.get::<_, Option<i64>>(c(1))?,
+            r.get::<_, Option<i64>>(c(2))?,
+        ) {
+            (Some(t), Some(m)) => Some(Key::new(PitchClass::new(t as u8), mode_from_int(m))),
+            _ => None,
+        },
+        // A single anchor beat carrying bpm + first-beat position and its bar
+        // number (the downbeat phase); the player extrapolates the full grid from
+        // these. Number defaults to 1 for pre-v17 rows that predate downbeat
+        // detection.
+        beatgrid: match (
+            r.get::<_, Option<i64>>(c(3))?,
+            r.get::<_, Option<f64>>(c(0))?,
+        ) {
+            (Some(off), Some(bpm)) => Beatgrid {
+                beats: vec![Beat {
+                    number: r.get::<_, Option<i64>>(c(13))?.unwrap_or(1) as u32,
+                    position_ms: off as u64,
+                    bpm: bpm as f32,
+                }],
+            },
+            _ => Beatgrid::default(),
+        },
+        cues: Vec::new(),
+        peak: r.get::<_, Option<f64>>(c(4))?.map(|v| v as f32),
+        integrated_loudness_lufs: r.get::<_, Option<f64>>(c(5))?.map(|v| v as f32),
+        waveform_preview: r.get::<_, Option<Vec<u8>>>(c(6))?.unwrap_or_default(),
+        content_hash: r.get(c(7))?,
+        analyzer_version: r.get::<_, i64>(c(8))? as u32,
+        audio_fingerprint: r.get::<_, Option<Vec<u8>>>(c(9))?,
+        lowpass_hz: r.get::<_, Option<f64>>(c(10))?.map(|v| v as f32),
+        lowpass_edge_db_per_khz: r.get::<_, Option<f64>>(c(11))?.map(|v| v as f32),
+        waveform_bands: r.get::<_, Option<Vec<u8>>>(c(12))?.unwrap_or_default(),
+    })
 }
 
 pub struct Catalog {
@@ -201,6 +247,20 @@ const METADATA_COMPLETE_SQL: &str =
 /// short list of genuinely fresh imports. See [`Catalog::list_recently_added`].
 const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 
+/// Schema generation stamped into `PRAGMA user_version` once [`Catalog::init_schema`]
+/// and [`Catalog::migrate`] have run to completion. An open that finds this value
+/// already set skips both, which is what keeps `Catalog::open` cheap.
+///
+/// **Bump this whenever either of those functions gains a statement** — a new
+/// `CREATE TABLE`/`CREATE INDEX`, a new `add_column_if_missing`, or a new data
+/// backfill. Forgetting to means existing catalogs never see the change. (Fresh
+/// catalogs would still get it, so the omission shows up only on upgrade.)
+///
+/// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
+/// Discogs "decide once at add time" backfill in `migrate`, which still keys off
+/// `user_version < 1` and so remains correctly skipped at any later generation.
+const SCHEMA_VERSION: i64 = 2;
+
 impl Catalog {
     /// Open (creating if needed) a catalog at `path` and ensure the schema exists.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -217,8 +277,34 @@ impl Catalog {
         // for the lock instead of dropping the write.
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
         let cat = Catalog { conn };
-        cat.init_schema()?;
+        cat.ensure_schema()?;
         Ok(cat)
+    }
+
+    /// Bring the schema up to [`SCHEMA_VERSION`], or do nothing if it already is.
+    ///
+    /// The GUI opens a catalog far more often than it looks like: `reload` alone
+    /// opens four (playlist tree, rows, edited count, inbox count), and it runs on
+    /// every keystroke in the search box. Unconditionally re-running the DDL made
+    /// each of those parse 16 `CREATE TABLE IF NOT EXISTS` statements and walk
+    /// `PRAGMA table_info` once per `add_column_if_missing` — ~80 scans of a
+    /// 79-column table, allocating a `String` per column per scan, to discover
+    /// every single time that there was nothing to do.
+    ///
+    /// The version is stamped only after both steps succeed, so a migration that
+    /// fails part-way is retried on the next open rather than being skipped.
+    fn ensure_schema(&self) -> Result<()> {
+        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        // `>=`, not `==`: a catalog written by a *newer* build must not be stamped
+        // back down to this build's generation, or that build would redo its own
+        // migrations on the next open. The DDL is idempotent either way.
+        if version >= SCHEMA_VERSION {
+            return Ok(());
+        }
+        self.init_schema()?;
+        self.conn
+            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        Ok(())
     }
 
     fn init_schema(&self) -> Result<()> {
@@ -2141,52 +2227,44 @@ impl Catalog {
         Ok(())
     }
 
+    /// The columns [`analysis_from_row`] reads, in the order it indexes them.
+    /// Shared by the single-track and whole-table loads so they can't drift apart.
+    const ANALYSIS_COLS: &'static str =
+        "bpm, key_tonic, key_mode, beat_offset_ms, peak, loudness,
+         waveform, content_hash, analyzer_version, audio_fingerprint,
+         lowpass_hz, lowpass_edge, waveform_bands, first_beat_number";
+
+    /// Every track's analysis in one query, keyed by track id.
+    ///
+    /// The table needs an analysis for each of its rows (BPM, key, transcode
+    /// verdict, inline waveform), which used to mean one `get_analysis` per row —
+    /// an N+1 that ran on every keystroke in the search box, since typing rebuilds
+    /// the rows. The callers own the returned values, so they can move the waveform
+    /// blobs out rather than cloning them (they average ~31 KB each, so on a
+    /// mid-sized library that copy alone was tens of MB per reload).
+    pub fn analyses_by_track(&self) -> Result<HashMap<Id, Analysis>> {
+        let sql = format!(
+            "SELECT track_id, {} FROM analysis",
+            Self::ANALYSIS_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        // Column 0 is `track_id`; `analysis_from_row` indexes from 0, so shift it.
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)? as Id, analysis_from_row(r, 1)?))
+        })?;
+        rows.collect::<rusqlite::Result<HashMap<_, _>>>()
+            .map_err(Into::into)
+    }
+
     /// Load a track's analysis, if present.
     pub fn get_analysis(&self, id: Id) -> Result<Option<Analysis>> {
+        let sql = format!(
+            "SELECT {} FROM analysis WHERE track_id=?1",
+            Self::ANALYSIS_COLS
+        );
         let row = self
             .conn
-            .query_row(
-                "SELECT bpm, key_tonic, key_mode, beat_offset_ms, peak, loudness,
-                     waveform, content_hash, analyzer_version, audio_fingerprint,
-                     lowpass_hz, lowpass_edge, waveform_bands, first_beat_number
-                 FROM analysis WHERE track_id=?1",
-                params![id as i64],
-                |r| {
-                    Ok(Analysis {
-                        bpm: r.get::<_, Option<f64>>(0)?.map(|v| v as f32),
-                        key: match (r.get::<_, Option<i64>>(1)?, r.get::<_, Option<i64>>(2)?) {
-                            (Some(t), Some(m)) => {
-                                Some(Key::new(PitchClass::new(t as u8), mode_from_int(m)))
-                            }
-                            _ => None,
-                        },
-                        // A single anchor beat carrying bpm + first-beat position and
-                        // its bar number (the downbeat phase); the player extrapolates
-                        // the full grid from these. Number defaults to 1 for pre-v17
-                        // rows that predate downbeat detection.
-                        beatgrid: match (r.get::<_, Option<i64>>(3)?, r.get::<_, Option<f64>>(0)?) {
-                            (Some(off), Some(bpm)) => Beatgrid {
-                                beats: vec![Beat {
-                                    number: r.get::<_, Option<i64>>(13)?.unwrap_or(1) as u32,
-                                    position_ms: off as u64,
-                                    bpm: bpm as f32,
-                                }],
-                            },
-                            _ => Beatgrid::default(),
-                        },
-                        cues: Vec::new(),
-                        peak: r.get::<_, Option<f64>>(4)?.map(|v| v as f32),
-                        integrated_loudness_lufs: r.get::<_, Option<f64>>(5)?.map(|v| v as f32),
-                        waveform_preview: r.get::<_, Option<Vec<u8>>>(6)?.unwrap_or_default(),
-                        content_hash: r.get(7)?,
-                        analyzer_version: r.get::<_, i64>(8)? as u32,
-                        audio_fingerprint: r.get::<_, Option<Vec<u8>>>(9)?,
-                        lowpass_hz: r.get::<_, Option<f64>>(10)?.map(|v| v as f32),
-                        lowpass_edge_db_per_khz: r.get::<_, Option<f64>>(11)?.map(|v| v as f32),
-                        waveform_bands: r.get::<_, Option<Vec<u8>>>(12)?.unwrap_or_default(),
-                    })
-                },
-            )
+            .query_row(&sql, params![id as i64], |r| analysis_from_row(r, 0))
             .optional()?;
         Ok(row)
     }

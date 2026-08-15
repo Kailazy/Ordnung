@@ -1,6 +1,12 @@
 //! Split out of `main.rs`; part of the GUI `App`.
 use super::*;
 
+/// How long the search box waits for typing to stop before rebuilding the rows
+/// (see `App::filter_apply_at`). Short enough to feel immediate — comfortably
+/// under the ~200 ms gap that reads as a pause — while collapsing the keystrokes
+/// within a typed word into a single reload.
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+
 impl App {
     pub(crate) fn new(db_path: PathBuf, egui_ctx: egui::Context) -> Self {
         // Install the Inter font stack and push the design tokens into egui's
@@ -39,6 +45,7 @@ impl App {
             db_path,
             rows: Vec::new(),
             filter: String::new(),
+            filter_apply_at: None,
             selected: None,
             selection: HashSet::new(),
             select_anchor: None,
@@ -639,6 +646,20 @@ fn parse_camelot_label(s: &str) -> Option<Camelot> {
 }
 
 impl eframe::App for App {
+    // TEMP DEBUG: inject a synthetic hover at ORDNUNG_CURSOR_PROBE="x,y".
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(path) = std::env::var_os("ORDNUNG_CURSOR_PROBE") {
+            let v = std::fs::read_to_string(path).unwrap_or_default();
+            if let Some((x, y)) = v.trim().split_once(',') {
+                if let (Ok(x), Ok(y)) = (x.trim().parse::<f32>(), y.trim().parse::<f32>()) {
+                    raw_input
+                        .events
+                        .push(egui::Event::PointerMoved(egui::pos2(x, y)));
+                }
+            }
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Drop cover textures evicted during the PREVIOUS frame. Doing it here —
         // before anything paints or uploads — guarantees the frame that painted
@@ -745,6 +766,19 @@ impl eframe::App for App {
                 if a.current() == Some(id) {
                     a.set_now_playing_cover(url);
                 }
+            }
+        }
+
+        // Apply a parked search edit once typing has settled. Repainting on the
+        // deadline is what makes it fire while the user sits still — without it the
+        // rows would wait for whatever incidental event repainted next.
+        if let Some(at) = self.filter_apply_at {
+            let now = std::time::Instant::now();
+            if now >= at {
+                self.filter_apply_at = None;
+                self.reload();
+            } else {
+                ctx.request_repaint_after(at - now);
             }
         }
 
@@ -1144,10 +1178,15 @@ impl eframe::App for App {
                                 .desired_width(w),
                         );
                         if resp.changed() {
-                            self.reload();
+                            // Park the reload until typing settles (see
+                            // `filter_apply_at`); the field itself already shows
+                            // the new text, so this costs no responsiveness.
+                            self.filter_apply_at =
+                                Some(std::time::Instant::now() + SEARCH_DEBOUNCE);
                         }
                         if !self.filter.is_empty() && ui.small_button("×").clicked() {
                             self.filter.clear();
+                            self.filter_apply_at = None;
                             self.reload();
                         }
                         // A prominent "clear all filters" button, shown only while a
@@ -1166,6 +1205,7 @@ impl eframe::App for App {
                             {
                                 self.filter.clear();
                                 self.col_filters.clear();
+                                self.filter_apply_at = None;
                                 self.reload();
                             }
                         }
@@ -1594,6 +1634,7 @@ impl eframe::App for App {
                             {
                                 self.filter.clear();
                                 self.col_filters.clear();
+                                self.filter_apply_at = None;
                                 self.reload();
                             }
                         });
@@ -1889,6 +1930,17 @@ impl eframe::App for App {
         // still fetched covers queued for the user to review.
         if self.is_busy() || !self.artwork_queue.is_empty() || self.artwork_saving {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        }
+
+        // TEMP DEBUG: trace the cursor icon egui asks for, frame by frame.
+        if std::env::var_os("ORDNUNG_CURSOR_DEBUG").is_some() {
+            let icon = ctx.output(|o| o.cursor_icon);
+            let pos = ctx.input(|i| i.pointer.latest_pos());
+            let screen = ctx.screen_rect();
+            let over = ctx.is_pointer_over_area();
+            let id = ctx.input(|i| i.pointer.interact_pos());
+            eprintln!("cursor: {icon:?} at {pos:?} interact={id:?} over_area={over} screen={screen:?}");
+            ctx.request_repaint();
         }
     }
 }

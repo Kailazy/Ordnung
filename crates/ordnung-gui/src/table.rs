@@ -926,6 +926,10 @@ impl App {
                                 if col != TableColumn::Cover {
                                     observed_widths.push((col, ui.max_rect().width()));
                                 }
+                                // TEMP DEBUG
+                                if std::env::var_os("ORDNUNG_CURSOR_DEBUG").is_some() {
+                                    eprintln!("hdrcell {} {:?}", col.label(), ui.max_rect());
+                                }
                                 let resp = if col == TableColumn::Waveform {
                                     // The Waveform header *is* the energy/frequency
                                     // toggle: the whole header cell is clickable and
@@ -2252,9 +2256,13 @@ pub(crate) fn load_rows(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    // Every row's analysis in one query rather than one query per row. `remove`
+    // below hands each row an *owned* `Analysis`, so its waveform blobs (~31 KB
+    // apiece) move into the `TrackRow` instead of being cloned out of it.
+    let mut analyses = catalog.analyses_by_track().map_err(|e| e.to_string())?;
     let mut rows = Vec::with_capacity(tracks.len());
     for t in tracks {
-        let analysis = catalog.get_analysis(t.id).map_err(|e| e.to_string())?;
+        let analysis = analyses.remove(&t.id);
         let bpm_val = analysis.as_ref().and_then(|a| a.bpm);
         let camelot = analysis.as_ref().and_then(|a| a.key).map(|k| k.camelot());
         let key_sort = camelot.map(|c| u16::from(c.number) * 2 + u16::from(c.major));
@@ -2294,6 +2302,19 @@ pub(crate) fn load_rows(
             ),
             None => ("—".into(), "—".into()),
         };
+        // Take the envelopes out of the owned `Analysis` — a move, not a copy.
+        // Only show waveform data that spans the full track (v13+). Earlier
+        // versions covered just the first 150 s, so the renderer — which maps
+        // the bar across the whole track — would stretch ~150 s across it and
+        // put the wrong section under the playhead. Treat stale data as absent
+        // (cells draw flat) until `needs_analysis` re-analyzes to the current
+        // version. This also subsumes the old v11 4-byte-stride guard.
+        let (waveform, waveform_bands) = match analysis {
+            Some(a) if a.analyzer_version >= WAVEFORM_FULLTRACK_VERSION => {
+                (a.waveform_preview, a.waveform_bands)
+            }
+            _ => (Vec::new(), Vec::new()),
+        };
         rows.push(TrackRow {
             id: t.id,
             artist: t.tags.artist.unwrap_or_default(),
@@ -2312,22 +2333,8 @@ pub(crate) fn load_rows(
                 .map(|&ts| fmt_added(ts, now))
                 .unwrap_or_default(),
             added_at: added_at.get(&t.id).copied().unwrap_or(0),
-            // Only show waveform data that spans the full track (v13+). Earlier
-            // versions covered just the first 150 s, so the renderer — which maps
-            // the bar across the whole track — would stretch ~150 s across it and
-            // put the wrong section under the playhead. Treat stale data as absent
-            // (cells draw flat) until `needs_analysis` re-analyzes to the current
-            // version. This also subsumes the old v11 4-byte-stride guard.
-            waveform: analysis
-                .as_ref()
-                .filter(|a| a.analyzer_version >= WAVEFORM_FULLTRACK_VERSION)
-                .map(|a| a.waveform_preview.clone())
-                .unwrap_or_default(),
-            waveform_bands: analysis
-                .as_ref()
-                .filter(|a| a.analyzer_version >= WAVEFORM_FULLTRACK_VERSION)
-                .map(|a| a.waveform_bands.clone())
-                .unwrap_or_default(),
+            waveform,
+            waveform_bands,
             source_path: PathBuf::from(t.source_path),
             has_cover: t.tags.has_cover,
             has_external_cover: ext_art.contains(&t.id),

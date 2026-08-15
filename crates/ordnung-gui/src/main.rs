@@ -706,6 +706,14 @@ struct App {
     db_path: PathBuf,
     rows: Vec<TrackRow>,
     filter: String,
+    /// When a pending search-box edit should be applied, if any.
+    ///
+    /// Rebuilding the rows means re-querying the catalog for every track, so
+    /// reloading on each keystroke made a typed word cost one full rebuild per
+    /// character — all but the last of them thrown away before a frame ever showed
+    /// them. Typing instead parks a deadline here and the reload happens once the
+    /// user pauses (see `SEARCH_DEBOUNCE`).
+    filter_apply_at: Option<std::time::Instant>,
     /// The primary/active row — drives the inspector. Always the last row the
     /// user clicked (and a member of `selection` whenever `selection` is non-empty).
     selected: Option<Id>,
