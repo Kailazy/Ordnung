@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Ordnung — DJ music catalog & analyzer</title>
+<title>Ordnung — DJ music catalog &amp; analyzer</title>
 <meta name="description" content="A DJ music catalog and analyzer." />
 
 <meta property="og:title" content="Ordnung" />
@@ -16,26 +16,23 @@
   :root {
     /* pulled straight from the egui app's palette */
     --bg: #141414;            /* from_gray(20) */
-    --panel: #1d1d1d;
-    --panel-2: #212121;
-    --hover: #292929;         /* gray 0x29 */
-    --line: #333333;          /* ~from_gray(51) */
     --line-soft: #262626;
-    --squircle: #42454b;
     --accent: #406eb4;        /* NAV_ACCENT rgb(64,110,180) */
     --accent-bright: #5a96dc; /* selection stroke rgb(90,150,220) */
     --text: #d6d6d6;
     --muted: #888888;         /* from_gray(120-ish) */
-    --good: #4e9a5e;
     --radius: 6px;            /* egui Rounding::same(6.0) */
-    --mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
 
   * { box-sizing: border-box; }
-  html { scroll-behavior: smooth; }
 
   body {
     margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
     background: var(--bg);
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
@@ -44,58 +41,21 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  .wrap { max-width: 760px; margin: 0 auto; padding: 0 20px; }
-
-  a { color: var(--accent-bright); }
-
-  /* ---- app-window frame ---- */
-  .app {
-    margin: 46px auto 0;
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    overflow: hidden;
-    box-shadow: 0 24px 60px rgba(0,0,0,0.55);
-  }
-
-  /* titlebar like the app chrome */
-  .titlebar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 9px 12px;
-    background: #1a1a1a;
-    border-bottom: 1px solid var(--line);
-  }
-  .lights { display: flex; gap: 7px; }
-  .lights i { width: 11px; height: 11px; border-radius: 50%; display: block; }
-  .lights i:nth-child(1) { background: #5a5a5a; }
-  .lights i:nth-child(2) { background: #4a4a4a; }
-  .lights i:nth-child(3) { background: #3f3f3f; }
-  .titlebar span {
-    font-size: 12px; color: var(--muted); margin-left: 4px;
-    font-family: var(--mono); letter-spacing: 0.02em;
-  }
-
-  /* ---- hero body ---- */
-  .hero { padding: 40px 32px 30px; text-align: center; }
-
-  .mark { width: 84px; height: 84px; display: block; margin: 0 auto 18px; }
+  main { width: 100%; max-width: 520px; text-align: center; }
 
   h1 {
-    margin: 0;
-    font-size: 2.4rem;
+    font-size: 2rem;
     font-weight: 600;
     letter-spacing: -0.02em;
-    color: #fff;
+    margin: 0;
   }
-  .tagline { margin: 10px auto 0; max-width: 520px; color: var(--muted); font-size: 1.02rem; }
-  .tagline b { color: var(--text); font-weight: 600; }
 
-  /* ---- waveform strip: the app's signature element ---- */
+  .tagline { color: var(--muted); margin: 6px 0 0; }
+
+  /* ---- waveform ---- */
   .wave {
     height: 64px;
-    margin: 26px 0 4px;
+    margin: 30px 0;
     display: flex;
     align-items: center;
     gap: 2px;
@@ -113,8 +73,7 @@
     min-width: 0;
   }
 
-  /* ---- buttons ---- */
-  .cta { display: flex; gap: 10px; justify-content: center; margin-top: 28px; flex-wrap: wrap; }
+  /* ---- download ---- */
   .btn {
     display: inline-flex; align-items: center; gap: 8px;
     padding: 10px 20px;
@@ -122,176 +81,64 @@
     font-size: 0.95rem; font-weight: 550;
     text-decoration: none;
     border: 1px solid transparent;
-    transition: background 0.15s ease, border-color 0.15s ease;
+    background: var(--accent);
+    color: #fff;
+    transition: background 0.15s ease;
   }
+  .btn:hover { background: var(--accent-bright); }
   .btn svg { width: 17px; height: 17px; }
-  .btn-primary { background: var(--accent); color: #fff; }
-  .btn-primary:hover { background: var(--accent-bright); }
-  .btn-ghost { background: var(--panel-2); color: var(--text); border-color: var(--line); }
-  .btn-ghost:hover { background: var(--hover); }
 
-  .platform-note { margin-top: 14px; font-size: 0.82rem; color: var(--muted); }
-  .platform-note code { font-family: var(--mono); color: #aab6c4; }
-
-  /* ---- sections under the window ---- */
-  section { margin-top: 40px; }
-  h2 {
-    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.16em;
-    color: var(--muted); font-weight: 600; margin: 0 0 14px; padding-left: 2px;
+  .platform-note {
+    color: var(--muted);
+    font-size: 0.82rem;
+    margin: 12px 0 0;
+    text-wrap: balance;
   }
 
-  /* feature rows — dense, like catalog rows */
-  .rows {
-    border: 1px solid var(--line); border-radius: var(--radius);
-    background: var(--panel); overflow: hidden;
-  }
-  .row {
-    display: flex; gap: 14px; align-items: flex-start;
-    padding: 15px 18px;
-    border-bottom: 1px solid var(--line-soft);
-  }
-  .row:last-child { border-bottom: none; }
-  .row:hover { background: var(--hover); }
-  .row .k {
-    flex: 0 0 22px; height: 22px; margin-top: 1px;
-    color: var(--accent-bright); font-size: 15px;
-    display: flex; align-items: center; justify-content: center;
-  }
-  .row .t b { color: #fff; font-weight: 600; display: block; font-size: 0.98rem; }
-  .row .t span { color: var(--muted); font-size: 0.9rem; }
-
-  /* camelot chip row, a nod to the key feature */
-  .chips { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
-  .chip {
-    font-family: var(--mono); font-size: 0.74rem; color: #cdd6e2;
-    background: var(--panel-2); border: 1px solid var(--line);
-    border-radius: 4px; padding: 1px 7px;
-  }
-
-  /* install */
-  .install {
-    border: 1px solid var(--line); border-radius: var(--radius);
-    background: var(--panel); padding: 20px 22px;
-  }
-  .install ol { margin: 0; padding-left: 20px; }
-  .install li { margin: 7px 0; }
-  .install li::marker { color: var(--accent-bright); }
-  code {
-    font-family: var(--mono); font-size: 0.85em;
-    background: var(--panel-2); border: 1px solid var(--line);
-    padding: 1px 6px; border-radius: 4px; color: #cdd6e2;
-  }
-  .install .why { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line-soft); font-size: 0.85rem; color: var(--muted); }
-
-  footer {
-    margin-top: 44px; padding: 26px 0 56px;
-    text-align: center; color: var(--muted); font-size: 0.85rem;
+  /* ---- the two things it does ---- */
+  .does {
+    margin: 38px 0 0;
+    padding: 22px 0 0;
     border-top: 1px solid var(--line-soft);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 22px;
+    text-align: left;
   }
-  footer a { text-decoration: none; }
-  footer a:hover { text-decoration: underline; }
-  .footer-links { display: flex; gap: 18px; justify-content: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .does b { display: block; font-weight: 550; font-size: 0.9rem; }
+  .does span { color: var(--muted); font-size: 0.85rem; }
+
+  @media (max-width: 560px) {
+    h1 { font-size: 1.7rem; }
+    .does { grid-template-columns: 1fr; gap: 18px; }
+  }
+
+  footer { margin: 34px 0 0; }
+  footer a { color: var(--muted); font-size: 0.82rem; text-decoration: none; }
+  footer a:hover { color: var(--text); }
 </style>
 </head>
 <body>
 
-<div class="wrap">
-  <div class="app">
-    <div class="titlebar">
-      <div class="lights"><i></i><i></i><i></i></div>
-    </div>
+<main>
+  <h1>Ordnung</h1>
+  <p class="tagline">A DJ music catalog and analyzer.</p>
 
-    <div class="hero">
-      <svg class="mark" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <defs>
-          <filter id="fuzz" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB">
-            <feGaussianBlur stdDeviation="20"/>
-          </filter>
-        </defs>
-        <rect x="100" y="100" width="824" height="824" rx="184" fill="#42454b"/>
-        <path d="M512 257 A255 255 0 1 0 512 767 A255 255 0 1 0 512 257 Z M512 337 A175 175 0 1 1 512 687 A175 175 0 1 1 512 337 Z"
-              fill="#93a6bf" fill-rule="evenodd" filter="url(#fuzz)"/>
-        <rect x="424" y="490" width="176" height="35" rx="17" fill="#93a6bf"/>
-      </svg>
+  <div class="wave" id="wave" aria-hidden="true"></div>
 
-      <h1>Ordnung</h1>
-      <p class="tagline">
-        A DJ music <b>catalog and analyzer</b>.
-      </p>
+  <a class="btn" href="https://github.com/Kailazy/Ordnung/releases/latest">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
+    Download for macOS
+  </a>
+  <p class="platform-note">Universal <code>.dmg</code> — Apple Silicon + Intel · macOS 11+</p>
 
-      <div class="wave" id="wave" aria-hidden="true"></div>
-
-      <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/Kailazy/Ordnung/releases/latest">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
-          Download for macOS
-        </a>
-        <a class="btn btn-ghost" href="https://github.com/Kailazy/Ordnung">
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.7.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 016 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .4.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
-          GitHub
-        </a>
-      </div>
-      <p class="platform-note">Universal <code>.dmg</code> — Apple Silicon + Intel · macOS 11+</p>
-    </div>
+  <div class="does">
+    <div><b>Catalog</b><span>Scans your music into a SQLite catalog. Finds duplicates and missing files.</span></div>
+    <div><b>Analysis</b><span>Musical key, colored waveforms, and loudness.</span></div>
   </div>
 
-  <section>
-    <h2>What it does</h2>
-    <div class="rows">
-      <div class="row">
-        <div class="k">▤</div>
-        <div class="t"><b>Catalog</b><span>Scans your music into a SQLite catalog. Finds duplicates and missing files.</span></div>
-      </div>
-      <div class="row">
-        <div class="k">∿</div>
-        <div class="t"><b>Analysis</b><span>Musical key, colored waveforms, and loudness.</span></div>
-      </div>
-      <div class="row">
-        <div class="k">◆</div>
-        <div class="t"><b>Camelot keys</b><span>Keys shown as Camelot by default.</span>
-          <div class="chips"><span class="chip">8A</span><span class="chip">8B</span><span class="chip">9A</span><span class="chip">5A</span><span class="chip">12B</span></div>
-        </div>
-      </div>
-      <div class="row">
-        <div class="k">≡</div>
-        <div class="t"><b>Playlists</b><span>Nested playlists and folders. Files are never moved.</span></div>
-      </div>
-      <div class="row">
-        <div class="k">⇄</div>
-        <div class="t"><b>Convert</b><span>MP3, AAC, FLAC, WAV, and AIFF presets for CDJs.</span></div>
-      </div>
-      <div class="row">
-        <div class="k">⛉</div>
-        <div class="t"><b>Source files</b><span>Tag writes and conversions are opt-in. Deletes go to the Trash.</span></div>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2>Install</h2>
-    <div class="install">
-      <ol>
-        <li>Download the latest <code>.dmg</code> and open it.</li>
-        <li>Drag <b>Ordnung</b> into your <b>Applications</b> folder.</li>
-        <li>First launch only: right-click <code>Ordnung.app</code> → <b>Open</b> → <b>Open</b>.</li>
-      </ol>
-      <p class="why">
-        The one-time right-click is needed because the build is ad-hoc signed, not notarized by Apple —
-        macOS warns once on apps from unidentified developers, then trusts it. Or run
-        <code>xattr -dr com.apple.quarantine /Applications/Ordnung.app</code>.
-      </p>
-    </div>
-  </section>
-
-  <footer>
-    <div class="footer-links">
-      <a href="https://github.com/Kailazy/Ordnung">GitHub</a>
-      <a href="https://github.com/Kailazy/Ordnung/releases/latest">Releases</a>
-      <a href="https://github.com/Kailazy/Ordnung/blob/main/README.md">Docs</a>
-    </div>
-    Free and open source under the MIT license.
-  </footer>
-</div>
+  <footer><a href="https://github.com/Kailazy/Ordnung">GitHub</a></footer>
+</main>
 
 <script>
   // Build a static waveform strip echoing the app's spectrum view.
