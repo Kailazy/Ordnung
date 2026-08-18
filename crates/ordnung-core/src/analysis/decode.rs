@@ -344,7 +344,19 @@ fn decode_mono_inner(
 
     // Pre-size the output to the known cap so a ~150 s window (≈7 M f32, ~29 MB)
     // fills without the repeated grow-and-copy reallocations of an empty Vec.
-    let mut samples: Vec<f32> = match max_samples {
+    //
+    // The cap is an *upper bound*, not the expected length: `analyze_file` passes a
+    // 20-minute ceiling so long tracks aren't truncated, which would reserve 230 MB
+    // for every file — a 6-minute track included. That is per rayon worker, so a
+    // full-library analysis on an 8-core machine committed ~1.8 GB before decoding a
+    // single packet. `with_capacity` commits the allocation, so clamp it to the
+    // container's declared frame count when we have one; the cap still applies as a
+    // hard limit while decoding below, and the Vec still grows if `n_frames` lies.
+    let reserve = match (max_samples, n_frames) {
+        (Some(cap), Some(frames)) => Some(cap.min(frames as usize)),
+        (cap, _) => cap,
+    };
+    let mut samples: Vec<f32> = match reserve {
         Some(cap) => Vec::with_capacity(cap),
         None => Vec::new(),
     };

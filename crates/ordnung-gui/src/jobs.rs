@@ -1143,9 +1143,15 @@ fn analyze_tracks(
     // progress bar advances as tracks finish. `map_init` hands each rayon worker
     // its own `Sender` clone (the channel sender isn't `Sync`); the egui context
     // and the counter are `Sync`, so they're shared by reference.
+    //
+    // Run it on a pool sized for *memory*, not just cores: each worker holds a
+    // whole decoded track plus its spectrogram, so on a small-RAM machine the
+    // default one-thread-per-core pool is what pushes the app into swap.
     let params = AnalysisParams::default();
     let done = AtomicUsize::new(0);
-    let results: Vec<(u64, u64, i64, Result<Analysis, String>)> = pending
+    let pool = analysis_pool();
+    let run = || -> Vec<(u64, u64, i64, Result<Analysis, String>)> {
+        pending
         .par_iter()
         .map_init(
             || tx.clone(),
@@ -1157,7 +1163,14 @@ fn analyze_tracks(
                 (*id, *size, *mtime, r)
             },
         )
-        .collect();
+        .collect()
+    };
+    // `install` runs the fan-out on the sized pool; without a pool we're on
+    // rayon's global one, which is the pre-clamp behavior.
+    let results = match &pool {
+        Some(p) => p.install(run),
+        None => run(),
+    };
 
     let (mut ok, mut failed) = (0u64, 0u64);
     let mut fails: Vec<(String, String)> = Vec::new();
@@ -2248,4 +2261,48 @@ pub(crate) fn file_stamp(path: &str) -> (u64, i64) {
         }
         Err(_) => (0, 0),
     }
+}
+
+/// Physical RAM in bytes, or `None` if the platform won't say.
+///
+/// Reads `hw.memsize` via sysctl — always present on macOS, and cheaper than
+/// pulling in a system-info crate for one number.
+fn physical_memory_bytes() -> Option<u64> {
+    let out = std::process::Command::new("/usr/sbin/sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// A rayon pool sized so a full-library analysis doesn't drive a small-RAM Mac
+/// into swap, or `None` to use rayon's default (one worker per logical core).
+///
+/// Each analysis worker holds a whole decoded track plus its spectrogram — call it
+/// ~350 MB of headroom apiece at the 20-minute decode ceiling. The default pool
+/// ignores memory entirely, so a 2015 8 GB MacBook Pro (4c/8t) would start eight of
+/// those at once and thrash. Budget a quarter of physical RAM for analysis and
+/// derive the worker count from that, always leaving at least one worker and never
+/// exceeding what the default pool would have used.
+///
+/// A quarter (not half) is what actually binds where it matters: analysis runs
+/// *alongside* the OS, the catalog, and the GUI's cover textures, and the app has
+/// to stay responsive while it works. In practice this clamps 8 GB machines to
+/// 4-5 workers and leaves 16 GB and up at full core count.
+fn analysis_pool() -> Option<rayon::ThreadPool> {
+    /// Rough peak footprint of one in-flight analysis worker.
+    const BYTES_PER_WORKER: u64 = 350 * 1024 * 1024;
+
+    let cores = std::thread::available_parallelism().map(|n| n.get()).ok()?;
+    let budget = physical_memory_bytes()? / 4;
+    let affordable = (budget / BYTES_PER_WORKER).max(1) as usize;
+    let workers = affordable.min(cores);
+    // Nothing to gain from a custom pool when memory isn't the binding constraint.
+    if workers >= cores {
+        return None;
+    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .ok()
 }
