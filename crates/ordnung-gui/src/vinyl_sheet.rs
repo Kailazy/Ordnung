@@ -1201,6 +1201,50 @@ enum RecordPlay {
 /// transport bar sizes against — see the `set_max_width` note in the sheet.
 const SHEET_W: f32 = 620.0;
 
+/// Colour for one of the transport's painted icons: bright under the pointer,
+/// resting a shade below the clocks either side of them so the scrubber stays
+/// the loudest thing on the bar.
+fn icon_col(resp: &egui::Response) -> egui::Color32 {
+    if resp.hovered() {
+        egui::Color32::WHITE
+    } else {
+        egui::Color32::from_gray(150)
+    }
+}
+
+/// The video-window toggle: a small display outline, filled once the window is
+/// actually on screen, so the button shows the state rather than only the verb.
+fn draw_screen_glyph(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, showing: bool) {
+    let screen = egui::Rect::from_center_size(egui::pos2(c.x, c.y - 1.0), egui::vec2(15.0, 11.0));
+    if showing {
+        p.rect_filled(screen, 2.0, col);
+    } else {
+        p.rect_stroke(screen, 2.0, egui::Stroke::new(1.5, col));
+    }
+    // Stand, so the mark reads as a screen at this size instead of a bare box.
+    p.line_segment(
+        [
+            egui::pos2(c.x - 3.5, screen.max.y + 2.5),
+            egui::pos2(c.x + 3.5, screen.max.y + 2.5),
+        ],
+        egui::Stroke::new(1.5, col),
+    );
+}
+
+/// The close: a drawn cross, rather than the "✕" character in a button frame.
+fn draw_close_glyph(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
+    const R: f32 = 4.5;
+    let stroke = egui::Stroke::new(1.5, col);
+    p.line_segment(
+        [egui::pos2(c.x - R, c.y - R), egui::pos2(c.x + R, c.y + R)],
+        stroke,
+    );
+    p.line_segment(
+        [egui::pos2(c.x + R, c.y - R), egui::pos2(c.x - R, c.y + R)],
+        stroke,
+    );
+}
+
 /// What the transport bar's controls asked for this frame.
 enum VideoAct {
     TogglePause,
@@ -1309,11 +1353,19 @@ fn video_transport_ui(
                     ),
                 );
 
-                // Scrubber: the sheet's width less everything beside it — the
-                // frame's margins, the play button, both clocks, the close, and
-                // the gaps between them. Derived from `content_w`, never from
-                // the space left in the row (see the note on this function).
-                const BESIDE: f32 = 236.0;
+                // Scrubber: the sheet's width less everything sitting beside
+                // it, added up from the sizes this function itself allocates
+                // rather than kept as one hand-tuned figure that silently goes
+                // stale the next time a control moves. Derived from
+                // `content_w`, never from the space left in the row (see the
+                // note on this function).
+                const BESIDE: f32 = 20.0   // frame margin, both sides
+                    + 30.0 + 6.0           // play button, then its gap
+                    + 42.0                 // elapsed clock
+                    + 6.0 + 42.0           // gap, total clock
+                    + 8.0 + 24.0           // gap, video toggle
+                    + 2.0 + 24.0           // gap, close
+                    + 12.0;                // slack, so the row never wraps
                 let track_w = (content_w - BESIDE).max(60.0);
                 let (rect, resp) = ui
                     .allocate_exact_size(egui::vec2(track_w, 26.0), egui::Sense::click_and_drag());
@@ -1362,42 +1414,56 @@ fn video_transport_ui(
                     }
                 }
 
+                // Total. Sized like the elapsed clock beside it: a bare label
+                // would be as wide as its text, so an hour-long set ("1:07:59")
+                // would take width the scrubber had already been given.
                 ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(if t.ready && t.duration > 0.0 {
-                        fmt_time(t.duration)
-                    } else {
-                        // A page still finding its video, or a stream with no
-                        // end — neither has a total to show.
-                        "--:--".to_string()
-                    })
-                    .monospace()
-                    .size(11.0)
-                    .color(egui::Color32::from_gray(170)),
+                ui.add_sized(
+                    egui::vec2(42.0, 18.0),
+                    egui::Label::new(
+                        egui::RichText::new(if t.ready && t.duration > 0.0 {
+                            fmt_time(t.duration)
+                        } else {
+                            // A page still finding its video, or a stream with
+                            // no end — neither has a total to show.
+                            "--:--".to_string()
+                        })
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_gray(170)),
+                    ),
                 );
 
                 // The picture, for when the user wants it. The panel plays
                 // parked off screen otherwise, since this bar is the interface.
-                ui.add_space(4.0);
+                // Painted rather than a text glyph in button chrome, so both of
+                // these sit beside the play triangle as the same kind of mark.
+                ui.add_space(8.0);
                 let showing = webview::video_visible();
-                if ui
-                    .small_button(if showing { "❏" } else { "▣" })
-                    .on_hover_note(if showing {
-                        "Hide the video window"
-                    } else {
-                        "Show the video window"
-                    })
-                    .clicked()
-                {
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+                let resp = resp.on_hover_note(if showing {
+                    "Hide the video window"
+                } else {
+                    "Show the video window"
+                });
+                draw_screen_glyph(ui.painter(), rect.center(), icon_col(&resp), showing);
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if resp.clicked() {
                     act = Some(VideoAct::ToggleVideo);
                 }
 
-                ui.add_space(4.0);
-                if ui
-                    .small_button("✕")
-                    .on_hover_note("Close the video player")
-                    .clicked()
-                {
+                ui.add_space(2.0);
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+                let resp = resp.on_hover_note("Close the video player");
+                draw_close_glyph(ui.painter(), rect.center(), icon_col(&resp));
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if resp.clicked() {
                     act = Some(VideoAct::Stop);
                 }
             });
