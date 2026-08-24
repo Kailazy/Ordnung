@@ -751,12 +751,22 @@ impl App {
             .id(egui::Id::new(("vinyl-sheet", release_id)))
             .open(&mut open)
             .collapsible(false)
-            .resizable(true)
-            .default_width(620.0)
+            // Fixed width: the sheet's content is a fixed-width layout (see the
+            // `set_max_width` note below), so a horizontal drag would only pad
+            // it. Height still follows the tracklist.
+            .resizable([false, true])
+            .default_width(SHEET_W)
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
-                ui.set_min_width(560.0);
+                // Pin the content width rather than only flooring it. The sheet
+                // auto-sizes, so any child that fills the width it is offered
+                // (the transport's scrubber does) turns this frame's layout into
+                // next frame's demand, and the window creeps wider every frame
+                // until it hits the screen. A max as well as a min removes the
+                // feedback path entirely.
+                ui.set_min_width(SHEET_W);
+                ui.set_max_width(SHEET_W);
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     // Cover.
@@ -933,11 +943,7 @@ impl App {
                         .vinyl_sheet
                         .as_ref()
                         .and_then(|s| s.video_scrub);
-                    // `max_rect` is the width the window handed down, not one
-                    // measured back off this row's contents — so a wider window
-                    // widens the bar, but the bar can never widen the window.
-                    let content_w = ui.max_rect().width();
-                    video_act = video_transport_ui(ui, content_w, &mut scrub);
+                    video_act = video_transport_ui(ui, SHEET_W, &mut scrub);
                     if let Some(s) = self.vinyl_sheet.as_mut() {
                         s.video_scrub = scrub;
                     }
@@ -1191,6 +1197,10 @@ enum RecordPlay {
     Stopped,
 }
 
+/// The record sheet's content width. Fixed, and the single source the
+/// transport bar sizes against — see the `set_max_width` note in the sheet.
+const SHEET_W: f32 = 620.0;
+
 /// What the transport bar's controls asked for this frame.
 enum VideoAct {
     TogglePause,
@@ -1214,11 +1224,12 @@ enum VideoAct {
 /// `scrub` is the in-flight drag fraction, borrowed mutably so the drag can own
 /// the playhead until it's released.
 ///
-/// `content_w` is the sheet's content width, passed in rather than measured.
-/// The bar must never ask `ui.available_width()` for it: this lives in an
-/// auto-sizing [`egui::Window`], where the window grows to fit its content, so
-/// a scrubber that claims whatever is available makes this frame's width next
-/// frame's demand and the window walks itself out to the screen edge.
+/// `content_w` is [`SHEET_W`], passed in rather than measured. The bar must
+/// never derive its width from the `Ui` — not `available_width`, not
+/// `max_rect` — because this lives in an auto-sizing [`egui::Window`] that
+/// grows to fit its content: anything measured off the layout makes this
+/// frame's width next frame's demand, and the window walks out to the screen
+/// edge. A constant in, a constant out.
 fn video_transport_ui(
     ui: &mut egui::Ui,
     content_w: f32,

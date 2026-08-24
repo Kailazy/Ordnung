@@ -765,7 +765,14 @@ impl eframe::App for App {
         if !ctx.wants_keyboard_input()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
         {
-            if self.now_playing.is_some() {
+            // A record's video answers first while one is loaded: it's the
+            // sound the user is hearing, and its own window is parked off
+            // screen, so this key is the only way to reach it without the
+            // pointer. Without this the key would fall through and start an
+            // unrelated local track *over* the video.
+            if webview::is_open() {
+                webview::toggle_pause();
+            } else if self.now_playing.is_some() {
                 if let Some(a) = &mut self.audio {
                     a.toggle_pause();
                 }
