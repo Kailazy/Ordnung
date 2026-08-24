@@ -55,7 +55,14 @@ pub(crate) struct SheetRow {
 
 /// The open record sheet.
 pub(crate) struct VinylSheet {
-    pub key: VinylCoverKey,
+    /// Cover-cache key, when this record is in the collection or wantlist.
+    /// `None` for a record opened from a dig: it isn't in either list, so it has
+    /// no cached cover to key — `cover_url` carries its art instead.
+    pub key: Option<VinylCoverKey>,
+    /// Cover thumbnail URL for a record with no local cache entry (a dug
+    /// record). Loaded through [`App::dig_covers`], which the strip already
+    /// fills for the same release.
+    pub cover_url: Option<String>,
     pub release_id: u64,
     pub title: String,
     pub artist: String,
@@ -76,6 +83,84 @@ pub(crate) struct VinylSheet {
     /// Set when the user hit play on the cover rather than opening the sheet:
     /// start the record as soon as there's a tracklist to start it from.
     pub pending_play: bool,
+    /// Lowest current marketplace listing for this release, once looked up.
+    /// `Loading` while the request is out, `Ready(None)` when nothing is for
+    /// sale (or Discogs blocks the release from sale).
+    pub price: PriceState,
+}
+
+/// The sheet's marketplace price lookup.
+pub(crate) enum PriceState {
+    /// Not asked yet — a record already in a list may have a synced price to
+    /// show without spending a request.
+    Idle,
+    Loading,
+    Ready(Option<discogs::MarketPrice>),
+    /// Nothing for sale on *this* pressing, but another pressing of the same
+    /// record has copies. Promos and white labels are routinely dead ends while
+    /// the standard pressing is stocked, and "no copies for sale" would be a
+    /// misleading answer to "can I buy this record?".
+    Elsewhere {
+        version: Box<discogs::MasterVersion>,
+        price: discogs::MarketPrice,
+    },
+    Failed,
+}
+
+/// Find a pressing of the same record that can actually be bought, for a
+/// release with nothing listed. Returns the pressing and its lowest price.
+///
+/// Runs on the price worker, so every call here is off the UI thread. Costs at
+/// most `1 + MAX_VERSION_PRICES` paced requests, and only for a record that
+/// came back with no copies at all — the common case never reaches this.
+fn sheet_alternative(
+    client: &discogs::Client,
+    db: &Path,
+    release_id: u64,
+) -> Option<(discogs::MasterVersion, discogs::MarketPrice)> {
+    /// How many sibling pressings to price before giving up. Versions arrive
+    /// most-owned first, so the buyable one is nearly always in the first few,
+    /// and each check is a rate-limited request.
+    const MAX_VERSION_PRICES: usize = 4;
+
+    // The master id rides along on the release detail the sheet already caches,
+    // so this usually costs nothing.
+    let id = release_id.to_string();
+    let master_id = Catalog::open(db)
+        .ok()
+        .and_then(|cat| cat.cached_release(&id).ok().flatten())
+        .and_then(|d| d.master_id)
+        .or_else(|| client.fetch_release(&id).ok().and_then(|d| d.master_id))?;
+
+    let versions = client.master_versions(master_id).ok()?;
+    for v in versions
+        .into_iter()
+        .filter(|v| v.release_id != release_id)
+        .take(MAX_VERSION_PRICES)
+    {
+        if let Ok(Some(price)) = client.marketplace_price(v.release_id) {
+            return Some((v, price));
+        }
+    }
+    None
+}
+
+/// Render a marketplace price for the sheet header — symbol where there is
+/// one, and always the exact figure: this is the number the user decides on.
+fn fmt_market_price(p: &discogs::MarketPrice) -> String {
+    let code = p.currency.trim().to_uppercase();
+    let symbol = match code.as_str() {
+        "USD" | "CAD" | "AUD" | "NZD" => "$",
+        "EUR" => "€",
+        "GBP" => "£",
+        "JPY" => "¥",
+        _ => "",
+    };
+    if symbol.is_empty() {
+        format!("{:.2} {code}", p.value)
+    } else {
+        format!("{symbol}{:.2}", p.value)
+    }
 }
 
 impl App {
@@ -83,7 +168,7 @@ impl App {
     /// if they aren't cached yet. Re-opening the record that's already open is a
     /// no-op, so a second click doesn't restart a fetch.
     pub(crate) fn open_vinyl_sheet(&mut self, key: VinylCoverKey, ctx: &egui::Context) {
-        if self.vinyl_sheet.as_ref().is_some_and(|s| s.key == key) {
+        if self.vinyl_sheet.as_ref().is_some_and(|s| s.key == Some(key)) {
             return;
         }
         let Some(record) = self.vinyl_record(key) else {
@@ -109,7 +194,8 @@ impl App {
         .join(" · ");
 
         self.vinyl_sheet = Some(VinylSheet {
-            key,
+            key: Some(key),
+            cover_url: None,
             release_id: record.release_id,
             title: record.title.clone(),
             artist: record.artist.clone(),
@@ -123,8 +209,63 @@ impl App {
             playing_video: None,
             video_uri: None,
             pending_play: false,
+            // A synced record already has a price on file; anything else asks
+            // the marketplace when the sheet opens.
+            price: match (record.price, record.price_currency.clone()) {
+                (Some(value), Some(currency)) => {
+                    PriceState::Ready(Some(discogs::MarketPrice { value, currency }))
+                }
+                _ => PriceState::Idle,
+            },
         });
         self.spawn_sheet_fetch(record.release_id, ctx.clone());
+        self.spawn_sheet_price(record.release_id, ctx.clone());
+    }
+
+    /// Open the sheet for a bare Discogs release — a record from a dig, which
+    /// isn't in the collection or the wantlist and so has no cache key. The
+    /// tracklist, videos and "play" behaviour are all driven by the release id,
+    /// so everything below works the same; only the cover comes from a URL
+    /// instead of the local cache.
+    pub(crate) fn open_release_sheet(
+        &mut self,
+        release_id: u64,
+        artist: String,
+        title: String,
+        sub: String,
+        cover_url: Option<String>,
+        ctx: &egui::Context,
+    ) {
+        if self
+            .vinyl_sheet
+            .as_ref()
+            .is_some_and(|s| s.release_id == release_id)
+        {
+            return;
+        }
+        self.stop_sheet_video();
+        self.vinyl_sheet = Some(VinylSheet {
+            key: None,
+            cover_url,
+            release_id,
+            title,
+            artist,
+            sub,
+            detail: None,
+            // A dug record can still turn out to be one you have digitally —
+            // the link map is by release id, not by list membership.
+            local: self.sheet_local_tracks(release_id),
+            rows: Vec::new(),
+            extra_videos: Vec::new(),
+            loading: true,
+            error: None,
+            playing_video: None,
+            video_uri: None,
+            pending_play: false,
+            price: PriceState::Idle,
+        });
+        self.spawn_sheet_fetch(release_id, ctx.clone());
+        self.spawn_sheet_price(release_id, ctx.clone());
     }
 
     /// The catalog tracks linked to `release_id`, with the analysis figures the
@@ -152,6 +293,75 @@ impl App {
                 })
             })
             .collect()
+    }
+
+    /// Look up the lowest marketplace listing for the open sheet's record, off
+    /// the UI thread. One request; a record whose price came from a sync
+    /// already shows that and this refreshes it, since a synced price can be
+    /// weeks stale and the sheet is where the user decides whether to buy.
+    fn spawn_sheet_price(&mut self, release_id: u64, ctx: egui::Context) {
+        let token = self.discogs_token();
+        if token.trim().is_empty() {
+            return;
+        }
+        if let Some(s) = self.vinyl_sheet.as_mut() {
+            // Keep a known price on screen while the refresh runs, rather than
+            // blanking it — `Loading` only replaces "nothing shown yet".
+            if matches!(s.price, PriceState::Idle) {
+                s.price = PriceState::Loading;
+            }
+        }
+        let (tx, rx) = mpsc::channel();
+        self.sheet_price_rx = Some(rx);
+        let db = self.db_path.clone();
+        thread::spawn(move || {
+            let client = discogs::Client::new(
+                token,
+                "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
+            );
+            let mine = client.marketplace_price(release_id);
+            // Priced fine, or the request failed — either way there's nothing
+            // more to ask.
+            let found = match &mine {
+                Ok(Some(_)) | Err(_) => {
+                    let _ = tx.send((release_id, mine.map(|p| (p, None))));
+                    ctx.request_repaint();
+                    return;
+                }
+                Ok(None) => None,
+            };
+            // Nothing for sale here. This is often a promo or a white label
+            // whose standard pressing is well stocked, so ask the master which
+            // other pressings exist and price the most-owned one.
+            let alt = sheet_alternative(&client, &db, release_id);
+            let _ = tx.send((release_id, Ok((found, alt))));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Adopt a finished price lookup onto the sheet it was asked for.
+    pub(crate) fn poll_sheet_price(&mut self) {
+        let Some(rx) = &self.sheet_price_rx else { return };
+        let Ok((release_id, result)) = rx.try_recv() else {
+            return;
+        };
+        self.sheet_price_rx = None;
+        let Some(sheet) = self.vinyl_sheet.as_mut() else {
+            return;
+        };
+        // The user opened a different record while this was in flight.
+        if sheet.release_id != release_id {
+            return;
+        }
+        sheet.price = match result {
+            Ok((Some(p), _)) => PriceState::Ready(Some(p)),
+            Ok((None, Some((version, price)))) => PriceState::Elsewhere {
+                version: Box::new(version),
+                price,
+            },
+            Ok((None, None)) => PriceState::Ready(None),
+            Err(_) => PriceState::Failed,
+        };
     }
 
     /// Resolve one release's detail off the UI thread — cache first, network on
@@ -399,10 +609,11 @@ impl App {
 
         // Snapshot what the closure paints so it never borrows `self` (actions
         // below need it mutably).
-        let (key, title, artist, sub, release_id, loading, error, playing_video, video_open) = {
+        let (key, cover_url, title, artist, sub, release_id, loading, error, playing_video, video_open) = {
             let s = self.vinyl_sheet.as_ref().unwrap();
             (
                 s.key,
+                s.cover_url.clone(),
                 s.title.clone(),
                 s.artist.clone(),
                 s.sub.clone(),
@@ -413,11 +624,56 @@ impl App {
                 webview::is_open(),
             )
         };
-        let cover = match self.vinyl_covers.get(&key) {
-            Some(ThumbState::Ready(Some(t))) => Some(t.clone()),
-            _ => None,
+        // Cover from whichever cache holds it: the local one for a record in a
+        // list, the dig's URL cache for one that isn't.
+        let cover = match key {
+            Some(k) => match self.vinyl_covers.get(&k) {
+                Some(ThumbState::Ready(Some(t))) => Some(t.clone()),
+                _ => None,
+            },
+            None => cover_url.as_deref().and_then(|u| self.dig_cover(u)).cloned(),
         };
         let now_playing_id = self.audio.as_ref().and_then(|a| a.current());
+        // Digging is offered for a record that's in a list (it's the seed of a
+        // dig). A record already reached *by* a dig has the strip's own buttons
+        // instead, so it doesn't need a second set here.
+        let can_dig = key.is_some_and(|k| self.can_dig(k));
+        // Where this record stands on Discogs right now. Read from the same
+        // membership sets the grid uses, so the sheet agrees with the wall
+        // behind it, and both update together on the reload an edit triggers.
+        let in_collection = self.vinyl_owned.contains(&release_id);
+        let in_wantlist = self.vinyl_wanted.contains(&release_id);
+        let price_line = match &self.vinyl_sheet.as_ref().map(|s| &s.price) {
+            Some(PriceState::Ready(Some(p))) => {
+                Some(format!("From {}", fmt_market_price(p)))
+            }
+            Some(PriceState::Ready(None)) => Some("No copies for sale".to_string()),
+            Some(PriceState::Loading) => Some("Checking price…".to_string()),
+            _ => None,
+        };
+        // A different pressing of the same record that *is* for sale. Snapshot
+        // what the row needs so the window closure doesn't borrow the sheet.
+        let alt = match self.vinyl_sheet.as_ref().map(|s| &s.price) {
+            Some(PriceState::Elsewhere { version, price }) => Some((
+                version.release_id,
+                // The pressing detail is what distinguishes it from the one on
+                // screen — "12\", White Label, Limited Edition" against the
+                // promo the user is looking at.
+                if version.format.trim().is_empty() {
+                    version.title.clone()
+                } else {
+                    version.format.clone()
+                },
+                version.catno.clone(),
+                fmt_market_price(price),
+                self.vinyl_owned.contains(&version.release_id),
+                self.vinyl_wanted.contains(&version.release_id),
+            )),
+            _ => None,
+        };
+        // An edit is already running: the buttons would queue a second job
+        // against the same record, so they wait it out rather than misreport.
+        let editing = self.is_busy();
 
         /// What the user clicked this frame, applied after the window closes its
         /// borrow of `self`.
@@ -427,12 +683,18 @@ impl App {
             StopVideo,
             PlayExtra(usize),
             Goto,
+            Dig,
+            /// Add this record to that list, or take it off if it's there.
+            ToggleList(VinylList),
+            /// Want a *different* pressing of the same record — the one that
+            /// has copies for sale.
+            WantAlternative(u64),
         }
         let mut act: Option<Act> = None;
         let mut open = true;
 
         egui::Window::new(format!("{artist} — {title}"))
-            .id(egui::Id::new(("vinyl-sheet", key)))
+            .id(egui::Id::new(("vinyl-sheet", release_id)))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -469,6 +731,65 @@ impl App {
                         if !sub.is_empty() {
                             ui.label(egui::RichText::new(&sub).weak());
                         }
+                        // What it costs, right under what it is — the sheet is
+                        // where the buy decision happens.
+                        if let Some(line) = &price_line {
+                            ui.label(
+                                egui::RichText::new(line)
+                                    .color(egui::Color32::from_rgb(120, 200, 140)),
+                            );
+                        }
+                        // This pressing is a dead end, but another isn't. Say
+                        // which one and offer it, rather than leaving "no copies
+                        // for sale" to imply the record can't be bought.
+                        if let Some((alt_id, alt_fmt, alt_catno, alt_price, alt_owned, alt_wanted)) =
+                            &alt
+                        {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                ui.label(
+                                    egui::RichText::new("Another pressing:").small().weak(),
+                                );
+                                let mut what = alt_fmt.clone();
+                                if !alt_catno.trim().is_empty() {
+                                    what = format!("{what} · {alt_catno}");
+                                }
+                                ui.label(egui::RichText::new(what).small());
+                                ui.label(
+                                    egui::RichText::new(format!("from {alt_price}"))
+                                        .small()
+                                        .color(egui::Color32::from_rgb(120, 200, 140)),
+                                );
+                                if ui
+                                    .small_button("Open ↗")
+                                    .on_hover_note("Open that pressing on discogs.com")
+                                    .clicked()
+                                {
+                                    open_url(&format!(
+                                        "https://www.discogs.com/release/{alt_id}"
+                                    ));
+                                }
+                                // Want the pressing you can actually buy, not
+                                // the promo you happened to land on.
+                                let already = *alt_owned || *alt_wanted;
+                                let want_tip = if already {
+                                    "That pressing is already in one of your lists"
+                                } else {
+                                    "Add that pressing to your Discogs wantlist"
+                                };
+                                if ui
+                                    .add_enabled(
+                                        !already && !editing,
+                                        egui::Button::new("＋ Wantlist").small(),
+                                    )
+                                    .on_hover_note(want_tip)
+                                    .on_disabled_hover_text(crate::ui::hover::note(want_tip))
+                                    .clicked()
+                                {
+                                    act = Some(Act::WantAlternative(*alt_id));
+                                }
+                            });
+                        }
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
                             if ui
@@ -492,6 +813,53 @@ impl App {
                                 .clicked()
                             {
                                 open_url(&format!("https://www.discogs.com/release/{release_id}"));
+                            }
+                            // Collection and wantlist, each showing this
+                            // record's actual state — so one button always says
+                            // what pressing it and clicking it does the opposite
+                            // of what's true now.
+                            let (col_label, col_tip) = if in_collection {
+                                ("✓ In collection", "Remove this record from your Discogs collection")
+                            } else {
+                                ("＋ Collection", "Add this record to your Discogs collection")
+                            };
+                            if ui
+                                .add_enabled(!editing, egui::Button::new(col_label))
+                                .on_hover_note(col_tip)
+                                .on_disabled_hover_text(crate::ui::hover::note(
+                                    "Wait for the current Discogs job to finish",
+                                ))
+                                .clicked()
+                            {
+                                act = Some(Act::ToggleList(VinylList::Collection));
+                            }
+                            let (want_label, want_tip) = if in_wantlist {
+                                ("✓ In wantlist", "Remove this record from your Discogs wantlist")
+                            } else {
+                                ("＋ Wantlist", "Add this record to your Discogs wantlist")
+                            };
+                            if ui
+                                .add_enabled(!editing, egui::Button::new(want_label))
+                                .on_hover_note(want_tip)
+                                .on_disabled_hover_text(crate::ui::hover::note(
+                                    "Wait for the current Discogs job to finish",
+                                ))
+                                .clicked()
+                            {
+                                act = Some(Act::ToggleList(VinylList::Wantlist));
+                            }
+                            // Dig from here: search Discogs outward from this
+                            // record for pressings you don't already have.
+                            if can_dig
+                                && ui
+                                    .button("⛏  Dig")
+                                    .on_hover_note(
+                                        "Find records like this one on Discogs that aren't \
+                                         in your collection",
+                                    )
+                                    .clicked()
+                            {
+                                act = Some(Act::Dig);
                             }
                         });
                     });
@@ -541,7 +909,7 @@ impl App {
                                 SheetSource::Video(v) => playing_video == Some(v),
                                 SheetSource::None => false,
                             };
-                            if sheet_row_ui(ui, sheet, row, playing) {
+                            if sheet_row_ui(ui, sheet, row, i, playing) {
                                 act = Some(Act::Play(i));
                             }
                         }
@@ -551,14 +919,14 @@ impl App {
                             ui.add_space(10.0);
                             ui.label(egui::RichText::new("Other videos").weak());
                             ui.separator();
-                            for v in &sheet.extra_videos {
+                            for (n, v) in sheet.extra_videos.iter().enumerate() {
                                 let Some(video) =
                                     sheet.detail.as_ref().and_then(|d| d.videos.get(*v))
                                 else {
                                     continue;
                                 };
                                 let playing = playing_video == Some(*v);
-                                if extra_video_ui(ui, video, playing) {
+                                if extra_video_ui(ui, video, n, playing) {
                                     act = Some(Act::PlayExtra(*v));
                                 }
                             }
@@ -598,6 +966,56 @@ impl App {
             });
 
         match act {
+            // Starting a dig closes the sheet: the strip it drives sits behind
+            // this window, and the first thing a digger does is look at it.
+            Some(Act::WantAlternative(id)) => {
+                self.request_vinyl_edit(
+                    ctx.clone(),
+                    VinylEdit::Want {
+                        release_ids: vec![id],
+                        label: format!("{artist} — {title}"),
+                    },
+                );
+            }
+            Some(Act::ToggleList(list)) => {
+                let present = match list {
+                    VinylList::Collection => in_collection,
+                    VinylList::Wantlist => in_wantlist,
+                };
+                let label = format!("{artist} — {title}");
+                let edit = if present {
+                    // Removing needs the cached row: a collection copy is
+                    // addressed by folder + instance id, not by release id.
+                    // Anything in a list has one, since that's what membership
+                    // is read from.
+                    let Some(record) = self.vinyl_record_in(list, release_id) else {
+                        self.status =
+                            "That record isn't in the local cache yet — sync and try again."
+                                .into();
+                        return;
+                    };
+                    VinylEdit::Remove {
+                        list,
+                        record: Box::new(record),
+                    }
+                } else {
+                    match list {
+                        VinylList::Collection => VinylEdit::Collect { release_id, label },
+                        VinylList::Wantlist => VinylEdit::Want {
+                            release_ids: vec![release_id],
+                            label,
+                        },
+                    }
+                };
+                self.request_vinyl_edit(ctx.clone(), edit);
+            }
+            Some(Act::Dig) => {
+                let Some(k) = key else { return };
+                self.start_dig(k);
+                self.stop_sheet_video();
+                self.vinyl_sheet = None;
+                return;
+            }
             Some(Act::Play(row)) => self.play_sheet_row(row, frame),
             Some(Act::PlayAll) => self.play_sheet_from_start(frame),
             Some(Act::StopVideo) => self.stop_sheet_video(),
@@ -664,12 +1082,16 @@ fn sheet_row_ui(
     ui: &mut egui::Ui,
     sheet: &VinylSheet,
     row: &SheetRow,
+    index: usize,
     playing: bool,
 ) -> bool {
     const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
     let playable = !matches!(row.source, SheetSource::None);
     let mut clicked = false;
 
+    // Reserve a slot underneath the row's content so the hover fill paints
+    // behind the text instead of washing over it.
+    let bg = ui.painter().add(egui::Shape::Noop);
     let resp = ui
         .scope(|ui| {
             ui.horizontal(|ui| {
@@ -752,14 +1174,20 @@ fn sheet_row_ui(
 
     // The whole row is the hit target, so there's no small glyph to aim at.
     let rect = resp.rect;
-    let id = ui.id().with(("sheet-row", &row.position, &row.title));
+    // Keyed by index, not by text: Discogs releases regularly repeat a
+    // position or a title, and two rows sharing an id share hover state — one
+    // cursor would light up both.
+    let id = ui.id().with(("sheet-row", index));
     let hit = ui.interact(rect, id, egui::Sense::click());
     if playable {
         if hit.hovered() {
-            ui.painter().rect_filled(
-                rect.expand2(egui::vec2(4.0, 1.0)),
-                egui::Rounding::same(4.0),
-                egui::Color32::from_white_alpha(10),
+            ui.painter().set(
+                bg,
+                egui::epaint::RectShape::filled(
+                    rect.expand2(egui::vec2(4.0, 0.0)),
+                    egui::Rounding::same(4.0),
+                    egui::Color32::from_white_alpha(10),
+                ),
             );
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
@@ -773,8 +1201,14 @@ fn sheet_row_ui(
 }
 
 /// One "other video" row (album rip, live set). Returns true when clicked.
-fn extra_video_ui(ui: &mut egui::Ui, video: &discogs::ReleaseVideo, playing: bool) -> bool {
+fn extra_video_ui(
+    ui: &mut egui::Ui,
+    video: &discogs::ReleaseVideo,
+    index: usize,
+    playing: bool,
+) -> bool {
     const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
+    let bg = ui.painter().add(egui::Shape::Noop);
     let resp = ui
         .scope(|ui| {
             ui.horizontal(|ui| {
@@ -803,14 +1237,17 @@ fn extra_video_ui(ui: &mut egui::Ui, video: &discogs::ReleaseVideo, playing: boo
         .response;
     let hit = ui.interact(
         resp.rect,
-        ui.id().with(("sheet-extra", &video.uri)),
+        ui.id().with(("sheet-extra", index)),
         egui::Sense::click(),
     );
     if hit.hovered() {
-        ui.painter().rect_filled(
-            resp.rect.expand2(egui::vec2(4.0, 1.0)),
-            egui::Rounding::same(4.0),
-            egui::Color32::from_white_alpha(10),
+        ui.painter().set(
+            bg,
+            egui::epaint::RectShape::filled(
+                resp.rect.expand2(egui::vec2(4.0, 0.0)),
+                egui::Rounding::same(4.0),
+                egui::Color32::from_white_alpha(10),
+            ),
         );
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
