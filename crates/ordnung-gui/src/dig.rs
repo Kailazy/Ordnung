@@ -105,6 +105,14 @@ pub(crate) struct DigPath {
     /// two threads it has yet to deliver. Empty set means nothing is in flight.
     /// Used to avoid starting a second worker for a head already being primed.
     pub priming: Option<(u64, Vec<DigThread>)>,
+    /// Raised to tell the prefetch worker to stop between requests.
+    ///
+    /// Speculation shares one process-wide request pace with everything else,
+    /// so a prefetch already in flight sits *ahead* of a click that arrives
+    /// mid-fetch and the user waits out work they didn't ask for. The worker
+    /// checks this before each request and abandons the rest, which hands the
+    /// pace back to the click within one request rather than up to thirteen.
+    pub cancel_prime: Arc<AtomicBool>,
 }
 
 impl DigPath {
@@ -148,6 +156,9 @@ pub(crate) struct DigFetched {
     pub entity: u64,
     pub result: std::result::Result<BrowsePage, String>,
 }
+
+/// A flag that is never raised, for the call sites that must not be cancelled.
+static NEVER_CANCEL: AtomicBool = AtomicBool::new(false);
 
 /// How many unknown-format rows one browse will resolve before giving up.
 /// Each is a paced API request (~1.1s), so this bounds a step's worst case:
@@ -357,12 +368,19 @@ fn split_title(combined: &str) -> (String, String) {
 /// Shared by the explicit step and the speculative prefetch so both pages are
 /// judged the same way — a prefetched page has to be *pickable* the moment it's
 /// wanted, and the format resolution is what makes a row pickable.
+///
+/// `cancel`, when raised, stops the format resolution early. The page is still
+/// returned — the rows resolved so far are perfectly good, and the unresolved
+/// ones stay `format_known: false`, which the pick already treats as "unknown,
+/// keep as a candidate" rather than "not vinyl". Only speculation passes a flag
+/// that ever rises; an explicit step passes one that never does.
 fn browse_step(
     client: &discogs::Client,
     thread: DigThread,
     entity: u64,
     page: u32,
     skip: &HashSet<u64>,
+    cancel: &AtomicBool,
 ) -> std::result::Result<BrowsePage, String> {
     client
         .browse_by_id(thread.browse(), entity, page)
@@ -376,6 +394,12 @@ fn browse_step(
             for r in p.releases.iter_mut() {
                 if r.format_known || budget == 0 {
                     continue;
+                }
+                // Each lookup is another paced request. If a click is waiting,
+                // stop refining and give the pace back — a page with some rows
+                // still unresolved is usable, just slightly less pre-judged.
+                if cancel.load(Ordering::Relaxed) {
+                    break;
                 }
                 if skip.contains(&r.release_id) {
                     continue;
@@ -445,6 +469,7 @@ impl App {
             pages: HashMap::new(),
             ready: HashMap::new(),
             priming: None,
+            cancel_prime: Arc::new(AtomicBool::new(false)),
         });
         // The local cover cache is keyed by list + instance id, so make sure the
         // starting record's cover is loaded even if the grid hasn't drawn it.
@@ -520,6 +545,18 @@ impl App {
             _ => 1,
         };
         if let Some(dig) = self.dig.as_mut() {
+            // The click owns the request pace from here. Any speculation still
+            // running is work the user has now overtaken, so stand it down
+            // rather than making them queue behind it.
+            dig.cancel_prime.store(true, Ordering::Relaxed);
+            dig.priming = None;
+            // Drop the discarded future *now*, not when the answer lands.
+            // Taking a branch is the decision; the request is only how it gets
+            // filled in. Leaving the old path drawn until the fetch returns
+            // makes the spinner look like a fifth step continuing the walk
+            // rather than the second step of a new branch. `seen` is untouched,
+            // so the abandoned records still don't come round again.
+            dig.steps.truncate(dig.at + 1);
             dig.pending = Some(thread);
             dig.error = None;
         }
@@ -538,7 +575,9 @@ impl App {
                 token,
                 "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
             );
-            let result = browse_step(&client, thread, entity, page, &skip);
+            // An explicit step is never stood down: it's the request the user
+            // is waiting on, so it runs to completion.
+            let result = browse_step(&client, thread, entity, page, &skip, &NEVER_CANCEL);
             let _ = tx.send(DigFetched {
                 from,
                 thread,
@@ -805,10 +844,15 @@ impl App {
         skip.extend(self.vinyl_wanted.iter().copied());
         skip.extend(dig.seen.iter().copied());
 
-        self.dig
-            .as_mut()
-            .expect("checked above")
-            .priming = Some((from, jobs.iter().map(|j| j.0).collect()));
+        // A fresh flag per worker: the previous one may already be raised by
+        // the click that stood its worker down, and reusing it would cancel
+        // this speculation before it made a single request.
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let dig = self.dig.as_mut().expect("checked above");
+            dig.priming = Some((from, jobs.iter().map(|j| j.0).collect()));
+            dig.cancel_prime = cancel.clone();
+        }
         let tx = self.dig_prime_tx.clone();
         let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
@@ -817,7 +861,17 @@ impl App {
                 "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
             );
             for (thread, entity, page) in jobs {
-                let result = browse_step(&client, thread, entity, page, &skip);
+                // Checked before each browse rather than only at the top: the
+                // artist thread's page and the label thread's page are two
+                // separate trips through the shared pace, and the click that
+                // cancels usually arrives during the first.
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                let result = browse_step(&client, thread, entity, page, &skip, &cancel);
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 if tx
                     .send(DigPrimed {
                         from,
@@ -1298,6 +1352,11 @@ impl App {
         // Vary the roll between clicks (see `dig_roll`).
         self.dig_seed = self.dig_seed.wrapping_add(0x2545_F491_4F6C_DD1D);
         if end {
+            // Closing the strip abandons the dig, so any speculation for it is
+            // now pure waste on a shared pace the rest of the app is using.
+            if let Some(dig) = self.dig.as_ref() {
+                dig.cancel_prime.store(true, Ordering::Relaxed);
+            }
             self.dig = None;
         } else if let Some(i) = goto {
             if let Some(dig) = self.dig.as_mut() {
@@ -1326,6 +1385,10 @@ impl App {
         dig.ready.retain(|(id, _), _| *id == head);
         if let Some((from, _)) = &dig.priming {
             if *from != head {
+                // Its results would be dropped on arrival anyway, so stop it
+                // spending requests to produce them — on a backtrack the next
+                // head wants that pace for its own two threads.
+                dig.cancel_prime.store(true, Ordering::Relaxed);
                 dig.priming = None;
             }
         }
