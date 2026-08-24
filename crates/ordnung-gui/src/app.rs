@@ -858,11 +858,10 @@ impl eframe::App for App {
                                 .color(egui::Color32::from_rgb(220, 230, 245)),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .button("✕")
-                                .on_hover_note("Dismiss until the next launch")
-                                .clicked()
-                            {
+                            if crate::ui::icon::close_button(
+                                ui,
+                                "Dismiss until the next launch",
+                            ) {
                                 self.update_available = None;
                             }
                             if ui

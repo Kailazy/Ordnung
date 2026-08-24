@@ -2097,7 +2097,7 @@ impl App {
                         ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
-                                if ui.button("✕").on_hover_note("Close the editor").clicked() {
+                                if crate::ui::icon::close_button(ui, "Close the editor") {
                                     // Also drop the table selection, or the
                                     // panel would re-open from it next frame.
                                     self.usb_selected = None;

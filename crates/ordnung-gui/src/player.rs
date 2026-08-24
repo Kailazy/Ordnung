@@ -545,7 +545,7 @@ impl App {
 
                     // Dismiss the player.
                     ui.add_space(4.0);
-                    if ui.small_button("✕").on_hover_note("Close player").clicked() {
+                    if crate::ui::icon::close_button(ui, "Close player") {
                         close = true;
                     }
                 });

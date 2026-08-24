@@ -1061,11 +1061,10 @@ impl App {
                         egui::RichText::new(format!("step {} of {}", at + 1, cards.len())).weak(),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .button("✕")
-                            .on_hover_note("Stop digging and clear this path")
-                            .clicked()
-                        {
+                        if crate::ui::icon::close_button(
+                            ui,
+                            "Stop digging and clear this path",
+                        ) {
                             end = true;
                         }
                         // Forward only re-walks a path already dug — a new

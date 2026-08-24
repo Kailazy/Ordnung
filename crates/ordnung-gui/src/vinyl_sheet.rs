@@ -1201,17 +1201,6 @@ enum RecordPlay {
 /// transport bar sizes against — see the `set_max_width` note in the sheet.
 const SHEET_W: f32 = 620.0;
 
-/// Colour for one of the transport's painted icons: bright under the pointer,
-/// resting a shade below the clocks either side of them so the scrubber stays
-/// the loudest thing on the bar.
-fn icon_col(resp: &egui::Response) -> egui::Color32 {
-    if resp.hovered() {
-        egui::Color32::WHITE
-    } else {
-        egui::Color32::from_gray(150)
-    }
-}
-
 /// The video-window toggle: a small display outline, filled once the window is
 /// actually on screen, so the button shows the state rather than only the verb.
 fn draw_screen_glyph(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, showing: bool) {
@@ -1228,20 +1217,6 @@ fn draw_screen_glyph(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, showi
             egui::pos2(c.x + 3.5, screen.max.y + 2.5),
         ],
         egui::Stroke::new(1.5, col),
-    );
-}
-
-/// The close: a drawn cross, rather than the "✕" character in a button frame.
-fn draw_close_glyph(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
-    const R: f32 = 4.5;
-    let stroke = egui::Stroke::new(1.5, col);
-    p.line_segment(
-        [egui::pos2(c.x - R, c.y - R), egui::pos2(c.x + R, c.y + R)],
-        stroke,
-    );
-    p.line_segment(
-        [egui::pos2(c.x + R, c.y - R), egui::pos2(c.x - R, c.y + R)],
-        stroke,
     );
 }
 
@@ -1447,7 +1422,7 @@ fn video_transport_ui(
                 } else {
                     "Show the video window"
                 });
-                draw_screen_glyph(ui.painter(), rect.center(), icon_col(&resp), showing);
+                draw_screen_glyph(ui.painter(), rect.center(), crate::ui::icon::col(&resp), showing);
                 if resp.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
@@ -1456,14 +1431,7 @@ fn video_transport_ui(
                 }
 
                 ui.add_space(2.0);
-                let (rect, resp) =
-                    ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
-                let resp = resp.on_hover_note("Close the video player");
-                draw_close_glyph(ui.painter(), rect.center(), icon_col(&resp));
-                if resp.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                if resp.clicked() {
+                if crate::ui::icon::close_button(ui, "Close the video player") {
                     act = Some(VideoAct::Stop);
                 }
             });

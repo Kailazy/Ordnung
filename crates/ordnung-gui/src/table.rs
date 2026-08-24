@@ -317,11 +317,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Columns").strong().size(15.0));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let close = ui.add(
-                            egui::Button::new(egui::RichText::new("✕").size(13.0).weak())
-                                .frame(false),
-                        );
-                        if close.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        if crate::ui::icon::close_button(ui, "Close") {
                             open = false;
                         }
                     });
