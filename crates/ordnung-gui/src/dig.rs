@@ -1060,11 +1060,6 @@ impl App {
                     ui.label(
                         egui::RichText::new(format!("step {} of {}", at + 1, cards.len())).weak(),
                     );
-                    ui.label(
-                        egui::RichText::new("· new records, not in your collection")
-                            .small()
-                            .weak(),
-                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .button("✕")
@@ -1206,6 +1201,38 @@ impl App {
                                                 egui::FontId::proportional(9.5),
                                                 egui::Color32::from_gray(210),
                                             );
+                                        }
+                                        // A label dig follows one imprint the
+                                        // whole way, and the sleeve rarely says
+                                        // which — so the record carries its
+                                        // label, banded across the bottom.
+                                        if let Some((DigThread::Label, name)) = &card.via {
+                                            let band = egui::Rect::from_min_max(
+                                                egui::pos2(rect.min.x, rect.max.y - 17.0),
+                                                rect.max,
+                                            );
+                                            ui.painter().rect_filled(
+                                                band,
+                                                egui::Rounding {
+                                                    nw: 0.0,
+                                                    ne: 0.0,
+                                                    sw: 5.0,
+                                                    se: 5.0,
+                                                },
+                                                egui::Color32::from_black_alpha(205),
+                                            );
+                                            // Clipped, not truncated: a long
+                                            // imprint fades at the sleeve edge
+                                            // rather than pushing past it.
+                                            ui.painter()
+                                                .with_clip_rect(band)
+                                                .text(
+                                                    band.center(),
+                                                    egui::Align2::CENTER_CENTER,
+                                                    name,
+                                                    egui::FontId::proportional(10.0),
+                                                    egui::Color32::from_gray(215),
+                                                );
                                         }
                                         let tip = if current {
                                             format!(
