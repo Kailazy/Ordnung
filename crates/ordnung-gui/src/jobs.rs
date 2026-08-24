@@ -355,6 +355,7 @@ impl App {
                 VinylList::Collection => "Moving to your wantlist…".into(),
                 VinylList::Wantlist => "Moving to your collection…".into(),
             },
+            VinylEdit::Collect { .. } => "Adding to your collection…".into(),
             VinylEdit::Remove { list, .. } => match list {
                 VinylList::Collection => "Removing from your collection…".into(),
                 VinylList::Wantlist => "Removing from your wantlist…".into(),
@@ -1511,6 +1512,50 @@ pub(crate) fn run_vinyl_edit(
                 _ => format!(
                     "Added {} of {total} to your wantlist.{non_vinyl_note}",
                     wanted + non_vinyl
+                ),
+            }
+        }
+
+        VinylEdit::Collect { release_id, label } => {
+            // `add_to_collection` answers with an instance id only, so the row
+            // to cache comes from the release itself. A non-vinyl release is
+            // added on Discogs but has no place in the records-only view — the
+            // same rule `Want` follows.
+            let instance_id = match client.add_to_collection(&username, release_id) {
+                Ok(id) => id,
+                Err(e) => {
+                    let _ = tx.send(JobMsg::Failed(format!(
+                        "adding {label} to your collection: {e}"
+                    )));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+            match client.collection_record(&username, release_id, instance_id) {
+                Ok(Some(rec)) => {
+                    let _ = catalog.upsert_vinyl(VinylList::Collection, &rec);
+                    // Pull the cover now so the record isn't a blank tile until
+                    // the next sync; a failed download doesn't fail the add.
+                    if let Some(url) = rec.cover_url.as_deref() {
+                        if let Some(png) = client.fetch_cover(url) {
+                            let _ = catalog.set_vinyl_cover(
+                                VinylList::Collection,
+                                rec.instance_id,
+                                &png,
+                            );
+                        }
+                    }
+                    format!("Added {label} to your collection.")
+                }
+                Ok(None) => format!(
+                    "Added {label} to your Discogs collection. It isn't a vinyl \
+                     pressing, so it won't show in this view."
+                ),
+                // On Discogs either way — the local cache just misses it until
+                // the next sync, which is worth saying plainly.
+                Err(e) => format!(
+                    "Added {label} to your Discogs collection, but couldn't cache \
+                     it locally: {e}"
                 ),
             }
         }

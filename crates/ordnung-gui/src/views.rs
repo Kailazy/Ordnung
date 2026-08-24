@@ -232,6 +232,8 @@ enum VinylGridAction {
     Open(VinylCoverKey),
     /// Open the sheet *and* start the record from its first playable track.
     Play(VinylCoverKey),
+    /// Start a dig from this record — see [`crate::dig`].
+    Dig(VinylCoverKey),
 }
 
 impl App {
@@ -1106,6 +1108,17 @@ impl App {
         // What the user asked of a cell (jump to the catalog, or a list edit).
         // Applied after the grid so we don't mutate `self` mid-render.
         let mut action: Option<VinylGridAction> = None;
+        // A record the dig strip asked to open, applied with `action` below.
+        let mut open_sheet: Option<dig::DigOpen> = None;
+        // The dig strip sits above both shelves rather than inside the scroll
+        // area: it's the thing you're steering, so it shouldn't scroll away
+        // under the wall of covers you're steering past.
+        if let Some(key) = self.draw_dig(ui) {
+            open_sheet = Some(key);
+        }
+        if self.dig.is_some() {
+            ui.add_space(8.0);
+        }
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(4.0);
             if owned.is_empty() {
@@ -1176,6 +1189,7 @@ impl App {
                 }
             }
             Some(VinylGridAction::Open(key)) => self.open_vinyl_sheet(key, ctx),
+            Some(VinylGridAction::Dig(key)) => self.start_dig(key),
             Some(VinylGridAction::Play(key)) => {
                 // The tracklist may still be loading; the sheet starts playback
                 // itself once it has one (see `pending_play`).
@@ -1186,11 +1200,29 @@ impl App {
             }
             None => {}
         }
+        if let Some(o) = open_sheet {
+            self.open_release_sheet(o.release_id, o.artist, o.title, o.sub, o.cover_url, ctx);
+        }
     }
 
     /// Look up the cached record a grid cell stands for. `None` if the lists
     /// changed under the click (a sync landing mid-frame), in which case the
     /// action is simply dropped rather than applied to the wrong record.
+    /// The cached row for one release in one list, found by *release* id. The
+    /// record sheet can be open on a record it has no cache key for (one reached
+    /// by a dig), so a list edit from there resolves the row this way instead.
+    pub(crate) fn vinyl_record_in(
+        &self,
+        list: VinylList,
+        release_id: u64,
+    ) -> Option<VinylRecord> {
+        let records = match list {
+            VinylList::Collection => &self.vinyl,
+            VinylList::Wantlist => &self.wantlist,
+        };
+        records.iter().find(|v| v.release_id == release_id).cloned()
+    }
+
     pub(crate) fn vinyl_record(&self, (list, instance_id): VinylCoverKey) -> Option<VinylRecord> {
         let records = match list {
             VinylList::Collection => &self.vinyl,
@@ -1289,7 +1321,7 @@ impl App {
             .vinyl_sheet
             .as_ref()
             .filter(|s| s.playing_video.is_some())
-            .map(|s| s.key);
+            .and_then(|s| s.key);
 
         let mut action: Option<VinylGridAction> = None;
         // Top-aligned wrapping rather than `horizontal_wrapped`: that helper
@@ -1416,6 +1448,10 @@ impl App {
                             egui::Sense::click(),
                         );
                         let playing_this = playing_key == Some(c.key);
+                        // Read before the block below consumes `hit`; the dig
+                        // disc reveals on the play disc's hover too, so the pair
+                        // appears and disappears together.
+                        let play_hovered = hit.hovered();
                         if resp.hovered() || hit.hovered() || playing_this {
                             let bg = if hit.hovered() {
                                 egui::Color32::from_rgb(120, 220, 150)
@@ -1440,6 +1476,53 @@ impl App {
                             if hit.on_hover_note("Play this record").clicked() {
                                 play_clicked = true;
                                 action = Some(VinylGridAction::Play(c.key));
+                            }
+                        }
+                        // Dig disc, left of the play disc: start a crate dig
+                        // from this record. Same hover-reveal and same
+                        // always-registered hit area as the play disc above —
+                        // see that comment for why the interact() is
+                        // unconditional.
+                        let mut dig_clicked = false;
+                        let dig_rect = egui::Rect::from_min_size(
+                            egui::pos2(disc.left() - D - 5.0, rect.bottom() - D - 6.0),
+                            egui::vec2(D, D),
+                        );
+                        let dig_hit = ui.interact(
+                            dig_rect,
+                            ui.id().with(("vinyl-dig", c.key)),
+                            egui::Sense::click(),
+                        );
+                        if resp.hovered() || dig_hit.hovered() || play_hovered {
+                            let bg = if dig_hit.hovered() {
+                                egui::Color32::from_rgb(120, 220, 150)
+                            } else {
+                                egui::Color32::from_black_alpha(190)
+                            };
+                            let fg = if dig_hit.hovered() {
+                                egui::Color32::from_gray(20)
+                            } else {
+                                egui::Color32::from_gray(240)
+                            };
+                            ui.painter().circle_filled(dig_rect.center(), D / 2.0, bg);
+                            ui.painter().text(
+                                dig_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "⛏",
+                                egui::FontId::proportional(14.0),
+                                fg,
+                            );
+                            let dig_hit =
+                                dig_hit.on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if dig_hit
+                                .on_hover_note(
+                                    "Dig from here: records like this on Discogs that \
+                                     aren't in your collection",
+                                )
+                                .clicked()
+                            {
+                                dig_clicked = true;
+                                action = Some(VinylGridAction::Dig(c.key));
                             }
                         }
                         // Price chip, bottom-left of the cover: what the sort is
@@ -1485,7 +1568,7 @@ impl App {
                         // layered above it. Discogs itself is one click further
                         // in, from the sheet or the menu below.
                         let resp = resp.on_hover_note(tip);
-                        if resp.clicked() && !badge_clicked && !play_clicked {
+                        if resp.clicked() && !badge_clicked && !play_clicked && !dig_clicked {
                             action = Some(VinylGridAction::Open(c.key));
                         }
                         // Right-click: move this record between the two lists, or
@@ -1505,6 +1588,17 @@ impl App {
                                 open_url(&release_url);
                                 ui.close_menu();
                             }
+                            if ui
+                                .button("⛏  Dig from here")
+                                .on_hover_note(
+                                    "Walk the collection from this record, by artist or label",
+                                )
+                                .clicked()
+                            {
+                                action = Some(VinylGridAction::Dig(c.key));
+                                ui.close_menu();
+                            }
+                            ui.separator();
                             let (move_label, move_tip, remove_label) = match list {
                                 VinylList::Collection => (
                                     "Move to wantlist",

@@ -20,6 +20,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const SEARCH_URL: &str = "https://api.discogs.com/database/search";
+/// Artist and label browse endpoints; `/{id}/releases` is appended. These take
+/// a Discogs entity id and list exactly that entity's records — see
+/// [`Client::browse_by_id`].
+const ARTISTS_URL: &str = "https://api.discogs.com/artists";
+const LABELS_URL: &str = "https://api.discogs.com/labels";
+/// Master (release-group) endpoint; `/{id}/versions` lists every pressing.
+const MASTERS_URL: &str = "https://api.discogs.com/masters";
 /// Per-release endpoint; `{id}` is appended for full release detail.
 const RELEASE_URL: &str = "https://api.discogs.com/releases";
 /// Identity endpoint — resolves the token owner's username so the collection
@@ -95,6 +102,73 @@ pub struct ReleaseCandidate {
     pub cover_image_url: String,
 }
 
+/// One pressing of a master — a specific release, with how many people own and
+/// want it. See [`Client::master_versions`].
+#[derive(Debug, Clone)]
+pub struct MasterVersion {
+    pub release_id: u64,
+    pub title: String,
+    /// Format details for this pressing, e.g. `12", White Label, Limited Edition`.
+    pub format: String,
+    pub label: String,
+    pub catno: String,
+    pub country: String,
+    /// Release date as Discogs lists it; often just a year.
+    pub released: String,
+    pub thumb_url: String,
+    /// How many Discogs users hold this exact pressing. The best single signal
+    /// for "the normal one" versus a promo or a limited variant.
+    pub in_collection: u32,
+    pub in_wantlist: u32,
+}
+
+/// Which association a browse follows — the two threads a crate dig can pull.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowseThread {
+    Artist,
+    Label,
+}
+
+/// One page of browse results, with the shape of the whole result set so the
+/// caller can page around it. See [`Client::browse_by_id`].
+#[derive(Debug, Clone, Default)]
+pub struct BrowsePage {
+    /// Total pages available for this query, at least 1.
+    pub pages: u32,
+    /// Total releases across all pages, as Discogs counts them.
+    pub items: u32,
+    pub releases: Vec<BrowseRelease>,
+}
+
+/// One release from an artist or label browse. Leaner than
+/// [`ReleaseCandidate`]: these endpoints return a listing, not a search hit.
+#[derive(Debug, Clone)]
+pub struct BrowseRelease {
+    /// A concrete release id — masters are resolved to their `main_release`.
+    pub release_id: u64,
+    pub title: String,
+    /// Credited artist. On a label browse this is the release's artist; on an
+    /// artist browse it's the artist themself (possibly a collaboration string).
+    pub artist: String,
+    pub year: Option<u16>,
+    /// Format summary (`12"`, `2xLP, Album`). Empty on master entries, which
+    /// don't carry one — check [`BrowseRelease::format_known`] before reading
+    /// this as "not a record".
+    pub format: String,
+    /// False when Discogs gave no format for this row (every master entry, plus
+    /// the occasional bare release). An empty `format` then means "unknown",
+    /// not "not vinyl" — resolve it with [`Client::release_format`] rather than
+    /// discarding a row that may well be a 12".
+    pub format_known: bool,
+    /// Label name — only the label browse and release rows carry it.
+    pub label: String,
+    pub catno: String,
+    pub thumb_url: String,
+    /// False when the artist is credited as a remixer rather than the main
+    /// artist, so a dig can prefer their own records.
+    pub main: bool,
+}
+
 /// Full detail for a single Discogs release (`GET /releases/{id}`), carrying the
 /// album-level metadata the search endpoint omits. Used to fill in tag fields a
 /// track is missing once the user has chosen which release it is.
@@ -117,6 +191,25 @@ pub struct ReleaseDetail {
     pub styles: Vec<String>,
     pub label: Option<String>,
     pub catalog_number: Option<String>,
+    /// Discogs artist ids credited on this release, in credit order. These name
+    /// exactly one artist where a name doesn't — Discogs has four distinct
+    /// artists called "Lawrence" — so anything walking the database by artist
+    /// should use these. `#[serde(default)]` for `release_cache` rows written
+    /// before the field existed; [`DETAIL_SCHEMA_VERSION`](crate::catalog::DETAIL_SCHEMA_VERSION)
+    /// re-fetches those.
+    #[serde(default)]
+    pub artist_ids: Vec<u64>,
+    /// Discogs label ids, in release order — the primary label first. Same
+    /// reasoning as [`ReleaseDetail::artist_ids`]: "Dial" and "Dial Record" are
+    /// different labels that a name match conflates.
+    #[serde(default)]
+    pub label_ids: Vec<u64>,
+    /// The master (release group) this pressing belongs to; `None` when it
+    /// stands alone. A promo or white label often has no copies for sale while
+    /// another pressing of the same record has plenty — the master is how the
+    /// buyable one is found. See [`Client::master_versions`].
+    #[serde(default)]
+    pub master_id: Option<u64>,
     /// The release's own track listing, in pressing order. Empty when Discogs
     /// lists none. `#[serde(default)]` so a `release_cache` row written before
     /// this field existed still deserializes (the cache's `detail_version`
@@ -625,6 +718,24 @@ impl Client {
         Ok(body.into_detail())
     }
 
+    /// The format summary of one release (`Vinyl, 12", 33 ⅓ RPM`), for deciding
+    /// whether a browse row that carried no format is actually a record. One
+    /// API request; callers should only reach for it on rows where
+    /// [`BrowseRelease::format_known`] is false.
+    pub fn release_format(&self, release_id: u64) -> Result<String> {
+        let url = format!("{RELEASE_URL}/{release_id}");
+        let resp = self.call_with_retry(|| {
+            self.agent
+                .get(&url)
+                .set("User-Agent", &self.user_agent)
+                .set("Authorization", &format!("Discogs token={}", self.token))
+        })?;
+        let body: ReleaseResponse = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs release response: {e}")))?;
+        Ok(body.format_summary())
+    }
+
     /// Resolve the token owner's Discogs username (`GET /oauth/identity`). One
     /// authenticated request — the collection endpoints are keyed by username, so
     /// this is the first call [`Client::fetch_collection`] makes.
@@ -790,6 +901,82 @@ impl Client {
         Ok(added.instance_id)
     }
 
+    /// Every pressing of one master (`GET /masters/{id}/versions`) — the
+    /// original, the repress, the promo, the coloured vinyl.
+    ///
+    /// This is what makes a dead-end pressing buyable: a promo white label
+    /// routinely has nothing for sale while the standard pressing of the same
+    /// record has a dozen copies listed. The caller compares the versions and
+    /// points the user at one that can actually be bought.
+    ///
+    /// Ordered by how many people own each pressing, most first — the canonical
+    /// pressing is the one most collections hold, and it's also the one most
+    /// likely to be for sale. One API request.
+    pub fn master_versions(&self, master_id: u64) -> Result<Vec<MasterVersion>> {
+        let url = format!("{MASTERS_URL}/{master_id}/versions");
+        let resp = self.call_with_retry(|| {
+            self.agent
+                .get(&url)
+                .set("User-Agent", &self.user_agent)
+                .set("Authorization", &format!("Discogs token={}", self.token))
+                .query("per_page", "100")
+        })?;
+        let body: VersionsResponse = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs versions response: {e}")))?;
+        let mut out: Vec<MasterVersion> = body
+            .versions
+            .into_iter()
+            .filter(|v| {
+                // Records only, matching the rest of the vinyl view.
+                v.major_formats.iter().any(|f| f.eq_ignore_ascii_case("Vinyl"))
+            })
+            .map(|v| MasterVersion {
+                release_id: v.id,
+                title: v.title,
+                format: v.format,
+                label: v.label,
+                catno: v.catno,
+                country: v.country,
+                released: v.released,
+                thumb_url: v.thumb,
+                in_collection: v.stats.community.in_collection,
+                in_wantlist: v.stats.community.in_wantlist,
+            })
+            .collect();
+        out.sort_by(|a, b| b.in_collection.cmp(&a.in_collection));
+        Ok(out)
+    }
+
+    /// Build the cache row for a release just added to the collection
+    /// (`GET /releases/{id}`), since [`Client::add_to_collection`] answers with
+    /// an instance id and nothing else. `Ok(None)` when the release isn't a
+    /// vinyl pressing — it's in the user's Discogs collection either way, but
+    /// the records-only view has nowhere to put it, exactly as
+    /// [`Client::add_to_wantlist`] reports.
+    ///
+    /// The copy is brand new, so it's in the folder the add targeted
+    /// ([`UNCATEGORIZED_FOLDER`]) and its `added` date is left for the next sync
+    /// to fill from Discogs itself.
+    pub fn collection_record(
+        &self,
+        _username: &str,
+        release_id: u64,
+        instance_id: u64,
+    ) -> Result<Option<VinylRecord>> {
+        let url = format!("{RELEASE_URL}/{release_id}");
+        let resp = self.call_with_retry(|| {
+            self.agent
+                .get(&url)
+                .set("User-Agent", &self.user_agent)
+                .set("Authorization", &format!("Discogs token={}", self.token))
+        })?;
+        let body: ReleaseResponse = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs release response: {e}")))?;
+        Ok(body.into_vinyl_record(instance_id, Some(UNCATEGORIZED_FOLDER)))
+    }
+
     /// Which collection folder holds a given copy
     /// (`GET /users/{u}/collection/releases/{r}`, which lists every instance of
     /// one release with its folder). `Ok(None)` means Discogs doesn't have that
@@ -937,6 +1124,73 @@ impl Client {
         Ok(Vec::new())
     }
 
+    /// Browse an artist's or a label's releases by Discogs **id**, for crate
+    /// digging — records the user does not already have.
+    ///
+    /// Ids rather than names: Discogs's search endpoint matches loosely, so
+    /// `artist=Lawrence` returns three unrelated Lawrences plus Steve Lawrence,
+    /// and `label=Dial` returns the salsa label "Dial Record". An artist id
+    /// (`6644`) and a label id (`392`) name exactly one entity, which is what a
+    /// dig means by "the same artist". Ids come from
+    /// [`ReleaseDetail::artist_ids`] / [`ReleaseDetail::label_ids`].
+    ///
+    /// `page` is 1-based; the caller varies it for variety and learns the real
+    /// page count from [`BrowsePage::pages`]. Vinyl-only filtering is *not*
+    /// done here — these endpoints don't take a format filter — so entries
+    /// report whatever format Discogs lists and the caller decides.
+    ///
+    /// One API request per call, paced by the shared throttle.
+    pub fn browse_by_id(&self, thread: BrowseThread, id: u64, page: u32) -> Result<BrowsePage> {
+        let page = page.max(1);
+        let url = match thread {
+            BrowseThread::Artist => format!("{ARTISTS_URL}/{id}/releases"),
+            BrowseThread::Label => format!("{LABELS_URL}/{id}/releases"),
+        };
+        let resp = self.call_with_retry(|| {
+            self.agent
+                .get(&url)
+                .set("User-Agent", &self.user_agent)
+                .set("Authorization", &format!("Discogs token={}", self.token))
+                .query("per_page", "100")
+                .query("page", &page.to_string())
+        })?;
+        let body: BrowseResponse = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs browse response: {e}")))?;
+        Ok(BrowsePage {
+            pages: body.pagination.pages.max(1),
+            items: body.pagination.items,
+            releases: body
+                .releases
+                .into_iter()
+                .filter_map(|r| {
+                    // A "master" is an abstract release group; `main_release`
+                    // is the concrete pressing to actually show. Entries with
+                    // neither id are unusable.
+                    let release_id = match r.kind.as_str() {
+                        "master" => r.main_release.filter(|id| *id > 0)?,
+                        _ => r.id,
+                    };
+                    let is_master = r.kind == "master";
+                    Some(BrowseRelease {
+                        release_id,
+                        format_known: !is_master && !r.format.trim().is_empty(),
+                        title: r.title,
+                        artist: r.artist,
+                        year: r.year,
+                        format: r.format,
+                        label: r.label,
+                        catno: r.catno,
+                        thumb_url: r.thumb,
+                        // Only the artist endpoint sets a role; a label's
+                        // releases are all "main" as far as a dig cares.
+                        main: !r.role.eq_ignore_ascii_case("remix"),
+                    })
+                })
+                .collect(),
+        })
+    }
+
     fn search_release(&self, params: &[(&str, &str)]) -> Result<Vec<SearchHit>> {
         let resp = self.call_with_retry(|| {
             let mut req = self
@@ -970,10 +1224,108 @@ impl Client {
     }
 }
 
+/// The `masters/{id}/versions` response.
+#[derive(Debug, Deserialize)]
+struct VersionsResponse {
+    #[serde(default, deserialize_with = "null_as_default")]
+    versions: Vec<VersionEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VersionEntry {
+    #[serde(default, deserialize_with = "null_as_default")]
+    id: u64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    title: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    format: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    label: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    catno: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    country: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    released: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    thumb: String,
+    /// Carrier names (`Vinyl`, `CD`), separate from the detailed `format`.
+    #[serde(default, deserialize_with = "null_as_default")]
+    major_formats: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    stats: VersionStats,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct VersionStats {
+    #[serde(default, deserialize_with = "null_as_default")]
+    community: VersionCommunity,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct VersionCommunity {
+    #[serde(default, deserialize_with = "null_as_default")]
+    in_collection: u32,
+    #[serde(default, deserialize_with = "null_as_default")]
+    in_wantlist: u32,
+}
+
+/// The artist/label `releases` response.
+#[derive(Debug, Deserialize)]
+struct BrowseResponse {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pagination: SearchPagination,
+    #[serde(default, deserialize_with = "null_as_default")]
+    releases: Vec<BrowseEntry>,
+}
+
+/// One raw row of a browse response. The artist and label endpoints return
+/// slightly different shapes (only the artist one has `type`/`role`/
+/// `main_release`; only the label one has `catno`), so every field that isn't
+/// common defaults.
+#[derive(Debug, Deserialize)]
+struct BrowseEntry {
+    #[serde(default, deserialize_with = "null_as_default")]
+    id: u64,
+    /// `"master"` or `"release"`; absent on the label endpoint, where every row
+    /// is already a release.
+    #[serde(rename = "type", default, deserialize_with = "null_as_default")]
+    kind: String,
+    /// The concrete release a master stands for.
+    #[serde(default)]
+    main_release: Option<u64>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    title: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    artist: String,
+    #[serde(default)]
+    year: Option<u16>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    format: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    label: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    catno: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    thumb: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    role: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
     #[serde(default, deserialize_with = "null_as_default")]
     results: Vec<SearchHit>,
+}
+
+/// The `pagination` block Discogs attaches to a search response. Defaults to a
+/// single empty page so a response that omits it still deserializes.
+#[derive(Debug, Default, Deserialize)]
+struct SearchPagination {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pages: u32,
+    #[serde(default, deserialize_with = "null_as_default")]
+    items: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1254,6 +1606,24 @@ struct ReleaseResponse {
     #[serde(default, deserialize_with = "null_as_default")]
     labels: Vec<ReleaseLabel>,
     #[serde(default, deserialize_with = "null_as_default")]
+    artists: Vec<ReleaseArtist>,
+    /// The master (release group) this pressing belongs to, 0 when it stands
+    /// alone. Every other pressing of the same music hangs off it — see
+    /// [`Client::master_versions`].
+    #[serde(default, deserialize_with = "null_as_default")]
+    master_id: u64,
+    /// Pressing formats. Only read by [`ReleaseResponse::format_summary`], to
+    /// answer "is this actually a record?" for a browse row that carried no
+    /// format of its own.
+    #[serde(default, deserialize_with = "null_as_default")]
+    formats: Vec<CollectionFormat>,
+    /// Cover images, for caching a record the user just added to their
+    /// collection — the add response itself carries no artwork.
+    #[serde(default, deserialize_with = "null_as_default")]
+    thumb: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    cover_image: String,
+    #[serde(default, deserialize_with = "null_as_default")]
     tracklist: Vec<TracklistEntry>,
     #[serde(default, deserialize_with = "null_as_default")]
     videos: Vec<VideoEntry>,
@@ -1262,9 +1632,21 @@ struct ReleaseResponse {
 #[derive(Debug, Deserialize)]
 struct ReleaseLabel {
     #[serde(default, deserialize_with = "null_as_default")]
+    id: u64,
+    #[serde(default, deserialize_with = "null_as_default")]
     name: String,
     #[serde(default, deserialize_with = "null_as_default")]
     catno: String,
+}
+
+/// An artist credit on a release — only the id is used, to browse that exact
+/// artist's other records.
+#[derive(Debug, Deserialize)]
+struct ReleaseArtist {
+    #[serde(default, deserialize_with = "null_as_default")]
+    id: u64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1324,12 +1706,84 @@ where
 }
 
 impl ReleaseResponse {
+    /// Build a [`VinylRecord`] straight from a release response, for a copy the
+    /// user just added to their collection. `None` when the release isn't
+    /// vinyl. Mirrors `BasicInformation::into_record`, but reads the release
+    /// endpoint's own shape.
+    fn into_vinyl_record(
+        self,
+        instance_id: u64,
+        folder_id: Option<u32>,
+    ) -> Option<VinylRecord> {
+        if !self
+            .formats
+            .iter()
+            .any(|f| f.name.eq_ignore_ascii_case("Vinyl"))
+        {
+            return None;
+        }
+        let artist = self
+            .artists
+            .iter()
+            .map(|a| strip_discogs_number(&a.name))
+            .filter(|n| !n.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (label, catalog_number) = match self.labels.first() {
+            Some(l) => (none_if_empty(l.name.clone()), none_if_empty(l.catno.clone())),
+            None => (None, None),
+        };
+        let format = none_if_empty(self.format_summary());
+        Some(VinylRecord {
+            instance_id,
+            release_id: self.id,
+            title: self.title.clone(),
+            artist,
+            year: self.year.filter(|y| *y > 0),
+            label,
+            catalog_number,
+            format,
+            thumb_url: none_if_empty(self.thumb.clone()),
+            cover_url: none_if_empty(self.cover_image.clone())
+                .or_else(|| none_if_empty(self.thumb.clone())),
+            // Discogs stamps the add itself; the next sync brings the real date.
+            added: None,
+            folder_id,
+            has_cover: false,
+            price: None,
+            price_currency: None,
+        })
+    }
+
+    /// The release's formats as one comparable string, e.g. `Vinyl, 12", Album`.
+    fn format_summary(&self) -> String {
+        self.formats
+            .iter()
+            .map(|f| {
+                let mut parts = vec![f.name.clone()];
+                parts.extend(f.descriptions.iter().cloned());
+                parts.join(", ")
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     fn into_detail(self) -> ReleaseDetail {
         // Discogs lists labels in release order; the first is the primary one.
+        let label_ids: Vec<u64> = self.labels.iter().map(|l| l.id).filter(|i| *i > 0).collect();
         let (label, catalog_number) = match self.labels.into_iter().next() {
             Some(l) => (none_if_empty(l.name), none_if_empty(l.catno)),
             None => (None, None),
         };
+        // "Various" (id 194) is Discogs's placeholder for a compilation, not an
+        // artist anyone can browse — dropping it here keeps every consumer from
+        // having to know that.
+        let artist_ids: Vec<u64> = self
+            .artists
+            .iter()
+            .filter(|a| a.id > 0 && !a.name.eq_ignore_ascii_case("various"))
+            .map(|a| a.id)
+            .collect();
         ReleaseDetail {
             release_id: self.id.to_string(),
             title: self.title,
@@ -1341,6 +1795,9 @@ impl ReleaseResponse {
             styles: self.styles,
             label,
             catalog_number,
+            artist_ids,
+            label_ids,
+            master_id: (self.master_id > 0).then_some(self.master_id),
             tracklist: self
                 .tracklist
                 .into_iter()
@@ -1434,6 +1891,9 @@ mod tests {
             styles: vec!["Acid".into(), "Techno".into()],
             label: Some("Plus 8".into()),
             catalog_number: Some("PLUS8 024".into()),
+            artist_ids: vec![11209],
+            label_ids: vec![385],
+            master_id: None,
             tracklist: Vec::new(),
             videos: Vec::new(),
         }
@@ -1684,6 +2144,7 @@ mod tests {
                 cover_image: "https://img/cover.jpg".into(),
                 artists: vec![CollectionArtist { name: "Plastikman (2)".into() }],
                 labels: vec![ReleaseLabel {
+                    id: 385,
                     name: "Plus 8".into(),
                     catno: "PLUS8 024".into(),
                 }],

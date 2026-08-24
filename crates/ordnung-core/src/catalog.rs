@@ -19,7 +19,7 @@ use std::path::Path;
 /// missing data the app now needs — rows below the current version read as a
 /// cache miss and are re-fetched. Version 2 added the tracklist and the release's
 /// YouTube videos, which the vinyl record sheet plays from.
-pub const DETAIL_SCHEMA_VERSION: i64 = 2;
+pub const DETAIL_SCHEMA_VERSION: i64 = 4;
 
 /// Which table backs a vinyl list. The two caches share an identical schema and
 /// every query below, so the list only ever picks the table name — never its own
@@ -4301,6 +4301,9 @@ mod tests {
             styles: vec!["Techno".into()],
             label: Some("Downwards".into()),
             catalog_number: Some("DN-01".into()),
+            artist_ids: vec![42],
+            label_ids: vec![99],
+            master_id: None,
             tracklist: Vec::new(),
             videos: Vec::new(),
         }

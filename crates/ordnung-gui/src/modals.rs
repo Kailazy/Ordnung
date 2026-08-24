@@ -1510,7 +1510,8 @@ impl App {
         let (record, moving) = match &edit {
             VinylEdit::Move { record, .. } => (record, true),
             VinylEdit::Remove { record, .. } => (record, false),
-            VinylEdit::Want { .. } => return,
+            // Neither adds anything to confirm: they only ever create.
+            VinylEdit::Want { .. } | VinylEdit::Collect { .. } => return,
         };
         let title = if moving {
             "Move out of your collection?"
