@@ -657,6 +657,34 @@ impl App {
             None => cover_url.as_deref().and_then(|u| self.dig_cover(u)).cloned(),
         };
         let now_playing_id = self.audio.as_ref().and_then(|a| a.current());
+        // Is *this record* sounding right now, and through which engine? One
+        // button covers both, so it has to know which one to talk to.
+        let record_play = {
+            let s = self.vinyl_sheet.as_ref().unwrap();
+            if video_open {
+                if webview::transport().playing {
+                    RecordPlay::Playing(PlayEngine::Video)
+                } else {
+                    RecordPlay::Paused(PlayEngine::Video)
+                }
+            } else {
+                // A local track counts only while it's one of this record's own.
+                let mine = now_playing_id
+                    .is_some_and(|id| s.local.iter().any(|t| t.id == id));
+                match (mine, now_playing_id) {
+                    (true, Some(id))
+                        if self
+                            .audio
+                            .as_ref()
+                            .is_some_and(|a| a.state_for(id) == PlayState::Playing) =>
+                    {
+                        RecordPlay::Playing(PlayEngine::Audio)
+                    }
+                    (true, _) => RecordPlay::Paused(PlayEngine::Audio),
+                    _ => RecordPlay::Stopped,
+                }
+            }
+        };
         // Digging is offered for a record that's in a list (it's the seed of a
         // dig). A record already reached *by* a dig has the strip's own buttons
         // instead, so it doesn't need a second set here.
@@ -702,7 +730,8 @@ impl App {
         /// borrow of `self`.
         enum Act {
             Play(usize),
-            PlayAll,
+            /// Play the record, or pause/resume whatever of it is loaded.
+            TogglePlay,
             PlayExtra(usize),
             Goto,
             Dig,
@@ -817,12 +846,23 @@ impl App {
                         }
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
-                            if ui
-                                .button("▶  Play record")
-                                .on_hover_note("Play from the first track that has a source")
-                                .clicked()
-                            {
-                                act = Some(Act::PlayAll);
+                            // One control, two states: it says what pressing
+                            // it does, so there's never a stopped "pause" or a
+                            // second button to hunt for.
+                            let (play_label, play_tip) = match record_play {
+                                RecordPlay::Playing(_) => {
+                                    ("❚❚  Pause record", "Pause this record")
+                                }
+                                RecordPlay::Paused(_) => {
+                                    ("▶  Resume record", "Resume this record")
+                                }
+                                RecordPlay::Stopped => (
+                                    "▶  Play record",
+                                    "Play from the first track that has a source",
+                                ),
+                            };
+                            if ui.button(play_label).on_hover_note(play_tip).clicked() {
+                                act = Some(Act::TogglePlay);
                             }
                             if ui
                                 .button("↗  Discogs")
@@ -893,7 +933,11 @@ impl App {
                         .vinyl_sheet
                         .as_ref()
                         .and_then(|s| s.video_scrub);
-                    video_act = video_transport_ui(ui, &mut scrub);
+                    // `max_rect` is the width the window handed down, not one
+                    // measured back off this row's contents — so a wider window
+                    // widens the bar, but the bar can never widen the window.
+                    let content_w = ui.max_rect().width();
+                    video_act = video_transport_ui(ui, content_w, &mut scrub);
                     if let Some(s) = self.vinyl_sheet.as_mut() {
                         s.video_scrub = scrub;
                     }
@@ -1059,7 +1103,17 @@ impl App {
                 return;
             }
             Some(Act::Play(row)) => self.play_sheet_row(row, frame),
-            Some(Act::PlayAll) => self.play_sheet_from_start(frame),
+            Some(Act::TogglePlay) => match record_play {
+                RecordPlay::Playing(PlayEngine::Video)
+                | RecordPlay::Paused(PlayEngine::Video) => webview::toggle_pause(),
+                RecordPlay::Playing(PlayEngine::Audio)
+                | RecordPlay::Paused(PlayEngine::Audio) => {
+                    if let Some(a) = self.audio.as_mut() {
+                        a.toggle_pause();
+                    }
+                }
+                RecordPlay::Stopped => self.play_sheet_from_start(frame),
+            },
             Some(Act::PlayExtra(v)) => {
                 let (ids, title) = {
                     let s = self.vinyl_sheet.as_ref().unwrap();
@@ -1118,6 +1172,22 @@ impl App {
     }
 }
 
+/// Which engine is carrying the record right now — the two are never both
+/// live, but the play button has to send its click to the right one.
+#[derive(Clone, Copy, PartialEq)]
+enum PlayEngine {
+    Audio,
+    Video,
+}
+
+/// Whether this record is sounding, loaded-but-paused, or not started.
+#[derive(Clone, Copy, PartialEq)]
+enum RecordPlay {
+    Playing(PlayEngine),
+    Paused(PlayEngine),
+    Stopped,
+}
+
 /// What the transport bar's controls asked for this frame.
 enum VideoAct {
     TogglePause,
@@ -1138,7 +1208,17 @@ enum VideoAct {
 ///
 /// `scrub` is the in-flight drag fraction, borrowed mutably so the drag can own
 /// the playhead until it's released.
-fn video_transport_ui(ui: &mut egui::Ui, scrub: &mut Option<f32>) -> Option<VideoAct> {
+///
+/// `content_w` is the sheet's content width, passed in rather than measured.
+/// The bar must never ask `ui.available_width()` for it: this lives in an
+/// auto-sizing [`egui::Window`], where the window grows to fit its content, so
+/// a scrubber that claims whatever is available makes this frame's width next
+/// frame's demand and the window walks itself out to the screen edge.
+fn video_transport_ui(
+    ui: &mut egui::Ui,
+    content_w: f32,
+    scrub: &mut Option<f32>,
+) -> Option<VideoAct> {
     const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
     let t = webview::transport();
     let mut act = None;
@@ -1213,9 +1293,12 @@ fn video_transport_ui(ui: &mut egui::Ui, scrub: &mut Option<f32>) -> Option<Vide
                     ),
                 );
 
-                // Scrubber, filling what's left after the trailing clock and the
-                // stop button.
-                let track_w = (ui.available_width() - 84.0).max(60.0);
+                // Scrubber: the sheet's width less everything beside it — the
+                // frame's margins, the play button, both clocks, the close, and
+                // the gaps between them. Derived from `content_w`, never from
+                // the space left in the row (see the note on this function).
+                const BESIDE: f32 = 210.0;
+                let track_w = (content_w - BESIDE).max(60.0);
                 let (rect, resp) = ui
                     .allocate_exact_size(egui::vec2(track_w, 26.0), egui::Sense::click_and_drag());
                 let y = rect.center().y;
