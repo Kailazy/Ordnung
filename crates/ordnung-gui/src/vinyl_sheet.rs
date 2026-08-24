@@ -1016,6 +1016,34 @@ impl App {
                                 busy,
                             )) = &branch
                             {
+                                // Set apart from the four buttons before them:
+                                // those record what you already decided, these
+                                // are how you keep moving. A separator breaks
+                                // the run, and the accent fill makes the
+                                // forward action the one thing in the row that
+                                // reads as a place to press.
+                                ui.add_space(crate::ui::tokens::space::S2);
+                                ui.separator();
+                                ui.add_space(crate::ui::tokens::space::S2);
+                                // A disabled button keeps whatever fill it was
+                                // given, so an accent one still looks pressable
+                                // while the ids resolve. Drop to the muted
+                                // surface when it can't be clicked, so the
+                                // colour only ever means "this works now".
+                                let dig_fill = |on: bool| {
+                                    if on {
+                                        crate::ui::tokens::color::ACCENT
+                                    } else {
+                                        crate::ui::tokens::color::SURFACE_HI
+                                    }
+                                };
+                                let dig_text = |on: bool| {
+                                    if on {
+                                        egui::Color32::WHITE
+                                    } else {
+                                        crate::ui::tokens::color::LABEL_4
+                                    }
+                                };
                                 let artist_tip = if *has_artist_id {
                                     format!(
                                         "Find another vinyl release by {head_artist} that you \
@@ -1029,7 +1057,11 @@ impl App {
                                 if ui
                                     .add_enabled(
                                         *has_artist_id && !busy,
-                                        egui::Button::new("♪  Dig the artist"),
+                                        egui::Button::new(
+                                            egui::RichText::new("♪  Dig the artist")
+                                                .color(dig_text(*has_artist_id && !busy)),
+                                        )
+                                        .fill(dig_fill(*has_artist_id && !busy)),
                                     )
                                     .on_hover_note(artist_tip.clone())
                                     .on_disabled_hover_text(crate::ui::hover::note(artist_tip))
@@ -1049,7 +1081,11 @@ impl App {
                                 if ui
                                     .add_enabled(
                                         *has_label_id && !busy,
-                                        egui::Button::new("⌂  Dig the label"),
+                                        egui::Button::new(
+                                            egui::RichText::new("⌂  Dig the label")
+                                                .color(dig_text(*has_label_id && !busy)),
+                                        )
+                                        .fill(dig_fill(*has_label_id && !busy)),
                                     )
                                     .on_hover_note(label_tip.clone())
                                     .on_disabled_hover_text(crate::ui::hover::note(label_tip))
