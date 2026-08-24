@@ -14,6 +14,11 @@ impl App {
         // matches the Ordnung visual language (see `ui::theme`). DejaVu Sans stays
         // in the fallback chain for the wide-Unicode glyphs Inter lacks.
         crate::ui::theme::install(&egui_ctx);
+        // Dig cover downloads: many small CDN fetches, each answering on this
+        // one channel (the dig is a single path, so there's no per-request
+        // routing to do).
+        let (dig_cover_tx, dig_cover_rx) = mpsc::channel();
+        let (dig_prime_tx, dig_prime_rx) = mpsc::channel();
         // Clone the context before it's moved into the audio engine below, so we
         // can hand it to the startup background refresh once the app is built.
         let startup_ctx = egui_ctx.clone();
@@ -81,6 +86,18 @@ impl App {
             confirm_vinyl_edit: None,
             vinyl_sheet: None,
             sheet_rx: None,
+            sheet_price_rx: None,
+            egui_ctx: egui_ctx.clone(),
+            dig: None,
+            dig_seed: 0x853C_49E6_748F_EA9B,
+            dig_rx: None,
+            dig_prime_tx,
+            dig_prime_rx,
+            dig_ids_rx: None,
+            dig_covers: HashMap::new(),
+            dig_cover_tx,
+            dig_cover_rx,
+            dig_start_keys: HashMap::new(),
             scroll_to_track: None,
             row_screen_rects: Vec::new(),
             cover_drop: None,
@@ -676,6 +693,11 @@ impl eframe::App for App {
         self.poll_artwork_save();
         self.poll_metadata_preview();
         self.poll_vinyl_sheet();
+        self.poll_sheet_price();
+        self.poll_dig();
+        self.poll_dig_primed();
+        self.poll_dig_ids();
+        self.poll_dig_covers(ctx);
         self.drive_video_player();
 
         // Fade an idle status message out of the bottom-left bar after a short

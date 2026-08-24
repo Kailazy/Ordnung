@@ -11,6 +11,7 @@ mod app;
 mod audio;
 mod config;
 mod covers;
+mod dig;
 mod inspector;
 mod jobs;
 mod macos_drag;
@@ -52,6 +53,7 @@ use std::thread;
 use std::time::Duration;
 use table::*;
 use ui::hover::HoverNoteExt;
+use dig::DigPath;
 use vinyl_sheet::{SheetFetched, VinylSheet};
 use util::*;
 
@@ -621,6 +623,11 @@ pub(crate) enum VinylEdit {
         from: VinylList,
         record: Box<VinylRecord>,
     },
+    /// Own one release, named by id rather than from a cached row — the record
+    /// sheet's "Add to collection", which can be open on a record the user
+    /// doesn't have yet (a dug one). Mirrors [`VinylEdit::Want`]: Discogs's
+    /// response supplies the metadata to cache.
+    Collect { release_id: u64, label: String },
     /// Drop one cached record from its list entirely.
     Remove {
         list: VinylList,
@@ -646,6 +653,7 @@ impl VinylEdit {
             }
         )
     }
+
 }
 
 /// Result of a background "what would this release fill in?" lookup, computed for
@@ -828,6 +836,53 @@ struct App {
     /// sheet. One release per lookup, off the UI thread; results for a record
     /// the user has since closed are dropped.
     sheet_rx: Option<Receiver<SheetFetched>>,
+    /// Receives the open sheet's marketplace price lookup, as
+    /// `(release_id, result)` so a reply for a record the user has since closed
+    /// is dropped rather than shown against the wrong record.
+    #[allow(clippy::type_complexity)]
+    sheet_price_rx: Option<
+        Receiver<(
+            u64,
+            ordnung_core::Result<(
+                Option<discogs::MarketPrice>,
+                Option<(discogs::MasterVersion, discogs::MarketPrice)>,
+            )>,
+        )>,
+    >,
+    /// A clone of the egui context, so background work started from a place
+    /// that isn't handed one (the dig's browse and cover fetches) can still ask
+    /// for a repaint when it lands.
+    egui_ctx: egui::Context,
+    /// The dig in progress above the vinyl grid — the path of records walked by
+    /// following artist and label threads, and where along it the user is.
+    /// `None` when no dig is running, which is the view's normal state. See
+    /// [`dig`].
+    dig: Option<DigPath>,
+    /// Rolling seed for the dig's random pick. Advanced every frame the strip
+    /// draws, so taking the same branch twice from one record lands somewhere
+    /// else rather than repeating.
+    dig_seed: u64,
+    /// Receives a dug release's Discogs artist and label ids, which are what its
+    /// own two branches browse by. `(release_id, (artist_ids, label_ids))`.
+    dig_ids_rx: Option<Receiver<(u64, (Vec<u64>, Vec<u64>, Option<String>))>>,
+    /// Receives the finished Discogs browse for the step being dug.
+    dig_rx: Option<Receiver<dig::DigFetched>>,
+    /// Receives speculative browses for the two threads out of the record on
+    /// screen, fetched ahead of the click that takes one. A persistent channel
+    /// rather than a one-shot `Option<Receiver>`: one prefetch worker delivers
+    /// two results, and a result for a record the user has already left still
+    /// has to be received so it can be dropped. See [`dig`].
+    dig_prime_tx: Sender<dig::DigPrimed>,
+    dig_prime_rx: Receiver<dig::DigPrimed>,
+    /// Covers for dug records, keyed by thumbnail URL rather than by list +
+    /// instance id: these records aren't in either list, so they have no local
+    /// cache entry to key against.
+    dig_covers: HashMap<String, ThumbState>,
+    dig_cover_tx: Sender<(String, Option<egui::ColorImage>)>,
+    dig_cover_rx: Receiver<(String, Option<egui::ColorImage>)>,
+    /// Cover-cache keys for the records digs were started from, so the strip can
+    /// draw the one step that *is* in a list from the local cache.
+    dig_start_keys: HashMap<u64, VinylCoverKey>,
     /// A track the table should scroll to and reveal on the next frame, set when
     /// jumping into the catalog from the vinyl grid. Cleared once honoured.
     scroll_to_track: Option<Id>,
