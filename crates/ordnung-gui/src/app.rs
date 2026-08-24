@@ -942,9 +942,9 @@ impl eframe::App for App {
                             .map(|x| x.id)
                             .collect()
                     };
-                    // Analysis cluster: the common "Analyze" stays one click; its
-                    // less-frequent siblings (force re-analyze, Discogs metadata)
-                    // tuck into an adjacent ▾ menu so the toolbar stays lean.
+                    // Analysis: one button. Force re-analyze and bulk Discogs
+                    // fetches were dropped — per-track "Edit release…" covers the
+                    // metadata case, and re-analysis is rarely wanted in bulk.
                     let analyze_label = if sel_ids.is_empty() {
                         "⚡ Analyze".to_string()
                     } else {
@@ -964,39 +964,6 @@ impl eframe::App for App {
                             self.spawn_analyze_ids(ctx.clone(), sel_ids.clone(), false);
                         }
                     }
-                    let more = ui.menu_button("▾", |ui| {
-                        let reanalyze_label = if sel_ids.is_empty() {
-                            "Re-analyze (force)".to_string()
-                        } else {
-                            format!("Re-analyze {} selected (force)", sel_ids.len())
-                        };
-                        if ui
-                            .button(reanalyze_label)
-                            .on_hover_note("Re-analyze, including tracks already analyzed")
-                            .clicked()
-                        {
-                            if sel_ids.is_empty() {
-                                self.spawn_analyze(ctx.clone(), true);
-                            } else {
-                                self.spawn_analyze_ids(ctx.clone(), sel_ids.clone(), true);
-                            }
-                            ui.close_menu();
-                        }
-                        if ui
-                            .button("Fetch song data…")
-                            .on_hover_note(
-                                "Pick a Discogs release to cache the cover and fill \
-                                 empty fields. Never overwrites tags or files. Needs \
-                                 a Discogs token (see Settings).",
-                            )
-                            .clicked()
-                        {
-                            self.spawn_fetch_artwork(ctx.clone(), true);
-                            ui.close_menu();
-                        }
-                    });
-                    more.response
-                        .on_hover_note("More analysis & metadata actions");
                     // Batch convert: enabled whenever tracks are selected. Opens a
                     // dialog to pick one target format for all of them.
                     if !self.selection.is_empty() && !usb_view {
