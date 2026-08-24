@@ -80,6 +80,13 @@ pub(crate) struct DigPath {
     /// Release ids already visited on this dig, so a step never lands back on
     /// something earlier in the path.
     pub seen: HashSet<u64>,
+    /// The *records* already visited, folded to artist + title (see
+    /// [`work_key`]). A Discogs release id identifies one pressing, not one
+    /// record, so `seen` alone lets the original, the repress and the German
+    /// pressing of a record all land on the same path as if they were three
+    /// finds. Digging is about hearing something new, so a record counts once
+    /// however many times it was pressed.
+    pub works: HashSet<String>,
     /// The thread currently being fetched, if a step is in flight.
     pub pending: Option<DigThread>,
     /// Why the last step couldn't move, shown in place of the buttons.
@@ -207,6 +214,134 @@ fn strip_disambiguator(s: &str) -> &str {
     }
 }
 
+/// Edition words that name a *pressing* rather than a record. A repress of a
+/// record is the same music, so these are dropped before two titles are
+/// compared — otherwise `Jackintosh EP` and `Jackintosh EP (Repress)` read as
+/// two different finds.
+const EDITION_WORDS: &[&str] = &[
+    "repress",
+    "reissue",
+    "remaster",
+    "remastered",
+    "reedition",
+    "re-edition",
+    "reprint",
+    "represse",
+    "limited",
+    "edition",
+    "promo",
+    "sampler",
+    "white label",
+    "test pressing",
+];
+
+/// Fold an artist and title down to the *record* they name, so two pressings of
+/// one release collapse onto a single key.
+///
+/// Discogs gives every pressing its own release id, and a dig that dedups on
+/// the id alone will happily walk `Jackintosh EP` → `Jackintosh Ep` → the 2015
+/// repress and call each one a new record. What varies between pressings is
+/// case, punctuation, bracketed edition notes and the `EP`/`LP` suffix; what
+/// stays is the artist and the words of the title. Fold away the former.
+///
+/// Deliberately not applied to the *artist* ids — `strip_disambiguator` handles
+/// display, and two genuinely different artists with the same release title
+/// (covers, split names) still fold apart because the artist is in the key.
+fn work_key(artist: &str, title: &str) -> String {
+    fn fold(s: &str) -> String {
+        let lower = s.to_lowercase();
+        // Drop bracketed asides wholesale: they're where Discogs parks the
+        // catalogue number, the edition and the disambiguator.
+        let mut out = String::with_capacity(lower.len());
+        let mut depth = 0i32;
+        for c in lower.chars() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth = (depth - 1).max(0),
+                _ if depth == 0 => out.push(c),
+                _ => {}
+            }
+        }
+        // Collapse intra-word punctuation before splitting, so `E.P.` reads as
+        // the one word `ep` rather than the two letters `e` and `p` — the
+        // dotted spelling is a pressing's typography, not a different record.
+        let out: String = out
+            .chars()
+            .map(|c| if matches!(c, '.' | '\'' | '\u{2019}') { '\0' } else { c })
+            .filter(|c| *c != '\0')
+            .collect();
+        // Then keep only the alphanumeric words, minus the ones that describe a
+        // pressing rather than a record.
+        out.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .filter(|w| !EDITION_WORDS.contains(w))
+            // `EP`/`LP`/`12` are format noise appended inconsistently across
+            // pressings of one record; the rest of the title still identifies it.
+            .filter(|w| !matches!(*w, "ep" | "lp" | "12" | "10" | "7" | "vol"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+    let (a, t) = (fold(artist), fold(title));
+    // A title that folds to nothing (a self-titled `EP`, a numbered white
+    // label) would collapse every such record onto one key and wall the dig off
+    // from all of them. Fall back to the unfolded title, which at least keeps
+    // distinct records distinct.
+    let t = if t.is_empty() {
+        title.trim().to_lowercase()
+    } else {
+        t
+    };
+    format!("{a}\u{1}{t}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pressings of one record must fold together; different records must not.
+    #[test]
+    fn work_key_folds_pressings_not_records() {
+        let same = |a: &str, t: &str, b: &str, u: &str| {
+            assert_eq!(work_key(a, t), work_key(b, u), "{t:?} vs {u:?}");
+        };
+        let differ = |a: &str, t: &str, b: &str, u: &str| {
+            assert_ne!(work_key(a, t), work_key(b, u), "{t:?} vs {u:?}");
+        };
+        // The case from the screenshot: one record, two Discogs releases.
+        same("XDB", "Jackintosh EP", "XDB", "Jackintosh Ep");
+        // Edition notes name a pressing, not a record.
+        same("XDB", "Jackintosh EP", "XDB", "Jackintosh EP (Repress)");
+        same("XDB", "Jackintosh EP", "XDB", "Jackintosh [2015 Reissue]");
+        same("XDB", "Jackintosh EP", "XDB", "Jackintosh  LP");
+        // Punctuation and spacing vary between pressings.
+        same("XDB", "Cagomi E.P.", "XDB", "Cagomi EP");
+        // But two actual records by one artist stay apart.
+        differ("XDB", "Jackintosh EP", "XDB", "Cagomi EP");
+        // And one title by two artists stays apart.
+        differ("XDB", "Descap", "Losoul", "Descap");
+    }
+
+    /// A title made only of folded-away words must not collapse every such
+    /// record onto one key — that would wall the dig off from all of them.
+    #[test]
+    fn work_key_keeps_degenerate_titles_apart() {
+        assert_ne!(work_key("XDB", "EP"), work_key("XDB", "LP"));
+        assert_ne!(work_key("XDB", "Vol. 1"), work_key("XDB", "Vol. 2"));
+    }
+}
+
+/// The artist and title of a browse row, however this endpoint chose to pack
+/// them. The label endpoint puts `Artist - Title` in `title`; the artist
+/// endpoint splits them already. Same rule the pick itself uses, factored out
+/// so the dedup folds exactly what the step will end up displaying.
+fn row_artist_title(r: &BrowseRelease) -> (String, String) {
+    if r.artist.trim().is_empty() {
+        split_title(&r.title)
+    } else {
+        (r.artist.clone(), r.title.clone())
+    }
+}
+
 /// Split the `Artist - Title` string Discogs search returns. Titles legitimately
 /// contain " - " (`Artist - A - B`), so only the *first* separator splits, which
 /// is the one Discogs itself inserted.
@@ -284,6 +419,8 @@ impl App {
         };
         let mut seen = HashSet::new();
         seen.insert(record.release_id);
+        let mut works = HashSet::new();
+        works.insert(work_key(&record.artist, &record.title));
         self.dig = Some(DigPath {
             steps: vec![DigStep {
                 release_id: record.release_id,
@@ -302,6 +439,7 @@ impl App {
             }],
             at: 0,
             seen,
+            works,
             pending: None,
             error: None,
             pages: HashMap::new(),
@@ -460,6 +598,7 @@ impl App {
         // already guaranteed the right artist/label, so what's left is what a
         // *record* dig wants — vinyl, and no repeats.
         let mut picked_ids = HashSet::new();
+        let mut picked_works = HashSet::new();
         let candidates: Vec<&BrowseRelease> = page
             .releases
             .iter()
@@ -470,6 +609,15 @@ impl App {
                 }
                 // Discogs lists some pressings twice on the same page.
                 if !picked_ids.insert(id) {
+                    return false;
+                }
+                // And lists the same *record* many times over as separate
+                // pressings — the original, the repress, each country's
+                // edition. All one find, so the first one on the page stands
+                // and the rest are dropped, here and against the path so far.
+                let (a, t) = row_artist_title(r);
+                let work = work_key(&a, &t);
+                if dig.works.contains(&work) || !picked_works.insert(work) {
                     return false;
                 }
                 // A row with no format of its own (every "master" entry) is
@@ -501,13 +649,7 @@ impl App {
         }
         let pick = fresh[dig_roll_with(roll, fresh.len())];
         let release_id = pick.release_id;
-        // The label endpoint puts "Artist - Title" in `title`; the artist
-        // endpoint splits them already. Prefer the split field when it's there.
-        let (artist, title) = if pick.artist.trim().is_empty() {
-            split_title(&pick.title)
-        } else {
-            (pick.artist.clone(), pick.title.clone())
-        };
+        let (artist, title) = row_artist_title(pick);
         let sub = [
             pick.year.filter(|y| *y > 0).map(|y| y.to_string()),
             (!pick.format.trim().is_empty()).then(|| pick.format.clone()),
@@ -548,6 +690,7 @@ impl App {
         // Choosing from here makes this the new future.
         dig.steps.truncate(dig.at + 1);
         dig.seen.insert(release_id);
+        dig.works.insert(work_key(&step.artist, &step.title));
         dig.steps.push(step);
         dig.at = dig.steps.len() - 1;
         // The new step can't be dug from until we know its artist/label ids.
