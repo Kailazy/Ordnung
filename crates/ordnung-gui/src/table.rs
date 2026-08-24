@@ -33,6 +33,12 @@ impl App {
     pub(crate) fn set_primary(&mut self, id: Option<Id>) {
         if self.selected != id {
             self.selected = id;
+            // A new track starts in read-only mode: edit mode is a deliberate
+            // per-track action, and leaving it latched would show the next
+            // track's tags as an open form. Reset here rather than in
+            // `refresh_selected`, which also runs after a save — where staying
+            // in the form is the right behaviour.
+            self.tags_editing = false;
             self.refresh_selected();
         }
     }

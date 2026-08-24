@@ -210,55 +210,107 @@ impl App {
         // the form outside it, a tall inspector clipped the form instead of
         // scrolling the column as a whole.
         egui::ScrollArea::vertical().show(ui, |ui| {
-            inspector_section(ui, "Edit tags", |ui| {
-                egui::Grid::new("tag-edit-grid")
-                    .num_columns(2)
-                    .spacing(egui::vec2(8.0, 4.0))
-                    .show(ui, |ui| {
-                        edit_row(ui, "Title", &mut self.tag_edit.title);
-                        edit_row(ui, "Artist", &mut self.tag_edit.artist);
-                        edit_row(ui, "Album artist", &mut self.tag_edit.album_artist);
-                        edit_row(ui, "Album", &mut self.tag_edit.album);
-                        edit_row(ui, "Genre", &mut self.tag_edit.genre);
-                        edit_row(ui, "Label", &mut self.tag_edit.label);
-                        edit_row(ui, "Year", &mut self.tag_edit.year);
-                        edit_row_multiline(ui, "Notes", &mut self.tag_edit.comment);
-                    });
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.add_enabled_ui(dirty && !busy, |ui| {
-                        if ui
-                            .add(egui::Button::new("Save").min_size(egui::vec2(72.0, 24.0)))
-                            .on_hover_note(
-                                "Save to the catalog only. The source file is untouched.",
-                            )
-                            .clicked()
-                        {
-                            action = Some(InspectorAction::SaveToCatalog(id));
-                        }
-                        if ui
-                            .add(
-                                egui::Button::new("⬇ Write to source file")
-                                    .min_size(egui::vec2(0.0, 24.0)),
-                            )
-                            .on_hover_note(
-                                "Save to the catalog and write the tags into the source file",
-                            )
-                            .clicked()
-                        {
-                            action = Some(InspectorAction::WriteToFile(id, source_path.clone()));
-                        }
-                    });
-                    if dirty {
-                        ui.label(
-                            egui::RichText::new("● unsaved")
-                                .small()
-                                .color(egui::Color32::from_rgb(220, 190, 90)),
-                        );
+            // Edit mode is off by default: the same fields render as plain
+            // rows, so the panel reads as a summary rather than eight text
+            // boxes. `editing` is copied out because the closures below borrow
+            // `self.tag_edit` mutably.
+            let editing = self.tags_editing;
+            let mut toggle_editing = false;
+            inspector_section_with_action(
+                ui,
+                "Tags",
+                |ui| {
+                    // Leaving edit mode with unsaved changes would silently drop
+                    // them, so the toggle says so rather than looking like a
+                    // plain view switch.
+                    let label = if editing { "Done" } else { "✏ Edit" };
+                    let btn = ui.small_button(label);
+                    let btn = if editing && dirty {
+                        btn.on_hover_note("Unsaved edits stay in the form until you save")
+                    } else {
+                        btn.on_hover_note("Edit the catalog tags for this track")
+                    };
+                    if btn.clicked() {
+                        toggle_editing = true;
                     }
-                });
-            });
+                },
+                |ui| {
+                    if editing {
+                        egui::Grid::new("tag-edit-grid")
+                            .num_columns(2)
+                            .spacing(egui::vec2(8.0, 4.0))
+                            .show(ui, |ui| {
+                                edit_row(ui, "Title", &mut self.tag_edit.title);
+                                edit_row(ui, "Artist", &mut self.tag_edit.artist);
+                                edit_row(ui, "Album artist", &mut self.tag_edit.album_artist);
+                                edit_row(ui, "Album", &mut self.tag_edit.album);
+                                edit_row(ui, "Genre", &mut self.tag_edit.genre);
+                                edit_row(ui, "Label", &mut self.tag_edit.label);
+                                edit_row(ui, "Year", &mut self.tag_edit.year);
+                                edit_row_multiline(ui, "Notes", &mut self.tag_edit.comment);
+                            });
+
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.add_enabled_ui(dirty && !busy, |ui| {
+                                if ui
+                                    .add(egui::Button::new("Save").min_size(egui::vec2(72.0, 24.0)))
+                                    .on_hover_note(
+                                        "Save to the catalog only. The source file is untouched.",
+                                    )
+                                    .clicked()
+                                {
+                                    action = Some(InspectorAction::SaveToCatalog(id));
+                                }
+                                if ui
+                                    .add(
+                                        egui::Button::new("⬇ Write to source file")
+                                            .min_size(egui::vec2(0.0, 24.0)),
+                                    )
+                                    .on_hover_note(
+                                        "Save to the catalog and write the tags into the source file",
+                                    )
+                                    .clicked()
+                                {
+                                    action =
+                                        Some(InspectorAction::WriteToFile(id, source_path.clone()));
+                                }
+                            });
+                            if dirty {
+                                ui.label(
+                                    egui::RichText::new("● unsaved")
+                                        .small()
+                                        .color(egui::Color32::from_rgb(220, 190, 90)),
+                                );
+                            }
+                        });
+                    } else {
+                        // Read-only view of the same buffers, so unsaved edits
+                        // stay visible after toggling out of edit mode. Empty
+                        // fields are dimmed placeholders rather than hidden:
+                        // this block is also the "what's missing" checklist.
+                        tag_view_row(ui, "Title", &self.tag_edit.title);
+                        tag_view_row(ui, "Artist", &self.tag_edit.artist);
+                        tag_view_row(ui, "Album artist", &self.tag_edit.album_artist);
+                        tag_view_row(ui, "Album", &self.tag_edit.album);
+                        tag_view_row(ui, "Genre", &self.tag_edit.genre);
+                        tag_view_row(ui, "Label", &self.tag_edit.label);
+                        tag_view_row(ui, "Year", &self.tag_edit.year);
+                        tag_view_row(ui, "Notes", &self.tag_edit.comment);
+                        if dirty {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("● unsaved edits — reopen Edit to save")
+                                    .small()
+                                    .color(egui::Color32::from_rgb(220, 190, 90)),
+                            );
+                        }
+                    }
+                },
+            );
+            if toggle_editing {
+                self.tags_editing = !self.tags_editing;
+            }
 
             // --- Audio (technical) ---------------------------------------
             inspector_section(ui, "Audio", |ui| {
@@ -650,21 +702,67 @@ pub(crate) fn inspector_section(
     ui.add_space(12.0);
     ui.label(egui::RichText::new(title.to_uppercase()).strong().small());
     ui.add_space(3.0);
-    let rule = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(rule, 1.0), egui::Sense::hover());
+    section_rule(ui);
+    ui.add_space(5.0);
+    add_body(ui);
+}
+
+/// Like [`inspector_section`] but with a trailing control on the caption row
+/// (e.g. the tag block's Edit toggle), right-aligned against the rule below.
+pub(crate) fn inspector_section_with_action(
+    ui: &mut egui::Ui,
+    title: &str,
+    add_action: impl FnOnce(&mut egui::Ui),
+    add_body: impl FnOnce(&mut egui::Ui),
+) {
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title.to_uppercase()).strong().small());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add_action);
+    });
+    ui.add_space(3.0);
+    section_rule(ui);
+    ui.add_space(5.0);
+    add_body(ui);
+}
+
+/// The hairline under a section caption.
+fn section_rule(ui: &mut egui::Ui) {
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), egui::Sense::hover());
     ui.painter().rect_filled(
         rect,
         0.0,
         ui.visuals().weak_text_color().gamma_multiply(0.3),
     );
-    ui.add_space(5.0);
-    add_body(ui);
+}
+
+/// A tag field shown read-only (edit mode off). Unlike [`opt_row`] an empty
+/// value still renders, as a dimmed em dash: the tag block doubles as the
+/// "what is still missing on this track" list, so a blank must stay visible.
+pub(crate) fn tag_view_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    let v = value.trim();
+    if v.is_empty() {
+        inspector_row_dim(ui, label, "—");
+    } else {
+        inspector_row(ui, label, v);
+    }
 }
 
 /// One read-only label/value line. The label sits in a fixed-width column so
 /// values align vertically down a section rather than starting at a different
 /// x for every row.
 pub(crate) fn inspector_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    row_impl(ui, label, value, None);
+}
+
+/// [`inspector_row`] with the value dimmed — used for "not set" placeholders.
+pub(crate) fn inspector_row_dim(ui: &mut egui::Ui, label: &str, value: &str) {
+    let c = ui.visuals().weak_text_color();
+    row_impl(ui, label, value, Some(c));
+}
+
+fn row_impl(ui: &mut egui::Ui, label: &str, value: &str, value_color: Option<egui::Color32>) {
     const LABEL_W: f32 = 108.0;
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(
@@ -678,7 +776,11 @@ pub(crate) fn inspector_row(ui: &mut egui::Ui, label: &str, value: &str) {
             egui::FontId::proportional(11.0),
             ui.visuals().weak_text_color(),
         );
-        ui.label(egui::RichText::new(value).size(12.5));
+        let mut txt = egui::RichText::new(value).size(12.5);
+        if let Some(c) = value_color {
+            txt = txt.color(c);
+        }
+        ui.label(txt);
     });
 }
 

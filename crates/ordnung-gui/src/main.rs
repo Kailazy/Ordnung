@@ -892,6 +892,10 @@ struct App {
     /// An image dropped onto a track row, awaiting confirmation to set it as that
     /// track's cover. `Some` shows the cover-drop modal. See [`CoverDrop`].
     cover_drop: Option<CoverDrop>,
+    /// Whether the inspector's tag block is in edit mode. Off by default: the
+    /// fields render as plain read-only rows, so the panel reads as a summary
+    /// instead of a wall of text boxes. The "Edit" toggle turns them into inputs.
+    tags_editing: bool,
     /// Set while a cancellable job (scan / artwork fetch) is running; the worker
     /// polls it and stops early. `None` when idle or running a non-cancellable job.
     job_cancel: Option<Arc<AtomicBool>>,

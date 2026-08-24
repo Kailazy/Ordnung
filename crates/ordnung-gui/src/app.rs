@@ -101,6 +101,7 @@ impl App {
             scroll_to_track: None,
             row_screen_rects: Vec::new(),
             cover_drop: None,
+            tags_editing: false,
             job_cancel: None,
             artwork_queue: VecDeque::new(),
             artwork_enrich: false,
