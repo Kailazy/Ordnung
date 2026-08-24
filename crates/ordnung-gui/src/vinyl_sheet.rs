@@ -1048,6 +1048,9 @@ impl App {
             Some(VideoAct::TogglePause) => webview::toggle_pause(),
             Some(VideoAct::Seek(secs)) => webview::seek(secs),
             Some(VideoAct::Stop) => self.stop_sheet_video(),
+            Some(VideoAct::ToggleVideo) => {
+                webview::set_video_visible(!webview::video_visible())
+            }
             None => {}
         }
 
@@ -1193,6 +1196,8 @@ enum VideoAct {
     TogglePause,
     Seek(f32),
     Stop,
+    /// Show the video panel, or park it off screen again.
+    ToggleVideo,
 }
 
 /// The record sheet's own transport for the video mini-player: a play/pause
@@ -1297,7 +1302,7 @@ fn video_transport_ui(
                 // frame's margins, the play button, both clocks, the close, and
                 // the gaps between them. Derived from `content_w`, never from
                 // the space left in the row (see the note on this function).
-                const BESIDE: f32 = 210.0;
+                const BESIDE: f32 = 236.0;
                 let track_w = (content_w - BESIDE).max(60.0);
                 let (rect, resp) = ui
                     .allocate_exact_size(egui::vec2(track_w, 26.0), egui::Sense::click_and_drag());
@@ -1359,6 +1364,22 @@ fn video_transport_ui(
                     .size(11.0)
                     .color(egui::Color32::from_gray(170)),
                 );
+
+                // The picture, for when the user wants it. The panel plays
+                // parked off screen otherwise, since this bar is the interface.
+                ui.add_space(4.0);
+                let showing = webview::video_visible();
+                if ui
+                    .small_button(if showing { "❏" } else { "▣" })
+                    .on_hover_note(if showing {
+                        "Hide the video window"
+                    } else {
+                        "Show the video window"
+                    })
+                    .clicked()
+                {
+                    act = Some(VideoAct::ToggleVideo);
+                }
 
                 ui.add_space(4.0);
                 if ui
