@@ -80,6 +80,11 @@ pub(crate) struct VinylSheet {
     /// That video's YouTube page, kept so a player error can hand it to a
     /// browser without re-deriving which row it came from.
     pub video_uri: Option<String>,
+    /// Fraction the transport scrubber is being dragged to, while a drag is in
+    /// flight. The bar paints this instead of the live position, so the
+    /// playhead follows the pointer and doesn't fight the poll answers still
+    /// arriving from the old spot. The seek fires on release.
+    pub video_scrub: Option<f32>,
     /// Set when the user hit play on the cover rather than opening the sheet:
     /// start the record as soon as there's a tracklist to start it from.
     pub pending_play: bool,
@@ -208,6 +213,7 @@ impl App {
             error: None,
             playing_video: None,
             video_uri: None,
+            video_scrub: None,
             pending_play: false,
             // A synced record already has a price on file; anything else asks
             // the marketplace when the sheet opens.
@@ -261,6 +267,7 @@ impl App {
             error: None,
             playing_video: None,
             video_uri: None,
+            video_scrub: None,
             pending_play: false,
             price: PriceState::Idle,
         });
@@ -555,6 +562,13 @@ impl App {
         if let Some(next) = webview::next_poll_in() {
             ctx.request_repaint_after(next);
         }
+        // The sheet's transport runs its playhead forward between polls, so
+        // while a video is rolling under an open sheet the bar wants every
+        // frame, not just the poll ticks — otherwise the scrubber steps four
+        // times a second instead of gliding.
+        if self.vinyl_sheet.is_some() && webview::transport().playing {
+            ctx.request_repaint();
+        }
         if self.vinyl_sheet.as_ref().is_none_or(|s| s.playing_video.is_none()) {
             return;
         }
@@ -575,6 +589,7 @@ impl App {
         if let Some(sheet) = self.vinyl_sheet.as_mut() {
             sheet.playing_video = None;
             sheet.video_uri = None;
+            sheet.video_scrub = None;
         }
     }
 
@@ -688,7 +703,6 @@ impl App {
         enum Act {
             Play(usize),
             PlayAll,
-            StopVideo,
             PlayExtra(usize),
             Goto,
             Dig,
@@ -699,6 +713,9 @@ impl App {
             WantAlternative(u64),
         }
         let mut act: Option<Act> = None;
+        // The transport bar's own action, kept apart from `act` so a scrub and
+        // a row click in the same frame don't shadow each other.
+        let mut video_act: Option<VideoAct> = None;
         let mut open = true;
 
         egui::Window::new(format!("{artist} — {title}"))
@@ -807,14 +824,6 @@ impl App {
                             {
                                 act = Some(Act::PlayAll);
                             }
-                            if video_open
-                                && ui
-                                    .button("■  Stop video")
-                                    .on_hover_note("Close the video player")
-                                    .clicked()
-                            {
-                                act = Some(Act::StopVideo);
-                            }
                             if ui
                                 .button("↗  Discogs")
                                 .on_hover_note("Open this release on discogs.com")
@@ -874,6 +883,22 @@ impl App {
                 });
                 ui.add_space(10.0);
                 ui.separator();
+
+                // The transport for whatever the mini-player is playing. Sits
+                // above the tracklist so it's in reach of the rows that feed it,
+                // and only while there's a panel to drive.
+                if video_open {
+                    ui.add_space(8.0);
+                    let mut scrub = self
+                        .vinyl_sheet
+                        .as_ref()
+                        .and_then(|s| s.video_scrub);
+                    video_act = video_transport_ui(ui, &mut scrub);
+                    if let Some(s) = self.vinyl_sheet.as_mut() {
+                        s.video_scrub = scrub;
+                    }
+                    ui.add_space(4.0);
+                }
 
                 if loading {
                     ui.add_space(10.0);
@@ -973,6 +998,15 @@ impl App {
                 });
             });
 
+        // The transport talks straight to the panel — nothing here touches the
+        // sheet's own state except the stop, which also clears the row marker.
+        match video_act {
+            Some(VideoAct::TogglePause) => webview::toggle_pause(),
+            Some(VideoAct::Seek(secs)) => webview::seek(secs),
+            Some(VideoAct::Stop) => self.stop_sheet_video(),
+            None => {}
+        }
+
         match act {
             // Starting a dig closes the sheet: the strip it drives sits behind
             // this window, and the first thing a digger does is look at it.
@@ -1026,7 +1060,6 @@ impl App {
             }
             Some(Act::Play(row)) => self.play_sheet_row(row, frame),
             Some(Act::PlayAll) => self.play_sheet_from_start(frame),
-            Some(Act::StopVideo) => self.stop_sheet_video(),
             Some(Act::PlayExtra(v)) => {
                 let (ids, title) = {
                     let s = self.vinyl_sheet.as_ref().unwrap();
@@ -1083,6 +1116,178 @@ impl App {
             self.vinyl_sheet = None;
         }
     }
+}
+
+/// What the transport bar's controls asked for this frame.
+enum VideoAct {
+    TogglePause,
+    Seek(f32),
+    Stop,
+}
+
+/// The record sheet's own transport for the video mini-player: a play/pause
+/// button, a wide draggable scrubber and the clock, drawn at egui's scale
+/// rather than YouTube's.
+///
+/// The panel's own controls are a few pixels tall inside a 480px window and
+/// vanish under the page's chrome styling, so scrubbing there is guesswork.
+/// Everything here drives the same `<video>` element through
+/// [`crate::webview::seek`] / [`crate::webview::toggle_pause`]; the position it
+/// paints comes back from the page on the next poll, so the bar always shows
+/// what the video is really doing.
+///
+/// `scrub` is the in-flight drag fraction, borrowed mutably so the drag can own
+/// the playhead until it's released.
+fn video_transport_ui(ui: &mut egui::Ui, scrub: &mut Option<f32>) -> Option<VideoAct> {
+    const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
+    let t = webview::transport();
+    let mut act = None;
+
+    egui::Frame::none()
+        .fill(ui.visuals().faint_bg_color)
+        .rounding(6.0)
+        .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // Play/pause. Sized so it stays a comfortable target next to the
+                // scrubber rather than a text-height button.
+                let (btn_rect, btn) =
+                    ui.allocate_exact_size(egui::vec2(30.0, 28.0), egui::Sense::click());
+                let col = if btn.hovered() {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::from_gray(190)
+                };
+                let c = btn_rect.center();
+                let p = ui.painter();
+                if t.playing {
+                    // Two bars.
+                    for dx in [-4.0f32, 3.0] {
+                        p.rect_filled(
+                            egui::Rect::from_min_size(
+                                egui::pos2(c.x + dx, c.y - 6.0),
+                                egui::vec2(3.0, 12.0),
+                            ),
+                            0.5,
+                            col,
+                        );
+                    }
+                } else {
+                    p.add(egui::Shape::convex_polygon(
+                        vec![
+                            egui::pos2(c.x - 4.0, c.y - 6.5),
+                            egui::pos2(c.x + 6.0, c.y),
+                            egui::pos2(c.x - 4.0, c.y + 6.5),
+                        ],
+                        col,
+                        egui::Stroke::NONE,
+                    ));
+                }
+                if btn.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let btn = btn.on_hover_note(if t.playing { "Pause" } else { "Play" });
+                if btn.clicked() {
+                    act = Some(VideoAct::TogglePause);
+                }
+                ui.add_space(6.0);
+
+                // The fraction the bar paints: the drag while one is in flight,
+                // the video's real position otherwise.
+                let live = if t.duration > 0.0 {
+                    (t.position / t.duration).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let shown = scrub.unwrap_or(live);
+
+                // Elapsed. Fixed width, so digits changing mid-scrub can't shift
+                // the scrubber that follows them (same reason as the player bar).
+                ui.add_sized(
+                    egui::vec2(42.0, 18.0),
+                    egui::Label::new(
+                        egui::RichText::new(fmt_time(shown * t.duration))
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_gray(170)),
+                    ),
+                );
+
+                // Scrubber, filling what's left after the trailing clock and the
+                // stop button.
+                let track_w = (ui.available_width() - 84.0).max(60.0);
+                let (rect, resp) = ui
+                    .allocate_exact_size(egui::vec2(track_w, 26.0), egui::Sense::click_and_drag());
+                let y = rect.center().y;
+                let (x0, x1) = (rect.left(), rect.right());
+                let knob_x = x0 + shown * (x1 - x0);
+                let p = ui.painter();
+                p.line_segment(
+                    [egui::pos2(x0, y), egui::pos2(x1, y)],
+                    egui::Stroke::new(4.0, egui::Color32::from_gray(70)),
+                );
+                p.line_segment(
+                    [egui::pos2(x0, y), egui::pos2(knob_x, y)],
+                    egui::Stroke::new(4.0, ACCENT),
+                );
+                let knob_r = if resp.hovered() || scrub.is_some() {
+                    6.5
+                } else {
+                    5.0
+                };
+                p.circle_filled(egui::pos2(knob_x, y), knob_r, egui::Color32::WHITE);
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+
+                // A live stream (or a page that hasn't reported a length) has
+                // nothing to seek within, so the bar stays a readout.
+                let seekable = t.duration > 0.0;
+                let frac_at = |pos: egui::Pos2| ((pos.x - x0) / (x1 - x0)).clamp(0.0, 1.0);
+                if seekable {
+                    if resp.dragged() || resp.drag_started() {
+                        if let Some(pos) = resp.interact_pointer_pos() {
+                            *scrub = Some(frac_at(pos));
+                        }
+                    }
+                    if resp.drag_stopped() {
+                        if let Some(f) = scrub.take() {
+                            act = Some(VideoAct::Seek(f * t.duration));
+                        }
+                    }
+                    if resp.clicked() {
+                        if let Some(pos) = resp.interact_pointer_pos() {
+                            act = Some(VideoAct::Seek(frac_at(pos) * t.duration));
+                        }
+                        *scrub = None;
+                    }
+                }
+
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(if t.ready && t.duration > 0.0 {
+                        fmt_time(t.duration)
+                    } else {
+                        // A page still finding its video, or a stream with no
+                        // end — neither has a total to show.
+                        "--:--".to_string()
+                    })
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(170)),
+                );
+
+                ui.add_space(4.0);
+                if ui
+                    .small_button("✕")
+                    .on_hover_note("Close the video player")
+                    .clicked()
+                {
+                    act = Some(VideoAct::Stop);
+                }
+            });
+        });
+    act
 }
 
 /// One tracklist row. Returns true when the user asked to play it.

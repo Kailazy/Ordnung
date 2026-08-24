@@ -84,6 +84,56 @@ pub fn next_poll_in() -> Option<std::time::Duration> {
     None
 }
 
+/// Where the mini-player's video has got to, as of the last [`poll`]. This is
+/// what lets the record sheet draw its own transport instead of leaving the
+/// user to hit YouTube's controls inside a 480px panel: the page is asked for
+/// its `<video>` position on every tick, and [`toggle_pause`] / [`seek`] push
+/// the other way.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Transport {
+    /// Seconds into the current video.
+    pub position: f32,
+    /// Total length in seconds, or 0 while the page hasn't reported one — a
+    /// live stream, or a video whose metadata hasn't loaded yet.
+    pub duration: f32,
+    /// True when the video element exists and isn't paused.
+    pub playing: bool,
+    /// True once a video element has been found at all. Until then the sheet
+    /// shows the bar in its loading state rather than a bogus 0:00 / 0:00.
+    pub ready: bool,
+}
+
+/// The mini-player's playback position, for drawing a scrubber.
+#[cfg(target_os = "macos")]
+pub fn transport() -> Transport {
+    imp::transport()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn transport() -> Transport {
+    Transport::default()
+}
+
+/// Play or pause the loaded video, whichever it isn't doing now. The state the
+/// sheet's button paints comes from the next [`poll`], not from here — the page
+/// is the only authority on whether the video actually moved.
+#[cfg(target_os = "macos")]
+pub fn toggle_pause() {
+    imp::toggle_pause();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn toggle_pause() {}
+
+/// Jump the loaded video to `secs`.
+#[cfg(target_os = "macos")]
+pub fn seek(secs: f32) {
+    imp::seek(secs);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn seek(_secs: f32) {}
+
 /// What the mini-player is doing, as of the last [`poll`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlayerStatus {
@@ -126,7 +176,7 @@ mod imp {
     };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    use super::PlayerStatus;
+    use super::{PlayerStatus, Transport};
 
     /// Content size of the panel: 16:9, since the page's own chrome is styled
     /// away and only the player is left (see `ISOLATION_CSS`).
@@ -140,6 +190,12 @@ mod imp {
     /// drives queue advance and the stuck fallback, neither of which needs to be
     /// tighter than this.
     const POLL_EVERY: Duration = Duration::from_millis(900);
+    /// How often it's asked while a video is actually rolling. The sheet draws a
+    /// scrubber from these answers, so the cadence is the readout's frame rate:
+    /// at 900ms the elapsed time visibly stepped, and the playhead crawled in
+    /// jumps. Between ticks the position is extrapolated (see [`transport`]), so
+    /// this only has to be tight enough to keep that estimate honest.
+    const POLL_EVERY_PLAYING: Duration = Duration::from_millis(250);
     /// How often it's asked while a freshly loaded page hasn't produced a video
     /// yet. Much tighter, because this is the window the user is *watching* —
     /// every tick re-applies the styling to whatever DOM now exists, so the page
@@ -169,6 +225,8 @@ mod imp {
             let settling = self.state.is_empty() || self.state == "novideo";
             if settling && self.loaded_at.elapsed() < SETTLING_FOR {
                 POLL_EVERY_SETTLING
+            } else if self.state == "playing" {
+                POLL_EVERY_PLAYING
             } else {
                 POLL_EVERY
             }
@@ -184,6 +242,12 @@ mod imp {
         title: String,
         /// What the page last said (`playing`, `paused`, `ended`, `novideo`).
         state: String,
+        /// Position and length the page last reported, and when it did. The
+        /// timestamp is what lets [`transport`] run the playhead forward
+        /// between polls instead of stepping it once per tick.
+        position: f32,
+        duration: f32,
+        reported_at: Instant,
         /// When the current video was loaded, for the stuck check.
         loaded_at: Instant,
         /// When the page was last asked.
@@ -232,6 +296,8 @@ mod imp {
             if let Some(mini) = slot.borrow_mut().as_mut() {
                 mini.queue.clear();
                 mini.state.clear();
+                mini.position = 0.0;
+                mini.duration = 0.0;
                 // Navigating away is what actually stops the audio — ordering the
                 // window out on its own leaves the video playing behind it.
                 blank(&mini.web);
@@ -271,6 +337,86 @@ mod imp {
                 _ => PlayerStatus::Unknown,
             }
         })
+    }
+
+    pub fn transport() -> Transport {
+        if MainThreadMarker::new().is_none() {
+            return Transport::default();
+        }
+        PANEL.with(|slot| {
+            let slot = slot.borrow();
+            let Some(mini) = slot.as_ref() else {
+                return Transport::default();
+            };
+            if !mini.panel.isVisible() {
+                return Transport::default();
+            }
+            let playing = mini.state == "playing";
+            // Run the clock forward from the last answer while the video rolls,
+            // so the playhead moves every frame rather than once per poll. The
+            // next answer corrects it, and the drift in between is bounded by
+            // the poll interval.
+            let position = if playing {
+                mini.position + mini.reported_at.elapsed().as_secs_f32()
+            } else {
+                mini.position
+            };
+            let duration = mini.duration;
+            Transport {
+                position: if duration > 0.0 {
+                    position.min(duration)
+                } else {
+                    position
+                },
+                duration,
+                playing,
+                ready: matches!(mini.state.as_str(), "playing" | "paused" | "ended"),
+            }
+        })
+    }
+
+    pub fn toggle_pause() {
+        // Assume the flip locally so the button responds on the click rather
+        // than at the next poll; the page's own answer overwrites it either way.
+        with_video("v.paused?v.play():v.pause()", |mini| {
+            mini.state = if mini.state == "playing" {
+                "paused".into()
+            } else {
+                "playing".into()
+            };
+            mini.reported_at = Instant::now();
+        });
+    }
+
+    pub fn seek(secs: f32) {
+        let secs = secs.max(0.0);
+        with_video(&format!("v.currentTime={secs}"), move |mini| {
+            // Same reason as the pause flip: the scrubber must land where it
+            // was dropped, not snap back until the page catches up.
+            mini.position = secs;
+            mini.reported_at = Instant::now();
+        });
+    }
+
+    /// Run `body` against the page's `<video>` (bound as `v`), and apply
+    /// `optimistic` to the local state so the UI reflects the command now.
+    fn with_video(body: &str, optimistic: impl FnOnce(&mut Mini)) {
+        if MainThreadMarker::new().is_none() {
+            return;
+        }
+        PANEL.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let Some(mini) = slot.as_mut() else { return };
+            if !mini.panel.isVisible() {
+                return;
+            }
+            let js = format!("(function(){{var v=document.querySelector('video');if(v){{{body}}}}})()");
+            unsafe {
+                mini.web
+                    .evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
+            }
+            optimistic(mini);
+        });
     }
 
     pub fn poll() {
@@ -394,6 +540,9 @@ mod imp {
             queue: Vec::new(),
             title: String::new(),
             state: String::new(),
+            position: 0.0,
+            duration: 0.0,
+            reported_at: Instant::now(),
             loaded_at: Instant::now(),
             polled_at: Instant::now(),
         }
@@ -405,6 +554,11 @@ mod imp {
         // the URL needs no escaping.
         let url = format!("https://www.youtube.com/watch?v={id}");
         mini.state.clear();
+        // The old video's clock must not show under the new one's title for the
+        // frame or two before the page answers.
+        mini.position = 0.0;
+        mini.duration = 0.0;
+        mini.reported_at = Instant::now();
         mini.loaded_at = Instant::now();
         // Due immediately: the same tick that reads the player's state also
         // injects the styling, and waiting a full period would show YouTube's
@@ -497,8 +651,9 @@ mod imp {
                {inject};\
                var v=document.querySelector('video');\
                if(!v)return 'novideo';\
-               if(v.ended)return 'ended';\
-               return v.paused?'paused':'playing';\
+               var s=v.ended?'ended':(v.paused?'paused':'playing');\
+               var d=isFinite(v.duration)?v.duration:0;\
+               return s+'|'+v.currentTime+'|'+d;\
              }})()",
             inject = inject_js()
         );
@@ -511,11 +666,25 @@ mod imp {
                 let s: Retained<NSString> = unsafe { objc2::msg_send_id![obj, description] };
                 s.to_string()
             };
+            // `state|position|duration` since the transport landed; a bare
+            // word (`novideo`, or an empty answer from a page mid-navigation)
+            // still parses, leaving the clock where it was.
+            let mut parts = state.split('|');
+            let word = parts.next().unwrap_or_default().to_string();
+            let pos = parts.next().and_then(|s| s.parse::<f32>().ok());
+            let dur = parts.next().and_then(|s| s.parse::<f32>().ok());
             // WebKit runs completion handlers on the main thread, which is the
             // thread that owns `PANEL`.
             PANEL.with(|slot| {
                 if let Some(mini) = slot.borrow_mut().as_mut() {
-                    mini.state = state;
+                    mini.state = word;
+                    if let Some(p) = pos {
+                        mini.position = p;
+                        mini.reported_at = Instant::now();
+                    }
+                    if let Some(d) = dur {
+                        mini.duration = d;
+                    }
                 }
             });
         });
