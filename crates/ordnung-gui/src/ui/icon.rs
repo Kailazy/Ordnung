@@ -52,3 +52,33 @@ pub fn close_button(ui: &mut egui::Ui, tip: &str) -> bool {
     }
     resp.clicked()
 }
+
+/// Draw a play triangle, or the two pause bars, centred on `c`.
+///
+/// One mark for both states, so the control that toggles between them keeps its
+/// footprint: the glyph swaps inside a fixed square instead of a label growing
+/// from "Play" to "Pause" and shifting everything to its right.
+pub fn play_pause(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, playing: bool) {
+    if playing {
+        for dx in [-4.0f32, 3.0] {
+            p.rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(c.x + dx, c.y - 6.0),
+                    egui::vec2(3.0, 12.0),
+                ),
+                0.5,
+                col,
+            );
+        }
+    } else {
+        p.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(c.x - 4.0, c.y - 6.5),
+                egui::pos2(c.x + 6.0, c.y),
+                egui::pos2(c.x - 4.0, c.y + 6.5),
+            ],
+            col,
+            egui::Stroke::NONE,
+        ));
+    }
+}

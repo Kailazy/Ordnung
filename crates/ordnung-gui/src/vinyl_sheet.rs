@@ -856,22 +856,43 @@ impl App {
                         }
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
-                            // One control, two states: it says what pressing
-                            // it does, so there's never a stopped "pause" or a
-                            // second button to hunt for.
-                            let (play_label, play_tip) = match record_play {
-                                RecordPlay::Playing(_) => {
-                                    ("❚❚  Pause record", "Pause this record")
+                            // One control, two states, drawn rather than
+                            // labelled. A "Play"/"Pause" word changes width
+                            // when it toggles and shoves the whole row sideways
+                            // under the pointer, so the mark swaps inside a
+                            // fixed square and everything after it stays put.
+                            let playing = matches!(record_play, RecordPlay::Playing(_));
+                            let play_tip = match record_play {
+                                RecordPlay::Playing(_) => "Pause this record",
+                                RecordPlay::Paused(_) => "Resume this record",
+                                RecordPlay::Stopped => {
+                                    "Play from the first track that has a source"
                                 }
-                                RecordPlay::Paused(_) => {
-                                    ("▶  Resume record", "Resume this record")
-                                }
-                                RecordPlay::Stopped => (
-                                    "▶  Play record",
-                                    "Play from the first track that has a source",
-                                ),
                             };
-                            if ui.button(play_label).on_hover_note(play_tip).clicked() {
+                            let (rect, resp) = ui.allocate_exact_size(
+                                egui::vec2(44.0, 24.0),
+                                egui::Sense::click(),
+                            );
+                            let resp = resp.on_hover_note(play_tip);
+                            // Same chrome the text buttons beside it wear, so
+                            // the row reads as one set of controls.
+                            let visuals = ui.style().interact(&resp);
+                            ui.painter().rect(
+                                rect.expand(visuals.expansion),
+                                visuals.rounding,
+                                visuals.weak_bg_fill,
+                                visuals.bg_stroke,
+                            );
+                            crate::ui::icon::play_pause(
+                                ui.painter(),
+                                rect.center(),
+                                visuals.fg_stroke.color,
+                                playing,
+                            );
+                            if resp.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if resp.clicked() {
                                 act = Some(Act::TogglePlay);
                             }
                             if ui
@@ -1273,31 +1294,7 @@ fn video_transport_ui(
                 } else {
                     egui::Color32::from_gray(190)
                 };
-                let c = btn_rect.center();
-                let p = ui.painter();
-                if t.playing {
-                    // Two bars.
-                    for dx in [-4.0f32, 3.0] {
-                        p.rect_filled(
-                            egui::Rect::from_min_size(
-                                egui::pos2(c.x + dx, c.y - 6.0),
-                                egui::vec2(3.0, 12.0),
-                            ),
-                            0.5,
-                            col,
-                        );
-                    }
-                } else {
-                    p.add(egui::Shape::convex_polygon(
-                        vec![
-                            egui::pos2(c.x - 4.0, c.y - 6.5),
-                            egui::pos2(c.x + 6.0, c.y),
-                            egui::pos2(c.x - 4.0, c.y + 6.5),
-                        ],
-                        col,
-                        egui::Stroke::NONE,
-                    ));
-                }
+                crate::ui::icon::play_pause(ui.painter(), btn_rect.center(), col, t.playing);
                 if btn.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
