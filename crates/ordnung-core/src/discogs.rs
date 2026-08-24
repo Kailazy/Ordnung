@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::model::{Tags, VinylRecord};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const SEARCH_URL: &str = "https://api.discogs.com/database/search";
@@ -531,12 +531,20 @@ pub struct Client {
     token: String,
     user_agent: String,
     agent: ureq::Agent,
-    /// Timestamp of the last API request, shared across clones so every search /
-    /// release call — whichever worker fires it, however many a single track
-    /// triggers — is paced against one global clock. Discogs rate-limits per
-    /// *request*, not per track. `None` until the first request.
-    last_request: Arc<Mutex<Option<Instant>>>,
 }
+
+/// Timestamp of the last API request, process-wide.
+///
+/// Discogs rate-limits the *token*, so the clock has to be global to the
+/// process rather than owned by a `Client`: callers construct a fresh client
+/// per worker thread rather than cloning one, so a per-instance clock gives
+/// every concurrent worker its own full allowance and they burst straight
+/// through the limit together. That stayed latent while only one worker talked
+/// to Discogs at a time, and became a reliable 429 as soon as a second
+/// concurrent caller existed.
+///
+/// `None` until the first request.
+static LAST_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
 
 impl Client {
     /// `token` is a Discogs personal access token (https://www.discogs.com/settings/developers).
@@ -551,16 +559,16 @@ impl Client {
             token: token.into(),
             user_agent: user_agent.into(),
             agent,
-            last_request: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Block until at least [`MIN_API_INTERVAL`] has elapsed since the previous
-    /// API request, then stamp "now". Holding the lock across the sleep is
-    /// intentional: it serializes concurrent workers so they share one pace
-    /// rather than each racing to the limit independently.
+    /// API request *anywhere in the process*, then stamp "now". Holding the
+    /// lock across the sleep is intentional: it serializes concurrent workers
+    /// so they share one pace rather than each racing to the limit
+    /// independently. See [`LAST_REQUEST`] for why the clock is global.
     fn throttle(&self) {
-        let mut last = self.last_request.lock().expect("discogs throttle lock");
+        let mut last = LAST_REQUEST.lock().expect("discogs throttle lock");
         if let Some(prev) = *last {
             let elapsed = prev.elapsed();
             if elapsed < MIN_API_INTERVAL {
@@ -1875,6 +1883,30 @@ fn downscale_png(bytes: &[u8], max_side: u32) -> Option<Vec<u8>> {
 
 // `read_to_end` is from std::io::Read — pull it in for the download path.
 use std::io::Read;
+
+#[cfg(test)]
+mod throttle_tests {
+    use super::*;
+
+    /// The pace must be shared by *separately constructed* clients, not just by
+    /// clones of one. Callers build a fresh client per worker thread, so a
+    /// per-instance clock would give each concurrent worker its own full
+    /// allowance — which is exactly how the dig's prefetch started drawing 429s
+    /// the moment it put a second caller on Discogs at the same time.
+    #[test]
+    fn throttle_is_shared_across_separately_built_clients() {
+        let a = Client::new("t", "Ordnung/test");
+        let b = Client::new("t", "Ordnung/test");
+        let start = Instant::now();
+        a.throttle();
+        b.throttle();
+        assert!(
+            start.elapsed() >= MIN_API_INTERVAL,
+            "two clients paced independently: {:?} elapsed for two requests,              expected at least {MIN_API_INTERVAL:?}",
+            start.elapsed()
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
