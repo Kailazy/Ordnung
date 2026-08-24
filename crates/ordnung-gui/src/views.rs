@@ -101,6 +101,17 @@ struct VinylCell {
     also_in_other: bool,
 }
 
+impl VinylCell {
+    /// Does this record match the view's search box? `query` is already trimmed
+    /// and lowercased. Every whitespace-separated term must appear somewhere in
+    /// the artist, title or the year/format caption, so "warp 1993" narrows the
+    /// way you'd expect rather than only matching that exact phrase.
+    fn matches(&self, query: &str) -> bool {
+        let hay = format!("{} {} {}", self.artist, self.title, self.sub).to_lowercase();
+        query.split_whitespace().all(|term| hay.contains(term))
+    }
+}
+
 /// How the vinyl grids are ordered. Persisted as a stable key in
 /// [`crate::config::Config::vinyl_sort`], so an unknown key from another build
 /// falls back to `Artist` (the fixed order the view shipped with) rather than
@@ -996,6 +1007,24 @@ impl App {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.heading("Vinyl Collection");
+            // Search sits right beside the heading: it's the fastest way through
+            // a wall of covers, so it shouldn't be hiding out with the utility
+            // buttons on the far right.
+            ui.add_space(10.0);
+            let search = ui.add(
+                egui::TextEdit::singleline(&mut self.vinyl_filter)
+                    .desired_width(200.0)
+                    .hint_text("Search vinyl"),
+            );
+            search.on_hover_note("Filter both shelves by artist, title, year or format");
+            if !self.vinyl_filter.is_empty()
+                && ui
+                    .small_button("✖")
+                    .on_hover_note("Clear the search")
+                    .clicked()
+            {
+                self.vinyl_filter.clear();
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_enabled_ui(!busy, |ui| {
                     if ui
@@ -1091,8 +1120,14 @@ impl App {
         // Snapshot what we render so the scroll closure doesn't borrow the record
         // lists while we read the cover cache. Kick off cover decodes up front
         // (the request is deduplicated, so doing it every frame is cheap).
-        let owned = self.vinyl_cells(VinylList::Collection, &self.vinyl, sort, ascending);
-        let wanted = self.vinyl_cells(VinylList::Wantlist, &self.wantlist, sort, ascending);
+        let query = self.vinyl_filter.trim().to_lowercase();
+        let mut owned = self.vinyl_cells(VinylList::Collection, &self.vinyl, sort, ascending);
+        let mut wanted = self.vinyl_cells(VinylList::Wantlist, &self.wantlist, sort, ascending);
+        if !query.is_empty() {
+            owned.retain(|c| c.matches(&query));
+            wanted.retain(|c| c.matches(&query));
+        }
+        let (owned, wanted) = (owned, wanted);
         for c in owned.iter().chain(wanted.iter()) {
             if c.has_cover {
                 self.request_vinyl_cover(c.key);
@@ -1122,7 +1157,14 @@ impl App {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(4.0);
             if owned.is_empty() {
-                ui.label(egui::RichText::new("Nothing in your Discogs collection yet.").weak());
+                let msg = if query.is_empty() {
+                    "Nothing in your Discogs collection yet."
+                } else if wanted.is_empty() {
+                    "No records match that search."
+                } else {
+                    "Nothing in your collection matches that search."
+                };
+                ui.label(egui::RichText::new(msg).weak());
             } else if let Some(a) = self.vinyl_grid(ui, &owned) {
                 action = Some(a);
             }

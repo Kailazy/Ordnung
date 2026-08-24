@@ -74,6 +74,7 @@ impl App {
             vinyl: Vec::new(),
             wantlist: Vec::new(),
             vinyl_count: 0,
+            vinyl_filter: String::new(),
             vinyl_covers: HashMap::new(),
             vinyl_cover_req_tx,
             vinyl_cover_rx,
@@ -1155,17 +1156,10 @@ impl eframe::App for App {
                     // group left over. Rendered left-to-right inside the reserved
                     // remainder so it can never collide with the counts.
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.label("Filter:");
-                        // Reserve room for the inline × and the Clear-filters button
-                        // so the text field shrinks rather than pushing them past
-                        // the edge of this remainder.
-                        let mut reserved = 0.0;
-                        if !self.filter.is_empty() {
-                            reserved += 28.0;
-                        }
-                        if has_filters {
-                            reserved += 140.0;
-                        }
+                        // Reserve room for the Clear-filters button so the text
+                        // field shrinks rather than pushing it past the edge of
+                        // this remainder.
+                        let reserved = if has_filters { 140.0 } else { 0.0 };
                         let w = (ui.available_width() - reserved).clamp(120.0, 320.0);
                         let resp =
                             ui.add(egui::TextEdit::singleline(&mut self.filter).desired_width(w));
@@ -1175,11 +1169,6 @@ impl eframe::App for App {
                             // the new text, so this costs no responsiveness.
                             self.filter_apply_at =
                                 Some(std::time::Instant::now() + SEARCH_DEBOUNCE);
-                        }
-                        if !self.filter.is_empty() && ui.small_button("×").clicked() {
-                            self.filter.clear();
-                            self.filter_apply_at = None;
-                            self.reload();
                         }
                         // A prominent "clear all filters" button, shown only while a
                         // filter is actually hiding rows. This rescues the case where
@@ -1720,24 +1709,29 @@ impl eframe::App for App {
                 .pivot(egui::Align2::CENTER_CENTER)
                 .default_pos(ctx.screen_rect().center())
                 .show(ctx, |ui| {
-                    ui.set_min_width(460.0);
-                    ui.add_space(2.0);
+                    // Fixed, narrow width: without a cap the long source path
+                    // used to dictate how wide the dialog opened.
+                    ui.set_width(400.0);
                     // Which track this acts on. Name/tag editing lives in the
                     // inspector (right panel) — this dialog is transcode only,
                     // so the header is identification, not another edit surface.
                     ui.label(egui::RichText::new(&modal.track_label).strong());
-                    ui.label(
-                        egui::RichText::new(modal.source_path.display().to_string())
-                            .small()
-                            .weak(),
-                    );
-                    ui.add_space(8.0);
-                    ui.separator();
+                    // File name only, full path on hover: the path is long
+                    // enough to set the dialog's whole width on its own.
+                    let src = modal.source_path.clone();
+                    let name = src
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| src.display().to_string());
+                    ui.label(egui::RichText::new(name).small().weak())
+                        .on_hover_text(src.display().to_string());
                     ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(4.0);
 
                     egui::Grid::new("convert_grid")
                         .num_columns(2)
-                        .spacing([14.0, 10.0])
+                        .spacing([12.0, 7.0])
                         .show(ui, |ui| {
                             ui.label(egui::RichText::new("Source").weak().small());
                             ui.label(format_label(modal.source_format));
@@ -1769,13 +1763,9 @@ impl eframe::App for App {
                                         .desired_width(70.0),
                                 );
                                 ui.label(
-                                    egui::RichText::new(if lossy {
-                                        "kbps"
-                                    } else {
-                                        "kbps — lossless target"
-                                    })
-                                    .weak()
-                                    .small(),
+                                    egui::RichText::new(if lossy { "kbps" } else { "lossless" })
+                                        .weak()
+                                        .small(),
                                 );
                             });
                             ui.end_row();
@@ -1804,10 +1794,10 @@ impl eframe::App for App {
                         });
 
                     if modal.in_place {
-                        ui.add_space(4.0);
+                        ui.add_space(2.0);
                         ui.colored_label(
                             egui::Color32::LIGHT_YELLOW,
-                            "⚠ The original file is removed and the catalog repointed.",
+                            "⚠ Original file removed, catalog repointed.",
                         );
                     }
 
@@ -1816,23 +1806,31 @@ impl eframe::App for App {
                         ui.colored_label(egui::Color32::LIGHT_RED, err);
                     }
 
-                    ui.add_space(10.0);
+                    ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(6.0);
                     // Primary action right-aligned, Cancel beside it — the
-                    // standard dialog footer shape.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let busy = self.job_rx.is_some();
-                        if ui
-                            .add_enabled(!busy, egui::Button::new("Convert"))
-                            .clicked()
-                        {
-                            start_convert = Some(());
-                        }
-                        if ui.button("Cancel").clicked() {
-                            close_modal = true;
-                        }
-                    });
+                    // standard dialog footer shape. The row is allocated at an
+                    // explicit height: a bare right-to-left layout claimed all
+                    // the window's remaining height, leaving a tall dead gap
+                    // above the buttons.
+                    let footer = egui::Layout::right_to_left(egui::Align::Center);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 26.0),
+                        footer,
+                        |ui| {
+                            let busy = self.job_rx.is_some();
+                            if ui
+                                .add_enabled(!busy, egui::Button::new("Convert"))
+                                .clicked()
+                            {
+                                start_convert = Some(());
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close_modal = true;
+                            }
+                        },
+                    );
                 });
         }
         // Apply deferred modal actions to satisfy the borrow checker.

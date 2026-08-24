@@ -791,6 +791,10 @@ struct App {
     /// Count of cached vinyl records, for the sidebar label. Kept fresh on reload
     /// so the badge is right even when the grid isn't the active view.
     vinyl_count: u64,
+    /// Free-text filter for the vinyl view's search bar. Narrows both shelves by
+    /// artist, title, year and format as you type. Not persisted: a search is
+    /// about the record you're looking for right now, not a saved view.
+    vinyl_filter: String,
     /// Decoded vinyl cover textures keyed by list + Discogs `instance_id` (reuses
     /// `ThumbState`). Loaded lazily by the vinyl-cover worker as cells render,
     /// mirroring `cover_cache` for table rows. The list is part of the key because
