@@ -325,11 +325,11 @@ impl App {
                     // (link affordance). Skipped when the tag is empty (nothing to
                     // filter by).
                     let link = |pos: egui::Pos2,
-                                    size: egui::Vec2,
-                                    salt: &str,
-                                    color: egui::Color32,
-                                    note: &str,
-                                    hit: &mut bool| {
+                                size: egui::Vec2,
+                                salt: &str,
+                                color: egui::Color32,
+                                note: &str,
+                                hit: &mut bool| {
                         let rect = egui::Rect::from_min_size(pos, size);
                         let resp = ui
                             .interact(rect, ui.id().with(salt), egui::Sense::click())
@@ -614,12 +614,7 @@ impl App {
     /// grid slide rather than a seek. Every edit is written straight to the catalog
     /// (see [`Catalog::set_manual_beatgrid`]), so it survives the track being
     /// reloaded and later re-analyzed.
-    fn draw_grid_editor(
-        &mut self,
-        ui: &mut egui::Ui,
-        lane: egui::Rect,
-        playhead_ms: f32,
-    ) -> bool {
+    fn draw_grid_editor(&mut self, ui: &mut egui::Ui, lane: egui::Rect, playhead_ms: f32) -> bool {
         let Some(g) = self.now_playing.as_ref().and_then(|n| n.grid) else {
             return false;
         };
@@ -631,7 +626,11 @@ impl App {
             egui::vec2(42.0, 15.0),
         );
         let tab = ui
-            .interact(tab_rect, ui.id().with("grid_edit_tab"), egui::Sense::click())
+            .interact(
+                tab_rect,
+                ui.id().with("grid_edit_tab"),
+                egui::Sense::click(),
+            )
             .on_hover_note("Adjust the beatgrid");
         if tab.clicked() {
             self.grid_edit_open = !self.grid_edit_open;
@@ -640,7 +639,10 @@ impl App {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         let (fill, text) = match (self.grid_edit_open, tab.hovered()) {
-            (true, _) => (crate::ui::tokens::color::ACCENT, crate::ui::tokens::color::LABEL),
+            (true, _) => (
+                crate::ui::tokens::color::ACCENT,
+                crate::ui::tokens::color::LABEL,
+            ),
             (false, true) => (
                 egui::Color32::from_rgba_unmultiplied(150, 150, 150, 120),
                 crate::ui::tokens::color::LABEL,
@@ -650,8 +652,11 @@ impl App {
                 crate::ui::tokens::color::LABEL_2,
             ),
         };
-        ui.painter()
-            .rect_filled(tab_rect, egui::Rounding::same(crate::ui::tokens::radius::XS), fill);
+        ui.painter().rect_filled(
+            tab_rect,
+            egui::Rounding::same(crate::ui::tokens::radius::XS),
+            fill,
+        );
         ui.painter().text(
             tab_rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -705,10 +710,34 @@ impl App {
                     "grid_nudge",
                     true,
                     &[
-                        (GridGlyph::Chevron { dir: -1.0, double: true }, "Slide the grid -10 ms"),
-                        (GridGlyph::Chevron { dir: -1.0, double: false }, "Slide the grid -1 ms"),
-                        (GridGlyph::Chevron { dir: 1.0, double: false }, "Slide the grid +1 ms"),
-                        (GridGlyph::Chevron { dir: 1.0, double: true }, "Slide the grid +10 ms"),
+                        (
+                            GridGlyph::Chevron {
+                                dir: -1.0,
+                                double: true,
+                            },
+                            "Slide the grid -10 ms",
+                        ),
+                        (
+                            GridGlyph::Chevron {
+                                dir: -1.0,
+                                double: false,
+                            },
+                            "Slide the grid -1 ms",
+                        ),
+                        (
+                            GridGlyph::Chevron {
+                                dir: 1.0,
+                                double: false,
+                            },
+                            "Slide the grid +1 ms",
+                        ),
+                        (
+                            GridGlyph::Chevron {
+                                dir: 1.0,
+                                double: true,
+                            },
+                            "Slide the grid +10 ms",
+                        ),
                     ],
                 );
                 if let Some(f) = nudge {
@@ -852,9 +881,7 @@ impl App {
         seek_to: &mut Option<f32>,
     ) {
         const MARGIN: f32 = 10.0;
-        let zoom = self
-            .wave_zoom_secs
-            .clamp(MIN_ZOOM_SECS, MAX_ZOOM_SECS);
+        let zoom = self.wave_zoom_secs.clamp(MIN_ZOOM_SECS, MAX_ZOOM_SECS);
         let lane_h = self.wave_lane_h.clamp(MIN_LANE_H, MAX_LANE_H);
         let lane_w = (ui.available_width() - 2.0 * MARGIN).max(60.0);
 
@@ -865,10 +892,8 @@ impl App {
 
         ui.horizontal(|ui| {
             ui.add_space(MARGIN);
-            let (rect, resp) = ui.allocate_exact_size(
-                egui::vec2(lane_w, lane_h),
-                egui::Sense::click_and_drag(),
-            );
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(lane_w, lane_h), egui::Sense::click_and_drag());
 
             // Visible window in track-fraction, width `zoom` seconds, slid to stay
             // inside `[0, 1]`.
@@ -933,8 +958,7 @@ impl App {
             }
 
             // Fixed playhead line at the window's mapping of the live position.
-            let play_x =
-                rect.left() + ((shown_frac - w0) / span.max(f32::EPSILON)) * rect.width();
+            let play_x = rect.left() + ((shown_frac - w0) / span.max(f32::EPSILON)) * rect.width();
             painter.line_segment(
                 [
                     egui::pos2(play_x, rect.top()),
@@ -958,8 +982,7 @@ impl App {
             );
             if grip.dragged() {
                 // Dragging up is negative dy; growing the lane means subtracting it.
-                self.wave_lane_h =
-                    (lane_h - grip.drag_delta().y).clamp(MIN_LANE_H, MAX_LANE_H);
+                self.wave_lane_h = (lane_h - grip.drag_delta().y).clamp(MIN_LANE_H, MAX_LANE_H);
                 ui.ctx().request_repaint();
             }
             if grip.hovered() || grip.dragged() {
@@ -1001,8 +1024,7 @@ impl App {
 
             // Click/drag to seek — map pointer x back through the window.
             let frac_at = |p: egui::Pos2| {
-                (w0 + ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * span)
-                    .clamp(0.0, 1.0)
+                (w0 + ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * span).clamp(0.0, 1.0)
             };
             // ...except in grid-edit mode, where dragging the lane slides the grid
             // under the waveform instead — the direct-manipulation version of the
@@ -1219,8 +1241,20 @@ mod segmented_tests {
     use std::rc::Rc;
 
     const CELLS: [(GridGlyph, &str); 2] = [
-        (GridGlyph::Chevron { dir: -1.0, double: false }, "left"),
-        (GridGlyph::Chevron { dir: 1.0, double: false }, "right"),
+        (
+            GridGlyph::Chevron {
+                dir: -1.0,
+                double: false,
+            },
+            "left",
+        ),
+        (
+            GridGlyph::Chevron {
+                dir: 1.0,
+                double: false,
+            },
+            "right",
+        ),
     ];
 
     /// Run one frame at time `t`, with the pointer held (or not) over the first
@@ -1300,7 +1334,10 @@ mod segmented_tests {
         let first = frame(&ctx, 0.02, vec![press(p)], true, true, &rect);
         let first = first.expect("press should fire immediately");
         assert_eq!(first.index, 0);
-        assert!(!first.held, "the initial press is a discrete edit, not a repeat");
+        assert!(
+            !first.held,
+            "the initial press is a discrete edit, not a repeat"
+        );
 
         // Held but still inside the delay: silent.
         let mut t = 0.02;
@@ -1349,7 +1386,10 @@ mod segmented_tests {
         let p = hit(&rect);
         assert!(frame(&ctx, 0.02, vec![press(p)], true, false, &rect).is_none());
         let up = frame(&ctx, 0.06, vec![release(p)], true, false, &rect);
-        assert!(up.is_some_and(|f| f.index == 0 && !f.held), "click fires once");
+        assert!(
+            up.is_some_and(|f| f.index == 0 && !f.held),
+            "click fires once"
+        );
 
         // Holding it must never turn into a repeat — "×2" held is still one ×2.
         frame(&ctx, 0.1, vec![press(p)], true, false, &rect);
@@ -1444,7 +1484,11 @@ mod grid_tests {
     fn beat_lines_spacing_downbeats_and_window() {
         // 120 BPM → 0.5 s/beat. First beat at 0.25 s, downbeat phase 1 (the 2nd
         // detected beat is the "1"). Window 0..4 s over a 4 s track, 400 px wide.
-        let g = PlayerGrid { bpm: 120.0, first_beat_ms: 250.0, downbeat_phase: 1 };
+        let g = PlayerGrid {
+            bpm: 120.0,
+            first_beat_ms: 250.0,
+            downbeat_phase: 1,
+        };
         let lines = beat_lines(g, 4.0, (0.0, 1.0), 0.0, 400.0);
         // Beats at 0.25,0.75,...,3.75 → 8 lines across 4 s.
         assert_eq!(lines.len(), 8);
@@ -1452,23 +1496,39 @@ mod grid_tests {
         assert!((lines[0].0 - 25.0).abs() < 0.5);
         assert!((lines[1].0 - 75.0).abs() < 0.5);
         // Downbeats: i where (i-1)%4==0 → i=1,5 → the 2nd and 6th lines.
-        let downs: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.1).map(|(k, _)| k).collect();
+        let downs: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.1)
+            .map(|(k, _)| k)
+            .collect();
         assert_eq!(downs, vec![1, 5]);
     }
 
     #[test]
     fn beat_lines_density_gating() {
-        let g = PlayerGrid { bpm: 128.0, first_beat_ms: 0.0, downbeat_phase: 0 };
+        let g = PlayerGrid {
+            bpm: 128.0,
+            first_beat_ms: 0.0,
+            downbeat_phase: 0,
+        };
         // Whole 600 s track in 400 px: ~0.03 px/beat → nothing drawn.
         assert!(beat_lines(g, 600.0, (0.0, 1.0), 0.0, 400.0).is_empty());
         // Zoomed to ~8 s window: beats ~10 px apart → beats show, incl. non-downbeats.
         let win = beat_lines(g, 600.0, (0.10, 0.10 + 8.0 / 600.0), 0.0, 400.0);
-        assert!(win.iter().any(|l| !l.1), "plain beats visible when zoomed in");
+        assert!(
+            win.iter().any(|l| !l.1),
+            "plain beats visible when zoomed in"
+        );
     }
 
     #[test]
     fn beat_lines_absent_without_tempo() {
-        let g = PlayerGrid { bpm: 0.0, first_beat_ms: 0.0, downbeat_phase: 0 };
+        let g = PlayerGrid {
+            bpm: 0.0,
+            first_beat_ms: 0.0,
+            downbeat_phase: 0,
+        };
         assert!(beat_lines(g, 300.0, (0.0, 1.0), 0.0, 400.0).is_empty());
     }
 
@@ -1492,12 +1552,19 @@ mod grid_tests {
 
     #[test]
     fn shift_moves_every_beat_and_keeps_the_bar_phase() {
-        let g = PlayerGrid { bpm: 120.0, first_beat_ms: 250.0, downbeat_phase: 1 };
+        let g = PlayerGrid {
+            bpm: 120.0,
+            first_beat_ms: 250.0,
+            downbeat_phase: 1,
+        };
         let before = beats_in_first_8s(g);
         let after = beats_in_first_8s(shift_grid(g, 30.0));
         assert_eq!(before.len(), after.len());
         for (b, a) in before.iter().zip(&after) {
-            assert!((a.0 - b.0 - 30.0).abs() < 1e-6, "every beat moved 30 ms later");
+            assert!(
+                (a.0 - b.0 - 30.0).abs() < 1e-6,
+                "every beat moved 30 ms later"
+            );
             assert_eq!(a.1, b.1, "downbeats stay downbeats");
         }
     }
@@ -1507,9 +1574,16 @@ mod grid_tests {
         // 120 BPM, anchor at 100 ms: a -300 ms nudge pushes it negative, so the
         // anchor has to roll forward onto the next beat. The grid itself must
         // still just be 300 ms earlier, downbeats included.
-        let g = PlayerGrid { bpm: 120.0, first_beat_ms: 100.0, downbeat_phase: 2 };
+        let g = PlayerGrid {
+            bpm: 120.0,
+            first_beat_ms: 100.0,
+            downbeat_phase: 2,
+        };
         let moved = shift_grid(g, -300.0);
-        assert!(moved.first_beat_ms >= 0.0, "anchor stays storable as unsigned ms");
+        assert!(
+            moved.first_beat_ms >= 0.0,
+            "anchor stays storable as unsigned ms"
+        );
         // Every beat that stayed in view must be its old self, 300 ms earlier and
         // with the same bar position — the anchor roll is bookkeeping, not a move.
         let before = beats_in_first_8s(g);
@@ -1521,14 +1595,22 @@ mod grid_tests {
                 matched += 1;
             }
         }
-        assert_eq!(matched, before.len() - 1, "all but the beat pushed off the front");
+        assert_eq!(
+            matched,
+            before.len() - 1,
+            "all but the beat pushed off the front"
+        );
     }
 
     #[test]
     fn beat_one_lands_the_downbeat_on_the_playhead() {
         // A grid 40 ms off the beat with its "1" in the wrong place — the two
         // things "Beat 1 here" has to fix at once.
-        let g = PlayerGrid { bpm: 128.0, first_beat_ms: 40.0, downbeat_phase: 3 };
+        let g = PlayerGrid {
+            bpm: 128.0,
+            first_beat_ms: 40.0,
+            downbeat_phase: 3,
+        };
         let fixed = set_beat_one_at(g, 4000.0);
         let beats = beats_in_first_8s(fixed);
         let at_playhead = beats
@@ -1545,7 +1627,11 @@ mod grid_tests {
 
     #[test]
     fn halving_and_doubling_pivot_on_the_downbeat() {
-        let g = PlayerGrid { bpm: 128.0, first_beat_ms: 500.0, downbeat_phase: 0 };
+        let g = PlayerGrid {
+            bpm: 128.0,
+            first_beat_ms: 500.0,
+            downbeat_phase: 0,
+        };
         let doubled = scale_grid_tempo(g, 2.0);
         assert_eq!(doubled.bpm, 256.0);
         // The "1" at 500 ms is still a downbeat at the new tempo.
@@ -1645,11 +1731,7 @@ fn draw_shuffle_glyph(painter: &egui::Painter, c: egui::Pos2, color: egui::Color
         let v = (to - from).normalized();
         let n = egui::vec2(-v.y, v.x);
         painter.add(egui::Shape::convex_polygon(
-            vec![
-                to + v * 2.5,
-                to - v * 3.5 + n * 3.0,
-                to - v * 3.5 - n * 3.0,
-            ],
+            vec![to + v * 2.5, to - v * 3.5 + n * 3.0, to - v * 3.5 - n * 3.0],
             color,
             egui::Stroke::NONE,
         ));
@@ -1739,8 +1821,11 @@ pub(crate) fn segmented(
 ) -> Option<Fire> {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, CELL_H), egui::Sense::hover());
     let r = crate::ui::tokens::radius::SM;
-    ui.painter()
-        .rect_filled(rect, egui::Rounding::same(r), crate::ui::tokens::color::SURFACE_HI);
+    ui.painter().rect_filled(
+        rect,
+        egui::Rounding::same(r),
+        crate::ui::tokens::color::SURFACE_HI,
+    );
 
     let mut hit = None;
     let w = rect.width() / cells.len() as f32;
@@ -1771,7 +1856,8 @@ pub(crate) fn segmented(
             );
         }
         if resp.is_pointer_button_down_on() {
-            ui.painter().rect_filled(cell, rounding, crate::ui::tokens::color::ACCENT_SOFT);
+            ui.painter()
+                .rect_filled(cell, rounding, crate::ui::tokens::color::ACCENT_SOFT);
             if repeat {
                 let id = resp.id.with("hold");
                 let now = ui.input(|i| i.time);
@@ -1784,8 +1870,7 @@ pub(crate) fn segmented(
                         let held = now - start;
                         let ramp = ((held - REPEAT_DELAY) / REPEAT_RAMP).clamp(0.0, 1.0);
                         let interval = REPEAT_SLOW + (REPEAT_FAST - REPEAT_SLOW) * ramp;
-                        (held > REPEAT_DELAY && now - last >= interval)
-                            .then_some((start, now))
+                        (held > REPEAT_DELAY && now - last >= interval).then_some((start, now))
                     }
                 };
                 if let Some(state) = fired {
@@ -1799,7 +1884,8 @@ pub(crate) fn segmented(
                 ui.ctx().request_repaint();
             }
         } else if repeat {
-            ui.ctx().data_mut(|d| d.remove::<(f64, f64)>(resp.id.with("hold")));
+            ui.ctx()
+                .data_mut(|d| d.remove::<(f64, f64)>(resp.id.with("hold")));
         }
         if !first {
             ui.painter().line_segment(
@@ -1853,7 +1939,10 @@ fn draw_grid_glyph(painter: &egui::Painter, c: egui::Pos2, color: egui::Color32,
         GridGlyph::Downbeat => {
             // Flagpole on the playhead, pennant flying right off its top.
             painter.line_segment(
-                [egui::pos2(c.x - 4.0, c.y - 7.0), egui::pos2(c.x - 4.0, c.y + 7.0)],
+                [
+                    egui::pos2(c.x - 4.0, c.y - 7.0),
+                    egui::pos2(c.x - 4.0, c.y + 7.0),
+                ],
                 stroke,
             );
             painter.add(egui::Shape::convex_polygon(
@@ -1888,7 +1977,11 @@ fn draw_grid_glyph(painter: &egui::Painter, c: egui::Pos2, color: egui::Color32,
         GridGlyph::Half | GridGlyph::Double => {
             // Beat ticks at the tempo the press would produce: spread for ½,
             // packed for ×2. The tallest tick is the downbeat.
-            let (gap, n) = if matches!(g, GridGlyph::Half) { (7.0, 2) } else { (3.5, 4) };
+            let (gap, n) = if matches!(g, GridGlyph::Half) {
+                (7.0, 2)
+            } else {
+                (3.5, 4)
+            };
             for i in -(n / 2)..=(n / 2) {
                 let x = c.x + i as f32 * gap;
                 let h = if i == 0 { 7.0 } else { 4.5 };

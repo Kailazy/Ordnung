@@ -73,51 +73,6 @@ impl App {
         self.refresh_selected();
     }
 
-    /// Apply edited title/artist/album to the catalog (and update_tags marks the
-    /// row user_edited so rescans don't overwrite it). Returns user-facing error.
-    pub(crate) fn save_name(&mut self, modal: &mut ConvertModal) {
-        let catalog = match Catalog::open(&self.db_path) {
-            Ok(c) => c,
-            Err(e) => {
-                modal.name_status = Some(format!("opening catalog: {e}"));
-                modal.name_is_error = true;
-                return;
-            }
-        };
-        // Preserve every other tag field — fetch, mutate the three we edit, write back.
-        let mut t = match catalog.get_track(modal.track_id) {
-            Ok(t) => t,
-            Err(e) => {
-                modal.name_status = Some(e.to_string());
-                modal.name_is_error = true;
-                return;
-            }
-        };
-        t.tags.title = non_empty(&modal.edit_title);
-        t.tags.artist = non_empty(&modal.edit_artist);
-        t.tags.album = non_empty(&modal.edit_album);
-        if let Err(e) = catalog.update_tags(modal.track_id, &t.tags) {
-            modal.name_status = Some(e.to_string());
-            modal.name_is_error = true;
-            return;
-        }
-        modal.track_label = format!(
-            "{} — {}",
-            if modal.edit_artist.trim().is_empty() {
-                "Unknown"
-            } else {
-                modal.edit_artist.trim()
-            },
-            if modal.edit_title.trim().is_empty() {
-                "Untitled"
-            } else {
-                modal.edit_title.trim()
-            },
-        );
-        modal.name_status = Some("Saved to catalog (rescan-safe).".into());
-        modal.name_is_error = false;
-    }
-
     /// The right-hand inspector — every standardized metadata field we have
     /// for the selected track. Empty fields are hidden so visible content is
     /// only what the file actually carried.
@@ -129,8 +84,11 @@ impl App {
         ui: &mut egui::Ui,
         ctx: &egui::Context,
     ) -> Option<InspectorAction> {
-        ui.heading("Track inspector");
-        ui.add_space(4.0);
+        // Small all-caps caption rather than a big heading: the track's own
+        // name below is what should read as the panel's title.
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("T R A C K").small().weak());
+        ui.add_space(2.0);
 
         // Copied out before borrowing `selected_track` so the button below can
         // act on them without holding an immutable borrow of `self`.
@@ -162,15 +120,28 @@ impl App {
         let id = t.id;
         let source_path = PathBuf::from(t.source_path.clone());
 
+        // Title on its own line at heading weight, artist beneath it — the
+        // "A — B" run-together line read as one undifferentiated string.
         ui.label(
-            egui::RichText::new(format!(
-                "{} — {}",
-                t.tags.artist.as_deref().unwrap_or("Unknown"),
-                t.tags.title.as_deref().unwrap_or("Untitled"),
-            ))
-            .strong(),
+            egui::RichText::new(t.tags.title.as_deref().unwrap_or("Untitled"))
+                .heading()
+                .size(17.0),
         );
-        ui.label(egui::RichText::new(t.source_path.clone()).small().weak());
+        ui.label(
+            egui::RichText::new(t.tags.artist.as_deref().unwrap_or("Unknown"))
+                .size(13.0)
+                .weak(),
+        );
+        // The full path is long and rarely needed at a glance: show the file
+        // name, with the whole path on hover.
+        let path_str = t.source_path.clone();
+        let file_name = std::path::Path::new(&path_str)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path_str.clone());
+        ui.add_space(1.0);
+        ui.label(egui::RichText::new(file_name).small().weak())
+            .on_hover_text(&path_str);
 
         // Cover art preview. Decoded off-thread (see `cover_full_texture`): once
         // ready we show the high-quality image (embedded art wins, fetched
@@ -178,21 +149,30 @@ impl App {
         // width. While the worker decodes, show a spinner so a large source
         // image never makes the panel look empty or frozen.
         if let Some(tex) = &cover_tex {
-            ui.add_space(6.0);
-            let side = ui.available_width().min(256.0);
+            ui.add_space(10.0);
+            let side = ui.available_width().min(240.0);
             ui.vertical_centered(|ui| {
                 ui.add(
                     egui::Image::new(tex)
                         .maintain_aspect_ratio(true)
-                        .fit_to_exact_size(egui::vec2(side, side)),
+                        .fit_to_exact_size(egui::vec2(side, side))
+                        .rounding(6.0),
                 );
             });
+            ui.add_space(4.0);
         } else if cover_loading {
-            ui.add_space(6.0);
+            ui.add_space(10.0);
+            let side = ui.available_width().min(240.0);
             ui.vertical_centered(|ui| {
-                ui.add(egui::Spinner::new());
-                ui.label(egui::RichText::new("Loading cover…").small().weak());
+                // Reserve the same square the artwork will occupy so the panel
+                // below doesn't jump once the decode lands.
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
+                ui.put(rect, egui::Spinner::new());
             });
+            ui.add_space(4.0);
         }
 
         // The user's requested action this frame, if any. Acted on by the caller
@@ -203,10 +183,13 @@ impl App {
         // Mirrors the CLI's `tag --write --art` — explicit and source-mutating,
         // so it only appears when fetched artwork actually exists.
         if has_ext_art {
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             ui.add_enabled_ui(!busy, |ui| {
                 if ui
-                    .button("⬇ Embed fetched cover into file")
+                    .add_sized(
+                        [ui.available_width(), 24.0],
+                        egui::Button::new("⬇ Embed fetched cover into file"),
+                    )
                     .on_hover_note("Write the fetched cover into the source file's tags")
                     .clicked()
                 {
@@ -214,7 +197,7 @@ impl App {
                 }
             });
         }
-        ui.separator();
+        ui.add_space(8.0);
 
         // --- Editable Core tags ------------------------------------------
         // The fields a user most often fixes or fills (e.g. from Discogs), plus
@@ -223,48 +206,60 @@ impl App {
         // "Write to source file" also writes them into the original file. Both
         // are disabled until something actually changes.
         let dirty = self.tag_edit != self.tag_edit_saved;
-        inspector_section(ui, "Edit tags", |ui| {
-            egui::Grid::new("tag-edit-grid")
-                .num_columns(2)
-                .spacing(egui::vec2(8.0, 4.0))
-                .show(ui, |ui| {
-                    edit_row(ui, "Title", &mut self.tag_edit.title);
-                    edit_row(ui, "Artist", &mut self.tag_edit.artist);
-                    edit_row(ui, "Album artist", &mut self.tag_edit.album_artist);
-                    edit_row(ui, "Album", &mut self.tag_edit.album);
-                    edit_row(ui, "Genre", &mut self.tag_edit.genre);
-                    edit_row(ui, "Label", &mut self.tag_edit.label);
-                    edit_row(ui, "Year", &mut self.tag_edit.year);
-                    edit_row_multiline(ui, "Notes", &mut self.tag_edit.comment);
-                });
-
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(dirty && !busy, |ui| {
-                    if ui
-                        .button("Save")
-                        .on_hover_note("Save to the catalog only. The source file is untouched.")
-                        .clicked()
-                    {
-                        action = Some(InspectorAction::SaveToCatalog(id));
-                    }
-                    if ui
-                        .button("⬇ Write to source file")
-                        .on_hover_note(
-                            "Save to the catalog and write the tags into the source file",
-                        )
-                        .clicked()
-                    {
-                        action = Some(InspectorAction::WriteToFile(id, source_path.clone()));
-                    }
-                });
-                if dirty {
-                    ui.label(egui::RichText::new("unsaved edits").small().weak());
-                }
-            });
-        });
-
+        // One scroll area over the edit form *and* the read-only sections: with
+        // the form outside it, a tall inspector clipped the form instead of
+        // scrolling the column as a whole.
         egui::ScrollArea::vertical().show(ui, |ui| {
+            inspector_section(ui, "Edit tags", |ui| {
+                egui::Grid::new("tag-edit-grid")
+                    .num_columns(2)
+                    .spacing(egui::vec2(8.0, 4.0))
+                    .show(ui, |ui| {
+                        edit_row(ui, "Title", &mut self.tag_edit.title);
+                        edit_row(ui, "Artist", &mut self.tag_edit.artist);
+                        edit_row(ui, "Album artist", &mut self.tag_edit.album_artist);
+                        edit_row(ui, "Album", &mut self.tag_edit.album);
+                        edit_row(ui, "Genre", &mut self.tag_edit.genre);
+                        edit_row(ui, "Label", &mut self.tag_edit.label);
+                        edit_row(ui, "Year", &mut self.tag_edit.year);
+                        edit_row_multiline(ui, "Notes", &mut self.tag_edit.comment);
+                    });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(dirty && !busy, |ui| {
+                        if ui
+                            .add(egui::Button::new("Save").min_size(egui::vec2(72.0, 24.0)))
+                            .on_hover_note(
+                                "Save to the catalog only. The source file is untouched.",
+                            )
+                            .clicked()
+                        {
+                            action = Some(InspectorAction::SaveToCatalog(id));
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new("⬇ Write to source file")
+                                    .min_size(egui::vec2(0.0, 24.0)),
+                            )
+                            .on_hover_note(
+                                "Save to the catalog and write the tags into the source file",
+                            )
+                            .clicked()
+                        {
+                            action = Some(InspectorAction::WriteToFile(id, source_path.clone()));
+                        }
+                    });
+                    if dirty {
+                        ui.label(
+                            egui::RichText::new("● unsaved")
+                                .small()
+                                .color(egui::Color32::from_rgb(220, 190, 90)),
+                        );
+                    }
+                });
+            });
+
             // --- Audio (technical) ---------------------------------------
             inspector_section(ui, "Audio", |ui| {
                 if let Some(p) = &t.properties {
@@ -644,20 +639,46 @@ pub(crate) fn has_value(v: &Option<String>) -> bool {
     v.as_deref().is_some_and(|s| !s.trim().is_empty())
 }
 
+/// One titled block in the inspector: a dimmed caption with a hairline rule
+/// under it, then the body. The rule is what makes the sections read as
+/// distinct groups instead of one long list of label/value pairs.
 pub(crate) fn inspector_section(
     ui: &mut egui::Ui,
     title: &str,
     add_body: impl FnOnce(&mut egui::Ui),
 ) {
-    ui.add_space(6.0);
-    ui.label(egui::RichText::new(title).strong().small());
+    ui.add_space(12.0);
+    ui.label(egui::RichText::new(title.to_uppercase()).strong().small());
+    ui.add_space(3.0);
+    let rule = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(rule, 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(
+        rect,
+        0.0,
+        ui.visuals().weak_text_color().gamma_multiply(0.3),
+    );
+    ui.add_space(5.0);
     add_body(ui);
 }
 
+/// One read-only label/value line. The label sits in a fixed-width column so
+/// values align vertically down a section rather than starting at a different
+/// x for every row.
 pub(crate) fn inspector_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    const LABEL_W: f32 = 108.0;
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(format!("{label}:")).weak().small());
-        ui.label(value);
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(LABEL_W.min(ui.available_width() * 0.5), 16.0),
+            egui::Sense::hover(),
+        );
+        ui.painter().text(
+            rect.left_center(),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(11.0),
+            ui.visuals().weak_text_color(),
+        );
+        ui.label(egui::RichText::new(value).size(12.5));
     });
 }
 

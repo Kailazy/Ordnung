@@ -1125,18 +1125,18 @@ fn analyze_tracks(
     let pool = analysis_pool();
     let run = || -> Vec<(u64, u64, i64, Result<Analysis, String>)> {
         pending
-        .par_iter()
-        .map_init(
-            || tx.clone(),
-            |tx_local, (id, path, size, mtime)| {
-                let r = analysis::analyze_file(path, params).map_err(|e| e.to_string());
-                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                let _ = tx_local.send(JobMsg::Progress { done: n, total });
-                ctx.request_repaint();
-                (*id, *size, *mtime, r)
-            },
-        )
-        .collect()
+            .par_iter()
+            .map_init(
+                || tx.clone(),
+                |tx_local, (id, path, size, mtime)| {
+                    let r = analysis::analyze_file(path, params).map_err(|e| e.to_string());
+                    let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    let _ = tx_local.send(JobMsg::Progress { done: n, total });
+                    ctx.request_repaint();
+                    (*id, *size, *mtime, r)
+                },
+            )
+            .collect()
     };
     // `install` runs the fan-out on the sized pool; without a pool we're on
     // rayon's global one, which is the pre-clamp behavior.
@@ -1553,20 +1553,21 @@ pub(crate) fn run_vinyl_edit(
             // next sync fills in the real one.
             let mut moved = (*record).clone();
             moved.added = None;
-            let result = match to {
-                VinylList::Wantlist => client.add_to_wantlist(&username, record.release_id).map(|_| {
-                    moved.instance_id = record.release_id;
-                    moved.folder_id = None;
-                }),
-                VinylList::Collection => {
-                    client
+            let result =
+                match to {
+                    VinylList::Wantlist => client
+                        .add_to_wantlist(&username, record.release_id)
+                        .map(|_| {
+                            moved.instance_id = record.release_id;
+                            moved.folder_id = None;
+                        }),
+                    VinylList::Collection => client
                         .add_to_collection(&username, record.release_id)
                         .map(|instance_id| {
                             moved.instance_id = instance_id;
                             moved.folder_id = Some(discogs::UNCATEGORIZED_FOLDER);
-                        })
-                }
-            };
+                        }),
+                };
             if let Err(e) = result {
                 let _ = tx.send(JobMsg::Failed(format!(
                     "adding {} to your {}: {e}",
@@ -1634,12 +1635,7 @@ fn remove_from(
                     client.collection_folder_of(username, record.release_id, record.instance_id)?
                 }
             };
-            client.remove_from_collection(
-                username,
-                folder,
-                record.release_id,
-                record.instance_id,
-            )
+            client.remove_from_collection(username, folder, record.release_id, record.instance_id)
         }
     }
 }

@@ -307,12 +307,9 @@ impl App {
                         // procedure bumps.
                         ui.add_space(10.0);
                         ui.label(
-                            egui::RichText::new(concat!(
-                                "Ordnung v",
-                                env!("CARGO_PKG_VERSION")
-                            ))
-                            .size(10.5)
-                            .color(egui::Color32::from_gray(120)),
+                            egui::RichText::new(concat!("Ordnung v", env!("CARGO_PKG_VERSION")))
+                                .size(10.5)
+                                .color(egui::Color32::from_gray(120)),
                         );
                     });
                     // Rail/content divider: reserve the gap here, draw the line
@@ -337,10 +334,10 @@ impl App {
                             .max_height(max_scroll_h)
                             .auto_shrink([false, true])
                             .show(ui, |ui| {
-                        match self.settings_tab {
-                            SettingsTab::General => {
-                                ui.label(egui::RichText::new("Discogs token").strong());
-                                ui.label(
+                                match self.settings_tab {
+                                    SettingsTab::General => {
+                                        ui.label(egui::RichText::new("Discogs token").strong());
+                                        ui.label(
                     egui::RichText::new(
                         "Used to fetch cover art. Create a personal access token at \
                          discogs.com → Settings → Developers, then paste it here.",
@@ -348,39 +345,42 @@ impl App {
                     .small()
                     .weak(),
                 );
-                                ui.add_space(6.0);
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.token_input)
-                                        .password(true)
-                                        .hint_text("paste your Discogs token")
-                                        .desired_width(f32::INFINITY),
-                                );
-                                ui.add_space(10.0);
-                                ui.horizontal(|ui| {
-                                    if ui.button("Save").clicked() {
-                                        save = true;
-                                    }
-                                    if ui.button("Cancel").clicked() {
-                                        self.token_input = self.config.discogs_token.clone();
-                                        self.settings_open = false;
-                                    }
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if let Some(p) = config::config_path() {
-                                                ui.label(
-                                                    egui::RichText::new(p.display().to_string())
-                                                        .small()
-                                                        .weak(),
-                                                );
+                                        ui.add_space(6.0);
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut self.token_input)
+                                                .password(true)
+                                                .hint_text("paste your Discogs token")
+                                                .desired_width(f32::INFINITY),
+                                        );
+                                        ui.add_space(10.0);
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Save").clicked() {
+                                                save = true;
                                             }
-                                        },
-                                    );
-                                });
-                            }
-                            SettingsTab::Analysis => {
-                                ui.label(egui::RichText::new("Analysis").strong());
-                                if ui
+                                            if ui.button("Cancel").clicked() {
+                                                self.token_input =
+                                                    self.config.discogs_token.clone();
+                                                self.settings_open = false;
+                                            }
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if let Some(p) = config::config_path() {
+                                                        ui.label(
+                                                            egui::RichText::new(
+                                                                p.display().to_string(),
+                                                            )
+                                                            .small()
+                                                            .weak(),
+                                                        );
+                                                    }
+                                                },
+                                            );
+                                        });
+                                    }
+                                    SettingsTab::Analysis => {
+                                        ui.label(egui::RichText::new("Analysis").strong());
+                                        if ui
                     .checkbox(
                         &mut self.config.auto_analyze,
                         "Analyze tracks automatically when added",
@@ -395,10 +395,10 @@ impl App {
                         self.status = format!("Couldn't save settings: {e}");
                     }
                 }
-                            }
-                            SettingsTab::Waveform => {
-                                ui.label(egui::RichText::new("Waveform").strong());
-                                ui.label(
+                                    }
+                                    SettingsTab::Waveform => {
+                                        ui.label(egui::RichText::new("Waveform").strong());
+                                        ui.label(
                                     egui::RichText::new(
                                         "How the player's waveform is colored. Energy shades each \
                          section by its loudness (cool → hot); Spectrum colors by \
@@ -407,49 +407,53 @@ impl App {
                                     .small()
                                     .weak(),
                                 );
-                                ui.add_space(4.0);
-                                let current = config::WaveformColorMode::from_key(
-                                    &self.config.waveform_color_mode,
-                                );
-                                let mut picked = current;
-                                egui::ComboBox::from_id_salt("settings_waveform_color")
-                                    .selected_text(match current {
-                                        config::WaveformColorMode::Energy => "Energy (loudness)",
-                                        config::WaveformColorMode::Spectrum => {
-                                            "Spectrum (frequency)"
+                                        ui.add_space(4.0);
+                                        let current = config::WaveformColorMode::from_key(
+                                            &self.config.waveform_color_mode,
+                                        );
+                                        let mut picked = current;
+                                        egui::ComboBox::from_id_salt("settings_waveform_color")
+                                            .selected_text(match current {
+                                                config::WaveformColorMode::Energy => {
+                                                    "Energy (loudness)"
+                                                }
+                                                config::WaveformColorMode::Spectrum => {
+                                                    "Spectrum (frequency)"
+                                                }
+                                            })
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(
+                                                    &mut picked,
+                                                    config::WaveformColorMode::Energy,
+                                                    "Energy (loudness)",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut picked,
+                                                    config::WaveformColorMode::Spectrum,
+                                                    "Spectrum (frequency)",
+                                                );
+                                            });
+                                        if picked != current {
+                                            self.config.waveform_color_mode =
+                                                picked.key().to_string();
+                                            if let Err(e) = self.config.save() {
+                                                self.status =
+                                                    format!("Couldn't save settings: {e}");
+                                            }
                                         }
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut picked,
-                                            config::WaveformColorMode::Energy,
-                                            "Energy (loudness)",
-                                        );
-                                        ui.selectable_value(
-                                            &mut picked,
-                                            config::WaveformColorMode::Spectrum,
-                                            "Spectrum (frequency)",
-                                        );
-                                    });
-                                if picked != current {
-                                    self.config.waveform_color_mode = picked.key().to_string();
-                                    if let Err(e) = self.config.save() {
-                                        self.status = format!("Couldn't save settings: {e}");
-                                    }
-                                }
 
-                                ui.add_space(12.0);
-                                let mut wave_dirty = false;
-                                if subsection_header(ui, "Height & gain") {
-                                    self.config.waveform_height_exp =
-                                        config::default_waveform_height_exp();
-                                    self.config.waveform_energy_gain =
-                                        config::default_waveform_energy_gain();
-                                    self.config.waveform_band_gain =
-                                        config::default_waveform_band_gain();
-                                    wave_dirty = true;
-                                }
-                                ui.label(
+                                        ui.add_space(12.0);
+                                        let mut wave_dirty = false;
+                                        if subsection_header(ui, "Height & gain") {
+                                            self.config.waveform_height_exp =
+                                                config::default_waveform_height_exp();
+                                            self.config.waveform_energy_gain =
+                                                config::default_waveform_energy_gain();
+                                            self.config.waveform_band_gain =
+                                                config::default_waveform_band_gain();
+                                            wave_dirty = true;
+                                        }
+                                        ui.label(
                     egui::RichText::new(
                         "How tall the waveform draws — the overall height curve, plus \
                          the height of each frequency band. Changes apply live to the \
@@ -458,13 +462,13 @@ impl App {
                     .small()
                     .weak(),
                 );
-                                ui.add_space(4.0);
-                                egui::Grid::new("settings_waveform_render_grid")
-                                    .num_columns(2)
-                                    .spacing([12.0, 8.0])
-                                    .show(ui, |ui| {
-                                        ui.label("Height exponent:");
-                                        if ui
+                                        ui.add_space(4.0);
+                                        egui::Grid::new("settings_waveform_render_grid")
+                                            .num_columns(2)
+                                            .spacing([12.0, 8.0])
+                                            .show(ui, |ui| {
+                                                ui.label("Height exponent:");
+                                                if ui
                             .add(
                                 egui::Slider::new(
                                     &mut self.config.waveform_height_exp,
@@ -479,73 +483,71 @@ impl App {
                         {
                             wave_dirty = true;
                         }
-                                        ui.end_row();
+                                                ui.end_row();
 
-                                        ui.label("Energy gain:");
-                                        if ui
-                                            .add(
-                                                egui::Slider::new(
-                                                    &mut self.config.waveform_energy_gain,
-                                                    0.0..=2.0,
-                                                )
-                                                .fixed_decimals(2),
-                                            )
-                                            .on_hover_text(
-                                                "Envelope height in Energy mode",
-                                            )
-                                            .changed()
-                                        {
+                                                ui.label("Energy gain:");
+                                                if ui
+                                                    .add(
+                                                        egui::Slider::new(
+                                                            &mut self.config.waveform_energy_gain,
+                                                            0.0..=2.0,
+                                                        )
+                                                        .fixed_decimals(2),
+                                                    )
+                                                    .on_hover_text("Envelope height in Energy mode")
+                                                    .changed()
+                                                {
+                                                    wave_dirty = true;
+                                                }
+                                                ui.end_row();
+
+                                                for (i, name, tip) in [
+                                                    (
+                                                        0usize,
+                                                        "Bass gain:",
+                                                        "Height of the low band (spectrum mode).",
+                                                    ),
+                                                    (
+                                                        1,
+                                                        "Mid gain:",
+                                                        "Height of the mid band (spectrum mode).",
+                                                    ),
+                                                    (
+                                                        2,
+                                                        "High gain:",
+                                                        "Height of the high band (spectrum mode).",
+                                                    ),
+                                                ] {
+                                                    ui.label(name);
+                                                    if ui
+                                                        .add(
+                                                            egui::Slider::new(
+                                                                &mut self.config.waveform_band_gain
+                                                                    [i],
+                                                                0.0..=2.0,
+                                                            )
+                                                            .fixed_decimals(2),
+                                                        )
+                                                        .on_hover_text(tip)
+                                                        .changed()
+                                                    {
+                                                        wave_dirty = true;
+                                                    }
+                                                    ui.end_row();
+                                                }
+                                            });
+
+                                        ui.add_space(12.0);
+                                        if subsection_header(ui, "Smoothing") {
+                                            self.config.waveform_smoothing =
+                                                config::default_waveform_smoothing();
+                                            self.config.waveform_smooth_attack_ms =
+                                                config::default_waveform_smooth_attack_ms();
+                                            self.config.waveform_smooth_release_ms =
+                                                config::default_waveform_smooth_release_ms();
                                             wave_dirty = true;
                                         }
-                                        ui.end_row();
-
-                                        for (i, name, tip) in [
-                                            (
-                                                0usize,
-                                                "Bass gain:",
-                                                "Height of the low band (spectrum mode).",
-                                            ),
-                                            (
-                                                1,
-                                                "Mid gain:",
-                                                "Height of the mid band (spectrum mode).",
-                                            ),
-                                            (
-                                                2,
-                                                "High gain:",
-                                                "Height of the high band (spectrum mode).",
-                                            ),
-                                        ] {
-                                            ui.label(name);
-                                            if ui
-                                                .add(
-                                                    egui::Slider::new(
-                                                        &mut self.config.waveform_band_gain[i],
-                                                        0.0..=2.0,
-                                                    )
-                                                    .fixed_decimals(2),
-                                                )
-                                                .on_hover_text(tip)
-                                                .changed()
-                                            {
-                                                wave_dirty = true;
-                                            }
-                                            ui.end_row();
-                                        }
-
-                                    });
-
-                                ui.add_space(12.0);
-                                if subsection_header(ui, "Smoothing") {
-                                    self.config.waveform_smoothing =
-                                        config::default_waveform_smoothing();
-                                    self.config.waveform_smooth_attack_ms =
-                                        config::default_waveform_smooth_attack_ms();
-                                    self.config.waveform_smooth_release_ms =
-                                        config::default_waveform_smooth_release_ms();
-                                    wave_dirty = true;
-                                }
-                                ui.label(
+                                        ui.label(
                                     egui::RichText::new(
                                         "Irons the envelope's small jaggies into a connected, \
                                          rekordbox-style silhouette. Strength scales the attack \
@@ -555,32 +557,32 @@ impl App {
                                     .small()
                                     .weak(),
                                 );
-                                ui.add_space(4.0);
-                                egui::Grid::new("settings_waveform_smooth_grid")
-                                    .num_columns(2)
-                                    .spacing([12.0, 8.0])
-                                    .show(ui, |ui| {
-                                        ui.label("Strength:");
-                                        if ui
-                                            .add(
-                                                egui::Slider::new(
-                                                    &mut self.config.waveform_smoothing,
-                                                    0.0..=1.0,
-                                                )
-                                                .fixed_decimals(2),
-                                            )
-                                            .on_hover_text(
-                                                "Scales attack and release together. 0 is \
+                                        ui.add_space(4.0);
+                                        egui::Grid::new("settings_waveform_smooth_grid")
+                                            .num_columns(2)
+                                            .spacing([12.0, 8.0])
+                                            .show(ui, |ui| {
+                                                ui.label("Strength:");
+                                                if ui
+                                                    .add(
+                                                        egui::Slider::new(
+                                                            &mut self.config.waveform_smoothing,
+                                                            0.0..=1.0,
+                                                        )
+                                                        .fixed_decimals(2),
+                                                    )
+                                                    .on_hover_text(
+                                                        "Scales attack and release together. 0 is \
                                                  raw; 1 uses the full times below.",
-                                            )
-                                            .changed()
-                                        {
-                                            wave_dirty = true;
-                                        }
-                                        ui.end_row();
+                                                    )
+                                                    .changed()
+                                                {
+                                                    wave_dirty = true;
+                                                }
+                                                ui.end_row();
 
-                                        ui.label("Attack:");
-                                        if ui
+                                                ui.label("Attack:");
+                                                if ui
                                             .add(
                                                 egui::Slider::new(
                                                     &mut self.config.waveform_smooth_attack_ms,
@@ -596,38 +598,40 @@ impl App {
                                         {
                                             wave_dirty = true;
                                         }
-                                        ui.end_row();
+                                                ui.end_row();
 
-                                        ui.label("Release:");
-                                        if ui
-                                            .add(
-                                                egui::Slider::new(
-                                                    &mut self.config.waveform_smooth_release_ms,
-                                                    0.0..=1000.0,
-                                                )
-                                                .fixed_decimals(0)
-                                                .suffix(" ms"),
-                                            )
-                                            .on_hover_text(
-                                                "How long tails ring out. Around 450 ms \
+                                                ui.label("Release:");
+                                                if ui
+                                                    .add(
+                                                        egui::Slider::new(
+                                                            &mut self
+                                                                .config
+                                                                .waveform_smooth_release_ms,
+                                                            0.0..=1000.0,
+                                                        )
+                                                        .fixed_decimals(0)
+                                                        .suffix(" ms"),
+                                                    )
+                                                    .on_hover_text(
+                                                        "How long tails ring out. Around 450 ms \
                                                  connects beats; shorter pinches between them.",
-                                            )
-                                            .changed()
-                                        {
+                                                    )
+                                                    .changed()
+                                                {
+                                                    wave_dirty = true;
+                                                }
+                                                ui.end_row();
+                                            });
+
+                                        ui.add_space(12.0);
+                                        if subsection_header(ui, "Bass floor") {
+                                            self.config.waveform_bass_floor_threshold =
+                                                config::default_waveform_bass_floor_threshold();
+                                            self.config.waveform_bass_floor_amount =
+                                                config::default_waveform_bass_floor_amount();
                                             wave_dirty = true;
                                         }
-                                        ui.end_row();
-                                    });
-
-                                ui.add_space(12.0);
-                                if subsection_header(ui, "Bass floor") {
-                                    self.config.waveform_bass_floor_threshold =
-                                        config::default_waveform_bass_floor_threshold();
-                                    self.config.waveform_bass_floor_amount =
-                                        config::default_waveform_bass_floor_amount();
-                                    wave_dirty = true;
-                                }
-                                ui.label(
+                                        ui.label(
                                     egui::RichText::new(
                                         "Declutters the low band in Spectrum mode: sustained sub \
                                          (the quiet rumble lingering under a kick) is dimmed so \
@@ -636,32 +640,34 @@ impl App {
                                     .small()
                                     .weak(),
                                 );
-                                ui.add_space(4.0);
-                                egui::Grid::new("settings_waveform_bass_floor_grid")
-                                    .num_columns(2)
-                                    .spacing([12.0, 8.0])
-                                    .show(ui, |ui| {
-                                        ui.label("Threshold:");
-                                        if ui
-                                            .add(
-                                                egui::Slider::new(
-                                                    &mut self.config.waveform_bass_floor_threshold,
-                                                    0.0..=1.0,
-                                                )
-                                                .fixed_decimals(2),
-                                            )
-                                            .on_hover_text(
-                                                "Bass below this level is dimmed as \
+                                        ui.add_space(4.0);
+                                        egui::Grid::new("settings_waveform_bass_floor_grid")
+                                            .num_columns(2)
+                                            .spacing([12.0, 8.0])
+                                            .show(ui, |ui| {
+                                                ui.label("Threshold:");
+                                                if ui
+                                                    .add(
+                                                        egui::Slider::new(
+                                                            &mut self
+                                                                .config
+                                                                .waveform_bass_floor_threshold,
+                                                            0.0..=1.0,
+                                                        )
+                                                        .fixed_decimals(2),
+                                                    )
+                                                    .on_hover_text(
+                                                        "Bass below this level is dimmed as \
                                                  sustained sub. Higher dims more.",
-                                            )
-                                            .changed()
-                                        {
-                                            wave_dirty = true;
-                                        }
-                                        ui.end_row();
+                                                    )
+                                                    .changed()
+                                                {
+                                                    wave_dirty = true;
+                                                }
+                                                ui.end_row();
 
-                                        ui.label("Amount:");
-                                        if ui
+                                                ui.label("Amount:");
+                                                if ui
                                             .add(
                                                 egui::Slider::new(
                                                     &mut self.config.waveform_bass_floor_amount,
@@ -677,22 +683,22 @@ impl App {
                                         {
                                             wave_dirty = true;
                                         }
-                                        ui.end_row();
-                                    });
+                                                ui.end_row();
+                                            });
 
-                                ui.add_space(12.0);
-                                if subsection_header(ui, "Frequency bands") {
-                                    self.config.waveform_low_hz =
-                                        config::default_waveform_low_hz();
-                                    self.config.waveform_mid_hz =
-                                        config::default_waveform_mid_hz();
-                                    if let Some(np) = self.now_playing.as_mut() {
-                                        np.hires_bands = None;
-                                        np.hires_requested = false;
-                                    }
-                                    wave_dirty = true;
-                                }
-                                ui.label(
+                                        ui.add_space(12.0);
+                                        if subsection_header(ui, "Frequency bands") {
+                                            self.config.waveform_low_hz =
+                                                config::default_waveform_low_hz();
+                                            self.config.waveform_mid_hz =
+                                                config::default_waveform_mid_hz();
+                                            if let Some(np) = self.now_playing.as_mut() {
+                                                np.hires_bands = None;
+                                                np.hires_requested = false;
+                                            }
+                                            wave_dirty = true;
+                                        }
+                                        ui.label(
                                     egui::RichText::new(
                                         "Crossover frequencies that split the low / mid / high \
                                          bands. Lower the bass top toward kick + sub to keep \
@@ -703,106 +709,109 @@ impl App {
                                     .small()
                                     .weak(),
                                 );
-                                ui.add_space(4.0);
-                                // Reset the loaded track's hi-res bands so the zoom lane
-                                // recomputes from PCM with the new crossovers next frame.
-                                let mut freq_dirty = false;
-                                egui::Grid::new("settings_waveform_freq_grid")
-                                    .num_columns(2)
-                                    .spacing([12.0, 8.0])
-                                    .show(ui, |ui| {
-                                        ui.label("Bass top (Hz):");
-                                        if ui
-                                            .add(
-                                                egui::Slider::new(
-                                                    &mut self.config.waveform_low_hz,
-                                                    40.0..=400.0,
-                                                )
-                                                .fixed_decimals(0),
-                                            )
-                                            .on_hover_text(
-                                                "Low to mid crossover. Raise to fold \
+                                        ui.add_space(4.0);
+                                        // Reset the loaded track's hi-res bands so the zoom lane
+                                        // recomputes from PCM with the new crossovers next frame.
+                                        let mut freq_dirty = false;
+                                        egui::Grid::new("settings_waveform_freq_grid")
+                                            .num_columns(2)
+                                            .spacing([12.0, 8.0])
+                                            .show(ui, |ui| {
+                                                ui.label("Bass top (Hz):");
+                                                if ui
+                                                    .add(
+                                                        egui::Slider::new(
+                                                            &mut self.config.waveform_low_hz,
+                                                            40.0..=400.0,
+                                                        )
+                                                        .fixed_decimals(0),
+                                                    )
+                                                    .on_hover_text(
+                                                        "Low to mid crossover. Raise to fold \
                                                  low-mids into the bass.",
-                                            )
-                                            .changed()
-                                        {
-                                            freq_dirty = true;
-                                        }
-                                        ui.end_row();
+                                                    )
+                                                    .changed()
+                                                {
+                                                    freq_dirty = true;
+                                                }
+                                                ui.end_row();
 
-                                        ui.label("Mid top (Hz):");
-                                        if ui
-                                            .add(
-                                                egui::Slider::new(
-                                                    &mut self.config.waveform_mid_hz,
-                                                    800.0..=6000.0,
-                                                )
-                                                .fixed_decimals(0),
-                                            )
-                                            .on_hover_text(
-                                                "Mid to high crossover. Everything above \
+                                                ui.label("Mid top (Hz):");
+                                                if ui
+                                                    .add(
+                                                        egui::Slider::new(
+                                                            &mut self.config.waveform_mid_hz,
+                                                            800.0..=6000.0,
+                                                        )
+                                                        .fixed_decimals(0),
+                                                    )
+                                                    .on_hover_text(
+                                                        "Mid to high crossover. Everything above \
                                                  reads as highs.",
-                                            )
-                                            .changed()
-                                        {
-                                            freq_dirty = true;
+                                                    )
+                                                    .changed()
+                                                {
+                                                    freq_dirty = true;
+                                                }
+                                                ui.end_row();
+                                            });
+                                        if freq_dirty {
+                                            // Keep mid above low so the bands never invert.
+                                            self.config.waveform_mid_hz = self
+                                                .config
+                                                .waveform_mid_hz
+                                                .max(self.config.waveform_low_hz);
+                                            if let Some(np) = self.now_playing.as_mut() {
+                                                np.hires_bands = None;
+                                                np.hires_requested = false;
+                                            }
+                                            wave_dirty = true;
                                         }
-                                        ui.end_row();
-                                    });
-                                if freq_dirty {
-                                    // Keep mid above low so the bands never invert.
-                                    self.config.waveform_mid_hz = self
-                                        .config
-                                        .waveform_mid_hz
-                                        .max(self.config.waveform_low_hz);
-                                    if let Some(np) = self.now_playing.as_mut() {
-                                        np.hires_bands = None;
-                                        np.hires_requested = false;
-                                    }
-                                    wave_dirty = true;
-                                }
 
-                                ui.add_space(12.0);
-                                if subsection_header(ui, "Band colors") {
-                                    self.config.waveform_band_colors =
-                                        config::default_waveform_band_colors();
-                                    wave_dirty = true;
-                                }
-                                ui.label(
+                                        ui.add_space(12.0);
+                                        if subsection_header(ui, "Band colors") {
+                                            self.config.waveform_band_colors =
+                                                config::default_waveform_band_colors();
+                                            wave_dirty = true;
+                                        }
+                                        ui.label(
                                     egui::RichText::new(
                                         "Colors of the three frequency bands in Spectrum mode.",
                                     )
                                     .small()
                                     .weak(),
                                 );
-                                ui.add_space(4.0);
-                                egui::Grid::new("settings_waveform_band_color_grid")
-                                    .num_columns(2)
-                                    .spacing([12.0, 8.0])
-                                    .show(ui, |ui| {
-                                        for (i, name) in
-                                            [(0usize, "Low / bass:"), (1, "Mid:"), (2, "High:")]
-                                        {
-                                            ui.label(name);
-                                            if ui
-                                                .color_edit_button_srgb(
-                                                    &mut self.config.waveform_band_colors[i],
-                                                )
-                                                .changed()
-                                            {
-                                                wave_dirty = true;
-                                            }
-                                            ui.end_row();
-                                        }
-                                    });
+                                        ui.add_space(4.0);
+                                        egui::Grid::new("settings_waveform_band_color_grid")
+                                            .num_columns(2)
+                                            .spacing([12.0, 8.0])
+                                            .show(ui, |ui| {
+                                                for (i, name) in [
+                                                    (0usize, "Low / bass:"),
+                                                    (1, "Mid:"),
+                                                    (2, "High:"),
+                                                ] {
+                                                    ui.label(name);
+                                                    if ui
+                                                        .color_edit_button_srgb(
+                                                            &mut self.config.waveform_band_colors
+                                                                [i],
+                                                        )
+                                                        .changed()
+                                                    {
+                                                        wave_dirty = true;
+                                                    }
+                                                    ui.end_row();
+                                                }
+                                            });
 
-                                ui.add_space(12.0);
-                                if subsection_header(ui, "Energy gradient") {
-                                    self.config.waveform_energy_colors =
-                                        config::default_waveform_energy_colors();
-                                    wave_dirty = true;
-                                }
-                                ui.label(
+                                        ui.add_space(12.0);
+                                        if subsection_header(ui, "Energy gradient") {
+                                            self.config.waveform_energy_colors =
+                                                config::default_waveform_energy_colors();
+                                            wave_dirty = true;
+                                        }
+                                        ui.label(
                                     egui::RichText::new(
                                         "Cool → hot gradient used in Energy mode, quiet (left) to \
                          loudest (right).",
@@ -810,23 +819,23 @@ impl App {
                                     .small()
                                     .weak(),
                                 );
-                                ui.add_space(4.0);
-                                ui.horizontal(|ui| {
-                                    for i in 0..self.config.waveform_energy_colors.len() {
-                                        if ui
-                                            .color_edit_button_srgb(
-                                                &mut self.config.waveform_energy_colors[i],
-                                            )
-                                            .changed()
-                                        {
-                                            wave_dirty = true;
-                                        }
-                                    }
-                                });
+                                        ui.add_space(4.0);
+                                        ui.horizontal(|ui| {
+                                            for i in 0..self.config.waveform_energy_colors.len() {
+                                                if ui
+                                                    .color_edit_button_srgb(
+                                                        &mut self.config.waveform_energy_colors[i],
+                                                    )
+                                                    .changed()
+                                                {
+                                                    wave_dirty = true;
+                                                }
+                                            }
+                                        });
 
-                                ui.add_space(12.0);
-                                ui.label(egui::RichText::new("Presets").strong());
-                                ui.label(
+                                        ui.add_space(12.0);
+                                        ui.label(egui::RichText::new("Presets").strong());
+                                        ui.label(
                                     egui::RichText::new(
                                         "Five slots that snapshot every waveform setting above, \
                                          so a look you like isn't lost while experimenting. \
@@ -835,115 +844,116 @@ impl App {
                                     .small()
                                     .weak(),
                                 );
-                                ui.add_space(4.0);
-                                let mut load_slot: Option<u8> = None;
-                                let mut save_slot: Option<u8> = None;
-                                ui.horizontal(|ui| {
-                                    ui.label("Save:");
-                                    for slot in 1..=5u8 {
-                                        let filled =
-                                            self.config.waveform_preset(slot).is_some();
-                                        let label = slot.to_string();
+                                        ui.add_space(4.0);
+                                        let mut load_slot: Option<u8> = None;
+                                        let mut save_slot: Option<u8> = None;
+                                        ui.horizontal(|ui| {
+                                            ui.label("Save:");
+                                            for slot in 1..=5u8 {
+                                                let filled =
+                                                    self.config.waveform_preset(slot).is_some();
+                                                let label = slot.to_string();
+                                                if ui
+                                                    .button(label)
+                                                    .on_hover_text(if filled {
+                                                        format!("Overwrite preset {slot}")
+                                                    } else {
+                                                        format!("Save as preset {slot}")
+                                                    })
+                                                    .clicked()
+                                                {
+                                                    save_slot = Some(slot);
+                                                }
+                                            }
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Load:");
+                                            for slot in 1..=5u8 {
+                                                let filled =
+                                                    self.config.waveform_preset(slot).is_some();
+                                                let resp = ui
+                                                    .add_enabled(
+                                                        filled,
+                                                        egui::Button::new(slot.to_string()),
+                                                    )
+                                                    .on_hover_text(format!("Apply preset {slot}"))
+                                                    .on_disabled_hover_text(format!(
+                                                        "Preset {slot} is empty. Save to it first."
+                                                    ));
+                                                if resp.clicked() {
+                                                    load_slot = Some(slot);
+                                                }
+                                            }
+                                        });
+                                        if let Some(slot) = save_slot {
+                                            self.config.save_waveform_preset(slot);
+                                            self.status = format!("Saved waveform preset {slot}.");
+                                            wave_dirty = true;
+                                        }
+                                        if let Some(slot) = load_slot {
+                                            if let Some(freq_changed) =
+                                                self.config.load_waveform_preset(slot)
+                                            {
+                                                if freq_changed {
+                                                    // New crossovers → recompute the zoom lane bands.
+                                                    if let Some(np) = self.now_playing.as_mut() {
+                                                        np.hires_bands = None;
+                                                        np.hires_requested = false;
+                                                    }
+                                                }
+                                                self.status =
+                                                    format!("Loaded waveform preset {slot}.");
+                                                wave_dirty = true;
+                                            }
+                                        }
+
+                                        ui.add_space(10.0);
                                         if ui
-                                            .button(label)
-                                            .on_hover_text(if filled {
-                                                format!("Overwrite preset {slot}")
-                                            } else {
-                                                format!("Save as preset {slot}")
-                                            })
+                                            .button("Reset all to defaults")
+                                            .on_hover_text("Restore all waveform defaults")
                                             .clicked()
                                         {
-                                            save_slot = Some(slot);
-                                        }
-                                    }
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.label("Load:");
-                                    for slot in 1..=5u8 {
-                                        let filled =
-                                            self.config.waveform_preset(slot).is_some();
-                                        let resp = ui
-                                            .add_enabled(
-                                                filled,
-                                                egui::Button::new(slot.to_string()),
-                                            )
-                                            .on_hover_text(format!("Apply preset {slot}"))
-                                            .on_disabled_hover_text(format!(
-                                                "Preset {slot} is empty. Save to it first."
-                                            ));
-                                        if resp.clicked() {
-                                            load_slot = Some(slot);
-                                        }
-                                    }
-                                });
-                                if let Some(slot) = save_slot {
-                                    self.config.save_waveform_preset(slot);
-                                    self.status = format!("Saved waveform preset {slot}.");
-                                    wave_dirty = true;
-                                }
-                                if let Some(slot) = load_slot {
-                                    if let Some(freq_changed) =
-                                        self.config.load_waveform_preset(slot)
-                                    {
-                                        if freq_changed {
-                                            // New crossovers → recompute the zoom lane bands.
+                                            self.config.waveform_height_exp =
+                                                config::default_waveform_height_exp();
+                                            self.config.waveform_band_gain =
+                                                config::default_waveform_band_gain();
+                                            self.config.waveform_energy_gain =
+                                                config::default_waveform_energy_gain();
+                                            self.config.waveform_band_colors =
+                                                config::default_waveform_band_colors();
+                                            self.config.waveform_energy_colors =
+                                                config::default_waveform_energy_colors();
+                                            self.config.waveform_low_hz =
+                                                config::default_waveform_low_hz();
+                                            self.config.waveform_mid_hz =
+                                                config::default_waveform_mid_hz();
+                                            self.config.waveform_smoothing =
+                                                config::default_waveform_smoothing();
+                                            self.config.waveform_smooth_attack_ms =
+                                                config::default_waveform_smooth_attack_ms();
+                                            self.config.waveform_smooth_release_ms =
+                                                config::default_waveform_smooth_release_ms();
+                                            self.config.waveform_bass_floor_threshold =
+                                                config::default_waveform_bass_floor_threshold();
+                                            self.config.waveform_bass_floor_amount =
+                                                config::default_waveform_bass_floor_amount();
+                                            // Restored crossovers → recompute the zoom lane bands.
                                             if let Some(np) = self.now_playing.as_mut() {
                                                 np.hires_bands = None;
                                                 np.hires_requested = false;
                                             }
+                                            wave_dirty = true;
                                         }
-                                        self.status =
-                                            format!("Loaded waveform preset {slot}.");
-                                        wave_dirty = true;
+                                        if wave_dirty {
+                                            if let Err(e) = self.config.save() {
+                                                self.status =
+                                                    format!("Couldn't save settings: {e}");
+                                            }
+                                        }
                                     }
-                                }
-
-                                ui.add_space(10.0);
-                                if ui
-                                    .button("Reset all to defaults")
-                                    .on_hover_text("Restore all waveform defaults")
-                                    .clicked()
-                                {
-                                    self.config.waveform_height_exp =
-                                        config::default_waveform_height_exp();
-                                    self.config.waveform_band_gain =
-                                        config::default_waveform_band_gain();
-                                    self.config.waveform_energy_gain =
-                                        config::default_waveform_energy_gain();
-                                    self.config.waveform_band_colors =
-                                        config::default_waveform_band_colors();
-                                    self.config.waveform_energy_colors =
-                                        config::default_waveform_energy_colors();
-                                    self.config.waveform_low_hz =
-                                        config::default_waveform_low_hz();
-                                    self.config.waveform_mid_hz =
-                                        config::default_waveform_mid_hz();
-                                    self.config.waveform_smoothing =
-                                        config::default_waveform_smoothing();
-                                    self.config.waveform_smooth_attack_ms =
-                                        config::default_waveform_smooth_attack_ms();
-                                    self.config.waveform_smooth_release_ms =
-                                        config::default_waveform_smooth_release_ms();
-                                    self.config.waveform_bass_floor_threshold =
-                                        config::default_waveform_bass_floor_threshold();
-                                    self.config.waveform_bass_floor_amount =
-                                        config::default_waveform_bass_floor_amount();
-                                    // Restored crossovers → recompute the zoom lane bands.
-                                    if let Some(np) = self.now_playing.as_mut() {
-                                        np.hires_bands = None;
-                                        np.hires_requested = false;
-                                    }
-                                    wave_dirty = true;
-                                }
-                                if wave_dirty {
-                                    if let Err(e) = self.config.save() {
-                                        self.status = format!("Couldn't save settings: {e}");
-                                    }
-                                }
-                            }
-                            SettingsTab::Sorting => {
-                                ui.label(egui::RichText::new("Sorting").strong());
-                                ui.label(
+                                    SettingsTab::Sorting => {
+                                        ui.label(egui::RichText::new("Sorting").strong());
+                                        ui.label(
                     egui::RichText::new(
                         "How the track table is sorted when the app launches. You can \
                          still click any column header to re-sort during a session.",
@@ -951,111 +961,120 @@ impl App {
                     .small()
                     .weak(),
                 );
-                                ui.add_space(4.0);
-                                let mut sort_dirty = false;
-                                // Sortable columns, in display order, plus a "Natural order"
-                                // sentinel (empty key) that keeps catalog/playlist order.
-                                let selected_label = if self.config.default_sort.trim().is_empty() {
-                                    "Natural order".to_string()
-                                } else {
-                                    TableColumn::from_key(&self.config.default_sort)
-                                        .map(|c| c.label().to_string())
-                                        .unwrap_or_else(|| "Natural order".to_string())
-                                };
-                                egui::Grid::new("settings_sort_grid")
-                                    .num_columns(2)
-                                    .spacing([12.0, 8.0])
-                                    .show(ui, |ui| {
-                                        ui.label("Default sort:");
-                                        egui::ComboBox::from_id_salt("settings_default_sort")
-                                            .selected_text(selected_label)
-                                            .show_ui(ui, |ui| {
-                                                if ui
-                                                    .selectable_label(
-                                                        self.config.default_sort.trim().is_empty(),
-                                                        "Natural order",
-                                                    )
-                                                    .clicked()
-                                                    && !self.config.default_sort.is_empty()
-                                                {
-                                                    self.config.default_sort.clear();
-                                                    sort_dirty = true;
-                                                }
-                                                for col in TableColumn::DEFAULT_ORDER {
-                                                    if col.sort_column().is_none() {
-                                                        continue;
-                                                    }
-                                                    let key = col.key();
+                                        ui.add_space(4.0);
+                                        let mut sort_dirty = false;
+                                        // Sortable columns, in display order, plus a "Natural order"
+                                        // sentinel (empty key) that keeps catalog/playlist order.
+                                        let selected_label =
+                                            if self.config.default_sort.trim().is_empty() {
+                                                "Natural order".to_string()
+                                            } else {
+                                                TableColumn::from_key(&self.config.default_sort)
+                                                    .map(|c| c.label().to_string())
+                                                    .unwrap_or_else(|| "Natural order".to_string())
+                                            };
+                                        egui::Grid::new("settings_sort_grid")
+                                            .num_columns(2)
+                                            .spacing([12.0, 8.0])
+                                            .show(ui, |ui| {
+                                                ui.label("Default sort:");
+                                                egui::ComboBox::from_id_salt(
+                                                    "settings_default_sort",
+                                                )
+                                                .selected_text(selected_label)
+                                                .show_ui(ui, |ui| {
                                                     if ui
                                                         .selectable_label(
-                                                            self.config.default_sort == key,
-                                                            col.label(),
+                                                            self.config
+                                                                .default_sort
+                                                                .trim()
+                                                                .is_empty(),
+                                                            "Natural order",
                                                         )
                                                         .clicked()
-                                                        && self.config.default_sort != key
+                                                        && !self.config.default_sort.is_empty()
                                                     {
-                                                        self.config.default_sort = key.to_string();
+                                                        self.config.default_sort.clear();
                                                         sort_dirty = true;
                                                     }
-                                                }
-                                            });
-                                        ui.end_row();
+                                                    for col in TableColumn::DEFAULT_ORDER {
+                                                        if col.sort_column().is_none() {
+                                                            continue;
+                                                        }
+                                                        let key = col.key();
+                                                        if ui
+                                                            .selectable_label(
+                                                                self.config.default_sort == key,
+                                                                col.label(),
+                                                            )
+                                                            .clicked()
+                                                            && self.config.default_sort != key
+                                                        {
+                                                            self.config.default_sort =
+                                                                key.to_string();
+                                                            sort_dirty = true;
+                                                        }
+                                                    }
+                                                });
+                                                ui.end_row();
 
-                                        ui.label("Direction:");
-                                        let has_sort = !self.config.default_sort.trim().is_empty();
-                                        let dir_text = if self.config.default_sort_ascending {
-                                            "Ascending (A→Z, oldest first)"
-                                        } else {
-                                            "Descending (Z→A, newest first)"
-                                        };
-                                        ui.add_enabled_ui(has_sort, |ui| {
-                                            egui::ComboBox::from_id_salt(
-                                                "settings_default_sort_dir",
-                                            )
-                                            .selected_text(dir_text)
-                                            .show_ui(
-                                                ui,
-                                                |ui| {
-                                                    if ui
-                                                        .selectable_label(
-                                                            self.config.default_sort_ascending,
-                                                            "Ascending (A→Z, oldest first)",
-                                                        )
-                                                        .clicked()
-                                                        && !self.config.default_sort_ascending
-                                                    {
-                                                        self.config.default_sort_ascending = true;
-                                                        sort_dirty = true;
-                                                    }
-                                                    if ui
-                                                        .selectable_label(
-                                                            !self.config.default_sort_ascending,
-                                                            "Descending (Z→A, newest first)",
-                                                        )
-                                                        .clicked()
-                                                        && self.config.default_sort_ascending
-                                                    {
-                                                        self.config.default_sort_ascending = false;
-                                                        sort_dirty = true;
-                                                    }
-                                                },
-                                            );
-                                        });
-                                        ui.end_row();
-                                    });
-                                if sort_dirty {
-                                    if let Err(e) = self.config.save() {
-                                        self.status = format!("Couldn't save settings: {e}");
+                                                ui.label("Direction:");
+                                                let has_sort =
+                                                    !self.config.default_sort.trim().is_empty();
+                                                let dir_text = if self.config.default_sort_ascending
+                                                {
+                                                    "Ascending (A→Z, oldest first)"
+                                                } else {
+                                                    "Descending (Z→A, newest first)"
+                                                };
+                                                ui.add_enabled_ui(has_sort, |ui| {
+                                                    egui::ComboBox::from_id_salt(
+                                                        "settings_default_sort_dir",
+                                                    )
+                                                    .selected_text(dir_text)
+                                                    .show_ui(ui, |ui| {
+                                                        if ui
+                                                            .selectable_label(
+                                                                self.config.default_sort_ascending,
+                                                                "Ascending (A→Z, oldest first)",
+                                                            )
+                                                            .clicked()
+                                                            && !self.config.default_sort_ascending
+                                                        {
+                                                            self.config.default_sort_ascending =
+                                                                true;
+                                                            sort_dirty = true;
+                                                        }
+                                                        if ui
+                                                            .selectable_label(
+                                                                !self.config.default_sort_ascending,
+                                                                "Descending (Z→A, newest first)",
+                                                            )
+                                                            .clicked()
+                                                            && self.config.default_sort_ascending
+                                                        {
+                                                            self.config.default_sort_ascending =
+                                                                false;
+                                                            sort_dirty = true;
+                                                        }
+                                                    });
+                                                });
+                                                ui.end_row();
+                                            });
+                                        if sort_dirty {
+                                            if let Err(e) = self.config.save() {
+                                                self.status =
+                                                    format!("Couldn't save settings: {e}");
+                                            }
+                                            // Apply the new default to the live view immediately so the
+                                            // change is visible without relaunching.
+                                            self.sort = self.default_sort();
+                                            self.reload();
+                                        }
                                     }
-                                    // Apply the new default to the live view immediately so the
-                                    // change is visible without relaunching.
-                                    self.sort = self.default_sort();
-                                    self.reload();
-                                }
-                            }
-                            SettingsTab::Conversion => {
-                                ui.label(egui::RichText::new("Conversion").strong());
-                                ui.label(
+                                    SettingsTab::Conversion => {
+                                        ui.label(egui::RichText::new("Conversion").strong());
+                                        ui.label(
                     egui::RichText::new(
                         "Defaults used when you open a Convert dialog. You can still \
                          change them per conversion.",
@@ -1063,81 +1082,85 @@ impl App {
                     .small()
                     .weak(),
                 );
-                                ui.add_space(4.0);
-                                let mut convert_dirty = false;
-                                let mut target = format_from_key(&self.config.convert_format)
-                                    .unwrap_or(Format::Aiff);
-                                egui::Grid::new("settings_convert_grid")
-                                    .num_columns(2)
-                                    .spacing([12.0, 8.0])
-                                    .show(ui, |ui| {
-                                        ui.label("Default format:");
-                                        let before = target;
-                                        egui::ComboBox::from_id_salt("settings_convert_format")
-                                            .selected_text(format_label(target))
-                                            .show_ui(ui, |ui| {
-                                                for &f in &[
-                                                    Format::Mp3,
-                                                    Format::Aac,
-                                                    Format::Flac,
-                                                    Format::Wav,
-                                                    Format::Aiff,
-                                                ] {
-                                                    ui.selectable_value(
-                                                        &mut target,
-                                                        f,
-                                                        format_label(f),
-                                                    );
-                                                }
-                                            });
-                                        if target != before {
-                                            self.config.convert_format =
-                                                format_key(target).to_string();
-                                            convert_dirty = true;
-                                        }
-                                        ui.end_row();
-
-                                        ui.label("Default bitrate (kbps):");
-                                        let lossy = matches!(target, Format::Mp3 | Format::Aac);
-                                        let resp = ui.add_enabled(
-                                            lossy,
-                                            egui::TextEdit::singleline(
-                                                &mut self.config.convert_bitrate_kbps,
-                                            )
-                                            .hint_text(default_bitrate_hint(target))
-                                            .desired_width(80.0),
-                                        );
-                                        if resp.lost_focus() {
-                                            convert_dirty = true;
-                                        }
-                                        ui.end_row();
-
-                                        ui.label("Default output folder:");
-                                        ui.horizontal(|ui| {
-                                            let text = match &self.config.convert_out_dir {
-                                                Some(p) => p.display().to_string(),
-                                                None => "(alongside each source)".into(),
-                                            };
-                                            ui.label(egui::RichText::new(text).monospace());
-                                            if ui.small_button("Pick…").clicked() {
-                                                if let Some(d) =
-                                                    rfd::FileDialog::new().pick_folder()
-                                                {
-                                                    self.config.convert_out_dir = Some(d);
+                                        ui.add_space(4.0);
+                                        let mut convert_dirty = false;
+                                        let mut target =
+                                            format_from_key(&self.config.convert_format)
+                                                .unwrap_or(Format::Aiff);
+                                        egui::Grid::new("settings_convert_grid")
+                                            .num_columns(2)
+                                            .spacing([12.0, 8.0])
+                                            .show(ui, |ui| {
+                                                ui.label("Default format:");
+                                                let before = target;
+                                                egui::ComboBox::from_id_salt(
+                                                    "settings_convert_format",
+                                                )
+                                                .selected_text(format_label(target))
+                                                .show_ui(ui, |ui| {
+                                                    for &f in &[
+                                                        Format::Mp3,
+                                                        Format::Aac,
+                                                        Format::Flac,
+                                                        Format::Wav,
+                                                        Format::Aiff,
+                                                    ] {
+                                                        ui.selectable_value(
+                                                            &mut target,
+                                                            f,
+                                                            format_label(f),
+                                                        );
+                                                    }
+                                                });
+                                                if target != before {
+                                                    self.config.convert_format =
+                                                        format_key(target).to_string();
                                                     convert_dirty = true;
                                                 }
-                                            }
-                                            if self.config.convert_out_dir.is_some()
-                                                && ui.small_button("Clear").clicked()
-                                            {
-                                                self.config.convert_out_dir = None;
-                                                convert_dirty = true;
-                                            }
-                                        });
-                                        ui.end_row();
+                                                ui.end_row();
 
-                                        ui.label("In-place by default:");
-                                        if ui
+                                                ui.label("Default bitrate (kbps):");
+                                                let lossy =
+                                                    matches!(target, Format::Mp3 | Format::Aac);
+                                                let resp = ui.add_enabled(
+                                                    lossy,
+                                                    egui::TextEdit::singleline(
+                                                        &mut self.config.convert_bitrate_kbps,
+                                                    )
+                                                    .hint_text(default_bitrate_hint(target))
+                                                    .desired_width(80.0),
+                                                );
+                                                if resp.lost_focus() {
+                                                    convert_dirty = true;
+                                                }
+                                                ui.end_row();
+
+                                                ui.label("Default output folder:");
+                                                ui.horizontal(|ui| {
+                                                    let text = match &self.config.convert_out_dir {
+                                                        Some(p) => p.display().to_string(),
+                                                        None => "(alongside each source)".into(),
+                                                    };
+                                                    ui.label(egui::RichText::new(text).monospace());
+                                                    if ui.small_button("Pick…").clicked() {
+                                                        if let Some(d) =
+                                                            rfd::FileDialog::new().pick_folder()
+                                                        {
+                                                            self.config.convert_out_dir = Some(d);
+                                                            convert_dirty = true;
+                                                        }
+                                                    }
+                                                    if self.config.convert_out_dir.is_some()
+                                                        && ui.small_button("Clear").clicked()
+                                                    {
+                                                        self.config.convert_out_dir = None;
+                                                        convert_dirty = true;
+                                                    }
+                                                });
+                                                ui.end_row();
+
+                                                ui.label("In-place by default:");
+                                                if ui
                             .checkbox(
                                 &mut self.config.convert_in_place,
                                 "Replace each source file",
@@ -1150,23 +1173,24 @@ impl App {
                         {
                             convert_dirty = true;
                         }
-                                        ui.end_row();
-                                    });
-                                if self.config.convert_in_place {
-                                    ui.colored_label(
+                                                ui.end_row();
+                                            });
+                                        if self.config.convert_in_place {
+                                            ui.colored_label(
                                         egui::Color32::LIGHT_YELLOW,
                                         "In-place removes the original file on each conversion.",
                                     );
-                                }
-                                if convert_dirty {
-                                    if let Err(e) = self.config.save() {
-                                        self.status = format!("Couldn't save settings: {e}");
+                                        }
+                                        if convert_dirty {
+                                            if let Err(e) = self.config.save() {
+                                                self.status =
+                                                    format!("Couldn't save settings: {e}");
+                                            }
+                                        }
                                     }
-                                }
-                            }
-                            SettingsTab::Advanced => {
-                                ui.label(egui::RichText::new("Danger zone").strong());
-                                ui.label(
+                                    SettingsTab::Advanced => {
+                                        ui.label(egui::RichText::new("Danger zone").strong());
+                                        ui.label(
                     egui::RichText::new(
                         "Remove every scanned track, its analysis, and fetched artwork \
                          from the catalog. Playlists are kept but emptied. Your source \
@@ -1175,17 +1199,17 @@ impl App {
                     .small()
                     .weak(),
                 );
-                                ui.add_space(6.0);
-                                let clear_btn = egui::Button::new(
-                                    egui::RichText::new("Clear catalog…")
-                                        .color(egui::Color32::WHITE),
-                                )
-                                .fill(egui::Color32::from_rgb(150, 40, 40));
-                                if ui.add(clear_btn).clicked() {
-                                    self.confirm_clear_db = true;
+                                        ui.add_space(6.0);
+                                        let clear_btn = egui::Button::new(
+                                            egui::RichText::new("Clear catalog…")
+                                                .color(egui::Color32::WHITE),
+                                        )
+                                        .fill(egui::Color32::from_rgb(150, 40, 40));
+                                        if ui.add(clear_btn).clicked() {
+                                            self.confirm_clear_db = true;
+                                        }
+                                    }
                                 }
-                            }
-                        }
                             });
                     });
                     sep_x
@@ -2015,9 +2039,7 @@ impl App {
                         }
                         if ui
                             .button("Skip track")
-                            .on_hover_note(
-                                "Decide later. The track stays in Recently Added.",
-                            )
+                            .on_hover_note("Decide later. The track stays in Recently Added.")
                             .clicked()
                         {
                             skip = true;
@@ -2117,7 +2139,6 @@ impl App {
             self.artwork_selected = 0;
         }
     }
-
 
     /// Ensure a field preview for `(track_id, release_id)` is loading or loaded.
     /// Spawns a background lookup (fetch the release detail, diff it against the

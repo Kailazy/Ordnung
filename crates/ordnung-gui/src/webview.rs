@@ -201,8 +201,8 @@ mod imp {
         MainThreadMarker, NSError, NSNumber, NSPoint, NSRect, NSSize, NSString, NSURLRequest, NSURL,
     };
     use objc2_web_kit::{
-        WKAudiovisualMediaTypes, WKUserContentController, WKUserScript,
-        WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
+        WKAudiovisualMediaTypes, WKUserContentController, WKUserScript, WKUserScriptInjectionTime,
+        WKWebView, WKWebViewConfiguration,
     };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -452,7 +452,8 @@ mod imp {
             if !mini.live {
                 return;
             }
-            let js = format!("(function(){{var v=document.querySelector('video');if(v){{{body}}}}})()");
+            let js =
+                format!("(function(){{var v=document.querySelector('video');if(v){{{body}}}}})()");
             unsafe {
                 mini.web
                     .evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
@@ -503,7 +504,10 @@ mod imp {
             if !mini.live {
                 return None;
             }
-            Some(mini.poll_interval().saturating_sub(mini.polled_at.elapsed()))
+            Some(
+                mini.poll_interval()
+                    .saturating_sub(mini.polled_at.elapsed()),
+            )
         })
     }
 
@@ -631,7 +635,10 @@ mod imp {
     /// gap before the next video) flashed a bright rectangle inside an otherwise
     /// black panel. A black data page is the same unload with no flash.
     fn blank(web: &WKWebView) {
-        navigate(web, "data:text/html,<body style='margin:0;background:%23000'>");
+        navigate(
+            web,
+            "data:text/html,<body style='margin:0;background:%23000'>",
+        );
     }
 
     /// Styling that strips the watch page down to its player: pin the player

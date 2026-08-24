@@ -1122,9 +1122,7 @@ impl App {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(4.0);
             if owned.is_empty() {
-                ui.label(
-                    egui::RichText::new("Nothing in your Discogs collection yet.").weak(),
-                );
+                ui.label(egui::RichText::new("Nothing in your Discogs collection yet.").weak());
             } else if let Some(a) = self.vinyl_grid(ui, &owned) {
                 action = Some(a);
             }
@@ -1135,18 +1133,15 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.heading(format!("Wantlist ({})", wanted.len()));
                     if let Some(url) = &wantlist_url {
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui
-                                    .button("↗ Open in Discogs")
-                                    .on_hover_note("Open your wantlist on discogs.com")
-                                    .clicked()
-                                {
-                                    open_url(url);
-                                }
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button("↗ Open in Discogs")
+                                .on_hover_note("Open your wantlist on discogs.com")
+                                .clicked()
+                            {
+                                open_url(url);
+                            }
+                        });
                     }
                 });
                 ui.label(egui::RichText::new("Records you want but don't own yet.").weak());
@@ -1211,11 +1206,7 @@ impl App {
     /// The cached row for one release in one list, found by *release* id. The
     /// record sheet can be open on a record it has no cache key for (one reached
     /// by a dig), so a list edit from there resolves the row this way instead.
-    pub(crate) fn vinyl_record_in(
-        &self,
-        list: VinylList,
-        release_id: u64,
-    ) -> Option<VinylRecord> {
+    pub(crate) fn vinyl_record_in(&self, list: VinylList, release_id: u64) -> Option<VinylRecord> {
         let records = match list {
             VinylList::Collection => &self.vinyl,
             VinylList::Wantlist => &self.wantlist,
@@ -1345,10 +1336,8 @@ impl App {
                     |ui| {
                         // The cover is a link to the release page on Discogs —
                         // click-sensing, with a hand cursor on hover.
-                        let (rect, resp) = ui.allocate_exact_size(
-                            egui::vec2(COVER, COVER),
-                            egui::Sense::click(),
-                        );
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(COVER, COVER), egui::Sense::click());
                         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                         match &tex {
                             Some(h) => {
@@ -1420,10 +1409,8 @@ impl App {
                             let badge = badge.on_hover_cursor(egui::CursorIcon::PointingHand);
                             if badge.on_hover_note(tip).clicked() {
                                 badge_clicked = true;
-                                action = Some(VinylGridAction::Goto(
-                                    c.title.clone(),
-                                    c.linked.clone(),
-                                ));
+                                action =
+                                    Some(VinylGridAction::Goto(c.title.clone(), c.linked.clone()));
                             }
                         }
                         // Play disc, bottom-right: start the record. Shown on
@@ -1466,7 +1453,8 @@ impl App {
                             ui.painter().circle_filled(disc.center(), D / 2.0, bg);
                             let glyph = if playing_this { "❚❚" } else { "▶" };
                             ui.painter().text(
-                                disc.center() + egui::vec2(if glyph == "▶" { 1.5 } else { 0.0 }, 0.0),
+                                disc.center()
+                                    + egui::vec2(if glyph == "▶" { 1.5 } else { 0.0 }, 0.0),
                                 egui::Align2::CENTER_CENTER,
                                 glyph,
                                 egui::FontId::proportional(13.0),
@@ -1512,8 +1500,7 @@ impl App {
                                 egui::FontId::proportional(14.0),
                                 fg,
                             );
-                            let dig_hit =
-                                dig_hit.on_hover_cursor(egui::CursorIcon::PointingHand);
+                            let dig_hit = dig_hit.on_hover_cursor(egui::CursorIcon::PointingHand);
                             if dig_hit
                                 .on_hover_note(
                                     "Dig from here: records like this on Discogs that \
@@ -1546,7 +1533,8 @@ impl App {
                                 egui::Rounding::same(5.0),
                                 egui::Color32::from_black_alpha(190),
                             );
-                            ui.painter().galley(chip.min + pad, galley, egui::Color32::WHITE);
+                            ui.painter()
+                                .galley(chip.min + pad, galley, egui::Color32::WHITE);
                         }
                         let price_line = match c.price {
                             Some(p) => format!(
@@ -1556,7 +1544,10 @@ impl App {
                             None => String::new(),
                         };
                         let tip = if c.sub.is_empty() {
-                            format!("{}\n{}{price_line}\n\nShow the tracklist", c.artist, c.title)
+                            format!(
+                                "{}\n{}{price_line}\n\nShow the tracklist",
+                                c.artist, c.title
+                            )
                         } else {
                             format!(
                                 "{}\n{}\n{}{price_line}\n\nShow the tracklist",
@@ -1665,9 +1656,7 @@ impl App {
                         {
                             open_url(&release_url);
                         }
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(&c.artist).weak()).truncate(),
-                        );
+                        ui.add(egui::Label::new(egui::RichText::new(&c.artist).weak()).truncate());
                     },
                 );
             }
@@ -2094,39 +2083,36 @@ impl App {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(&fname).strong());
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if crate::ui::icon::close_button(ui, "Close the editor") {
-                                    // Also drop the table selection, or the
-                                    // panel would re-open from it next frame.
-                                    self.usb_selected = None;
-                                    self.selected = None;
-                                    self.selection.clear();
-                                }
-                                if ui
-                                    .add_enabled(
-                                        dirty,
-                                        egui::Button::new(
-                                            egui::RichText::new("Save to file")
-                                                .color(egui::Color32::WHITE),
-                                        )
-                                        .fill(crate::sidebar::NAV_ACCENT),
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if crate::ui::icon::close_button(ui, "Close the editor") {
+                                // Also drop the table selection, or the
+                                // panel would re-open from it next frame.
+                                self.usb_selected = None;
+                                self.selected = None;
+                                self.selection.clear();
+                            }
+                            if ui
+                                .add_enabled(
+                                    dirty,
+                                    egui::Button::new(
+                                        egui::RichText::new("Save to file")
+                                            .color(egui::Color32::WHITE),
                                     )
-                                    .on_hover_note("Write these tags into the file on the device")
-                                    .clicked()
-                                {
-                                    save = true;
-                                }
-                                if ui
-                                    .button("Reveal")
-                                    .on_hover_note("Show this file in Finder")
-                                    .clicked()
-                                {
-                                    reveal_in_finder(&file);
-                                }
-                            },
-                        );
+                                    .fill(crate::sidebar::NAV_ACCENT),
+                                )
+                                .on_hover_note("Write these tags into the file on the device")
+                                .clicked()
+                            {
+                                save = true;
+                            }
+                            if ui
+                                .button("Reveal")
+                                .on_hover_note("Show this file in Finder")
+                                .clicked()
+                            {
+                                reveal_in_finder(&file);
+                            }
+                        });
                     });
                     ui.add_space(4.0);
                     egui::Grid::new("usb_tag_grid")
@@ -2135,9 +2121,7 @@ impl App {
                         .show(ui, |ui| {
                             let field = |ui: &mut egui::Ui, label: &str, buf: &mut String| {
                                 ui.label(egui::RichText::new(label).weak());
-                                ui.add(
-                                    egui::TextEdit::singleline(buf).desired_width(220.0),
-                                );
+                                ui.add(egui::TextEdit::singleline(buf).desired_width(220.0));
                             };
                             field(ui, "Title", &mut self.usb_edit.title);
                             field(ui, "Artist", &mut self.usb_edit.artist);
@@ -2266,7 +2250,10 @@ mod tests {
             sort_vinyl_cells(&mut cells, VinylSort::Price, ascending);
             assert_eq!(artists(&cells), ["priced", "unpriced"]);
 
-            let mut cells = vec![cell("undated", None, None), cell("dated", Some("2020"), None)];
+            let mut cells = vec![
+                cell("undated", None, None),
+                cell("dated", Some("2020"), None),
+            ];
             sort_vinyl_cells(&mut cells, VinylSort::Added, ascending);
             assert_eq!(artists(&cells), ["dated", "undated"]);
         }

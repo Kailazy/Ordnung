@@ -278,7 +278,13 @@ fn work_key(artist: &str, title: &str) -> String {
         // dotted spelling is a pressing's typography, not a different record.
         let out: String = out
             .chars()
-            .map(|c| if matches!(c, '.' | '\'' | '\u{2019}') { '\0' } else { c })
+            .map(|c| {
+                if matches!(c, '.' | '\'' | '\u{2019}') {
+                    '\0'
+                } else {
+                    c
+                }
+            })
             .filter(|c| *c != '\0')
             .collect();
         // Then keep only the alphanumeric words, minus the ones that describe a
@@ -430,7 +436,11 @@ impl App {
             return;
         };
         if let Some(dig) = self.dig.as_mut() {
-            if let Some(i) = dig.steps.iter().position(|s| s.release_id == record.release_id) {
+            if let Some(i) = dig
+                .steps
+                .iter()
+                .position(|s| s.release_id == record.release_id)
+            {
                 dig.at = i;
                 return;
             }
@@ -517,8 +527,7 @@ impl App {
         if token.trim().is_empty() {
             if let Some(dig) = self.dig.as_mut() {
                 dig.error = Some(
-                    "No Discogs token set. Add one in Settings to dig for new records."
-                        .to_string(),
+                    "No Discogs token set. Add one in Settings to dig for new records.".to_string(),
                 );
             }
             return;
@@ -571,10 +580,8 @@ impl App {
         self.dig_rx = Some(rx);
         let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
-            let client = discogs::Client::new(
-                token,
-                "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
-            );
+            let client =
+                discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
             // An explicit step is never stood down: it's the request the user
             // is waiting on, so it runs to completion.
             let result = browse_step(&client, thread, entity, page, &skip, &NEVER_CANCEL);
@@ -758,7 +765,8 @@ impl App {
                     token,
                     "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
                 );
-                cat.release_cached_or(&id, || client.fetch_release(&id)).ok()
+                cat.release_cached_or(&id, || client.fetch_release(&id))
+                    .ok()
             });
             let _ = tx.send((
                 release_id,
@@ -856,10 +864,8 @@ impl App {
         let tx = self.dig_prime_tx.clone();
         let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
-            let client = discogs::Client::new(
-                token,
-                "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
-            );
+            let client =
+                discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
             for (thread, entity, page) in jobs {
                 // Checked before each browse rather than only at the top: the
                 // artist thread's page and the label thread's page are two
@@ -892,7 +898,9 @@ impl App {
     /// from, dropping any whose record is no longer the one on screen.
     pub(crate) fn poll_dig_primed(&mut self) {
         while let Ok(msg) = self.dig_prime_rx.try_recv() {
-            let Some(dig) = self.dig.as_mut() else { continue };
+            let Some(dig) = self.dig.as_mut() else {
+                continue;
+            };
             if let Some((from, outstanding)) = dig.priming.as_mut() {
                 if *from == msg.from {
                     outstanding.retain(|t| *t != msg.thread);
@@ -1061,10 +1069,7 @@ impl App {
                         egui::RichText::new(format!("step {} of {}", at + 1, cards.len())).weak(),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if crate::ui::icon::close_button(
-                            ui,
-                            "Stop digging and clear this path",
-                        ) {
+                        if crate::ui::icon::close_button(ui, "Stop digging and clear this path") {
                             end = true;
                         }
                         // Forward only re-walks a path already dug — a new
@@ -1105,10 +1110,9 @@ impl App {
                                                 .size(16.0)
                                                 .color(egui::Color32::from_gray(120)),
                                         )
-                                        .on_hover_note(format!(
-                                            "Same {}: {matched}",
-                                            thread.label()
-                                        ));
+                                        .on_hover_note(
+                                            format!("Same {}: {matched}", thread.label()),
+                                        );
                                     });
                                 }
                                 let current = i == at;
@@ -1223,15 +1227,13 @@ impl App {
                                             // Clipped, not truncated: a long
                                             // imprint fades at the sleeve edge
                                             // rather than pushing past it.
-                                            ui.painter()
-                                                .with_clip_rect(band)
-                                                .text(
-                                                    band.center(),
-                                                    egui::Align2::CENTER_CENTER,
-                                                    name,
-                                                    egui::FontId::proportional(10.0),
-                                                    egui::Color32::from_gray(215),
-                                                );
+                                            ui.painter().with_clip_rect(band).text(
+                                                band.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                name,
+                                                egui::FontId::proportional(10.0),
+                                                egui::Color32::from_gray(215),
+                                            );
                                         }
                                         let tip = if current {
                                             format!(
@@ -1270,9 +1272,7 @@ impl App {
                                         );
                                         ui.add(
                                             egui::Label::new(
-                                                egui::RichText::new(&card.artist)
-                                                    .size(11.0)
-                                                    .weak(),
+                                                egui::RichText::new(&card.artist).size(11.0).weak(),
                                             )
                                             .truncate(),
                                         );
@@ -1368,9 +1368,7 @@ impl App {
                     if busy {
                         ui.label(egui::RichText::new("Searching Discogs…").weak());
                     } else if at + 1 < cards.len() {
-                        ui.label(
-                            egui::RichText::new("— picking here drops the path ahead").weak(),
-                        );
+                        ui.label(egui::RichText::new("— picking here drops the path ahead").weak());
                     }
                 });
             });
@@ -1425,8 +1423,7 @@ impl App {
     /// count up front: what's out there is a Discogs query away.
     pub(crate) fn can_dig(&self, key: VinylCoverKey) -> bool {
         self.vinyl_record(key).is_some_and(|r| {
-            !r.artist.trim().is_empty()
-                || r.label.as_deref().is_some_and(|l| !l.trim().is_empty())
+            !r.artist.trim().is_empty() || r.label.as_deref().is_some_and(|l| !l.trim().is_empty())
         })
     }
 }

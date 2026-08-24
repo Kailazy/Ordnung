@@ -153,7 +153,11 @@ pub(crate) fn eject_failure_message(name: &str, raw: &str, users: &[String]) -> 
             format!(
                 "Can't eject {name} yet: {apps} {verb} still using it. \
                  Quit or close {} and click Eject again.",
-                if users.len() == 1 { "that app" } else { "those apps" }
+                if users.len() == 1 {
+                    "that app"
+                } else {
+                    "those apps"
+                }
             )
         }
     } else {

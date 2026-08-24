@@ -101,7 +101,6 @@ impl App {
             scroll_to_track: None,
             row_screen_rects: Vec::new(),
             cover_drop: None,
-            show_inspector: false,
             job_cancel: None,
             artwork_queue: VecDeque::new(),
             artwork_enrich: false,
@@ -659,7 +658,9 @@ fn parse_camelot_label(s: &str) -> Option<Camelot> {
         _ => return None,
     };
     let number: u8 = s[..s.len() - 1].parse().ok()?;
-    (1..=12).contains(&number).then_some(Camelot { number, major })
+    (1..=12)
+        .contains(&number)
+        .then_some(Camelot { number, major })
 }
 
 impl eframe::App for App {
@@ -854,14 +855,14 @@ impl eframe::App for App {
                                 .strong(),
                         );
                         ui.label(
-                            egui::RichText::new(format!("(you have {})", env!("CARGO_PKG_VERSION")))
-                                .color(egui::Color32::from_rgb(220, 230, 245)),
+                            egui::RichText::new(format!(
+                                "(you have {})",
+                                env!("CARGO_PKG_VERSION")
+                            ))
+                            .color(egui::Color32::from_rgb(220, 230, 245)),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if crate::ui::icon::close_button(
-                                ui,
-                                "Dismiss until the next launch",
-                            ) {
+                            if crate::ui::icon::close_button(ui, "Dismiss until the next launch") {
                                 self.update_available = None;
                             }
                             if ui
@@ -1126,12 +1127,9 @@ impl eframe::App for App {
                 // right-to-left FIRST reserves its width, so the left-aligned filter
                 // group nested inside shrinks to fit instead of overdrawing the
                 // counts when the window is narrow. Visual order on the right:
-                // counts · Refresh · Settings · Info.
+                // counts · Refresh · Settings.
                 let busy = self.is_busy();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.toggle_value(&mut self.show_inspector, "Info")
-                        .on_hover_note("Show/hide the track info panel");
-                    ui.separator();
                     // Settings stays reachable even while a job runs.
                     if ui
                         .button("⚙ Settings")
@@ -1168,10 +1166,8 @@ impl eframe::App for App {
                             reserved += 140.0;
                         }
                         let w = (ui.available_width() - reserved).clamp(120.0, 320.0);
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(&mut self.filter)
-                                .desired_width(w),
-                        );
+                        let resp =
+                            ui.add(egui::TextEdit::singleline(&mut self.filter).desired_width(w));
                         if resp.changed() {
                             // Park the reload until typing settles (see
                             // `filter_apply_at`); the field itself already shows
@@ -1266,16 +1262,17 @@ impl eframe::App for App {
         // track is loaded in (or decoding for) the player.
         self.draw_player(ctx);
 
+        // The inspector is the single surface for per-track detail and tag
+        // editing (the convert dialog no longer duplicates name editing), so it
+        // is always present rather than behind a toolbar toggle.
         let mut inspector_action: Option<InspectorAction> = None;
-        if self.show_inspector {
-            egui::SidePanel::right("inspector")
-                .resizable(true)
-                .default_width(340.0)
-                .width_range(220.0..=560.0)
-                .show(ctx, |ui| {
-                    inspector_action = self.draw_inspector(ui, ctx);
-                });
-        }
+        egui::SidePanel::right("inspector")
+            .resizable(true)
+            .default_width(360.0)
+            .width_range(260.0..=560.0)
+            .show(ctx, |ui| {
+                inspector_action = self.draw_inspector(ui, ctx);
+            });
         match inspector_action {
             Some(InspectorAction::EmbedCover(id, path)) => self.embed_cover_into_file(id, path),
             Some(InspectorAction::SaveToCatalog(id)) => self.save_tags(id, None),
@@ -1714,82 +1711,38 @@ impl eframe::App for App {
         let mut open = self.convert_modal.is_some();
         let mut close_modal = false;
         let mut start_convert: Option<()> = None;
-        let mut do_save_name = false;
         if let Some(modal) = self.convert_modal.as_mut() {
-            egui::Window::new("Track actions")
+            egui::Window::new("Convert track")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .pivot(egui::Align2::CENTER_CENTER)
                 .default_pos(ctx.screen_rect().center())
                 .show(ctx, |ui| {
-                    ui.set_min_width(500.0);
+                    ui.set_min_width(460.0);
+                    ui.add_space(2.0);
+                    // Which track this acts on. Name/tag editing lives in the
+                    // inspector (right panel) — this dialog is transcode only,
+                    // so the header is identification, not another edit surface.
                     ui.label(egui::RichText::new(&modal.track_label).strong());
                     ui.label(
                         egui::RichText::new(modal.source_path.display().to_string())
                             .small()
                             .weak(),
                     );
+                    ui.add_space(8.0);
                     ui.separator();
-
-                    // --- Edit name (catalog tags) -------------------------------
-                    ui.label(egui::RichText::new("Edit name").strong());
-                    egui::Grid::new("name_grid")
-                        .num_columns(2)
-                        .spacing([12.0, 6.0])
-                        .show(ui, |ui| {
-                            ui.label("Title:");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut modal.edit_title)
-                                    .desired_width(360.0),
-                            );
-                            ui.end_row();
-                            ui.label("Artist:");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut modal.edit_artist)
-                                    .desired_width(360.0),
-                            );
-                            ui.end_row();
-                            ui.label("Album:");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut modal.edit_album)
-                                    .desired_width(360.0),
-                            );
-                            ui.end_row();
-                        });
-                    ui.horizontal(|ui| {
-                        if ui.button("Save name").clicked() {
-                            do_save_name = true;
-                        }
-                        if let Some(msg) = &modal.name_status {
-                            let color = if modal.name_is_error {
-                                egui::Color32::LIGHT_RED
-                            } else {
-                                egui::Color32::LIGHT_GREEN
-                            };
-                            ui.colored_label(color, msg);
-                        } else {
-                            ui.label(
-                                egui::RichText::new("Catalog-only — source file is not touched.")
-                                    .small()
-                                    .weak(),
-                            );
-                        }
-                    });
                     ui.add_space(6.0);
-                    ui.separator();
-
-                    ui.label(egui::RichText::new("Convert").strong());
 
                     egui::Grid::new("convert_grid")
                         .num_columns(2)
-                        .spacing([12.0, 8.0])
+                        .spacing([14.0, 10.0])
                         .show(ui, |ui| {
-                            ui.label("Source format:");
+                            ui.label(egui::RichText::new("Source").weak().small());
                             ui.label(format_label(modal.source_format));
                             ui.end_row();
 
-                            ui.label("Target format:");
+                            ui.label(egui::RichText::new("Target").weak().small());
                             egui::ComboBox::from_id_salt("target_format")
                                 .selected_text(format_label(modal.target))
                                 .show_ui(ui, |ui| {
@@ -1805,23 +1758,34 @@ impl eframe::App for App {
                                 });
                             ui.end_row();
 
-                            ui.label("Bitrate (kbps):");
+                            ui.label(egui::RichText::new("Bitrate").weak().small());
                             let lossy = matches!(modal.target, Format::Mp3 | Format::Aac);
-                            ui.add_enabled(
-                                lossy,
-                                egui::TextEdit::singleline(&mut modal.bitrate_kbps)
-                                    .hint_text(default_bitrate_hint(modal.target))
-                                    .desired_width(80.0),
-                            );
+                            ui.horizontal(|ui| {
+                                ui.add_enabled(
+                                    lossy,
+                                    egui::TextEdit::singleline(&mut modal.bitrate_kbps)
+                                        .hint_text(default_bitrate_hint(modal.target))
+                                        .desired_width(70.0),
+                                );
+                                ui.label(
+                                    egui::RichText::new(if lossy {
+                                        "kbps"
+                                    } else {
+                                        "kbps — lossless target"
+                                    })
+                                    .weak()
+                                    .small(),
+                                );
+                            });
                             ui.end_row();
 
-                            ui.label("Output folder:");
+                            ui.label(egui::RichText::new("Output").weak().small());
                             ui.horizontal(|ui| {
                                 let text = match &modal.out_dir {
                                     Some(p) => p.display().to_string(),
                                     None => "(alongside source)".into(),
                                 };
-                                ui.label(egui::RichText::new(text).monospace());
+                                ui.label(egui::RichText::new(text).monospace().small());
                                 if ui.small_button("Pick…").clicked() {
                                     if let Some(d) = rfd::FileDialog::new().pick_folder() {
                                         modal.out_dir = Some(d);
@@ -1833,15 +1797,16 @@ impl eframe::App for App {
                             });
                             ui.end_row();
 
-                            ui.label("In-place:");
+                            ui.label(egui::RichText::new("In place").weak().small());
                             ui.checkbox(&mut modal.in_place, "Replace the source file");
                             ui.end_row();
                         });
 
                     if modal.in_place {
+                        ui.add_space(4.0);
                         ui.colored_label(
                             egui::Color32::LIGHT_YELLOW,
-                            "Warning: the original file will be removed and the catalog repointed.",
+                            "⚠ The original file is removed and the catalog repointed.",
                         );
                     }
 
@@ -1850,8 +1815,12 @@ impl eframe::App for App {
                         ui.colored_label(egui::Color32::LIGHT_RED, err);
                     }
 
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    // Primary action right-aligned, Cancel beside it — the
+                    // standard dialog footer shape.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let busy = self.job_rx.is_some();
                         if ui
                             .add_enabled(!busy, egui::Button::new("Convert"))
@@ -1866,29 +1835,12 @@ impl eframe::App for App {
                 });
         }
         // Apply deferred modal actions to satisfy the borrow checker.
-        if do_save_name {
-            // Move the modal out to call save_name (which needs &mut self).
-            if let Some(mut modal) = self.convert_modal.take() {
-                self.save_name(&mut modal);
-                let renamed_ok = !modal.name_is_error;
-                self.convert_modal = Some(modal);
-                if renamed_ok {
-                    self.reload();
-                    self.refresh_selected();
-                }
-            }
-        }
         if start_convert.is_some() {
             let modal_clone = self.convert_modal.as_ref().map(|m| ConvertModal {
                 track_id: m.track_id,
                 track_label: m.track_label.clone(),
                 source_path: m.source_path.clone(),
                 source_format: m.source_format,
-                edit_title: m.edit_title.clone(),
-                edit_artist: m.edit_artist.clone(),
-                edit_album: m.edit_album.clone(),
-                name_status: None,
-                name_is_error: false,
                 target: m.target,
                 bitrate_kbps: m.bitrate_kbps.clone(),
                 out_dir: m.out_dir.clone(),
@@ -1934,7 +1886,9 @@ impl eframe::App for App {
             let screen = ctx.screen_rect();
             let over = ctx.is_pointer_over_area();
             let id = ctx.input(|i| i.pointer.interact_pos());
-            eprintln!("cursor: {icon:?} at {pos:?} interact={id:?} over_area={over} screen={screen:?}");
+            eprintln!(
+                "cursor: {icon:?} at {pos:?} interact={id:?} over_area={over} screen={screen:?}"
+            );
             ctx.request_repaint();
         }
     }

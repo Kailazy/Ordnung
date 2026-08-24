@@ -173,7 +173,11 @@ impl App {
     /// if they aren't cached yet. Re-opening the record that's already open is a
     /// no-op, so a second click doesn't restart a fetch.
     pub(crate) fn open_vinyl_sheet(&mut self, key: VinylCoverKey, ctx: &egui::Context) {
-        if self.vinyl_sheet.as_ref().is_some_and(|s| s.key == Some(key)) {
+        if self
+            .vinyl_sheet
+            .as_ref()
+            .is_some_and(|s| s.key == Some(key))
+        {
             return;
         }
         let Some(record) = self.vinyl_record(key) else {
@@ -279,7 +283,11 @@ impl App {
     /// sheet shows. One small read per linked track — a record is a handful of
     /// tracks, so this stays on the UI thread like the other inline reads.
     fn sheet_local_tracks(&self, release_id: u64) -> Vec<SheetLocal> {
-        let ids = self.vinyl_links.get(&release_id).cloned().unwrap_or_default();
+        let ids = self
+            .vinyl_links
+            .get(&release_id)
+            .cloned()
+            .unwrap_or_default();
         let Ok(cat) = Catalog::open(&self.db_path) else {
             return Vec::new();
         };
@@ -322,10 +330,8 @@ impl App {
         self.sheet_price_rx = Some(rx);
         let db = self.db_path.clone();
         thread::spawn(move || {
-            let client = discogs::Client::new(
-                token,
-                "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
-            );
+            let client =
+                discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
             let mine = client.marketplace_price(release_id);
             // Priced fine, or the request failed — either way there's nothing
             // more to ask.
@@ -348,7 +354,9 @@ impl App {
 
     /// Adopt a finished price lookup onto the sheet it was asked for.
     pub(crate) fn poll_sheet_price(&mut self) {
-        let Some(rx) = &self.sheet_price_rx else { return };
+        let Some(rx) = &self.sheet_price_rx else {
+            return;
+        };
         let Ok((release_id, result)) = rx.try_recv() else {
             return;
         };
@@ -471,7 +479,9 @@ impl App {
         };
         match source {
             SheetSource::Local(i) => {
-                let Some(local) = sheet.local.get(i) else { return };
+                let Some(local) = sheet.local.get(i) else {
+                    return;
+                };
                 let (id, path) = (local.id, local.path.clone());
                 // Never leave a video playing under the local track.
                 self.stop_sheet_video();
@@ -569,7 +579,11 @@ impl App {
         if self.vinyl_sheet.is_some() && webview::transport().playing {
             ctx.request_repaint();
         }
-        if self.vinyl_sheet.as_ref().is_none_or(|s| s.playing_video.is_none()) {
+        if self
+            .vinyl_sheet
+            .as_ref()
+            .is_none_or(|s| s.playing_video.is_none())
+        {
             return;
         }
         if webview::status() != webview::PlayerStatus::Stuck {
@@ -632,7 +646,18 @@ impl App {
 
         // Snapshot what the closure paints so it never borrows `self` (actions
         // below need it mutably).
-        let (key, cover_url, title, artist, sub, release_id, loading, error, playing_video, video_open) = {
+        let (
+            key,
+            cover_url,
+            title,
+            artist,
+            sub,
+            release_id,
+            loading,
+            error,
+            playing_video,
+            video_open,
+        ) = {
             let s = self.vinyl_sheet.as_ref().unwrap();
             (
                 s.key,
@@ -654,7 +679,10 @@ impl App {
                 Some(ThumbState::Ready(Some(t))) => Some(t.clone()),
                 _ => None,
             },
-            None => cover_url.as_deref().and_then(|u| self.dig_cover(u)).cloned(),
+            None => cover_url
+                .as_deref()
+                .and_then(|u| self.dig_cover(u))
+                .cloned(),
         };
         let now_playing_id = self.audio.as_ref().and_then(|a| a.current());
         // Is *this record* sounding right now, and through which engine? One
@@ -669,8 +697,7 @@ impl App {
                 }
             } else {
                 // A local track counts only while it's one of this record's own.
-                let mine = now_playing_id
-                    .is_some_and(|id| s.local.iter().any(|t| t.id == id));
+                let mine = now_playing_id.is_some_and(|id| s.local.iter().any(|t| t.id == id));
                 match (mine, now_playing_id) {
                     (true, Some(id))
                         if self
@@ -695,9 +722,7 @@ impl App {
         let in_collection = self.vinyl_owned.contains(&release_id);
         let in_wantlist = self.vinyl_wanted.contains(&release_id);
         let price_line = match &self.vinyl_sheet.as_ref().map(|s| &s.price) {
-            Some(PriceState::Ready(Some(p))) => {
-                Some(format!("From {}", fmt_market_price(p)))
-            }
+            Some(PriceState::Ready(Some(p))) => Some(format!("From {}", fmt_market_price(p))),
             Some(PriceState::Ready(None)) => Some("No copies for sale".to_string()),
             Some(PriceState::Loading) => Some("Checking price…".to_string()),
             _ => None,
@@ -771,8 +796,7 @@ impl App {
                 ui.horizontal(|ui| {
                     // Cover.
                     const C: f32 = 120.0;
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(C, C), egui::Sense::hover());
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(C, C), egui::Sense::hover());
                     match &cover {
                         Some(h) => {
                             egui::Image::new(h)
@@ -806,14 +830,18 @@ impl App {
                         // This pressing is a dead end, but another isn't. Say
                         // which one and offer it, rather than leaving "no copies
                         // for sale" to imply the record can't be bought.
-                        if let Some((alt_id, alt_fmt, alt_catno, alt_price, alt_owned, alt_wanted)) =
-                            &alt
+                        if let Some((
+                            alt_id,
+                            alt_fmt,
+                            alt_catno,
+                            alt_price,
+                            alt_owned,
+                            alt_wanted,
+                        )) = &alt
                         {
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
-                                ui.label(
-                                    egui::RichText::new("Another pressing:").small().weak(),
-                                );
+                                ui.label(egui::RichText::new("Another pressing:").small().weak());
                                 let mut what = alt_fmt.clone();
                                 if !alt_catno.trim().is_empty() {
                                     what = format!("{what} · {alt_catno}");
@@ -829,9 +857,7 @@ impl App {
                                     .on_hover_note("Open that pressing on discogs.com")
                                     .clicked()
                                 {
-                                    open_url(&format!(
-                                        "https://www.discogs.com/release/{alt_id}"
-                                    ));
+                                    open_url(&format!("https://www.discogs.com/release/{alt_id}"));
                                 }
                                 // Want the pressing you can actually buy, not
                                 // the promo you happened to land on.
@@ -869,10 +895,8 @@ impl App {
                                     "Play from the first track that has a source"
                                 }
                             };
-                            let (rect, resp) = ui.allocate_exact_size(
-                                egui::vec2(44.0, 24.0),
-                                egui::Sense::click(),
-                            );
+                            let (rect, resp) = ui
+                                .allocate_exact_size(egui::vec2(44.0, 24.0), egui::Sense::click());
                             let resp = resp.on_hover_note(play_tip);
                             // Same chrome the text buttons beside it wear, so
                             // the row reads as one set of controls.
@@ -907,9 +931,15 @@ impl App {
                             // what pressing it and clicking it does the opposite
                             // of what's true now.
                             let (col_label, col_tip) = if in_collection {
-                                ("✓ In collection", "Remove this record from your Discogs collection")
+                                (
+                                    "✓ In collection",
+                                    "Remove this record from your Discogs collection",
+                                )
                             } else {
-                                ("＋ Collection", "Add this record to your Discogs collection")
+                                (
+                                    "＋ Collection",
+                                    "Add this record to your Discogs collection",
+                                )
                             };
                             if ui
                                 .add_enabled(!editing, egui::Button::new(col_label))
@@ -922,7 +952,10 @@ impl App {
                                 act = Some(Act::ToggleList(VinylList::Collection));
                             }
                             let (want_label, want_tip) = if in_wantlist {
-                                ("✓ In wantlist", "Remove this record from your Discogs wantlist")
+                                (
+                                    "✓ In wantlist",
+                                    "Remove this record from your Discogs wantlist",
+                                )
                             } else {
                                 ("＋ Wantlist", "Add this record to your Discogs wantlist")
                             };
@@ -960,10 +993,7 @@ impl App {
                 // and only while there's a panel to drive.
                 if video_open {
                     ui.add_space(8.0);
-                    let mut scrub = self
-                        .vinyl_sheet
-                        .as_ref()
-                        .and_then(|s| s.video_scrub);
+                    let mut scrub = self.vinyl_sheet.as_ref().and_then(|s| s.video_scrub);
                     video_act = video_transport_ui(ui, SHEET_W, &mut scrub);
                     if let Some(s) = self.vinyl_sheet.as_mut() {
                         s.video_scrub = scrub;
@@ -991,10 +1021,8 @@ impl App {
                 if sheet.rows.is_empty() && sheet.extra_videos.is_empty() {
                     ui.add_space(10.0);
                     ui.label(
-                        egui::RichText::new(
-                            "Discogs lists no tracks or videos for this release.",
-                        )
-                        .weak(),
+                        egui::RichText::new("Discogs lists no tracks or videos for this release.")
+                            .weak(),
                     );
                     ui.add_space(10.0);
                     return;
@@ -1053,18 +1081,15 @@ impl App {
                     };
                     ui.label(egui::RichText::new(note).small().weak());
                     if owned > 0 {
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui
-                                    .button("Show in library")
-                                    .on_hover_note("Filter the library to this record")
-                                    .clicked()
-                                {
-                                    act = Some(Act::Goto);
-                                }
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button("Show in library")
+                                .on_hover_note("Filter the library to this record")
+                                .clicked()
+                            {
+                                act = Some(Act::Goto);
+                            }
+                        });
                     }
                 });
             });
@@ -1075,9 +1100,7 @@ impl App {
             Some(VideoAct::TogglePause) => webview::toggle_pause(),
             Some(VideoAct::Seek(secs)) => webview::seek(secs),
             Some(VideoAct::Stop) => self.stop_sheet_video(),
-            Some(VideoAct::ToggleVideo) => {
-                webview::set_video_visible(!webview::video_visible())
-            }
+            Some(VideoAct::ToggleVideo) => webview::set_video_visible(!webview::video_visible()),
             None => {}
         }
 
@@ -1106,8 +1129,7 @@ impl App {
                     // is read from.
                     let Some(record) = self.vinyl_record_in(list, release_id) else {
                         self.status =
-                            "That record isn't in the local cache yet — sync and try again."
-                                .into();
+                            "That record isn't in the local cache yet — sync and try again.".into();
                         return;
                     };
                     VinylEdit::Remove {
@@ -1134,10 +1156,10 @@ impl App {
             }
             Some(Act::Play(row)) => self.play_sheet_row(row, frame),
             Some(Act::TogglePlay) => match record_play {
-                RecordPlay::Playing(PlayEngine::Video)
-                | RecordPlay::Paused(PlayEngine::Video) => webview::toggle_pause(),
-                RecordPlay::Playing(PlayEngine::Audio)
-                | RecordPlay::Paused(PlayEngine::Audio) => {
+                RecordPlay::Playing(PlayEngine::Video) | RecordPlay::Paused(PlayEngine::Video) => {
+                    webview::toggle_pause()
+                }
+                RecordPlay::Playing(PlayEngine::Audio) | RecordPlay::Paused(PlayEngine::Audio) => {
                     if let Some(a) = self.audio.as_mut() {
                         a.toggle_pause();
                     }
@@ -1337,7 +1359,7 @@ fn video_transport_ui(
                     + 6.0 + 42.0           // gap, total clock
                     + 8.0 + 24.0           // gap, video toggle
                     + 2.0 + 24.0           // gap, close
-                    + 12.0;                // slack, so the row never wraps
+                    + 12.0; // slack, so the row never wraps
                 let track_w = (content_w - BESIDE).max(60.0);
                 let (rect, resp) = ui
                     .allocate_exact_size(egui::vec2(track_w, 26.0), egui::Sense::click_and_drag());
@@ -1419,7 +1441,12 @@ fn video_transport_ui(
                 } else {
                     "Show the video window"
                 });
-                draw_screen_glyph(ui.painter(), rect.center(), crate::ui::icon::col(&resp), showing);
+                draw_screen_glyph(
+                    ui.painter(),
+                    rect.center(),
+                    crate::ui::icon::col(&resp),
+                    showing,
+                );
                 if resp.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
@@ -1456,7 +1483,13 @@ fn sheet_row_ui(
             ui.horizontal(|ui| {
                 ui.set_min_height(24.0);
                 // Play marker.
-                let glyph = if playing { "❚❚" } else if playable { "▶" } else { " " };
+                let glyph = if playing {
+                    "❚❚"
+                } else if playable {
+                    "▶"
+                } else {
+                    " "
+                };
                 let colour = if playing {
                     ACCENT
                 } else if playable {
@@ -1576,12 +1609,14 @@ fn extra_video_ui(
                     ui.label(
                         egui::RichText::new(if playing { "❚❚" } else { "▶" })
                             .size(11.0)
-                            .color(if playing { ACCENT } else { egui::Color32::from_gray(190) }),
+                            .color(if playing {
+                                ACCENT
+                            } else {
+                                egui::Color32::from_gray(190)
+                            }),
                     );
                 });
-                ui.label(
-                    egui::RichText::new(&video.title).color(egui::Color32::from_gray(215)),
-                );
+                ui.label(egui::RichText::new(&video.title).color(egui::Color32::from_gray(215)));
                 if let Some(d) = video.duration_secs {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(

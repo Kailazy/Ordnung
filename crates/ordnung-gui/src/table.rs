@@ -337,8 +337,9 @@ impl App {
                 // frame's placeholder line and make-room animation — rects aren't
                 // known until rows are laid out, and one frame of lag is invisible.
                 let gap_memory = egui::Id::new("col_reorder_gap_pos");
-                let prev_to: Option<usize> =
-                    ui.data(|d| d.get_temp::<Option<usize>>(gap_memory)).flatten();
+                let prev_to: Option<usize> = ui
+                    .data(|d| d.get_temp::<Option<usize>>(gap_memory))
+                    .flatten();
                 // Rows sit directly on the window background (no inset box) with a
                 // full-width rounded hover highlight, like a native menu. The drop
                 // is handled by hand below rather than via `dnd_drop_zone` because
@@ -831,8 +832,7 @@ impl App {
         // views — no row numbers), its inline paint stretches left across the
         // gutter so the waveform starts at the table's edge instead of
         // hanging ~40px in.
-        let waveform_flush_left =
-            !draw_index && order.first() == Some(&TableColumn::Waveform);
+        let waveform_flush_left = !draw_index && order.first() == Some(&TableColumn::Waveform);
         // Per-row vertical bands (full-list index, top y, bottom y) for the
         // visible rows, filled inside the body closure and used after the table to
         // map the cursor onto an insertion slot for the reorder line.
@@ -952,8 +952,7 @@ impl App {
                                     // inflate the column's measured width.
                                     let mut hdr_rect = ui.max_rect();
                                     if waveform_flush_left {
-                                        hdr_rect.min.x -=
-                                            index_w + ui.spacing().item_spacing.x;
+                                        hdr_rect.min.x -= index_w + ui.spacing().item_spacing.x;
                                     }
                                     let resp = ui.interact(
                                         hdr_rect,
@@ -1357,8 +1356,7 @@ impl App {
                                         // stretch below can paint across the gutter.
                                         let mut rect = ui.max_rect();
                                         if waveform_flush_left {
-                                            rect.min.x -=
-                                                index_w + ui.spacing().item_spacing.x;
+                                            rect.min.x -= index_w + ui.spacing().item_spacing.x;
                                         }
                                         if r.waveform.is_empty() {
                                             // Unanalyzed: a faint baseline, not an empty cell.
@@ -1467,9 +1465,7 @@ impl App {
                                             };
                                             if ui
                                                 .button(slsk_label)
-                                                .on_hover_note(soulseek_query(
-                                                    &r.artist, &r.title,
-                                                ))
+                                                .on_hover_note(soulseek_query(&r.artist, &r.title))
                                                 .clicked()
                                             {
                                                 menu_action =
@@ -1662,8 +1658,7 @@ impl App {
                                         // on, everything already yours (checked
                                         // + darkened, naming the list), or
                                         // something left to add.
-                                        let nothing_addressable =
-                                            held == 0 && want.is_empty();
+                                        let nothing_addressable = held == 0 && want.is_empty();
                                         let (want_label, want_tip) = if nothing_addressable {
                                             (
                                                 "Add to Discogs wantlist".to_string(),
@@ -1691,7 +1686,9 @@ impl App {
                                             let label = match want.len() {
                                                 1 => "Add to Discogs wantlist".to_string(),
                                                 n => {
-                                                    format!("Add to Discogs wantlist ({n} releases)")
+                                                    format!(
+                                                        "Add to Discogs wantlist ({n} releases)"
+                                                    )
                                                 }
                                             };
                                             // With a mixed selection, say what's
@@ -2116,10 +2113,7 @@ impl App {
                 self.spawn_fetch_tracks(ctx_clone.clone(), ids, true);
             }
             Some(TrackMenuAction::AddToWantlist(release_ids, label)) => {
-                self.spawn_vinyl_edit(
-                    ctx_clone.clone(),
-                    VinylEdit::Want { release_ids, label },
-                );
+                self.spawn_vinyl_edit(ctx_clone.clone(), VinylEdit::Want { release_ids, label });
             }
             None => {}
         }
@@ -2140,11 +2134,6 @@ impl App {
                     ),
                     source_path: r.source_path.clone(),
                     source_format: r.format,
-                    edit_title: r.title.clone(),
-                    edit_artist: r.artist.clone(),
-                    edit_album: r.album.clone(),
-                    name_status: None,
-                    name_is_error: false,
                     target,
                     bitrate_kbps,
                     out_dir,

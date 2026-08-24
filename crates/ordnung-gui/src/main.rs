@@ -30,6 +30,7 @@ mod webview;
 use audio::{fmt_time, AudioEngine, PlayState};
 use config::Config;
 use covers::*;
+use dig::DigPath;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use ordnung_core::analysis::{self, AnalysisParams, ANALYZER_VERSION, WAVEFORM_FULLTRACK_VERSION};
@@ -39,23 +40,24 @@ use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
     Analysis, Format, Id, Playlist, Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
 };
-use ordnung_core::{best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind, ScannedTrack};
+use ordnung_core::{
+    best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind, ScannedTrack,
+};
 use player::*;
 use rayon::prelude::*;
 use sidebar::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use tex::{Tex, TexGraveyard};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use table::*;
+use tex::{Tex, TexGraveyard};
 use ui::hover::HoverNoteExt;
-use dig::DigPath;
-use vinyl_sheet::{SheetFetched, VinylSheet};
 use util::*;
+use vinyl_sheet::{SheetFetched, VinylSheet};
 
 fn main() -> eframe::Result<()> {
     // Pull a repo-root `.env` into the process environment before anything reads
@@ -472,11 +474,6 @@ struct ConvertModal {
     source_path: PathBuf,
     source_format: Format,
     // Editable display name. Saved to catalog tags via `update_tags`.
-    edit_title: String,
-    edit_artist: String,
-    edit_album: String,
-    name_status: Option<String>,
-    name_is_error: bool,
     // Conversion options.
     target: Format,
     bitrate_kbps: String,
@@ -616,7 +613,10 @@ pub(crate) enum VinylEdit {
     /// Want these releases, named from the library rather than the grid — so
     /// there's no cached record yet and Discogs's response supplies the metadata.
     /// Carries a label for the status line, since the ids mean nothing to the user.
-    Want { release_ids: Vec<u64>, label: String },
+    Want {
+        release_ids: Vec<u64>,
+        label: String,
+    },
     /// Move one cached record to the other list. Two Discogs calls (add to the
     /// destination, remove from the source), then one local re-key.
     Move {
@@ -653,7 +653,6 @@ impl VinylEdit {
             }
         )
     }
-
 }
 
 /// Result of a background "what would this release fill in?" lookup, computed for
@@ -893,7 +892,6 @@ struct App {
     /// An image dropped onto a track row, awaiting confirmation to set it as that
     /// track's cover. `Some` shows the cover-drop modal. See [`CoverDrop`].
     cover_drop: Option<CoverDrop>,
-    show_inspector: bool,
     /// Set while a cancellable job (scan / artwork fetch) is running; the worker
     /// polls it and stops early. `None` when idle or running a non-cancellable job.
     job_cancel: Option<Arc<AtomicBool>>,

@@ -345,8 +345,7 @@ impl Config {
     /// is empty.
     pub fn load_waveform_preset(&mut self, slot: u8) -> Option<bool> {
         let p = self.waveform_preset(slot)?.clone();
-        let freq_changed =
-            p.low_hz != self.waveform_low_hz || p.mid_hz != self.waveform_mid_hz;
+        let freq_changed = p.low_hz != self.waveform_low_hz || p.mid_hz != self.waveform_mid_hz;
         self.waveform_color_mode = p.color_mode;
         self.waveform_height_exp = p.height_exp;
         self.waveform_band_gain = p.band_gain;

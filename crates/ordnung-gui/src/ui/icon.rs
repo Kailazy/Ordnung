@@ -62,10 +62,7 @@ pub fn play_pause(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, playing:
     if playing {
         for dx in [-4.0f32, 3.0] {
             p.rect_filled(
-                egui::Rect::from_min_size(
-                    egui::pos2(c.x + dx, c.y - 6.0),
-                    egui::vec2(3.0, 12.0),
-                ),
+                egui::Rect::from_min_size(egui::pos2(c.x + dx, c.y - 6.0), egui::vec2(3.0, 12.0)),
                 0.5,
                 col,
             );
