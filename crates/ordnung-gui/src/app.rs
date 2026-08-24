@@ -698,7 +698,7 @@ impl eframe::App for App {
         self.poll_dig_primed();
         self.poll_dig_ids();
         self.poll_dig_covers(ctx);
-        self.drive_video_player();
+        self.drive_video_player(ctx);
 
         // Fade an idle status message out of the bottom-left bar after a short
         // while, so a one-off "Synced…/Done…" note doesn't linger forever. We

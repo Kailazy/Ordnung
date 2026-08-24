@@ -70,6 +70,20 @@ pub fn poll() {
 #[cfg(not(target_os = "macos"))]
 pub fn poll() {}
 
+/// How long until [`poll`] next has work to do, or `None` when the panel is
+/// closed. Callers feed this to `Context::request_repaint_after`, since the
+/// panel lives outside egui's event loop and an otherwise idle frame loop would
+/// leave [`poll`] uncalled for as long as nothing else woke it.
+#[cfg(target_os = "macos")]
+pub fn next_poll_in() -> Option<std::time::Duration> {
+    imp::next_poll_in()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn next_poll_in() -> Option<std::time::Duration> {
+    None
+}
+
 /// What the mini-player is doing, as of the last [`poll`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlayerStatus {
@@ -104,9 +118,12 @@ mod imp {
         NSBackingStoreType, NSColor, NSPanel, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
     };
     use objc2_foundation::{
-        MainThreadMarker, NSError, NSPoint, NSRect, NSSize, NSString, NSURLRequest, NSURL,
+        MainThreadMarker, NSError, NSNumber, NSPoint, NSRect, NSSize, NSString, NSURLRequest, NSURL,
     };
-    use objc2_web_kit::{WKAudiovisualMediaTypes, WKWebView, WKWebViewConfiguration};
+    use objc2_web_kit::{
+        WKAudiovisualMediaTypes, WKUserContentController, WKUserScript,
+        WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
+    };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::PlayerStatus;
@@ -119,10 +136,19 @@ mod imp {
     const MIN_H: f64 = 180.0;
     /// Inset from the main window's bottom-right corner on first show.
     const MARGIN: f64 = 24.0;
-    /// How often the page is asked what it's doing. The answer drives queue
-    /// advance, the stuck fallback and the style injection, so once a second is
-    /// plenty — the first tick after a load runs immediately (see `load`).
+    /// How often the page is asked what it's doing once it's settled. The answer
+    /// drives queue advance and the stuck fallback, neither of which needs to be
+    /// tighter than this.
     const POLL_EVERY: Duration = Duration::from_millis(900);
+    /// How often it's asked while a freshly loaded page hasn't produced a video
+    /// yet. Much tighter, because this is the window the user is *watching* —
+    /// every tick re-applies the styling to whatever DOM now exists, so the page
+    /// snaps to the player as soon as it's there rather than at the next second
+    /// boundary.
+    const POLL_EVERY_SETTLING: Duration = Duration::from_millis(120);
+    /// How long after a load the tight cadence applies, if the page hasn't
+    /// started playing before then.
+    const SETTLING_FOR: Duration = Duration::from_secs(6);
     /// How long a page may sit with no video element before it counts as stuck.
     /// Generous: a cold watch page on a slow link takes a few seconds.
     const STUCK_AFTER: Duration = Duration::from_secs(12);
@@ -133,6 +159,20 @@ mod imp {
         /// panel keeps its position. Main-thread-only by construction — every
         /// entry point below takes a `MainThreadMarker` first.
         static PANEL: RefCell<Option<Mini>> = const { RefCell::new(None) };
+    }
+
+    impl Mini {
+        /// How long until this panel wants asking again. Tight while a fresh
+        /// page is still finding its video, relaxed once it's playing — the
+        /// value the GUI's repaint scheduling follows too, via [`next_poll_in`].
+        fn poll_interval(&self) -> Duration {
+            let settling = self.state.is_empty() || self.state == "novideo";
+            if settling && self.loaded_at.elapsed() < SETTLING_FOR {
+                POLL_EVERY_SETTLING
+            } else {
+                POLL_EVERY
+            }
+        }
     }
 
     struct Mini {
@@ -245,7 +285,7 @@ mod imp {
             if !mini.panel.isVisible() {
                 return None;
             }
-            if mini.polled_at.elapsed() >= POLL_EVERY {
+            if mini.polled_at.elapsed() >= mini.poll_interval() {
                 mini.polled_at = Instant::now();
                 ask_state(&mini.web);
             }
@@ -259,6 +299,24 @@ mod imp {
                 }
             });
         }
+    }
+
+    /// How long until [`poll`] would next do something, or `None` when there's
+    /// nothing on screen to drive. The GUI turns this into a repaint request:
+    /// the panel isn't an egui surface, so without one an idle app never calls
+    /// `poll` and the queue, the stuck fallback and the styling all stall.
+    pub fn next_poll_in() -> Option<Duration> {
+        if MainThreadMarker::new().is_none() {
+            return None;
+        }
+        PANEL.with(|slot| {
+            let slot = slot.borrow();
+            let mini = slot.as_ref()?;
+            if !mini.panel.isVisible() {
+                return None;
+            }
+            Some(mini.poll_interval().saturating_sub(mini.polled_at.elapsed()))
+        })
     }
 
     /// Create the panel and its web view. Called once, lazily, the first time a
@@ -301,9 +359,33 @@ mod imp {
             // Without this, WebKit blocks autoplay and the page opens paused —
             // the click on the track *is* the user's play action.
             config.setMediaTypesRequiringUserActionForPlayback(WKAudiovisualMediaTypes::empty());
+
+            // Style the page down to its player *before it first paints*. The
+            // poll below re-applies the same snippet for YouTube's own SPA
+            // transitions, but by then the first frame is long gone — without a
+            // document-start script the panel shows a slab of unstyled watch
+            // page (or bare white) until the first poll tick lands.
+            let controller = WKUserContentController::new();
+            let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                mtm.alloc(),
+                &NSString::from_str(&inject_js()),
+                WKUserScriptInjectionTime::AtDocumentStart,
+                true,
+            );
+            controller.addUserScript(&script);
+            config.setUserContentController(&controller);
         }
         let web: Retained<WKWebView> =
             unsafe { WKWebView::initWithFrame_configuration(mtm.alloc(), content, &config) };
+        unsafe {
+            // The web view draws its own opaque white until the page paints, so
+            // the panel's black background never gets a chance to show through
+            // during a navigation. Turning off `drawsBackground` (the private
+            // but long-stable `NSView` value WebKit reads) lets it through, so a
+            // loading panel is black rather than a white slab.
+            let _: () = objc2::msg_send![&*web, setValue: &*NSNumber::numberWithBool(false),
+                forKey: &*NSString::from_str("drawsBackground")];
+        }
         panel.setContentView(Some(&web));
 
         Mini {
@@ -346,9 +428,12 @@ mod imp {
         }
     }
 
-    /// Navigate to a blank page, which unloads the player and stops the sound.
+    /// Navigate away from the player, which unloads it and stops the sound.
+    /// Deliberately *not* `about:blank`: that paints white, so a close (or the
+    /// gap before the next video) flashed a bright rectangle inside an otherwise
+    /// black panel. A black data page is the same unload with no flash.
     fn blank(web: &WKWebView) {
-        navigate(web, "about:blank");
+        navigate(web, "data:text/html,<body style='margin:0;background:%23000'>");
     }
 
     /// Styling that strips the watch page down to its player: pin the player
@@ -386,29 +471,36 @@ mod imp {
         tp-yt-paper-dialog, ytd-popup-container { \
           display: none !important; visibility: hidden !important; }";
 
-    /// Ask the page what its video element is doing, and (re)apply the styling
-    /// while we're in there. The answer lands asynchronously in `Mini::state`;
-    /// nothing waits on it.
-    ///
-    /// Injection rides along with the state poll rather than using a
-    /// `WKUserScript` so it re-applies itself on every navigation for free —
-    /// the queue advancing, and YouTube's own SPA transitions, both leave the
-    /// style behind otherwise. Inserting is idempotent: the `<style>` carries an
-    /// id, and a tick that finds it does nothing.
+    /// The self-contained snippet that puts [`ISOLATION_CSS`] on the page, used
+    /// both as a document-start `WKUserScript` (so the style is up before the
+    /// first paint) and on every state poll (so it survives YouTube's own SPA
+    /// navigations, which drop the injected node). Idempotent: the `<style>`
+    /// carries an id, and a run that finds it does nothing.
+    fn inject_js() -> String {
+        format!(
+            "(function(){{\
+               if(document.getElementById('ordnung-player-style'))return;\
+               var s=document.createElement('style');\
+               s.id='ordnung-player-style';\
+               s.textContent=`{ISOLATION_CSS}`;\
+               (document.head||document.documentElement).appendChild(s);\
+             }})()"
+        )
+    }
+
+    /// Ask the page what its video element is doing, and re-apply the styling
+    /// while we're in there (see [`inject_js`]). The answer lands
+    /// asynchronously in `Mini::state`; nothing waits on it.
     fn ask_state(web: &WKWebView) {
         let js = format!(
             "(function(){{\
-               if(!document.getElementById('ordnung-player-style')){{\
-                 var s=document.createElement('style');\
-                 s.id='ordnung-player-style';\
-                 s.textContent=`{ISOLATION_CSS}`;\
-                 (document.head||document.documentElement).appendChild(s);\
-               }}\
+               {inject};\
                var v=document.querySelector('video');\
                if(!v)return 'novideo';\
                if(v.ended)return 'ended';\
                return v.paused?'paused':'playing';\
-             }})()"
+             }})()",
+            inject = inject_js()
         );
         let js: &str = &js;
         let handler = block2::RcBlock::new(move |res: *mut AnyObject, _err: *mut NSError| {

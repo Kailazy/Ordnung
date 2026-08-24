@@ -545,8 +545,16 @@ impl App {
     /// wants clicked through. Those go to a real browser rather than sitting
     /// there blank. Called every frame; the panel keeps playing a record even
     /// once the sheet that started it is closed.
-    pub(crate) fn drive_video_player(&mut self) {
+    ///
+    /// The panel is an AppKit window, not an egui surface, so nothing the user
+    /// does *in* it wakes this loop. While it's up we ask for the repaint that
+    /// brings us back — otherwise an idle app leaves the queue un-advanced and
+    /// the styling un-refreshed until some unrelated event happens to tick.
+    pub(crate) fn drive_video_player(&mut self, ctx: &egui::Context) {
         webview::poll();
+        if let Some(next) = webview::next_poll_in() {
+            ctx.request_repaint_after(next);
+        }
         if self.vinyl_sheet.as_ref().is_none_or(|s| s.playing_video.is_none()) {
             return;
         }
