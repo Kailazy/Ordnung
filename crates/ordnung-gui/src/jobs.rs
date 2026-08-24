@@ -294,10 +294,11 @@ impl App {
         self.spawn_refresh_vinyl_inner(ctx, false);
     }
 
-    /// Shared body of the two vinyl-sync entry points. `quiet` suppresses the
-    /// closing tally: nobody asked for the startup sync, so it shouldn't leave a
-    /// summary sitting in the status bar every launch. An explicit Sync click
-    /// still reports what it did — that one the user is waiting on.
+    /// Shared body of the two vinyl-sync entry points. `quiet` keeps the run
+    /// out of the status bar entirely — no phase lines, no progress, no closing
+    /// tally: nobody asked for the startup sync, and narrating it makes a launch
+    /// that's otherwise ready read as busy. An explicit Sync click still reports
+    /// every phase and what it did — that one the user is waiting on.
     fn spawn_refresh_vinyl_inner(&mut self, ctx: egui::Context, quiet: bool) {
         let token = self.discogs_token();
         if token.trim().is_empty() {
@@ -314,7 +315,9 @@ impl App {
         // far; the next refresh resumes with what's still unpriced.
         let cancel = Arc::new(AtomicBool::new(false));
         self.job_cancel = Some(cancel.clone());
-        self.status = "Syncing vinyl collection and wantlist…".into();
+        if !quiet {
+            self.status = "Syncing vinyl collection and wantlist…".into();
+        }
         let db = self.db_path.clone();
         thread::spawn(move || run_refresh_vinyl(db, token, cancel, quiet, tx, ctx));
     }
@@ -1233,8 +1236,10 @@ const VINYL_PRICE_MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
 /// hence `cancel`: stopping there keeps everything already fetched, and the next
 /// refresh picks up the records that never got a price.
 ///
-/// `quiet` drops the closing tally (the job still reports `Done` so the grid
-/// reloads) — used by the startup sync, which runs unasked.
+/// `quiet` runs the whole sync silently: no phase lines, no progress bar, no
+/// closing tally (the job still reports `Done` so the grid reloads) — used by
+/// the startup sync, which runs unasked and shouldn't make an idle launch look
+/// like it's working.
 pub(crate) fn run_refresh_vinyl(
     db: PathBuf,
     token: String,
@@ -1253,8 +1258,10 @@ pub(crate) fn run_refresh_vinyl(
     };
     let client = discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
 
-    let _ = tx.send(JobMsg::Status("Fetching Discogs collection…".into()));
-    ctx.request_repaint();
+    if !quiet {
+        let _ = tx.send(JobMsg::Status("Fetching Discogs collection…".into()));
+        ctx.request_repaint();
+    }
     // Resolve the username up front so we can report it back for the collection
     // link, then reuse it for the fetch (no second identity request).
     let username = match client.identity() {
@@ -1275,8 +1282,10 @@ pub(crate) fn run_refresh_vinyl(
         }
     };
 
-    let _ = tx.send(JobMsg::Status("Fetching Discogs wantlist…".into()));
-    ctx.request_repaint();
+    if !quiet {
+        let _ = tx.send(JobMsg::Status("Fetching Discogs wantlist…".into()));
+        ctx.request_repaint();
+    }
     // The wantlist is a bonus section, not the point of the sync: if it fails
     // (or the account has none), keep the collection we just fetched rather than
     // failing the whole run.
@@ -1315,19 +1324,21 @@ pub(crate) fn run_refresh_vinyl(
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let _ = tx.send(JobMsg::Status(format!(
-            "Downloading vinyl covers… ({}/{total})",
-            i + 1
-        )));
-        let _ = tx.send(JobMsg::Progress { done: i, total });
-        ctx.request_repaint();
+        if !quiet {
+            let _ = tx.send(JobMsg::Status(format!(
+                "Downloading vinyl covers… ({}/{total})",
+                i + 1
+            )));
+            let _ = tx.send(JobMsg::Progress { done: i, total });
+            ctx.request_repaint();
+        }
         if let Some(png) = client.fetch_cover(url) {
             if catalog.set_vinyl_cover(*list, *instance_id, &png).is_ok() {
                 fetched += 1;
             }
         }
     }
-    if total > 0 {
+    if total > 0 && !quiet {
         let _ = tx.send(JobMsg::Progress { done: total, total });
     }
 
@@ -1349,15 +1360,17 @@ pub(crate) fn run_refresh_vinyl(
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let _ = tx.send(JobMsg::Status(format!(
-            "Checking Discogs prices… ({}/{price_total})",
-            i + 1
-        )));
-        let _ = tx.send(JobMsg::Progress {
-            done: i,
-            total: price_total,
-        });
-        ctx.request_repaint();
+        if !quiet {
+            let _ = tx.send(JobMsg::Status(format!(
+                "Checking Discogs prices… ({}/{price_total})",
+                i + 1
+            )));
+            let _ = tx.send(JobMsg::Progress {
+                done: i,
+                total: price_total,
+            });
+            ctx.request_repaint();
+        }
         // A failed lookup is left unstamped so the next refresh retries it; a
         // successful one that found nothing for sale is stamped as checked.
         if let Ok(price) = client.marketplace_price(*release_id) {
@@ -1374,7 +1387,7 @@ pub(crate) fn run_refresh_vinyl(
             }
         }
     }
-    if price_total > 0 {
+    if price_total > 0 && !quiet {
         let _ = tx.send(JobMsg::Progress {
             done: price_total,
             total: price_total,
