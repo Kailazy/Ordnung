@@ -1264,6 +1264,13 @@ impl eframe::App for App {
             // inspector's own contents wrap and truncate down to this.
             .width_range(72.0..=560.0)
             .show(ctx, |ui| {
+                // The inspector's text is laid out at its natural width, and a
+                // label wider than the panel would otherwise push the panel's
+                // minimum width back out — dragging the splitter past it left
+                // the contents painting over the table instead of narrowing.
+                // Clip to the frame so the panel's width is the panel's alone.
+                ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+                ui.set_max_width(ui.available_width());
                 inspector_action = self.draw_inspector(ui, ctx);
             });
         match inspector_action {

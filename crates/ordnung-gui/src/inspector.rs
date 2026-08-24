@@ -87,7 +87,7 @@ impl App {
         // Small all-caps caption rather than a big heading: the track's own
         // name below is what should read as the panel's title.
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("T R A C K").small().weak());
+        ui.add(egui::Label::new(egui::RichText::new("T R A C K").small().weak()).truncate());
         ui.add_space(2.0);
 
         // Copied out before borrowing `selected_track` so the button below can
@@ -114,7 +114,12 @@ impl App {
         };
 
         let Some(t) = &self.selected_track else {
-            ui.label(egui::RichText::new("Click a track in the table to inspect.").weak());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("Click a track in the table to inspect.").weak(),
+                )
+                .wrap(),
+            );
             return None;
         };
         let id = t.id;
@@ -122,15 +127,21 @@ impl App {
 
         // Title on its own line at heading weight, artist beneath it — the
         // "A — B" run-together line read as one undifferentiated string.
-        ui.label(
-            egui::RichText::new(t.tags.title.as_deref().unwrap_or("Untitled"))
-                .heading()
-                .size(17.0),
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(t.tags.title.as_deref().unwrap_or("Untitled"))
+                    .heading()
+                    .size(17.0),
+            )
+            .truncate(),
         );
-        ui.label(
-            egui::RichText::new(t.tags.artist.as_deref().unwrap_or("Unknown"))
-                .size(13.0)
-                .weak(),
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(t.tags.artist.as_deref().unwrap_or("Unknown"))
+                    .size(13.0)
+                    .weak(),
+            )
+            .truncate(),
         );
         // The full path is long and rarely needed at a glance: show the file
         // name, with the whole path on hover.
@@ -140,7 +151,7 @@ impl App {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path_str.clone());
         ui.add_space(1.0);
-        ui.label(egui::RichText::new(file_name).small().weak())
+        ui.add(egui::Label::new(egui::RichText::new(file_name).small().weak()).truncate())
             .on_hover_text(&path_str);
 
         // Cover art preview. Decoded off-thread (see `cover_full_texture`): once
