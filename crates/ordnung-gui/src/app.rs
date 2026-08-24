@@ -1259,7 +1259,10 @@ impl eframe::App for App {
         egui::SidePanel::right("inspector")
             .resizable(true)
             .default_width(360.0)
-            .width_range(260.0..=560.0)
+            // Floor low enough to shove the panel out of the way when the
+            // catalog needs the width, rather than only trimming it. The
+            // inspector's own contents wrap and truncate down to this.
+            .width_range(72.0..=560.0)
             .show(ctx, |ui| {
                 inspector_action = self.draw_inspector(ui, ctx);
             });

@@ -12,6 +12,7 @@
 //! catalog's `release_cache` — so a record opened once needs no network again.
 
 use super::*;
+use crate::dig::strip_disambiguator;
 
 /// One release detail fetched for the sheet: which record it was for, and either
 /// the detail or the error to show in its place.
@@ -713,9 +714,27 @@ impl App {
             }
         };
         // Digging is offered for a record that's in a list (it's the seed of a
-        // dig). A record already reached *by* a dig has the strip's own buttons
-        // instead, so it doesn't need a second set here.
+        // dig).
         let can_dig = key.is_some_and(|k| self.can_dig(k));
+        // A record reached *by* a dig branches with the strip's own two
+        // buttons — but the sheet is drawn over the strip, so it carries its
+        // own copy rather than making the user move the window to reach them.
+        // Only for the record the dig is actually standing on: taking a thread
+        // out of a card you merely walked back to would branch from the head
+        // instead of from what you're looking at.
+        let branch = {
+            let head = self.dig.as_ref().map(|d| d.head());
+            match head {
+                Some(h) if h.release_id == release_id => Some((
+                    strip_disambiguator(&h.artist).to_string(),
+                    h.label.clone(),
+                    !h.artist_ids.is_empty(),
+                    !h.label_ids.is_empty(),
+                    self.dig.as_ref().is_some_and(|d| d.pending.is_some()),
+                )),
+                _ => None,
+            }
+        };
         // Where this record stands on Discogs right now. Read from the same
         // membership sets the grid uses, so the sheet agrees with the wall
         // behind it, and both update together on the reload an edit triggers.
@@ -760,6 +779,9 @@ impl App {
             PlayExtra(usize),
             Goto,
             Dig,
+            /// Take a thread out of the record on screen — the strip's two
+            /// branch buttons, mirrored here.
+            Branch(crate::dig::DigThread),
             /// Add this record to that list, or take it off if it's there.
             ToggleList(VinylList),
             /// Want a *different* pressing of the same record — the one that
@@ -982,6 +1004,60 @@ impl App {
                             {
                                 act = Some(Act::Dig);
                             }
+                            // The dig's two threads, for the record the dig is
+                            // standing on. Same gating and wording as the strip
+                            // (see `draw_dig`): both always shown, a disabled
+                            // one explaining itself rather than vanishing.
+                            if let Some((
+                                head_artist,
+                                head_label,
+                                has_artist_id,
+                                has_label_id,
+                                busy,
+                            )) = &branch
+                            {
+                                let artist_tip = if *has_artist_id {
+                                    format!(
+                                        "Find another vinyl release by {head_artist} that you \
+                                         don't own"
+                                    )
+                                } else if head_artist.trim().is_empty() {
+                                    "Discogs lists no artist for this record".to_string()
+                                } else {
+                                    format!("Looking up {head_artist} on Discogs…")
+                                };
+                                if ui
+                                    .add_enabled(
+                                        *has_artist_id && !busy,
+                                        egui::Button::new("♪  Dig the artist"),
+                                    )
+                                    .on_hover_note(artist_tip.clone())
+                                    .on_disabled_hover_text(crate::ui::hover::note(artist_tip))
+                                    .clicked()
+                                {
+                                    act = Some(Act::Branch(crate::dig::DigThread::Artist));
+                                }
+                                let label_tip = match head_label {
+                                    Some(l) if *has_label_id => {
+                                        format!(
+                                            "Find another vinyl release on {l} that you don't own"
+                                        )
+                                    }
+                                    Some(l) => format!("Looking up {l} on Discogs…"),
+                                    None => "Discogs lists no label for this record".to_string(),
+                                };
+                                if ui
+                                    .add_enabled(
+                                        *has_label_id && !busy,
+                                        egui::Button::new("⌂  Dig the label"),
+                                    )
+                                    .on_hover_note(label_tip.clone())
+                                    .on_disabled_hover_text(crate::ui::hover::note(label_tip))
+                                    .clicked()
+                                {
+                                    act = Some(Act::Branch(crate::dig::DigThread::Label));
+                                }
+                            }
                         });
                     });
                 });
@@ -1150,6 +1226,15 @@ impl App {
             Some(Act::Dig) => {
                 let Some(k) = key else { return };
                 self.start_dig(k);
+                self.stop_sheet_video();
+                self.vinyl_sheet = None;
+                return;
+            }
+            // Branching moves the dig to a new record, so the sheet standing
+            // on the old one closes — same as starting a dig, and it uncovers
+            // the strip that's now showing where you landed.
+            Some(Act::Branch(thread)) => {
+                self.dig_step(thread);
                 self.stop_sheet_video();
                 self.vinyl_sheet = None;
                 return;

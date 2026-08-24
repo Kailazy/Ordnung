@@ -116,7 +116,7 @@ pub(crate) struct DigPath {
 }
 
 impl DigPath {
-    fn head(&self) -> &DigStep {
+    pub(crate) fn head(&self) -> &DigStep {
         &self.steps[self.at]
     }
 }
@@ -212,7 +212,7 @@ fn dig_roll_with(seed: u64, len: usize) -> usize {
 /// matching — `Lawrence (2)` really is a different artist from `Lawrence`, and
 /// treating them as one is how a dig ends up in the wrong discography — but the
 /// number is a database artefact nobody wants to read in a caption.
-fn strip_disambiguator(s: &str) -> &str {
+pub(crate) fn strip_disambiguator(s: &str) -> &str {
     let t = s.trim_end();
     if !t.ends_with(')') {
         return s;
@@ -496,7 +496,7 @@ impl App {
     /// page was fetched for exactly this click, and the pick still runs against
     /// collection membership as it is *now*, so a stale page can't offer a
     /// record you've bought in the meantime.
-    fn dig_step(&mut self, thread: DigThread) {
+    pub(crate) fn dig_step(&mut self, thread: DigThread) {
         if let Some(dig) = self.dig.as_ref() {
             let key = (dig.head().release_id, thread == DigThread::Artist);
             if dig.ready.contains_key(&key) {
