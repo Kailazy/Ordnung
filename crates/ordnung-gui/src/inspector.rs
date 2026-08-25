@@ -80,11 +80,19 @@ impl App {
     pub(crate) fn draw_inspector_tab(&mut self, ctx: &egui::Context, inset: f32) {
         const W: f32 = 26.0;
         const H: f32 = 96.0;
-        // `available_rect` here is what the toolbar, player and status bars have
-        // left over — i.e. the sidebar/table area — so the tab lines up with the
-        // top of the panel it opens rather than with the window's own edge.
-        let area = ctx.available_rect();
-        let pos = egui::pos2(area.right() - inset - W, area.top() + 8.0);
+        // Horizontal: measured from the window's own right edge, because that's
+        // what `inset` (the drawer's width) is measured against. Using
+        // `available_rect` here would double-count — by this point it has
+        // already had the open drawer subtracted from it, which left the tab
+        // stranded mid-table.
+        //
+        // Vertical: `available_rect`'s top is what the toolbar, player and
+        // status bars left over, so the tab lines up with the top of the panel
+        // it opens rather than riding up under the toolbar.
+        let pos = egui::pos2(
+            ctx.screen_rect().right() - inset - W,
+            ctx.available_rect().top() + 8.0,
+        );
         egui::Area::new(egui::Id::new("inspector_tab"))
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
