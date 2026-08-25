@@ -1277,6 +1277,13 @@ impl eframe::App for App {
             egui::SidePanel::right("inspector")
                 .resizable(false)
                 .exact_width(width)
+                // Same fill as the pull tab (see `color::DRAWER`), so the
+                // handle reads as the edge of this panel rather than a lighter
+                // shape stuck to a darker one.
+                .frame(
+                    egui::Frame::side_top_panel(&ctx.style())
+                        .fill(crate::ui::tokens::color::DRAWER),
+                )
                 .show(ctx, |ui| {
                     // The inspector's text is laid out at its natural width, and
                     // a label wider than the panel would otherwise push the

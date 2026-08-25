@@ -115,7 +115,7 @@ impl App {
                 let bg = if hovered {
                     egui::Color32::from_gray(82)
                 } else {
-                    egui::Color32::from_gray(54)
+                    crate::ui::tokens::color::DRAWER
                 };
                 ui.painter().rect_filled(rect, rounding, bg);
                 // The chevron points where the panel is headed: outward (▶) to

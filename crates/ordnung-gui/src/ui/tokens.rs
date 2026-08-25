@@ -60,6 +60,10 @@ pub mod color {
     pub const SURFACE_HI: Color32 = Color32::from_rgb(44, 44, 48);
     /// Sunken surface — text fields and other inputs.
     pub const FIELD: Color32 = Color32::from_rgb(20, 20, 22);
+    /// The inspector drawer and its pull tab. One token for both so the handle
+    /// reads as part of the panel it grows out of, rather than two greys that
+    /// drift apart the next time either is touched.
+    pub const DRAWER: Color32 = Color32::from_gray(54);
 
     // --- Hairlines ---
     /// Translucent separator that adapts to whatever sits behind it (white α20,
