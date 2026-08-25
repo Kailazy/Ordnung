@@ -73,25 +73,23 @@ impl App {
         self.refresh_selected();
     }
 
-    /// The inspector's pull tab: a slim handle hugging the right edge of the
-    /// window, at the drawer's inner boundary. `inset` is how far in from the
-    /// right edge to sit — the drawer's width while it's open, zero while it's
-    /// closed — so the tab travels with the panel and stays the one control
-    /// that toggles it.
+    /// The inspector's pull tab: a handle at the top-right of the content
+    /// area, sitting at the drawer's inner boundary. `inset` is how far in from
+    /// the right edge to sit — the drawer's animated width — so the tab rides
+    /// out with the panel and stays the one control that toggles it.
     pub(crate) fn draw_inspector_tab(&mut self, ctx: &egui::Context, inset: f32) {
-        const W: f32 = 14.0;
-        const H: f32 = 64.0;
-        let screen = ctx.screen_rect();
-        // Vertically centred on the window rather than on the panel: the tab
-        // reads as a fixture of the window edge, so it doesn't jump when the
-        // toolbar or the player bar changes height.
-        let pos = egui::pos2(screen.right() - inset - W, screen.center().y - H / 2.0);
+        const W: f32 = 26.0;
+        const H: f32 = 96.0;
+        // `available_rect` here is what the toolbar, player and status bars have
+        // left over — i.e. the sidebar/table area — so the tab lines up with the
+        // top of the panel it opens rather than with the window's own edge.
+        let area = ctx.available_rect();
+        let pos = egui::pos2(area.right() - inset - W, area.top() + 8.0);
         egui::Area::new(egui::Id::new("inspector_tab"))
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
             .show(ctx, |ui| {
-                let (rect, resp) =
-                    ui.allocate_exact_size(egui::vec2(W, H), egui::Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(W, H), egui::Sense::click());
                 let open = self.inspector_open;
                 let hovered = resp.hovered();
                 if hovered {
@@ -107,23 +105,23 @@ impl App {
                     se: 0.0,
                 };
                 let bg = if hovered {
-                    egui::Color32::from_gray(78)
+                    egui::Color32::from_gray(82)
                 } else {
-                    egui::Color32::from_gray(52)
+                    egui::Color32::from_gray(54)
                 };
                 ui.painter().rect_filled(rect, rounding, bg);
-                // The chevron points where the panel is headed: inward (◀) to
-                // pull it open, outward (▶) to push it away.
+                // The chevron points where the panel is headed: outward (▶) to
+                // push it away, inward (◀) to pull it back open.
                 let glyph = if open { "\u{25b6}" } else { "\u{25c0}" };
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
                     glyph,
-                    egui::FontId::proportional(9.0),
+                    egui::FontId::proportional(13.0),
                     if hovered {
-                        egui::Color32::from_gray(230)
+                        egui::Color32::from_gray(235)
                     } else {
-                        egui::Color32::from_gray(160)
+                        egui::Color32::from_gray(170)
                     },
                 );
                 let resp = resp.on_hover_note(if open {

@@ -1263,10 +1263,20 @@ impl eframe::App for App {
         // produced a cramped, half-truncated panel, so that affordance is gone
         // and the pull tab below is the single way to show/hide it.
         const INSPECTOR_W: f32 = 360.0;
-        if self.inspector_open {
+        // Animate the drawer's width instead of snapping it: egui eases this
+        // 0→1 over the given duration and repaints until it settles, so the
+        // panel slides out and the table reflows with it. Short enough to feel
+        // like a direct response to the click rather than a transition.
+        let t = ctx.animate_bool_with_time(
+            egui::Id::new("inspector_slide"),
+            self.inspector_open,
+            0.12,
+        );
+        let width = INSPECTOR_W * t;
+        if width > 0.5 {
             egui::SidePanel::right("inspector")
                 .resizable(false)
-                .exact_width(INSPECTOR_W)
+                .exact_width(width)
                 .show(ctx, |ui| {
                     // The inspector's text is laid out at its natural width, and
                     // a label wider than the panel would otherwise push the
@@ -1281,7 +1291,7 @@ impl eframe::App for App {
         // drawer, vertically centred over whatever is beside it. It rides along
         // with the panel so the same control both opens and closes it, and the
         // chevron always points the direction the panel will move.
-        self.draw_inspector_tab(ctx, if self.inspector_open { INSPECTOR_W } else { 0.0 });
+        self.draw_inspector_tab(ctx, width);
         match inspector_action {
             Some(InspectorAction::EmbedCover(id, path)) => self.embed_cover_into_file(id, path),
             Some(InspectorAction::SaveToCatalog(id)) => self.save_tags(id, None),
