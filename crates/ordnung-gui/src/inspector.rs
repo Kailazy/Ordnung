@@ -73,6 +73,70 @@ impl App {
         self.refresh_selected();
     }
 
+    /// The inspector's pull tab: a slim handle hugging the right edge of the
+    /// window, at the drawer's inner boundary. `inset` is how far in from the
+    /// right edge to sit — the drawer's width while it's open, zero while it's
+    /// closed — so the tab travels with the panel and stays the one control
+    /// that toggles it.
+    pub(crate) fn draw_inspector_tab(&mut self, ctx: &egui::Context, inset: f32) {
+        const W: f32 = 14.0;
+        const H: f32 = 64.0;
+        let screen = ctx.screen_rect();
+        // Vertically centred on the window rather than on the panel: the tab
+        // reads as a fixture of the window edge, so it doesn't jump when the
+        // toolbar or the player bar changes height.
+        let pos = egui::pos2(screen.right() - inset - W, screen.center().y - H / 2.0);
+        egui::Area::new(egui::Id::new("inspector_tab"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(W, H), egui::Sense::click());
+                let open = self.inspector_open;
+                let hovered = resp.hovered();
+                if hovered {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                // Rounded only on the side facing the content, so the handle
+                // looks like it's growing out of the panel edge rather than
+                // floating free.
+                let rounding = egui::Rounding {
+                    nw: W / 2.0,
+                    sw: W / 2.0,
+                    ne: 0.0,
+                    se: 0.0,
+                };
+                let bg = if hovered {
+                    egui::Color32::from_gray(78)
+                } else {
+                    egui::Color32::from_gray(52)
+                };
+                ui.painter().rect_filled(rect, rounding, bg);
+                // The chevron points where the panel is headed: inward (◀) to
+                // pull it open, outward (▶) to push it away.
+                let glyph = if open { "\u{25b6}" } else { "\u{25c0}" };
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    glyph,
+                    egui::FontId::proportional(9.0),
+                    if hovered {
+                        egui::Color32::from_gray(230)
+                    } else {
+                        egui::Color32::from_gray(160)
+                    },
+                );
+                let resp = resp.on_hover_note(if open {
+                    "Hide the track inspector"
+                } else {
+                    "Show the track inspector"
+                });
+                if resp.clicked() {
+                    self.inspector_open = !self.inspector_open;
+                }
+            });
+    }
+
     /// The right-hand inspector — every standardized metadata field we have
     /// for the selected track. Empty fields are hidden so visible content is
     /// only what the file actually carried.

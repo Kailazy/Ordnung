@@ -1011,6 +1011,10 @@ struct App {
     /// When `Some`, the per-column filter search bar is open (a header was
     /// double-clicked); mirrors `column_menu`.
     col_filter_open: Option<ColFilterPopup>,
+    /// Whether the inspector side panel is showing. Toggled by the pull tab at
+    /// the window's right edge — the panel is a fixed-width drawer that slides
+    /// in and out rather than a splitter the user drags to size.
+    inspector_open: bool,
     /// Whether the Settings window is open.
     settings_open: bool,
     /// Which category tab is active in the Settings window. Session-only — the

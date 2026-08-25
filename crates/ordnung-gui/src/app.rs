@@ -132,6 +132,7 @@ impl App {
             col_filters: HashMap::new(),
             col_filter_open: None,
             tex_graveyard: TexGraveyard::default(),
+            inspector_open: true,
             settings_open: false,
             settings_tab: SettingsTab::default(),
             token_input: String::new(),
@@ -1256,23 +1257,31 @@ impl eframe::App for App {
         // editing (the convert dialog no longer duplicates name editing), so it
         // is always present rather than behind a toolbar toggle.
         let mut inspector_action: Option<InspectorAction> = None;
-        egui::SidePanel::right("inspector")
-            .resizable(true)
-            .default_width(360.0)
-            // Floor low enough to shove the panel out of the way when the
-            // catalog needs the width, rather than only trimming it. The
-            // inspector's own contents wrap and truncate down to this.
-            .width_range(72.0..=560.0)
-            .show(ctx, |ui| {
-                // The inspector's text is laid out at its natural width, and a
-                // label wider than the panel would otherwise push the panel's
-                // minimum width back out — dragging the splitter past it left
-                // the contents painting over the table instead of narrowing.
-                // Clip to the frame so the panel's width is the panel's alone.
-                ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
-                ui.set_max_width(ui.available_width());
-                inspector_action = self.draw_inspector(ui, ctx);
-            });
+        // A fixed-width drawer, not a splitter: the inspector is either open at
+        // its designed width or fully out of the way, the way Spotify's right
+        // sidebar behaves. Dragging an edge to some in-between width only ever
+        // produced a cramped, half-truncated panel, so that affordance is gone
+        // and the pull tab below is the single way to show/hide it.
+        const INSPECTOR_W: f32 = 360.0;
+        if self.inspector_open {
+            egui::SidePanel::right("inspector")
+                .resizable(false)
+                .exact_width(INSPECTOR_W)
+                .show(ctx, |ui| {
+                    // The inspector's text is laid out at its natural width, and
+                    // a label wider than the panel would otherwise push the
+                    // panel's width back out and paint over the table. Clip to
+                    // the frame so the panel's width is the panel's alone.
+                    ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+                    ui.set_max_width(ui.available_width());
+                    inspector_action = self.draw_inspector(ui, ctx);
+                });
+        }
+        // Pull tab: a slim half-rounded handle pinned to the inner edge of the
+        // drawer, vertically centred over whatever is beside it. It rides along
+        // with the panel so the same control both opens and closes it, and the
+        // chevron always points the direction the panel will move.
+        self.draw_inspector_tab(ctx, if self.inspector_open { INSPECTOR_W } else { 0.0 });
         match inspector_action {
             Some(InspectorAction::EmbedCover(id, path)) => self.embed_cover_into_file(id, path),
             Some(InspectorAction::SaveToCatalog(id)) => self.save_tags(id, None),
