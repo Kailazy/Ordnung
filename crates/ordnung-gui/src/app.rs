@@ -1280,9 +1280,14 @@ impl eframe::App for App {
                 // Same fill as the pull tab (see `color::DRAWER`), so the
                 // handle reads as the edge of this panel rather than a lighter
                 // shape stuck to a darker one.
+                // No line between the drawer and the table: the fill change
+                // is the edge. `show_separator_line` kills the panel's own
+                // divider, the frame stroke its border.
+                .show_separator_line(false)
                 .frame(
                     egui::Frame::side_top_panel(&ctx.style())
-                        .fill(crate::ui::tokens::color::DRAWER),
+                        .fill(crate::ui::tokens::color::DRAWER)
+                        .stroke(egui::Stroke::NONE),
                 )
                 .show(ctx, |ui| {
                     // The inspector's text is laid out at its natural width, and
