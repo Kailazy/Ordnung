@@ -1026,6 +1026,7 @@ impl App {
             thumb_url: Option<String>,
             owned: bool,
             via: Option<(DigThread, String)>,
+            label: Option<String>,
         }
         let (cards, at, pending, error, head_artist, head_label, has_artist_id, has_label_id) = {
             let dig = self.dig.as_ref().expect("checked above");
@@ -1041,6 +1042,12 @@ impl App {
                         thumb_url: s.thumb_url.clone(),
                         owned: s.owned,
                         via: s.via.clone(),
+                        // A label dig knows the imprint it followed even when
+                        // the row's own field came back blank.
+                        label: s.label.clone().or_else(|| match &s.via {
+                            Some((DigThread::Label, name)) => Some(name.clone()),
+                            _ => None,
+                        }),
                     })
                     .collect::<Vec<_>>(),
                 dig.at,
@@ -1095,7 +1102,7 @@ impl App {
                 // The path itself. Scrolls horizontally once a dig runs past the
                 // window width; each card is clickable to jump back to that point.
                 egui::ScrollArea::horizontal()
-                    .max_height(COVER + 58.0)
+                    .max_height(COVER + 74.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
@@ -1117,7 +1124,7 @@ impl App {
                                 }
                                 let current = i == at;
                                 ui.allocate_ui_with_layout(
-                                    egui::vec2(COVER, COVER + 44.0),
+                                    egui::vec2(COVER, COVER + 60.0),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
                                         let (rect, resp) = ui.allocate_exact_size(
@@ -1205,36 +1212,6 @@ impl App {
                                                 egui::Color32::from_gray(210),
                                             );
                                         }
-                                        // A label dig follows one imprint the
-                                        // whole way, and the sleeve rarely says
-                                        // which — so the record carries its
-                                        // label, banded across the bottom.
-                                        if let Some((DigThread::Label, name)) = &card.via {
-                                            let band = egui::Rect::from_min_max(
-                                                egui::pos2(rect.min.x, rect.max.y - 17.0),
-                                                rect.max,
-                                            );
-                                            ui.painter().rect_filled(
-                                                band,
-                                                egui::Rounding {
-                                                    nw: 0.0,
-                                                    ne: 0.0,
-                                                    sw: 5.0,
-                                                    se: 5.0,
-                                                },
-                                                egui::Color32::from_black_alpha(205),
-                                            );
-                                            // Clipped, not truncated: a long
-                                            // imprint fades at the sleeve edge
-                                            // rather than pushing past it.
-                                            ui.painter().with_clip_rect(band).text(
-                                                band.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                name,
-                                                egui::FontId::proportional(10.0),
-                                                egui::Color32::from_gray(215),
-                                            );
-                                        }
                                         let tip = if current {
                                             format!(
                                                 "{}\n{}\n\nOpen the tracklist and listen",
@@ -1276,6 +1253,20 @@ impl App {
                                             )
                                             .truncate(),
                                         );
+                                        // The imprint, third line and dimmest:
+                                        // a sleeve rarely says which label put
+                                        // the record out, and on a dig that's
+                                        // half of what you're reading for.
+                                        if let Some(label) = &card.label {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(label)
+                                                        .size(10.0)
+                                                        .color(egui::Color32::from_gray(125)),
+                                                )
+                                                .truncate(),
+                                            );
+                                        }
                                     },
                                 );
                             }
@@ -1292,7 +1283,7 @@ impl App {
                                     );
                                 });
                                 ui.allocate_ui_with_layout(
-                                    egui::vec2(COVER, COVER + 44.0),
+                                    egui::vec2(COVER, COVER + 60.0),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
                                         let (rect, _) = ui.allocate_exact_size(
