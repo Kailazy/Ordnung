@@ -1270,9 +1270,14 @@ impl eframe::App for App {
         // 0→1 over the given duration and repaints until it settles, so the
         // panel slides out and the table reflows with it. Short enough to feel
         // like a direct response to the click rather than a transition.
+        // The inspector describes one selected track, which the vinyl view has
+        // no concept of — it's a grid of Discogs releases, not catalog rows. So
+        // the drawer (and its tab) are digital-only: force it shut there rather
+        // than leaving an empty panel with nothing to inspect.
+        let inspector_applies = self.view != LibraryView::Vinyl;
         let t = ctx.animate_bool_with_time(
             egui::Id::new("inspector_slide"),
-            self.inspector_open,
+            self.inspector_open && inspector_applies,
             0.12,
         );
         let width = INSPECTOR_W * t;
@@ -1306,7 +1311,9 @@ impl eframe::App for App {
         // drawer, vertically centred over whatever is beside it. It rides along
         // with the panel so the same control both opens and closes it, and the
         // chevron always points the direction the panel will move.
-        self.draw_inspector_tab(ctx, width);
+        if inspector_applies {
+            self.draw_inspector_tab(ctx, width);
+        }
         match inspector_action {
             Some(InspectorAction::EmbedCover(id, path)) => self.embed_cover_into_file(id, path),
             Some(InspectorAction::SaveToCatalog(id)) => self.save_tags(id, None),
