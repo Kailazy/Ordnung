@@ -93,10 +93,17 @@ impl App {
             ctx.screen_rect().right() - inset - W,
             ctx.available_rect().top() + 8.0,
         );
+        // Middle order, and clipped to the content area: a Foreground area
+        // paints over the side and top panels, which put the tab on top of the
+        // toolbar buttons whenever the toolbar wrapped to a taller row. Both
+        // together mean the tab can only ever draw inside the region the
+        // toolbar, player and status bars left behind.
         egui::Area::new(egui::Id::new("inspector_tab"))
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Middle)
+            .constrain_to(ctx.available_rect())
             .fixed_pos(pos)
             .show(ctx, |ui| {
+                ui.set_clip_rect(ctx.available_rect());
                 let (rect, resp) = ui.allocate_exact_size(egui::vec2(W, H), egui::Sense::click());
                 let open = self.inspector_open;
                 let hovered = resp.hovered();

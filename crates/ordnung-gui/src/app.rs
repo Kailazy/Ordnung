@@ -751,6 +751,17 @@ impl eframe::App for App {
             }
         }
 
+        // Cmd/Ctrl+R reloads the table from the catalog. This used to be a
+        // toolbar button, but it's a rare manual escape hatch (jobs reload on
+        // their own), so it lives as a shortcut instead of taking up chrome.
+        // Ignored while a job runs, which is when the old button was disabled.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R))
+            && !self.is_busy()
+        {
+            self.reload();
+            self.recount_missing();
+        }
+
         // Drive the snippet-preview engine: pick up finished decodes, notice when
         // a clip ends, and keep animating the button while audio is active.
         if let Some(a) = &mut self.audio {
@@ -1124,14 +1135,14 @@ impl eframe::App for App {
                 if self.missing_count > 0 {
                     counts.push_str(&format!(" · {} missing", self.missing_count));
                 }
-                // Right-aligned utility group: counts and the non-workflow actions
-                // (Refresh, Settings) live away from the left-edge library actions
-                // so the toolbar reads "do work … status & config". Laying this out
-                // right-to-left FIRST reserves its width, so the left-aligned filter
-                // group nested inside shrinks to fit instead of overdrawing the
-                // counts when the window is narrow. Visual order on the right:
-                // counts · Refresh · Settings.
-                let busy = self.is_busy();
+                // Right-aligned utility group: counts and Settings live away from
+                // the left-edge library actions so the toolbar reads "do work …
+                // status & config". Laying this out right-to-left FIRST reserves
+                // its width, so the left-aligned filter group nested inside
+                // shrinks to fit instead of overdrawing the counts when the
+                // window is narrow. Visual order on the right: counts · Settings.
+                // Reloading the table is a Cmd/Ctrl+R shortcut rather than a
+                // button: it's rarely needed, since every job reloads on finish.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Settings stays reachable even while a job runs.
                     if ui
@@ -1141,14 +1152,6 @@ impl eframe::App for App {
                     {
                         self.token_input = self.config.discogs_token.clone();
                         self.settings_open = true;
-                    }
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("↻ Refresh"))
-                        .on_hover_note("Reload the table from the catalog")
-                        .clicked()
-                    {
-                        self.reload();
-                        self.recount_missing();
                     }
                     ui.separator();
                     ui.label(counts);
