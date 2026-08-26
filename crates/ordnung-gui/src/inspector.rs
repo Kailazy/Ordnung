@@ -77,21 +77,47 @@ impl App {
     /// area, sitting at the drawer's inner boundary. `inset` is how far in from
     /// the right edge to sit — the drawer's animated width — so the tab rides
     /// out with the panel and stays the one control that toggles it.
+    ///
+    /// The tab also doubles as a nameplate for the last track the player
+    /// loaded: the title runs down it in rotated text under the chevron, so the
+    /// handle carries information rather than only a toggle.
     pub(crate) fn draw_inspector_tab(&mut self, ctx: &egui::Context, inset: f32) {
-        const W: f32 = 26.0;
-        const H: f32 = 96.0;
+        // Slim: the tab is a grip, not a button. The chevron spans its full
+        // width so the narrower it gets the more it reads as an arrow.
+        const W: f32 = 18.0;
+        /// Height of the chevron block at the top of the tab.
+        const HEAD: f32 = 40.0;
+        /// Extra height given over to the rotated last-played title.
+        const LABEL_H: f32 = 130.0;
+
+        // The title that rides down the tab: whatever the player last loaded.
+        // `now_playing` outlives playback (only an explicit close clears it), so
+        // this stays the *last* played track rather than blanking on pause.
+        let label = self
+            .now_playing
+            .as_ref()
+            .map(|np| {
+                if np.artist.is_empty() {
+                    np.title.clone()
+                } else {
+                    format!("{} — {}", np.title, np.artist)
+                }
+            })
+            .unwrap_or_default();
+        let h = if label.is_empty() { HEAD } else { HEAD + LABEL_H };
+
         // Horizontal: measured from the window's own right edge, because that's
         // what `inset` (the drawer's width) is measured against. Using
         // `available_rect` here would double-count — by this point it has
         // already had the open drawer subtracted from it, which left the tab
         // stranded mid-table.
         //
-        // Vertical: `available_rect`'s top is what the toolbar, player and
-        // status bars left over, so the tab lines up with the top of the panel
-        // it opens rather than riding up under the toolbar.
+        // Vertical: flush with `available_rect`'s top (what the toolbar, player
+        // and status bars left over) with no gap, so the tab meets the top
+        // border cleanly instead of leaving a notch of table above it.
         let pos = egui::pos2(
             ctx.screen_rect().right() - inset - W,
-            ctx.available_rect().top() + 8.0,
+            ctx.available_rect().top(),
         );
         // Middle order, and clipped to the content area: a Foreground area
         // paints over the side and top panels, which put the tab on top of the
@@ -104,17 +130,17 @@ impl App {
             .fixed_pos(pos)
             .show(ctx, |ui| {
                 ui.set_clip_rect(ctx.available_rect());
-                let (rect, resp) = ui.allocate_exact_size(egui::vec2(W, H), egui::Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(W, h), egui::Sense::click());
                 let open = self.inspector_open;
                 let hovered = resp.hovered();
                 if hovered {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
-                // Rounded only on the side facing the content, so the handle
-                // looks like it's growing out of the panel edge rather than
-                // floating free.
+                // Rounded only on the bottom-left: the top edge butts against
+                // the content area's top border and the right edge against the
+                // drawer, so the one free corner is the only one to soften.
                 let rounding = egui::Rounding {
-                    nw: W / 2.0,
+                    nw: 0.0,
                     sw: W / 2.0,
                     ne: 0.0,
                     se: 0.0,
@@ -125,20 +151,65 @@ impl App {
                     crate::ui::tokens::color::DRAWER
                 };
                 ui.painter().rect_filled(rect, rounding, bg);
+
+                let fg = if hovered {
+                    egui::Color32::from_gray(235)
+                } else {
+                    egui::Color32::from_gray(170)
+                };
                 // The chevron points where the panel is headed: outward (▶) to
-                // push it away, inward (◀) to pull it back open.
-                let glyph = if open { "\u{25b6}" } else { "\u{25c0}" };
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    glyph,
-                    egui::FontId::proportional(13.0),
-                    if hovered {
-                        egui::Color32::from_gray(235)
-                    } else {
-                        egui::Color32::from_gray(170)
-                    },
-                );
+                // push it away, inward (◀) to pull it back open. Painted as a
+                // triangle rather than a glyph so it can be sized to the tab —
+                // it spans the full width and most of the head's height, which
+                // a font-rendered arrow at this size can't do.
+                let head = egui::Rect::from_min_size(rect.min, egui::vec2(W, HEAD));
+                let pad = 4.0;
+                let (x_tip, x_base) = if open {
+                    (head.right() - pad, head.left() + pad)
+                } else {
+                    (head.left() + pad, head.right() - pad)
+                };
+                let (top, bottom) = (head.top() + pad, head.bottom() - pad);
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![
+                        egui::pos2(x_base, top),
+                        egui::pos2(x_tip, head.center().y),
+                        egui::pos2(x_base, bottom),
+                    ],
+                    fg,
+                    egui::Stroke::NONE,
+                ));
+
+                // Last-played title, rotated a quarter turn so it reads top-to-
+                // bottom down the tab. Laid out truncated to the label run's
+                // height (its length once rotated) so a long title ends in an
+                // ellipsis instead of running off the bottom.
+                if !label.is_empty() {
+                    let galley = ui.painter().layout_job({
+                        let mut job = egui::text::LayoutJob::simple_singleline(
+                            label,
+                            egui::FontId::proportional(11.0),
+                            fg,
+                        );
+                        // One row, capped at the label run's length: anything
+                        // longer ends in egui's default `…` rather than running
+                        // off the bottom of the tab.
+                        job.wrap.max_width = LABEL_H - 12.0;
+                        job.wrap.max_rows = 1;
+                        job.wrap.break_anywhere = true;
+                        job
+                    });
+                    // Rotation is about the galley's own min corner, so place
+                    // that corner at the top-right of the label run: +90° then
+                    // sweeps the text down the tab, centred across its width.
+                    let x = rect.center().x + galley.size().y / 2.0;
+                    let y = head.bottom() + 6.0;
+                    ui.painter().add(
+                        egui::epaint::TextShape::new(egui::pos2(x, y), galley, fg)
+                            .with_angle(std::f32::consts::FRAC_PI_2),
+                    );
+                }
+
                 let resp = resp.on_hover_note(if open {
                     "Hide the track inspector"
                 } else {
