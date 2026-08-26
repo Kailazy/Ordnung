@@ -133,6 +133,7 @@ impl App {
             col_filter_open: None,
             tex_graveyard: TexGraveyard::default(),
             inspector_open: true,
+            menu_installed: false,
             settings_open: false,
             settings_tab: SettingsTab::default(),
             token_input: String::new(),
@@ -647,6 +648,45 @@ impl App {
             })
             .collect()
     }
+
+    /// Select every row currently visible (`self.rows` is already narrowed to
+    /// the active view and column filters), promoting the first row to primary
+    /// when nothing was focused. Shared by ⌘A and the Edit ▸ Select All item.
+    pub(crate) fn select_all_visible(&mut self) {
+        self.selection = self.rows.iter().map(|r| r.id).collect();
+        if self.selected.is_none() {
+            if let Some(first) = self.rows.first().map(|r| r.id) {
+                self.set_primary(Some(first));
+            }
+        }
+    }
+
+    /// Play/pause whatever is currently sounding. Shared by the space bar and
+    /// the Playback menu.
+    ///
+    /// A record's video answers first while one is loaded: it's the sound the
+    /// user is hearing, and its own window is parked off screen, so this is the
+    /// only way to reach it without the pointer. Without that branch the
+    /// request would fall through and start an unrelated local track *over* the
+    /// video.
+    pub(crate) fn toggle_play_pause(&mut self) {
+        if webview::is_open() {
+            webview::toggle_pause();
+        } else if self.now_playing.is_some() {
+            if let Some(a) = &mut self.audio {
+                a.toggle_pause();
+            }
+        } else if let Some(id) = self.selected {
+            if let Some(path) = self
+                .rows
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| r.source_path.clone())
+            {
+                self.play_track(id, path);
+            }
+        }
+    }
 }
 
 /// Parse a Camelot label from a file's key tag ("8A", "12b") so the Key column
@@ -682,6 +722,14 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Install the native menu bar on the first frame. It has to wait for a
+        // frame rather than happen before `run_native`: the `NSApplication`
+        // whose main menu we replace doesn't exist until eframe/winit has
+        // created it, and AppKit would otherwise install its own stub over ours.
+        if !self.menu_installed {
+            self.menu_installed = true;
+            crate::macos_menu::install();
+        }
         // Drop cover textures evicted during the PREVIOUS frame. Doing it here —
         // before anything paints or uploads — guarantees the frame that painted
         // them has already been submitted to the GPU (see `tex_graveyard`).
@@ -731,12 +779,7 @@ impl eframe::App for App {
         if !ctx.wants_keyboard_input()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A))
         {
-            self.selection = self.rows.iter().map(|r| r.id).collect();
-            if self.selected.is_none() {
-                if let Some(first) = self.rows.first().map(|r| r.id) {
-                    self.set_primary(Some(first));
-                }
-            }
+            self.select_all_visible();
         }
 
         // Cmd/Ctrl+W: close the frontmost "window" — the floating Settings window
@@ -755,6 +798,10 @@ impl eframe::App for App {
         // toolbar button, but it's a rare manual escape hatch (jobs reload on
         // their own), so it lives as a shortcut instead of taking up chrome.
         // Ignored while a job runs, which is when the old button was disabled.
+        //
+        // On macOS the Library ▸ Reload menu item owns this chord and gets there
+        // first, so this branch only fires off-macOS. Kept rather than gated so
+        // the shortcut still exists on platforms with no native menu bar.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R))
             && !self.is_busy()
         {
@@ -780,26 +827,43 @@ impl eframe::App for App {
         if !ctx.wants_keyboard_input()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
         {
-            // A record's video answers first while one is loaded: it's the
-            // sound the user is hearing, and its own window is parked off
-            // screen, so this key is the only way to reach it without the
-            // pointer. Without this the key would fall through and start an
-            // unrelated local track *over* the video.
-            if webview::is_open() {
-                webview::toggle_pause();
-            } else if self.now_playing.is_some() {
-                if let Some(a) = &mut self.audio {
-                    a.toggle_pause();
+            self.toggle_play_pause();
+        }
+
+        // Menu-bar commands. Each arm runs the same code the in-app shortcut
+        // runs, so the menu is a second door onto one implementation rather
+        // than a parallel one. Drained once per frame; see `macos_menu`.
+        if let Some(cmd) = macos_menu::take_command() {
+            match cmd {
+                macos_menu::MenuCommand::Reload => {
+                    if !self.is_busy() {
+                        self.reload();
+                        self.recount_missing();
+                    }
                 }
-            } else if let Some(id) = self.selected {
-                if let Some(path) = self
-                    .rows
-                    .iter()
-                    .find(|r| r.id == id)
-                    .map(|r| r.source_path.clone())
-                {
-                    self.play_track(id, path);
+                macos_menu::MenuCommand::Settings => {
+                    self.token_input = self.config.discogs_token.clone();
+                    self.settings_open = true;
                 }
+                macos_menu::MenuCommand::SelectAll => self.select_all_visible(),
+                macos_menu::MenuCommand::ClearFilters => {
+                    self.filter.clear();
+                    self.col_filters.clear();
+                    self.filter_apply_at = None;
+                    self.reload();
+                }
+                // Re-injected as the OS copy event the table already listens
+                // for, so the menu and ⌘C land in the identical handler (which
+                // also decides between selection and primary row).
+                macos_menu::MenuCommand::Copy => {
+                    ctx.input_mut(|i| i.events.push(egui::Event::Copy));
+                }
+                macos_menu::MenuCommand::AddFolder => {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        self.spawn_scan(ctx.clone(), dir);
+                    }
+                }
+                macos_menu::MenuCommand::PlayPause => self.toggle_play_pause(),
             }
         }
 

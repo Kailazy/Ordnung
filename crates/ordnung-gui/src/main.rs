@@ -15,6 +15,7 @@ mod dig;
 mod inspector;
 mod jobs;
 mod macos_drag;
+mod macos_menu;
 mod macos_pasteboard;
 mod modals;
 mod player;
@@ -1015,6 +1016,10 @@ struct App {
     /// the window's right edge — the panel is a fixed-width drawer that slides
     /// in and out rather than a splitter the user drags to size.
     inspector_open: bool,
+    /// Whether the native macOS menu bar has been installed yet. It goes up on
+    /// the first frame rather than at construction, because the `NSApplication`
+    /// it attaches to doesn't exist until eframe has started (see `macos_menu`).
+    menu_installed: bool,
     /// Whether the Settings window is open.
     settings_open: bool,
     /// Which category tab is active in the Settings window. Session-only — the
