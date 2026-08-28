@@ -355,7 +355,13 @@ impl App {
         // Writeback action: imprint the fetched cover into the source file.
         // Mirrors the CLI's `tag --write --art` — explicit and source-mutating,
         // so it only appears when fetched artwork actually exists.
-        if has_ext_art {
+        //
+        // With auto-write on it never appears at all: fetched art already flags
+        // the track `user_edited`, so the background write embeds it within a
+        // frame or two and clears the row. Showing the button there would put a
+        // decision in front of the user that has already been made for them,
+        // and it would vanish under the pointer as the write lands.
+        if has_ext_art && !self.config.auto_write_tags {
             ui.add_space(6.0);
             ui.add_enabled_ui(!busy, |ui| {
                 if ui

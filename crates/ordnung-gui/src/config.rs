@@ -72,13 +72,19 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub auto_analyze: bool,
     /// Write tag edits straight into the source files instead of parking them
-    /// behind the toolbar's "Write N edited to files" button. Off by default:
-    /// source files are sacred and tag writeback is opt-in (see the
-    /// `ordnung-architecture` product rules), so turning this on IS the user's
-    /// standing request to write. When on, the inspector's Save writes the file
-    /// too, and edits made elsewhere (Discogs enrichment, bulk fetches) are
-    /// flushed by a background write as soon as no other job is running.
-    #[serde(default)]
+    /// behind the toolbar's "Write N edited to files" button. When on, the
+    /// inspector's Save writes the file too, and edits made elsewhere (Discogs
+    /// enrichment, bulk fetches, fetched cover art) are flushed by a background
+    /// write as soon as no other job is running.
+    ///
+    /// **On by default**, at the user's explicit direction. This is the one
+    /// place the GUI departs from the `ordnung-architecture` "tag writeback is
+    /// opt-in" rule: a catalog edit that never reaches the file is a surprise,
+    /// not a safeguard, so the app keeps files in sync unless told otherwise.
+    /// Only ever touches the tag block of tracks the user actually edited, and
+    /// turning it off restores the explicit two-step. Older configs that predate
+    /// the field get the new default too.
+    #[serde(default = "default_true")]
     pub auto_write_tags: bool,
     /// Default target format pre-selected in the convert dialogs, as a stable
     /// lowercase key (`mp3`/`aac`/`flac`/`wav`/`aiff`; see `util::format_key`).
@@ -404,7 +410,7 @@ impl Default for Config {
             nav_primary: default_nav_primary(),
             startup_view: default_startup_view(),
             auto_analyze: true,
-            auto_write_tags: false,
+            auto_write_tags: true,
             convert_format: default_convert_format(),
             convert_bitrate_kbps: String::new(),
             convert_out_dir: None,

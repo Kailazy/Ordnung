@@ -412,7 +412,11 @@ impl App {
                                         ui.label(egui::RichText::new("Tags").strong());
                                         ui.label(
                     egui::RichText::new(
-                        "Off, edits live in the catalog until you press the toolbar's                          Write button. On, Ordnung keeps the source files in sync as                          you edit and as Discogs fills fields in. Files change on disk,                          so those tracks get re-analyzed on the next Analyze.",
+                        "On, Ordnung keeps the source files in sync as you edit and as \
+                         Discogs fills in fields and cover art. Files change on disk, so \
+                         those tracks get re-analyzed on the next Analyze. Turn it off to \
+                         keep edits in the catalog until you press the toolbar's Write \
+                         button.",
                     )
                     .small()
                     .weak(),
