@@ -453,16 +453,29 @@ impl App {
                 self.token_input = self.config.discogs_token.clone();
                 self.settings_open = false;
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(p) = config::config_path() {
-                    ui.label(
-                        egui::RichText::new(p.display().to_string())
-                            .small()
-                            .weak(),
-                    );
+        });
+
+        // Where the token lands on disk. Useful when someone wants to check or
+        // remove it by hand, but it's developer detail — folded away by default
+        // rather than sitting in the save row as a wall of path.
+        if let Some(p) = config::config_path() {
+            ui.add_space(6.0);
+            egui::CollapsingHeader::new(
+                egui::RichText::new("Where is this stored?").small().weak(),
+            )
+            .id_salt("discogs_token_path")
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new(p.display().to_string()).small().weak());
+                ui.add_space(4.0);
+                if ui
+                    .small_button("Reveal in Finder")
+                    .on_hover_text("Show config.toml in Finder")
+                    .clicked()
+                {
+                    crate::util::reveal_in_finder(&p);
                 }
             });
-        });
+        }
 
         ui.add_space(14.0);
         ui.separator();
