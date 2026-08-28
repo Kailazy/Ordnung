@@ -1106,144 +1106,115 @@ impl eframe::App for App {
                 });
         }
 
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let busy = self.is_busy();
-                ui.add_enabled_ui(!busy, |ui| {
-                    // "Add songs…" opens a small menu: pick individual files, or a
-                    // whole folder. Both import into the catalog; source files are
-                    // never moved or modified, and unchanged files are skipped on a
-                    // re-add (same size + mtime), so it's never a full re-read.
-                    // Primary action: an accent fill marks it as the toolbar's
-                    // main entry point (it's the only action that grows the library).
-                    let add_btn = egui::Button::new(
-                        egui::RichText::new("Add songs…").color(egui::Color32::WHITE),
-                    )
-                    .fill(egui::Color32::from_rgb(64, 110, 180));
-                    let add = egui::menu::menu_custom_button(ui, add_btn, |ui| {
-                        if ui
-                            .button("🎵  Choose files…")
-                            .on_hover_note("Add audio files")
-                            .clicked()
-                        {
-                            let picked = rfd::FileDialog::new()
-                                .add_filter(
-                                    "Audio",
-                                    &["mp3", "flac", "aiff", "aif", "wav", "m4a", "aac", "ogg"],
-                                )
-                                .pick_files();
-                            if let Some(files) = picked {
-                                if !files.is_empty() {
-                                    self.spawn_import(ctx.clone(), files);
+        // Vertical padding is stated once, in the frame, rather than as
+        // `add_space` before and after the row. Trailing `item_spacing.y` is
+        // appended *after* a widget but never before one, so a leading and
+        // trailing spacer of the same size do not produce equal margins — the
+        // bottom gap silently inherits an extra `item_spacing.y`. A symmetric
+        // frame margin has no such asymmetry, and puts the button row on the
+        // 8-pt grid with equal optical weight above and below.
+        egui::TopBottomPanel::top("toolbar")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(space::S3, space::S3)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let busy = self.is_busy();
+                    ui.add_enabled_ui(!busy, |ui| {
+                        // "Add songs…" opens a small menu: pick individual files, or a
+                        // whole folder. Both import into the catalog; source files are
+                        // never moved or modified, and unchanged files are skipped on a
+                        // re-add (same size + mtime), so it's never a full re-read.
+                        // Primary action: an accent fill marks it as the toolbar's
+                        // main entry point (it's the only action that grows the library).
+                        let add_btn = egui::Button::new(
+                            egui::RichText::new("Add songs…").color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(64, 110, 180));
+                        let add = egui::menu::menu_custom_button(ui, add_btn, |ui| {
+                            if ui
+                                .button("🎵  Choose files…")
+                                .on_hover_note("Add audio files")
+                                .clicked()
+                            {
+                                let picked = rfd::FileDialog::new()
+                                    .add_filter(
+                                        "Audio",
+                                        &["mp3", "flac", "aiff", "aif", "wav", "m4a", "aac", "ogg"],
+                                    )
+                                    .pick_files();
+                                if let Some(files) = picked {
+                                    if !files.is_empty() {
+                                        self.spawn_import(ctx.clone(), files);
+                                    }
                                 }
+                                ui.close_menu();
                             }
-                            ui.close_menu();
-                        }
-                        if ui
-                            .button("📁  Choose folder…")
-                            .on_hover_note("Add a folder, subfolders included")
-                            .clicked()
-                        {
-                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                self.spawn_scan(ctx.clone(), dir);
+                            if ui
+                                .button("📁  Choose folder…")
+                                .on_hover_note("Add a folder, subfolders included")
+                                .clicked()
+                            {
+                                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                    self.spawn_scan(ctx.clone(), dir);
+                                }
+                                ui.close_menu();
                             }
-                            ui.close_menu();
-                        }
-                    });
-                    add.response.on_hover_note(
+                        });
+                        add.response.on_hover_note(
                         "Add files or a folder to the catalog. Source files are never modified.",
                     );
-                    ui.separator();
-                    // When rows are selected, the toolbar buttons act on just that
-                    // selection (in visible order); otherwise they fall back to the
-                    // whole filtered view. The label reflects which, so a user who
-                    // picked a few tracks isn't surprised by a full-library run.
-                    // USB rows have synthetic non-catalog ids, so a device-view
-                    // selection is ignored here — the buttons keep their
-                    // whole-catalog fallback meaning instead of no-op'ing.
-                    let usb_view = matches!(self.view, LibraryView::Usb(..));
-                    let sel_ids: Vec<Id> = if usb_view {
-                        Vec::new()
-                    } else {
-                        self.rows
-                            .iter()
-                            .filter(|x| self.selection.contains(&x.id))
-                            .map(|x| x.id)
-                            .collect()
-                    };
-                    // Analysis: one button. Force re-analyze and bulk Discogs
-                    // fetches were dropped — the per-track ↻ re-pick covers the
-                    // metadata case, and re-analysis is rarely wanted in bulk.
-                    let analyze_label = if sel_ids.is_empty() {
-                        "⚡ Analyze".to_string()
-                    } else {
-                        format!("⚡ Analyze {} selected", sel_ids.len())
-                    };
-                    if ui
-                        .button(analyze_label)
-                        .on_hover_note(
-                            "Detect BPM, key, beatgrid, and quality. Skips tracks \
-                             already analyzed.",
-                        )
-                        .clicked()
-                    {
-                        if sel_ids.is_empty() {
-                            self.spawn_analyze(ctx.clone(), false);
+                        ui.separator();
+                        // When rows are selected, the toolbar buttons act on just that
+                        // selection (in visible order); otherwise they fall back to the
+                        // whole filtered view. The label reflects which, so a user who
+                        // picked a few tracks isn't surprised by a full-library run.
+                        // USB rows have synthetic non-catalog ids, so a device-view
+                        // selection is ignored here — the buttons keep their
+                        // whole-catalog fallback meaning instead of no-op'ing.
+                        let usb_view = matches!(self.view, LibraryView::Usb(..));
+                        let sel_ids: Vec<Id> = if usb_view {
+                            Vec::new()
                         } else {
-                            self.spawn_analyze_ids(ctx.clone(), sel_ids.clone(), false);
-                        }
-                    }
-                    // Batch convert: enabled whenever tracks are selected. Opens a
-                    // dialog to pick one target format for all of them.
-                    if !self.selection.is_empty() && !usb_view {
-                        let n = self.selection.len();
-                        let noun = if n == 1 { "track" } else { "tracks" };
+                            self.rows
+                                .iter()
+                                .filter(|x| self.selection.contains(&x.id))
+                                .map(|x| x.id)
+                                .collect()
+                        };
+                        // Analysis: one button. Force re-analyze and bulk Discogs
+                        // fetches were dropped — the per-track ↻ re-pick covers the
+                        // metadata case, and re-analysis is rarely wanted in bulk.
+                        let analyze_label = if sel_ids.is_empty() {
+                            "⚡ Analyze".to_string()
+                        } else {
+                            format!("⚡ Analyze {} selected", sel_ids.len())
+                        };
                         if ui
-                            .button(format!("Convert {n} {noun}…"))
+                            .button(analyze_label)
                             .on_hover_note(
-                                "Convert selected tracks to one format, keeping \
-                                 metadata and cover.",
+                                "Detect BPM, key, beatgrid, and quality. Skips tracks \
+                             already analyzed.",
                             )
                             .clicked()
                         {
-                            let ids: Vec<Id> = self
-                                .rows
-                                .iter()
-                                .filter(|r| self.selection.contains(&r.id))
-                                .map(|r| r.id)
-                                .collect();
-                            let (target, bitrate_kbps, out_dir, in_place) =
-                                convert_defaults(&self.config);
-                            self.batch_convert = Some(BatchConvert {
-                                ids,
-                                target,
-                                bitrate_kbps,
-                                out_dir,
-                                in_place,
-                                error: None,
-                            });
+                            if sel_ids.is_empty() {
+                                self.spawn_analyze(ctx.clone(), false);
+                            } else {
+                                self.spawn_analyze_ids(ctx.clone(), sel_ids.clone(), false);
+                            }
                         }
-                    }
-                    // When viewing a playlist with a selection, offer to drop those
-                    // tracks from it. Only unlinks the playlist membership — the
-                    // tracks stay in the catalog (and in any other playlists).
-                    let playlist_view = match &self.view {
-                        LibraryView::Playlist(pid) => Some(*pid),
-                        LibraryView::Library
-                        | LibraryView::RecentlyAdded
-                        | LibraryView::Duplicates
-                        | LibraryView::Missing
-                        | LibraryView::Vinyl
-                        | LibraryView::Usb(..) => None,
-                    };
-                    if let Some(pid) = playlist_view {
-                        if !self.selection.is_empty() {
+                        // Batch convert: enabled whenever tracks are selected. Opens a
+                        // dialog to pick one target format for all of them.
+                        if !self.selection.is_empty() && !usb_view {
                             let n = self.selection.len();
+                            let noun = if n == 1 { "track" } else { "tracks" };
                             if ui
-                                .button(format!("Remove {n} from playlist"))
+                                .button(format!("Convert {n} {noun}…"))
                                 .on_hover_note(
-                                    "Remove from this playlist. Tracks stay in the catalog.",
+                                    "Convert selected tracks to one format, keeping \
+                                 metadata and cover.",
                                 )
                                 .clicked()
                             {
@@ -1253,203 +1224,242 @@ impl eframe::App for App {
                                     .filter(|r| self.selection.contains(&r.id))
                                     .map(|r| r.id)
                                     .collect();
-                                if let Ok(cat) = Catalog::open(&self.db_path) {
-                                    let _ = cat.remove_tracks(pid, &ids);
-                                }
-                                self.reload();
+                                let (target, bitrate_kbps, out_dir, in_place) =
+                                    convert_defaults(&self.config);
+                                self.batch_convert = Some(BatchConvert {
+                                    ids,
+                                    target,
+                                    bitrate_kbps,
+                                    out_dir,
+                                    in_place,
+                                    error: None,
+                                });
                             }
                         }
-                    }
-                    // Deleting from the catalog lives in the right-click context
-                    // menu (per-row), not the toolbar — it's a destructive action
-                    // that should be reached deliberately on a selection.
-                    // Bulk writeback: only shown when some tracks have catalog
-                    // edits not yet written to their files. Mutates source files,
-                    // so it's visually distinct and gated behind a confirmation.
-                    if self.edited_count > 0 {
-                        let label = format!("⬇ Write {} edited to files", self.edited_count);
-                        let btn = egui::Button::new(
-                            egui::RichText::new(label).color(egui::Color32::WHITE),
-                        )
-                        .fill(egui::Color32::from_rgb(70, 110, 70));
-                        if ui
-                            .add(btn)
-                            .on_hover_note("Write edited tags into the source files")
-                            .clicked()
-                        {
-                            self.confirm_bulk_write = true;
-                        }
-                    }
-                    // Relocate: only shown when some tracks' source files are
-                    // missing from disk. Pick a folder to search; files matched
-                    // by name (and content fingerprint) are repointed in the
-                    // catalog. Catalog-only — never moves or modifies files.
-                    if self.missing_count > 0 {
-                        let label = format!("🔗 Relocate {} missing", self.missing_count);
-                        let btn = egui::Button::new(
-                            egui::RichText::new(label).color(egui::Color32::WHITE),
-                        )
-                        .fill(egui::Color32::from_rgb(150, 90, 40));
-                        let labels = &self.missing_labels;
-                        let count = self.missing_count;
-                        if ui
-                            .add(btn)
-                            .on_hover_ui(|ui| {
-                                ui.set_max_width(420.0);
-                                ui.label(
-                                    crate::ui::hover::note(format!(
-                                        "{count} track(s) point at a file that's gone"
-                                    ))
-                                    .strong(),
-                                );
-                                ui.separator();
-                                // Cap the list so a huge backlog can't grow the
-                                // tooltip off-screen; note the overflow instead.
-                                const MAX: usize = 20;
-                                for label in labels.iter().take(MAX) {
-                                    ui.label(crate::ui::hover::note(label.as_str()));
+                        // When viewing a playlist with a selection, offer to drop those
+                        // tracks from it. Only unlinks the playlist membership — the
+                        // tracks stay in the catalog (and in any other playlists).
+                        let playlist_view = match &self.view {
+                            LibraryView::Playlist(pid) => Some(*pid),
+                            LibraryView::Library
+                            | LibraryView::RecentlyAdded
+                            | LibraryView::Duplicates
+                            | LibraryView::Missing
+                            | LibraryView::Vinyl
+                            | LibraryView::Usb(..) => None,
+                        };
+                        if let Some(pid) = playlist_view {
+                            if !self.selection.is_empty() {
+                                let n = self.selection.len();
+                                if ui
+                                    .button(format!("Remove {n} from playlist"))
+                                    .on_hover_note(
+                                        "Remove from this playlist. Tracks stay in the catalog.",
+                                    )
+                                    .clicked()
+                                {
+                                    let ids: Vec<Id> = self
+                                        .rows
+                                        .iter()
+                                        .filter(|r| self.selection.contains(&r.id))
+                                        .map(|r| r.id)
+                                        .collect();
+                                    if let Ok(cat) = Catalog::open(&self.db_path) {
+                                        let _ = cat.remove_tracks(pid, &ids);
+                                    }
+                                    self.reload();
                                 }
-                                if labels.len() > MAX {
-                                    ui.add_space(2.0);
+                            }
+                        }
+                        // Deleting from the catalog lives in the right-click context
+                        // menu (per-row), not the toolbar — it's a destructive action
+                        // that should be reached deliberately on a selection.
+                        // Bulk writeback: only shown when some tracks have catalog
+                        // edits not yet written to their files. Mutates source files,
+                        // so it's visually distinct and gated behind a confirmation.
+                        if self.edited_count > 0 {
+                            let label = format!("⬇ Write {} edited to files", self.edited_count);
+                            let btn = egui::Button::new(
+                                egui::RichText::new(label).color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(70, 110, 70));
+                            if ui
+                                .add(btn)
+                                .on_hover_note("Write edited tags into the source files")
+                                .clicked()
+                            {
+                                self.confirm_bulk_write = true;
+                            }
+                        }
+                        // Relocate: only shown when some tracks' source files are
+                        // missing from disk. Pick a folder to search; files matched
+                        // by name (and content fingerprint) are repointed in the
+                        // catalog. Catalog-only — never moves or modifies files.
+                        if self.missing_count > 0 {
+                            let label = format!("🔗 Relocate {} missing", self.missing_count);
+                            let btn = egui::Button::new(
+                                egui::RichText::new(label).color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(150, 90, 40));
+                            let labels = &self.missing_labels;
+                            let count = self.missing_count;
+                            if ui
+                                .add(btn)
+                                .on_hover_ui(|ui| {
+                                    ui.set_max_width(420.0);
                                     ui.label(
                                         crate::ui::hover::note(format!(
-                                            "…and {} more",
-                                            labels.len() - MAX
+                                            "{count} track(s) point at a file that's gone"
                                         ))
-                                        .weak(),
+                                        .strong(),
                                     );
-                                }
-                                ui.separator();
-                                ui.weak(
-                                    "Pick a folder to search; every file found there \
+                                    ui.separator();
+                                    // Cap the list so a huge backlog can't grow the
+                                    // tooltip off-screen; note the overflow instead.
+                                    const MAX: usize = 20;
+                                    for label in labels.iter().take(MAX) {
+                                        ui.label(crate::ui::hover::note(label.as_str()));
+                                    }
+                                    if labels.len() > MAX {
+                                        ui.add_space(2.0);
+                                        ui.label(
+                                            crate::ui::hover::note(format!(
+                                                "…and {} more",
+                                                labels.len() - MAX
+                                            ))
+                                            .weak(),
+                                        );
+                                    }
+                                    ui.separator();
+                                    ui.weak(
+                                        "Pick a folder to search; every file found there \
                                      by name (confirmed by content when names collide) \
                                      is repointed in the catalog. Your files are never \
                                      moved or modified.",
-                                );
-                            })
-                            .clicked()
-                        {
-                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                self.spawn_relocate(ctx.clone(), dir);
-                            }
-                        }
-                    }
-                });
-                ui.separator();
-                // Number of active column filters drives both the "Clear filters"
-                // label and whether that button (and the inline ×) show at all.
-                let active_col_filters =
-                    self.col_filters.values().filter(|v| !v.is_empty()).count();
-                let has_filters = active_col_filters > 0 || !self.filter.is_empty();
-                // Live counts: total visible tracks, plus selection and missing
-                // when they apply, so the toolbar always reflects current state.
-                // The vinyl view has no table rows, so it counts records instead
-                // — filtered by its own search box, the way the grid is.
-                let counts = if self.view == LibraryView::Vinyl {
-                    let query = self.vinyl_filter.trim().to_lowercase();
-                    let n = |recs: &[VinylRecord]| {
-                        if query.is_empty() {
-                            recs.len()
-                        } else {
-                            recs.iter()
-                                .filter(|v| crate::views::vinyl_matches(v, &query))
-                                .count()
-                        }
-                    };
-                    format!(
-                        "{} in collection · {} in wantlist",
-                        n(&self.vinyl),
-                        n(&self.wantlist)
-                    )
-                } else {
-                    let mut counts = format!("{} tracks", self.rows.len());
-                    if !self.selection.is_empty() {
-                        counts.push_str(&format!(" · {} selected", self.selection.len()));
-                    }
-                    if self.missing_count > 0 {
-                        counts.push_str(&format!(" · {} missing", self.missing_count));
-                    }
-                    counts
-                };
-                // Right-aligned utility group: counts and Settings live away from
-                // the left-edge library actions so the toolbar reads "do work …
-                // status & config". Laying this out right-to-left FIRST reserves
-                // its width, so the left-aligned filter group nested inside
-                // shrinks to fit instead of overdrawing the counts when the
-                // window is narrow. Visual order on the right: counts · Settings.
-                // Reloading the table is a Cmd/Ctrl+R shortcut rather than a
-                // button: it's rarely needed, since every job reloads on finish.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Settings stays reachable even while a job runs.
-                    if ui
-                        .button("⚙ Settings")
-                        .on_hover_note("Discogs token and app options")
-                        .clicked()
-                    {
-                        self.token_input = self.config.discogs_token.clone();
-                        self.settings_open = true;
-                    }
-                    ui.separator();
-                    ui.label(counts);
-                    ui.separator();
-                    // The filter group fills whatever horizontal space the utility
-                    // group left over. Rendered left-to-right inside the reserved
-                    // remainder so it can never collide with the counts.
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        // Reserve room for the Clear-filters button so the text
-                        // field shrinks rather than pushing it past the edge of
-                        // this remainder.
-                        let reserved = if has_filters { 140.0 } else { 0.0 };
-                        let w = (ui.available_width() - reserved).clamp(120.0, 320.0);
-                        // egui's TextEdit defaults to a 4×2 inner margin, which
-                        // leaves the caret and hint text jammed against the
-                        // frame. Give the field real breathing room and a
-                        // comfortable hit height — it's the most-used control in
-                        // the toolbar, so it earns the space.
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(&mut self.search_query)
-                                .desired_width(w)
-                                .margin(egui::Margin::symmetric(space::S3, space::S2 + 1.0))
-                                .min_size(egui::vec2(0.0, 26.0))
-                                .hint_text("Search songs and records"),
-                        );
-                        if resp.changed() {
-                            // Typing only recomputes the dropdown — the table is
-                            // left alone until a hit is chosen. Parked behind the
-                            // same debounce so a fast typist isn't re-querying
-                            // the catalog on every keystroke.
-                            self.search_apply_at =
-                                Some(std::time::Instant::now() + SEARCH_DEBOUNCE);
-                        }
-                        // Re-opening on focus lets a user who dismissed the
-                        // popup get it back by clicking into the box, without
-                        // retyping.
-                        if resp.gained_focus() && !self.search_hits.is_empty() {
-                            self.search_popup_open = true;
-                        }
-                        self.draw_search_popup(&resp);
-                        // A prominent "clear all filters" button, shown only while a
-                        // filter is actually hiding rows. This rescues the case where
-                        // a forgotten column filter leaves the table looking empty.
-                        if has_filters {
-                            let label = if active_col_filters > 0 {
-                                format!("⊘ Clear filters ({active_col_filters})")
-                            } else {
-                                "⊘ Clear filters".to_string()
-                            };
-                            if ui
-                                .button(label)
-                                .on_hover_note("Clear search and filters")
+                                    );
+                                })
                                 .clicked()
                             {
-                                self.clear_all_filters();
+                                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                    self.spawn_relocate(ctx.clone(), dir);
+                                }
                             }
                         }
                     });
+                    ui.separator();
+                    // Number of active column filters drives both the "Clear filters"
+                    // label and whether that button (and the inline ×) show at all.
+                    let active_col_filters =
+                        self.col_filters.values().filter(|v| !v.is_empty()).count();
+                    let has_filters = active_col_filters > 0 || !self.filter.is_empty();
+                    // Live counts: total visible tracks, plus selection and missing
+                    // when they apply, so the toolbar always reflects current state.
+                    // The vinyl view has no table rows, so it counts records instead
+                    // — filtered by its own search box, the way the grid is.
+                    let counts = if self.view == LibraryView::Vinyl {
+                        let query = self.vinyl_filter.trim().to_lowercase();
+                        let n = |recs: &[VinylRecord]| {
+                            if query.is_empty() {
+                                recs.len()
+                            } else {
+                                recs.iter()
+                                    .filter(|v| crate::views::vinyl_matches(v, &query))
+                                    .count()
+                            }
+                        };
+                        format!(
+                            "{} in collection · {} in wantlist",
+                            n(&self.vinyl),
+                            n(&self.wantlist)
+                        )
+                    } else {
+                        let mut counts = format!("{} tracks", self.rows.len());
+                        if !self.selection.is_empty() {
+                            counts.push_str(&format!(" · {} selected", self.selection.len()));
+                        }
+                        if self.missing_count > 0 {
+                            counts.push_str(&format!(" · {} missing", self.missing_count));
+                        }
+                        counts
+                    };
+                    // Right-aligned utility group: counts and Settings live away from
+                    // the left-edge library actions so the toolbar reads "do work …
+                    // status & config". Laying this out right-to-left FIRST reserves
+                    // its width, so the left-aligned filter group nested inside
+                    // shrinks to fit instead of overdrawing the counts when the
+                    // window is narrow. Visual order on the right: counts · Settings.
+                    // Reloading the table is a Cmd/Ctrl+R shortcut rather than a
+                    // button: it's rarely needed, since every job reloads on finish.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Settings stays reachable even while a job runs.
+                        if ui
+                            .button("⚙ Settings")
+                            .on_hover_note("Discogs token and app options")
+                            .clicked()
+                        {
+                            self.token_input = self.config.discogs_token.clone();
+                            self.settings_open = true;
+                        }
+                        ui.separator();
+                        ui.label(counts);
+                        ui.separator();
+                        // The filter group fills whatever horizontal space the utility
+                        // group left over. Rendered left-to-right inside the reserved
+                        // remainder so it can never collide with the counts.
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            // Reserve room for the Clear-filters button so the text
+                            // field shrinks rather than pushing it past the edge of
+                            // this remainder.
+                            let reserved = if has_filters { 140.0 } else { 0.0 };
+                            let w = (ui.available_width() - reserved).clamp(120.0, 320.0);
+                            // egui's TextEdit defaults to a 4×2 inner margin, which
+                            // leaves the caret and hint text jammed against the
+                            // frame. Give the field real breathing room and a
+                            // comfortable hit height — it's the most-used control in
+                            // the toolbar, so it earns the space.
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut self.search_query)
+                                    .desired_width(w)
+                                    .margin(egui::Margin::symmetric(space::S3, space::S2 + 1.0))
+                                    .min_size(egui::vec2(0.0, 26.0))
+                                    .hint_text("Search songs and records"),
+                            );
+                            if resp.changed() {
+                                // Typing only recomputes the dropdown — the table is
+                                // left alone until a hit is chosen. Parked behind the
+                                // same debounce so a fast typist isn't re-querying
+                                // the catalog on every keystroke.
+                                self.search_apply_at =
+                                    Some(std::time::Instant::now() + SEARCH_DEBOUNCE);
+                            }
+                            // Re-opening on focus lets a user who dismissed the
+                            // popup get it back by clicking into the box, without
+                            // retyping.
+                            if resp.gained_focus() && !self.search_hits.is_empty() {
+                                self.search_popup_open = true;
+                            }
+                            self.draw_search_popup(&resp);
+                            // A prominent "clear all filters" button, shown only while a
+                            // filter is actually hiding rows. This rescues the case where
+                            // a forgotten column filter leaves the table looking empty.
+                            if has_filters {
+                                let label = if active_col_filters > 0 {
+                                    format!("⊘ Clear filters ({active_col_filters})")
+                                } else {
+                                    "⊘ Clear filters".to_string()
+                                };
+                                if ui
+                                    .button(label)
+                                    .on_hover_note("Clear search and filters")
+                                    .clicked()
+                                {
+                                    self.clear_all_filters();
+                                }
+                            }
+                        });
+                    });
                 });
             });
-            ui.add_space(4.0);
-        });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.add_space(2.0);
