@@ -426,10 +426,7 @@ impl App {
         );
         ui.add_space(6.0);
         if ui
-            .add(
-                egui::Button::new("Get my token on Discogs ↗")
-                    .fill(crate::sidebar::NAV_ACCENT),
-            )
+            .add(egui::Button::new("Get my token on Discogs ↗").fill(crate::sidebar::NAV_ACCENT))
             .on_hover_text("Opens discogs.com/settings/developers")
             .clicked()
         {
@@ -506,8 +503,7 @@ impl App {
         // once, so the card shows a real answer rather than asking the user to
         // press a button to find out. Only from `Unverified`, so this can't loop
         // or re-spend a request on every frame.
-        if self.settings_tab == SettingsTab::Discogs
-            && self.discogs_auth == DiscogsAuth::Unverified
+        if self.settings_tab == SettingsTab::Discogs && self.discogs_auth == DiscogsAuth::Unverified
         {
             let c = ctx.clone();
             self.spawn_discogs_identity_check(c);
@@ -602,24 +598,26 @@ impl App {
                                             .spacing([12.0, 8.0])
                                             .show(ui, |ui| {
                                                 ui.label("Top of sidebar:");
-                                                egui::ComboBox::from_id_salt("settings_nav_primary")
-                                                    .selected_text(nav_primary.label())
-                                                    .show_ui(ui, |ui| {
-                                                        for opt in NavPrimary::ALL {
-                                                            if ui
-                                                                .selectable_label(
-                                                                    nav_primary == opt,
-                                                                    opt.label(),
-                                                                )
-                                                                .clicked()
-                                                                && nav_primary != opt
-                                                            {
-                                                                self.config.nav_primary =
-                                                                    opt.key().to_string();
-                                                                nav_dirty = true;
-                                                            }
+                                                egui::ComboBox::from_id_salt(
+                                                    "settings_nav_primary",
+                                                )
+                                                .selected_text(nav_primary.label())
+                                                .show_ui(ui, |ui| {
+                                                    for opt in NavPrimary::ALL {
+                                                        if ui
+                                                            .selectable_label(
+                                                                nav_primary == opt,
+                                                                opt.label(),
+                                                            )
+                                                            .clicked()
+                                                            && nav_primary != opt
+                                                        {
+                                                            self.config.nav_primary =
+                                                                opt.key().to_string();
+                                                            nav_dirty = true;
                                                         }
-                                                    });
+                                                    }
+                                                });
                                                 ui.end_row();
 
                                                 ui.label("Open on:");

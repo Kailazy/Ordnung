@@ -1619,11 +1619,7 @@ impl App {
                                             .iter()
                                             .filter(|id| track_releases.contains_key(id))
                                             .count();
-                                        if discogs_release_item(
-                                            ui,
-                                            drag_ids.len(),
-                                            matched,
-                                        ) {
+                                        if discogs_release_item(ui, drag_ids.len(), matched) {
                                             menu_action = Some(TrackMenuAction::FetchRelease(
                                                 drag_ids.clone(),
                                             ));
@@ -2169,10 +2165,8 @@ fn discogs_release_item(ui: &mut egui::Ui, total: usize, matched: usize) -> bool
     );
     // The refresh sits in a square at the right end, matching the row height so
     // it stays a comfortable target without eating the label.
-    let refresh_rect = egui::Rect::from_min_max(
-        egui::pos2(rect.right() - height, rect.top()),
-        rect.max,
-    );
+    let refresh_rect =
+        egui::Rect::from_min_max(egui::pos2(rect.right() - height, rect.top()), rect.max);
     let refresh = ui.interact(
         refresh_rect,
         ui.id().with(("discogs-release-refresh", total)),

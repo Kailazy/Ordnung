@@ -3,14 +3,13 @@
 //! egui widget (buttons, inputs, scrollbars, selections, menus) already matches
 //! the Ordnung visual language — no per-call-site styling required.
 //!
-//! This is Pass 1 of the design system: tokens + global style. Bespoke component
+//! This is Pass 1 of the design system: tokens + global style, typography
+//! included. Bespoke component
 //! helpers (cards, chips, segmented controls) build on top in a later pass.
 
-use eframe::egui::{
-    self, Color32, FontData, FontDefinitions, FontFamily, Margin, Rounding, Stroke,
-};
+use eframe::egui::{self, FontData, FontDefinitions, FontFamily, Margin, Rounding, Stroke};
 
-use super::tokens::{color, radius, space};
+use super::tokens::{color, font, radius, space};
 
 /// Install fonts and the global style. Call once, before any frame is laid out.
 pub fn install(ctx: &egui::Context) {
@@ -222,16 +221,16 @@ fn apply_style(ctx: &egui::Context) {
     w.inactive.expansion = 0.0;
 
     // Hovered.
-    w.hovered.bg_fill = Color32::from_rgb(54, 54, 58);
-    w.hovered.weak_bg_fill = Color32::from_rgb(54, 54, 58);
+    w.hovered.bg_fill = color::SURFACE_HOVER;
+    w.hovered.weak_bg_fill = color::SURFACE_HOVER;
     w.hovered.bg_stroke = Stroke::NONE;
     w.hovered.fg_stroke = Stroke::new(1.0, color::LABEL);
     w.hovered.rounding = Rounding::same(radius::SM);
     w.hovered.expansion = 0.0;
 
     // Active (pressed).
-    w.active.bg_fill = Color32::from_rgb(64, 64, 68);
-    w.active.weak_bg_fill = Color32::from_rgb(64, 64, 68);
+    w.active.bg_fill = color::SURFACE_ACTIVE;
+    w.active.weak_bg_fill = color::SURFACE_ACTIVE;
     w.active.bg_stroke = Stroke::new(1.0, color::ACCENT);
     w.active.fg_stroke = Stroke::new(1.0, color::LABEL);
     w.active.rounding = Rounding::same(radius::SM);
@@ -245,21 +244,38 @@ fn apply_style(ctx: &egui::Context) {
     w.open.rounding = Rounding::same(radius::SM);
     w.open.expansion = 0.0;
 
+    // Type ramp. egui's defaults are set for its own bundled face; Inter runs a
+    // larger x-height at the same nominal size, so stock sizes read a step bigger
+    // than intended. Bind each text style to the `font` ramp instead, so "small"
+    // is genuinely small and a button's label is sized by the system rather than
+    // by whatever egui happened to default to.
+    style.text_styles = [
+        (egui::TextStyle::Small, font::caption()),
+        (egui::TextStyle::Body, font::body()),
+        (egui::TextStyle::Button, font::body()),
+        (egui::TextStyle::Heading, font::title()),
+        (egui::TextStyle::Monospace, font::mono()),
+    ]
+    .into();
+
     // Spacing — the 8-pt grid.
     let s = &mut style.spacing;
     s.item_spacing = egui::vec2(space::S3, space::S2 + 2.0); // 8 × 6
-                                                             // Roomier inset so text sits clear of component edges: menu items and buttons
-                                                             // get 14px horizontal padding, and the menu frame adds 8px around that — so
-                                                             // menu text clears the edge by ~22px instead of feeling cramped.
-    s.button_padding = egui::vec2(space::S4 + 2.0, space::S2 + 3.0); // 14 × 7
+
+    // Padding for a *standalone* button, which sizes to its content. The ratio of
+    // horizontal to vertical inset is what makes a button read as square-ish or
+    // squat, so keep the two close: at 10 × 6 a short label like "Reveal in
+    // Finder" lands near 2.5:1 rather than the 4:1 that reads as a stretched pill.
+    //
+    // Menus don't use this. egui's `set_menu_style` overwrites `button_padding`
+    // to 2 × 0 inside a menu and insets items via `menu_margin` below, so this
+    // value is free to suit standalone buttons alone.
+    s.button_padding = egui::vec2(space::S4 - 2.0, space::S2 + 2.0); // 10 × 6
     s.menu_margin = Margin::same(space::S3); // 8
     s.window_margin = Margin::same(space::S4 - 2.0); // 10
     s.indent = 18.0;
     s.interact_size.y = 24.0;
     s.scroll.bar_width = 8.0;
-
-    // Text sizes/faces are left at egui's defaults; this pass only unifies colour,
-    // rounding, and spacing across components — not typography.
 
     ctx.set_style(style);
 }

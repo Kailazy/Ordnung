@@ -216,9 +216,8 @@ mod imp {
         let target = MenuTarget::new(mtm);
         let bar = unsafe { NSMenu::initWithTitle(mtm.alloc::<NSMenu>(), &NSString::from_str("")) };
 
-        let shift_cmd = NSEventModifierFlags(
-            CMD.0 | NSEventModifierFlags::NSEventModifierFlagShift.0,
-        );
+        let shift_cmd =
+            NSEventModifierFlags(CMD.0 | NSEventModifierFlags::NSEventModifierFlagShift.0);
 
         // ── Ordnung ────────────────────────────────────────────────────────
         // The first submenu is always the app menu, whatever its title.

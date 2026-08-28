@@ -761,10 +761,8 @@ impl App {
                 if token.trim().is_empty() {
                     return None;
                 }
-                let client = discogs::Client::new(
-                    token,
-                    "Ordnung/0.1 +https://kailazy.github.io/Ordnung/",
-                );
+                let client =
+                    discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
                 cat.release_cached_or(&id, || client.fetch_release(&id))
                     .ok()
             });
@@ -964,10 +962,8 @@ impl App {
             let ctx = self.egui_ctx.clone();
             let token = self.discogs_token();
             thread::spawn(move || {
-                let client = discogs::Client::new(
-                    token,
-                    "Ordnung/0.1 +https://kailazy.github.io/Ordnung/",
-                );
+                let client =
+                    discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
                 // Image CDN downloads don't count against the API rate limit,
                 // so a cover fetch never delays the next dig step.
                 let img = client.fetch_thumb(&url_owned).and_then(|png| {

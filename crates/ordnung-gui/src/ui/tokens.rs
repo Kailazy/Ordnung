@@ -60,6 +60,10 @@ pub mod color {
     pub const SURFACE_HI: Color32 = Color32::from_rgb(44, 44, 48);
     /// Sunken surface — text fields and other inputs.
     pub const FIELD: Color32 = Color32::from_rgb(20, 20, 22);
+    /// Hovered interactive surface — one step above `SURFACE_HI`.
+    pub const SURFACE_HOVER: Color32 = Color32::from_rgb(54, 54, 58);
+    /// Pressed interactive surface — one step above `SURFACE_HOVER`.
+    pub const SURFACE_ACTIVE: Color32 = Color32::from_rgb(64, 64, 68);
     /// The inspector drawer and its pull tab. One token for both so the handle
     /// reads as part of the panel it grows out of, rather than two greys that
     /// drift apart the next time either is touched.
@@ -94,8 +98,8 @@ pub mod color {
 }
 
 /// A size ramp for consistent text hierarchy, named after the role each size
-/// plays. Uses the default proportional/monospace faces — typography is left to
-/// egui's defaults for now; only the sizes are standardised here for reuse.
+/// plays. [`super::theme`] binds these to egui's `TextStyle`s, so stock widgets
+/// pick them up automatically; call them directly for bespoke text.
 pub mod font {
     use super::FontId;
 
