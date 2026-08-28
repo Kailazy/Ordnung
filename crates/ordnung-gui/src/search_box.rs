@@ -329,19 +329,27 @@ fn search_hit_row(
         );
     }
     let text_x = art.right() + 10.0;
-    painter.text(
+    // Both lines are truncated to the space actually left in the row.
+    // `painter.text` neither wraps nor clips, so a long "artist · year · format
+    // · label" ran straight out of the popup and over the table behind it.
+    let avail = (rect.right() - pad - text_x).max(0.0);
+    clipped_line(
+        ui,
+        painter,
         egui::pos2(text_x, rect.center().y - 8.0),
-        egui::Align2::LEFT_CENTER,
+        avail,
         primary,
-        egui::TextStyle::Body.resolve(ui.style()),
+        egui::TextStyle::Body,
         ui.visuals().strong_text_color(),
     );
     if !secondary.is_empty() {
-        painter.text(
+        clipped_line(
+            ui,
+            painter,
             egui::pos2(text_x, rect.center().y + 8.0),
-            egui::Align2::LEFT_CENTER,
+            avail,
             secondary,
-            egui::TextStyle::Small.resolve(ui.style()),
+            egui::TextStyle::Small,
             ui.visuals().weak_text_color(),
         );
     }
@@ -379,4 +387,38 @@ impl App {
             self.search_vinyl_covers.insert(msg.key, ThumbState::Ready(tex));
         }
     }
+}
+
+/// Paint one line of text left-aligned at `pos`, ellipsized to `width`.
+///
+/// egui's `Painter::text` neither wraps nor clips, so anything too long simply
+/// overflows its container. Laying the galley out with an explicit wrap width
+/// and `truncate` gives the usual single-line "…" instead.
+#[allow(clippy::too_many_arguments)]
+fn clipped_line(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    width: f32,
+    text: String,
+    style: egui::TextStyle,
+    color: egui::Color32,
+) {
+    let galley = ui.fonts(|f| {
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            text,
+            style.resolve(ui.style()),
+            color,
+        );
+        job.wrap.max_width = width;
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = false;
+        f.layout_job(job)
+    });
+    // `LEFT_CENTER` by hand: the galley is positioned from its top-left.
+    painter.galley(
+        egui::pos2(pos.x, pos.y - galley.size().y / 2.0),
+        galley,
+        color,
+    );
 }

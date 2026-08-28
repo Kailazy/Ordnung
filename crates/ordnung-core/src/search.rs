@@ -184,7 +184,7 @@ pub fn search_library(cat: &Catalog, query: &str, limit: usize) -> Result<Vec<Sc
             if score > 0 {
                 let sub = [
                     rec.year.map(|y| y.to_string()),
-                    rec.format.clone(),
+                    rec.format.as_deref().map(short_format),
                     rec.label.clone(),
                 ]
                 .into_iter()
@@ -217,6 +217,33 @@ pub fn search_library(cat: &Catalog, query: &str, limit: usize) -> Result<Vec<Sc
     });
     out.truncate(limit);
     Ok(out)
+}
+
+/// Reduce a Discogs format string to the carrier and its size — `Vinyl, 12"` out
+/// of `Vinyl, 12", 33 ⅓ RPM, Compilation, Stereo`.
+///
+/// Discogs packs the carrier, the physical size, the playback speed and a pile
+/// of edition descriptors into one comma-joined string. In a one-line suggestion
+/// only the first two carry their weight: a DJ cares that it's a 12" rather than
+/// an LP, not that it's a stereo repress. Dropping the rest is what keeps the
+/// row on one line.
+fn short_format(format: &str) -> String {
+    let mut parts = format.split(',').map(str::trim).filter(|p| !p.is_empty());
+    let Some(carrier) = parts.next() else {
+        return String::new();
+    };
+    // Keep a following component only when it names the physical size — `12"`,
+    // `10"`, `LP`. Everything else (RPM, EP, Album, Compilation, Reissue,
+    // Repress, White Label, Stereo…) is edition detail.
+    match parts.next() {
+        Some(size) if is_size(size) => format!("{carrier}, {size}"),
+        _ => carrier.to_string(),
+    }
+}
+
+/// Whether a format component names a physical size rather than an edition.
+fn is_size(part: &str) -> bool {
+    part.ends_with('"') || part.eq_ignore_ascii_case("lp")
 }
 
 /// Stable tiebreaker: the text the row displays.
@@ -285,6 +312,29 @@ mod tests {
                 SearchHit::Vinyl { title, .. } => format!("vinyl:{title}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn short_format_keeps_the_carrier_and_size_only() {
+        // The case from the screenshot: everything after the size is noise in a
+        // one-line suggestion.
+        assert_eq!(
+            short_format("Vinyl, LP, Compilation, Stereo"),
+            "Vinyl, LP"
+        );
+        assert_eq!(short_format("Vinyl, 12\", 33 ⅓ RPM"), "Vinyl, 12\"");
+        assert_eq!(
+            short_format("Vinyl, 12\", 33 ⅓ RPM, 45 RPM, Repress"),
+            "Vinyl, 12\""
+        );
+        assert_eq!(short_format("Vinyl, 10\", 45 RPM, White Label"), "Vinyl, 10\"");
+        assert_eq!(short_format("Vinyl, 12\""), "Vinyl, 12\"");
+        // No size component: the carrier stands alone rather than absorbing the
+        // next descriptor.
+        assert_eq!(short_format("Vinyl, EP"), "Vinyl");
+        assert_eq!(short_format("CD, Album, Reissue"), "CD");
+        assert_eq!(short_format("File, MP3, 320 kbps"), "File");
+        assert_eq!(short_format(""), "");
     }
 
     #[test]
