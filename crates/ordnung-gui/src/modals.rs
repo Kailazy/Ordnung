@@ -488,8 +488,11 @@ impl App {
                  sponsored or endorsed by Discogs. \"Discogs\" is a trademark of \
                  Zink Media, LLC.",
             )
-            .small()
-            .weak(),
+            // Legally required, so it stays verbatim, but it's boilerplate the
+            // user reads once: set smaller and dimmer than `.small().weak()` so
+            // it sits under the real controls instead of competing with them.
+            .size(9.5)
+            .color(egui::Color32::from_gray(95)),
         );
 
         save
