@@ -67,6 +67,7 @@ impl App {
             search_query: String::new(),
             search_apply_at: None,
             search_popup_open: false,
+            search_row_shown_at: None,
             search_cursor: None,
             search_vinyl_covers: HashMap::new(),
             search_cover_req_tx,

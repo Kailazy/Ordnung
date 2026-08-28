@@ -770,6 +770,12 @@ struct App {
     /// being non-empty so Esc (and picking a hit) can dismiss the popup without
     /// clearing the query the table is still filtered by.
     search_popup_open: bool,
+    /// When the current `search_hits` list went on screen, used as the origin
+    /// for the popup's staggered row entrance. Re-stamped whenever the results
+    /// actually change (not on every keystroke), so refining a query replays the
+    /// cascade while an unchanged list stays put. `None` while the popup is
+    /// fully closed.
+    search_row_shown_at: Option<std::time::Instant>,
     /// Keyboard cursor within `search_hits`, driven by ↑/↓ in the search box.
     /// `None` means nothing is highlighted and Enter falls through to the plain
     /// filter behaviour.

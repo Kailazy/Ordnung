@@ -16,6 +16,29 @@ use crate::ui::tokens::{color, radius, space};
 /// How many suggestions the popup shows.
 pub(crate) const MAX_SEARCH_HITS: usize = 5;
 
+/// Motion for the popup itself: how long the panel takes to settle open or fade
+/// away. Short enough to feel immediate under fast typing, long enough that the
+/// list reads as *arriving* rather than blinking into place.
+const POPUP_ANIM: f32 = 0.14;
+
+/// How far above its resting position the panel starts, in points. Small: the
+/// list should look like it slid out from under the field, not flown in.
+const POPUP_RISE: f32 = 6.0;
+
+/// Motion for one row's entrance, and the delay between consecutive rows. The
+/// stagger is what turns five simultaneous fades into a cascade; keep the total
+/// (`ROW_ANIM + MAX_SEARCH_HITS * ROW_STAGGER`) well under a comfortable read so
+/// the last row is settled by the time the eye reaches it.
+const ROW_ANIM: f32 = 0.16;
+const ROW_STAGGER: f32 = 0.028;
+
+/// How far right of its resting position a row starts, in points.
+const ROW_SLIDE: f32 = 10.0;
+
+/// Motion for a row's hover/selection wash and its cover art fading up.
+const ROW_HIGHLIGHT_ANIM: f32 = 0.11;
+const COVER_FADE_ANIM: f32 = 0.22;
+
 impl App {
     /// Recompute the suggestion list for the current query. Cheap enough to run
     /// on the search debounce: the digital side is a bounded SQL prefilter and
@@ -28,9 +51,17 @@ impl App {
             self.search_cursor = None;
             return;
         }
-        self.search_hits = Catalog::open(&self.db_path)
+        let hits = Catalog::open(&self.db_path)
             .and_then(|c| ordnung_core::search::search_library(&c, &q, MAX_SEARCH_HITS))
             .unwrap_or_default();
+        // Restart the row cascade only when the list actually changed. A query
+        // that narrows to the same five hits (or a debounce tick that lands on
+        // an unchanged result) leaves the rows where they are — re-running the
+        // entrance on every keystroke would read as flicker, not motion.
+        if !same_hits(&self.search_hits, &hits) {
+            self.search_row_shown_at = Some(std::time::Instant::now());
+        }
+        self.search_hits = hits;
         // Keep the highlight in range as the list shrinks under a longer query.
         if let Some(i) = self.search_cursor {
             if i >= self.search_hits.len() {
@@ -124,22 +155,39 @@ impl App {
     /// alone. Keys are read only while the field has focus, so the arrows still
     /// belong to the track table the rest of the time.
     pub(crate) fn draw_search_popup(&mut self, field: &egui::Response) {
-        if !self.search_popup_open || self.search_query.trim().is_empty() {
+        let ctx = field.ctx.clone();
+        // Whether the popup *wants* to be up. The panel keeps drawing past a
+        // `false` here until its fade-out finishes, so dismissing is as smooth
+        // as opening — an instant `return` would snap the list out of existence.
+        let want_open = self.search_popup_open && !self.search_query.trim().is_empty();
+        let open_t = ctx.animate_bool_with_time_and_easing(
+            egui::Id::new("search_popup_open"),
+            want_open,
+            POPUP_ANIM,
+            egui::emath::easing::cubic_out,
+        );
+        if open_t <= 0.0 {
+            // Fully closed and settled: nothing to paint, and no leftover row
+            // animations to keep alive for the next query.
+            self.search_row_shown_at = None;
             return;
         }
-        let ctx = field.ctx.clone();
         let focused = field.has_focus();
         let n = self.search_hits.len();
 
-        // Esc always dismisses, list or no list.
-        if focused && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // Esc always dismisses, list or no list. Only the flag is flipped here:
+        // this frame still paints the popup at its current `open_t`, and the
+        // fade-out starts from there. Returning early instead would blank the
+        // list for a frame before the animation ever got to run.
+        let dismissing = want_open && focused && ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        if dismissing {
             self.search_popup_open = false;
             self.search_cursor = None;
-            return;
+            ctx.request_repaint();
         }
         // Arrow/Enter handling only applies when there's a list to move through;
         // with the popup showing "No matches" the keys still belong to the table.
-        if focused && !self.search_hits.is_empty() {
+        if want_open && !dismissing && focused && !self.search_hits.is_empty() {
             let (down, up, enter) = ctx.input_mut(|i| {
                 (
                     i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
@@ -180,12 +228,32 @@ impl App {
         // no borrow of the caches is live when the loaders mutate them.
         let mut load_covers: Vec<SearchHit> = Vec::new();
         let cursor = self.search_cursor;
+        // `want_open` is this frame's intent; Esc above may have just revoked it.
+        let want_open = want_open && !dismissing;
         let hits = self.search_hits.clone();
 
+        // When the current list of hits first went up, so each row can time its
+        // own entrance off a shared origin. Re-stamped by `refresh_search_hits`
+        // whenever the results actually change, which is what makes a new query
+        // cascade in rather than swapping contents behind a static frame.
+        let shown_at = *self
+            .search_row_shown_at
+            .get_or_insert_with(std::time::Instant::now);
+        let since_shown = shown_at.elapsed().as_secs_f32();
+
+        // The panel rises the last few points into place and fades as it goes;
+        // reversing on close. Both are driven by the one `open_t` so the two
+        // halves of the motion can never drift apart.
+        let rise = POPUP_RISE * (1.0 - open_t);
         egui::Area::new(egui::Id::new("search_suggestions"))
             .order(egui::Order::Foreground)
-            .fixed_pos(field.rect.left_bottom() + egui::vec2(0.0, 4.0))
+            // Non-interactive while it is still materialising or on its way out,
+            // so a click during the fade lands on whatever the user aimed at
+            // rather than on a ghost row.
+            .interactable(open_t > 0.99 && want_open)
+            .fixed_pos(field.rect.left_bottom() + egui::vec2(0.0, 4.0 - rise))
             .show(&ctx, |ui| {
+                ui.multiply_opacity(open_t);
                 egui::Frame::popup(ui.style())
                     .inner_margin(egui::Margin::symmetric(space::S1, space::S2))
                     .rounding(egui::Rounding::same(radius::MD))
@@ -205,6 +273,9 @@ impl App {
                     }
                     for (i, scored) in hits.iter().enumerate() {
                         let selected = cursor == Some(i);
+                        // Each row trails the one above it, so the list unrolls
+                        // top-down instead of five things appearing at once.
+                        let enter = row_enter_t(since_shown, i);
                         // Resolve the row's artwork from whichever cache owns it,
                         // and note a miss so the loader is asked *after* the
                         // closure (it needs `&mut self`, borrowed here).
@@ -230,7 +301,7 @@ impl App {
                         if wants_load {
                             load_covers.push(scored.hit.clone());
                         }
-                        if search_hit_row(ui, &scored.hit, selected, tex) {
+                        if search_hit_row(ui, &scored.hit, selected, tex, enter) {
                             chosen = Some(scored.hit.clone());
                         }
                     }
@@ -246,9 +317,18 @@ impl App {
             }
         }
 
+        // Keep frames coming while anything is still in motion: the panel's own
+        // fade, and the row cascade that outlasts it. egui only repaints on
+        // demand, so without this the animation would advance a frame at a time
+        // as incidental events happened to land.
+        if since_shown < ROW_ANIM + ROW_STAGGER * n as f32 {
+            ctx.request_repaint();
+        }
+
         // A click anywhere else closes the popup — the usual dismiss gesture,
         // and without it the list would hang around over the table.
-        if ctx.input(|i| i.pointer.any_click()) && !field.has_focus() && chosen.is_none() {
+        if want_open && ctx.input(|i| i.pointer.any_click()) && !field.has_focus() && chosen.is_none()
+        {
             dismiss = true;
         }
         if let Some(hit) = chosen {
@@ -260,6 +340,40 @@ impl App {
     }
 }
 
+/// A stable identity for one hit, independent of the score that ranked it.
+/// Two queries that surface the same record should not restage the list.
+fn hit_key(h: &SearchHit) -> (u8, u64) {
+    match h {
+        SearchHit::Track { id, .. } => (0, *id),
+        SearchHit::Vinyl {
+            list, instance_id, ..
+        } => (
+            match list {
+                VinylList::Collection => 1,
+                VinylList::Wantlist => 2,
+            },
+            *instance_id,
+        ),
+    }
+}
+
+/// Whether two result lists name the same things in the same order.
+fn same_hits(a: &[ScoredHit], b: &[ScoredHit]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| hit_key(&x.hit) == hit_key(&y.hit))
+}
+
+/// How far along its entrance row `i` is, `since` seconds after the list went
+/// up. Each row waits out its share of the stagger, then eases in over
+/// [`ROW_ANIM`]; the result is clamped, so a row that has finished simply
+/// reports 1.0 forever after.
+fn row_enter_t(since: f32, i: usize) -> f32 {
+    let t = ((since - ROW_STAGGER * i as f32) / ROW_ANIM).clamp(0.0, 1.0);
+    egui::emath::easing::cubic_out(t)
+}
+
 /// The artwork square at the head of each suggestion row.
 const HIT_COVER_PX: f32 = 32.0;
 
@@ -269,11 +383,18 @@ const HIT_COVER_PX: f32 = 32.0;
 /// library the hit came from — so "the file" and "the record" are never confused
 /// at a glance, which is the whole point of searching both at once. The glyph
 /// stays visible as a small badge over the artwork for the same reason.
+///
+/// `enter` is the row's entrance progress (0→1, see [`row_enter_t`]): the row
+/// fades up and slides the last few points left into place, staggered behind the
+/// rows above it. It scales *opacity and offset only* — the row always occupies
+/// its full height from the first frame, so the popup never resizes mid-cascade
+/// and the rows below don't shuffle underneath a moving cursor.
 fn search_hit_row(
     ui: &mut egui::Ui,
     hit: &SearchHit,
     selected: bool,
     tex: Option<Tex>,
+    enter: f32,
 ) -> bool {
     let (kind, primary, secondary) = match hit {
         SearchHit::Track {
@@ -319,15 +440,36 @@ fn search_hit_row(
     // sit centred against it rather than crowding the square. One S3 gutter
     // above and below keeps the popup on the same 8-pt rhythm as the toolbar.
     let height = HIT_COVER_PX + space::S3 * 2.0;
-    let (rect, resp) = ui.allocate_exact_size(
+    let (slot, resp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
         egui::Sense::click(),
     );
-    if selected || resp.hovered() {
+    // Everything the row paints is offset by the remaining slide and dimmed by
+    // the remaining fade. The allocated slot above is untouched, so layout is
+    // stable while the contents move.
+    let rect = slot.translate(egui::vec2(ROW_SLIDE * (1.0 - enter), 0.0));
+    let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    let ui = &mut ui;
+    ui.multiply_opacity(enter);
+
+    // The hover/selection wash fades rather than switching on, and widens the
+    // last couple of points into the row — the same "settling" motion as the
+    // panel, at row scale.
+    let hot = ui.ctx().animate_bool_with_time(
+        resp.id.with("hot"),
+        selected || resp.hovered(),
+        ROW_HIGHLIGHT_ANIM,
+    );
+    if hot > 0.0 {
+        let inset = 2.0 * (1.0 - hot);
         ui.painter().rect_filled(
-            rect,
+            rect.shrink2(egui::vec2(inset, inset * 0.5)),
             ui.visuals().widgets.hovered.rounding,
-            ui.visuals().widgets.hovered.weak_bg_fill,
+            ui.visuals()
+                .widgets
+                .hovered
+                .weak_bg_fill
+                .gamma_multiply(hot),
         );
     }
     let pad = space::S3;
@@ -336,25 +478,37 @@ fn search_hit_row(
         egui::vec2(HIT_COVER_PX, HIT_COVER_PX),
     );
     let rounding = egui::Rounding::same(radius::XS);
-    match &tex {
-        Some(handle) => {
-            egui::Image::new(handle)
-                .rounding(rounding)
-                .paint_at(ui, art);
-        }
-        None => {
-            // No art (or still decoding): a muted square carrying the kind's
-            // mark, so the row keeps its shape and still says where it's from.
-            ui.painter().rect_filled(art, rounding, color::SURFACE_HI);
-            draw_hit_mark(ui.painter(), art.center(), 9.0, kind, false);
-        }
+    // Covers arrive from a decode thread, whenever they arrive. Cross-fading the
+    // artwork up over its placeholder keeps a late texture from punching a hole
+    // in an otherwise settled list.
+    let art_t = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("art"), tex.is_some(), COVER_FADE_ANIM);
+    // The placeholder holds underneath for the whole cross-fade, so the square
+    // is never briefly transparent between the two.
+    if art_t < 1.0 {
+        // No art (or still decoding): a muted square carrying the kind's
+        // mark, so the row keeps its shape and still says where it's from.
+        ui.painter().rect_filled(art, rounding, color::SURFACE_HI);
+        draw_hit_mark(ui.painter(), art.center(), 9.0, kind, false);
+    }
+    if let Some(handle) = &tex {
+        egui::Image::new(handle)
+            .rounding(rounding)
+            .tint(egui::Color32::WHITE.gamma_multiply(art_t))
+            .paint_at(ui, art);
     }
     let painter = ui.painter();
     // With artwork shown, the mark moves to a badge in the corner so the library
-    // a hit came from survives the cover taking its place.
-    if tex.is_some() {
+    // a hit came from survives the cover taking its place. It fades in with the
+    // artwork it sits on.
+    if tex.is_some() && art_t > 0.0 {
         let badge = art.right_bottom() + egui::vec2(-7.0, -7.0);
-        painter.circle_filled(badge, 8.0, egui::Color32::from_black_alpha(180));
+        painter.circle_filled(
+            badge,
+            8.0,
+            egui::Color32::from_black_alpha(180).gamma_multiply(art_t),
+        );
         draw_hit_mark(painter, badge, 6.0, kind, true);
     }
     let text_x = art.right() + space::S4 - 2.0;
@@ -537,5 +691,58 @@ fn draw_hit_mark(
             }
             painter.circle_filled(c, (r * 0.1).max(0.7), ink);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rows_enter_in_order_and_settle() {
+        // At t=0 nothing has moved yet.
+        assert_eq!(row_enter_t(0.0, 0), 0.0);
+        assert_eq!(row_enter_t(0.0, 3), 0.0);
+        // Mid-cascade, earlier rows are always further along than later ones.
+        let mid = ROW_STAGGER * 2.0 + ROW_ANIM * 0.5;
+        for i in 0..MAX_SEARCH_HITS - 1 {
+            assert!(
+                row_enter_t(mid, i) >= row_enter_t(mid, i + 1),
+                "row {i} should lead row {}",
+                i + 1
+            );
+        }
+        // Every row is settled once the whole cascade has had time to run.
+        let done = ROW_ANIM + ROW_STAGGER * MAX_SEARCH_HITS as f32;
+        for i in 0..MAX_SEARCH_HITS {
+            assert_eq!(row_enter_t(done, i), 1.0, "row {i} should be settled");
+        }
+    }
+
+    fn track(id: Id) -> ScoredHit {
+        ScoredHit {
+            hit: SearchHit::Track {
+                id,
+                title: String::new(),
+                artist: String::new(),
+                album: String::new(),
+                has_cover: false,
+            },
+            score: 0,
+        }
+    }
+
+    #[test]
+    fn same_hits_ignores_score_but_not_identity() {
+        // Identity, not rank, decides whether the list restages: re-scoring the
+        // same hits under a longer query must not replay the cascade.
+        let mut rescored = track(1);
+        rescored.score = 99;
+        assert!(same_hits(&[track(1), track(2)], &[rescored, track(2)]));
+        // Different members, different order, and different lengths all count
+        // as a new list.
+        assert!(!same_hits(&[track(1)], &[track(2)]));
+        assert!(!same_hits(&[track(1), track(2)], &[track(2), track(1)]));
+        assert!(!same_hits(&[track(1)], &[track(1), track(2)]));
     }
 }
