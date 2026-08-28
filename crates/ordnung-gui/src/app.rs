@@ -106,6 +106,9 @@ impl App {
             job_cancel: None,
             artwork_queue: VecDeque::new(),
             artwork_enrich: false,
+            wantlist_after_fetch: Vec::new(),
+            wantlist_after_fetch_label: String::new(),
+            pending_wantlist_releases: Vec::new(),
             artwork_overwrite: false,
             artwork_set_cover: true,
             artwork_apply_album: true,
@@ -847,7 +850,14 @@ impl eframe::App for App {
         self.poll_covers(ctx);
         self.poll_thumbs(ctx);
         self.poll_vinyl_covers(ctx);
-        self.poll_artwork_save();
+        self.poll_artwork_save(ctx);
+        // A "wantlist it, matching first" request whose fetch ended without ever
+        // queueing a picker (no candidates, or the run was cancelled) would
+        // otherwise sit pending forever. Once the job is done and the queue is
+        // empty, settle it — the flush is a no-op when nothing is pending.
+        if !self.is_busy() && !self.artwork_saving && self.artwork_queue.is_empty() {
+            self.flush_wantlist_after_fetch(ctx);
+        }
         self.poll_discogs_identity();
         self.poll_metadata_preview();
         self.poll_vinyl_sheet();

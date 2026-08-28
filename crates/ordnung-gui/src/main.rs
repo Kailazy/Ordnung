@@ -937,6 +937,18 @@ struct App {
     /// or just cache the cover ("Fetch artwork" button — harmless, no tag edits).
     /// Set when the fetch run is launched; read when a candidate is saved.
     artwork_enrich: bool,
+    /// Tracks whose Discogs release is being fetched *so it can be wantlisted*:
+    /// the library menu's "Add to Discogs wantlist" on an unmatched selection
+    /// opens the release picker first, then adds whatever it settled on. Drained
+    /// once the picker queue empties (whether the user picked, skipped or
+    /// cancelled) — only the tracks that ended up with a release get wanted.
+    /// The label names the selection in the status line.
+    wantlist_after_fetch: Vec<Id>,
+    wantlist_after_fetch_label: String,
+    /// Release ids from the same "add to wantlist" request that were already
+    /// matched — held aside so they're wanted in the same edit as the ones the
+    /// picker is still resolving.
+    pending_wantlist_releases: Vec<u64>,
     /// In a song-data run, whether committing a release *replaces* existing tag
     /// values (true) or only fills empty ones (false, the default). Toggled by a
     /// checkbox in the picker; read when a candidate is saved and woven into the
@@ -1436,9 +1448,16 @@ enum TrackMenuAction {
     /// fetched, so it doubles as the re-pick.
     FetchRelease(Vec<Id>),
     /// Add the Discogs releases behind the target track(s) to the user's
-    /// wantlist. Carries the deduplicated release ids (several tracks off one
-    /// record are one want) and a label naming the release for the status line.
-    AddToWantlist(Vec<u64>, String),
+    /// wantlist. `release_ids` are the deduplicated releases already on file
+    /// (several tracks off one record are one want); `fetch_first` are the
+    /// selected tracks with no release yet, which get the release picker run
+    /// over them before the whole set is wanted. `label` names the release for
+    /// the status line.
+    AddToWantlist {
+        release_ids: Vec<u64>,
+        fetch_first: Vec<Id>,
+        label: String,
+    },
 }
 
 fn default_db_path() -> Option<PathBuf> {

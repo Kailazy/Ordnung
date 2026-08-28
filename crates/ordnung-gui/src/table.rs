@@ -1654,26 +1654,54 @@ impl App {
                                         // id can actually be addressed on
                                         // Discogs. Several tracks off one record
                                         // collapse to a single want.
-                                        let mut want: Vec<u64> = drag_ids
+                                        let addable: Vec<Id> = drag_ids
                                             .iter()
+                                            .copied()
                                             .filter(|id| {
                                                 !vinyl_owned_tracks.contains(id)
                                                     && !vinyl_wanted_tracks.contains(id)
                                             })
+                                            .collect();
+                                        let mut want: Vec<u64> = addable
+                                            .iter()
                                             .filter_map(|id| track_releases.get(id).copied())
                                             .collect();
                                         want.sort_unstable();
                                         want.dedup();
+                                        // The rest were never Discogs-matched, so
+                                        // there's no release id to want yet. Rather
+                                        // than dead-ending on "run Find Discogs
+                                        // release first", the entry runs that match
+                                        // itself and wants whatever it settles on.
+                                        let unmatched: Vec<Id> = addable
+                                            .iter()
+                                            .copied()
+                                            .filter(|id| !track_releases.contains_key(id))
+                                            .collect();
                                         // Three states: nothing Discogs can act
                                         // on, everything already yours (checked
                                         // + darkened, naming the list), or
                                         // something left to add.
-                                        let nothing_addressable = held == 0 && want.is_empty();
+                                        let nothing_addressable =
+                                            held == 0 && want.is_empty() && unmatched.is_empty();
                                         let (want_label, want_tip) = if nothing_addressable {
                                             (
                                                 "Add to Discogs wantlist".to_string(),
-                                                "No Discogs release on file for this \
-                                                 selection. Run Find Discogs release first."
+                                                "Nothing here can be wanted on Discogs."
+                                                    .to_string(),
+                                            )
+                                        } else if want.is_empty() && !unmatched.is_empty() {
+                                            // Nothing matched yet: the entry still
+                                            // works, it just runs the release match
+                                            // first and wants the result.
+                                            let label = match unmatched.len() {
+                                                1 => "Add to Discogs wantlist".to_string(),
+                                                n => format!("Add to Discogs wantlist ({n})"),
+                                            };
+                                            (
+                                                label,
+                                                "Finds the Discogs release first, then \
+                                                 wants it."
                                                     .to_string(),
                                             )
                                         } else if want.is_empty() {
@@ -1693,7 +1721,8 @@ impl App {
                                             };
                                             (label.to_string(), tip.to_string())
                                         } else {
-                                            let label = match want.len() {
+                                            let n = want.len() + unmatched.len();
+                                            let label = match n {
                                                 1 => "Add to Discogs wantlist".to_string(),
                                                 n => {
                                                     format!(
@@ -1702,8 +1731,9 @@ impl App {
                                                 }
                                             };
                                             // With a mixed selection, say what's
-                                            // being skipped so the count adds up.
-                                            let tip = if held > 0 {
+                                            // being skipped so the count adds up,
+                                            // and warn when a match runs first.
+                                            let mut tip = if held > 0 {
                                                 format!(
                                                     "Want these records on Discogs. \
                                                      {held} already yours, skipped."
@@ -1711,11 +1741,16 @@ impl App {
                                             } else {
                                                 "Want these records on Discogs".to_string()
                                             };
+                                            if !unmatched.is_empty() {
+                                                tip.push_str(
+                                                    " Finds the missing releases first.",
+                                                );
+                                            }
                                             (label, tip)
                                         };
                                         if ui
                                             .add_enabled(
-                                                !want.is_empty(),
+                                                !nothing_addressable,
                                                 egui::Button::new(want_label),
                                             )
                                             .on_hover_note(want_tip.clone())
@@ -1730,10 +1765,11 @@ impl App {
                                             } else {
                                                 short(&r.album, "this release")
                                             };
-                                            menu_action = Some(TrackMenuAction::AddToWantlist(
-                                                want,
-                                                named.to_string(),
-                                            ));
+                                            menu_action = Some(TrackMenuAction::AddToWantlist {
+                                                release_ids: want,
+                                                fetch_first: unmatched,
+                                                label: named.to_string(),
+                                            });
                                             ui.close_menu();
                                         }
                                         ui.separator();
@@ -2078,8 +2114,39 @@ impl App {
                 // only ever meant a second trip through the same window.
                 self.spawn_fetch_tracks(ctx_clone.clone(), ids);
             }
-            Some(TrackMenuAction::AddToWantlist(release_ids, label)) => {
-                self.spawn_vinyl_edit(ctx_clone.clone(), VinylEdit::Want { release_ids, label });
+            Some(TrackMenuAction::AddToWantlist {
+                release_ids,
+                fetch_first,
+                label,
+            }) => {
+                if fetch_first.is_empty() {
+                    self.spawn_vinyl_edit(
+                        ctx_clone.clone(),
+                        VinylEdit::Want { release_ids, label },
+                    );
+                } else {
+                    // Some (or all) of the selection was never matched: run the
+                    // release picker over those tracks now and want everything —
+                    // the already-matched ids plus whatever the picker settles on —
+                    // in one edit when the queue drains. Saves the user running
+                    // "Find Discogs release" by hand first.
+                    self.wantlist_after_fetch = fetch_first.clone();
+                    self.wantlist_after_fetch_label = label;
+                    self.pending_wantlist_releases = release_ids;
+                    self.spawn_fetch_tracks(ctx_clone.clone(), fetch_first);
+                    // No token, so the picker never opened and there's nothing
+                    // to want later. Drop the pending state rather than let the
+                    // next idle frame report a no-op the user didn't ask for.
+                    if !self.is_busy() {
+                        self.wantlist_after_fetch.clear();
+                        self.wantlist_after_fetch_label.clear();
+                        self.pending_wantlist_releases.clear();
+                    } else {
+                        self.status =
+                            "Finding the Discogs release first, then adding to your wantlist…"
+                                .into();
+                    }
+                }
             }
             None => {}
         }

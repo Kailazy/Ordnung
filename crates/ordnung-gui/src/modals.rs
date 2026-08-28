@@ -2415,6 +2415,9 @@ impl App {
             self.artwork_queue.clear();
             self.artwork_previews = None;
             self.artwork_selected = 0;
+            // A pending want still fires for whatever *did* get matched before
+            // the user bailed; if that's nothing, the flush says so.
+            self.flush_wantlist_after_fetch(ctx);
         } else if save {
             // The commit runs on a background thread; the queue advances in
             // `poll_artwork_save` once it lands, so the spinner stays visible.
@@ -2451,10 +2454,12 @@ impl App {
             self.artwork_previews = None;
             self.artwork_selected = 0;
             self.reload();
+            self.flush_wantlist_after_fetch(ctx);
         } else if skip {
             self.artwork_queue.pop_front();
             self.artwork_previews = None;
             self.artwork_selected = 0;
+            self.flush_wantlist_after_fetch(ctx);
         }
     }
 
@@ -2680,7 +2685,7 @@ impl App {
     /// Drain finished background artwork saves. For each, advance past the saved
     /// track (it's the front of the queue — the picker is locked while saving),
     /// drop its cached textures so the new art re-decodes, and refresh the table.
-    pub(crate) fn poll_artwork_save(&mut self) {
+    pub(crate) fn poll_artwork_save(&mut self, ctx: &egui::Context) {
         while let Ok(done) = self.art_save_rx.try_recv() {
             self.artwork_saving = false;
             if self.artwork_queue.front().map(|c| c.id) == Some(done.id) {
@@ -2698,7 +2703,36 @@ impl App {
                 self.cover_inflight.remove(&id);
             }
             self.reload();
+            self.flush_wantlist_after_fetch(ctx);
         }
+    }
+
+    /// Finish a "add to wantlist" that had to find the releases first. Runs once
+    /// the picker queue is empty: looks up the release each pending track ended
+    /// up with, folds in the ones that were already matched, and fires a single
+    /// want. Tracks the user skipped simply have no release and drop out — if
+    /// none survive, say so instead of firing an empty edit.
+    pub(crate) fn flush_wantlist_after_fetch(&mut self, ctx: &egui::Context) {
+        if self.wantlist_after_fetch.is_empty() || !self.artwork_queue.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.wantlist_after_fetch);
+        let label = std::mem::take(&mut self.wantlist_after_fetch_label);
+        let mut release_ids = std::mem::take(&mut self.pending_wantlist_releases);
+        // `track_releases` was rebuilt by the reload that followed each save, so
+        // it already carries whatever the picker committed.
+        release_ids.extend(
+            pending
+                .iter()
+                .filter_map(|id| self.track_releases.get(id).copied()),
+        );
+        release_ids.sort_unstable();
+        release_ids.dedup();
+        if release_ids.is_empty() {
+            self.status = "No Discogs release picked, so nothing was wanted.".into();
+            return;
+        }
+        self.spawn_vinyl_edit(ctx.clone(), VinylEdit::Want { release_ids, label });
     }
 }
 
