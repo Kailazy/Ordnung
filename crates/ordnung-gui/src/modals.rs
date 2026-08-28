@@ -511,17 +511,24 @@ impl App {
         }
         let mut window_open = true;
         let mut save = false;
+        // Resizable, with a drag grip in the bottom-right corner. The default
+        // is deliberately shorter than the old fixed 620px viewport; anyone who
+        // wants more can drag it, and egui persists the size across sessions.
+        let default_h = (ctx.screen_rect().height() - 260.0).clamp(320.0, 460.0);
         egui::Window::new("Settings")
             .open(&mut window_open)
             .collapsible(false)
-            .resizable(false)
+            .resizable(true)
+            .default_size([620.0, default_h])
+            .min_width(520.0)
+            .min_height(300.0)
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 let row = ui.horizontal_top(|ui| {
                     // Left rail: selectable category tabs (Ableton-style).
                     ui.vertical(|ui| {
-                        ui.set_width(140.0);
+                        ui.set_width(104.0);
                         for tab in SettingsTab::ALL {
                             if ui
                                 .selectable_label(self.settings_tab == tab, tab.label())
@@ -553,16 +560,17 @@ impl App {
                     let sep_x = ui.cursor().left();
                     ui.add_space(7.0);
                     // Right: the active tab's controls.
-                    // One fixed viewport height for *every* tab, not a cap: the
-                    // window must not resize as you switch tabs, or the tab you
-                    // want next slides out from under the pointer. Tall tabs
-                    // (Waveform runs ~760px) scroll; short ones leave empty
-                    // space rather than shrinking the frame. Sized well under
-                    // the screen height so the window never reaches the edges.
-                    let scroll_h = (ctx.screen_rect().height() - 160.0).clamp(360.0, 620.0);
+                    // The viewport fills the window's remaining height rather
+                    // than sizing to its content, so switching tabs never moves
+                    // the frame (the tab you want next must stay under the
+                    // pointer) and dragging the corner grip actually grows the
+                    // scroll area. Tall tabs (Waveform runs ~760px) scroll;
+                    // short ones leave empty space instead of shrinking it.
+                    let scroll_h = ui.available_height().max(200.0);
                     ui.vertical(|ui| {
-                        ui.set_min_width(360.0);
-                        ui.set_max_width(360.0);
+                        let content_w = ui.available_width().max(300.0);
+                        ui.set_min_width(content_w);
+                        ui.set_max_width(content_w);
                         egui::ScrollArea::vertical()
                             .min_scrolled_height(scroll_h)
                             .max_height(scroll_h)

@@ -101,15 +101,26 @@ struct VinylCell {
     also_in_other: bool,
 }
 
-impl VinylCell {
-    /// Does this record match the view's search box? `query` is already trimmed
-    /// and lowercased. Every whitespace-separated term must appear somewhere in
-    /// the artist, title or the year/format caption, so "warp 1993" narrows the
-    /// way you'd expect rather than only matching that exact phrase.
-    fn matches(&self, query: &str) -> bool {
-        let hay = format!("{} {} {}", self.artist, self.title, self.sub).to_lowercase();
-        query.split_whitespace().all(|term| hay.contains(term))
+/// The caption line under a cover, e.g. `1993 · Vinyl, 12"`. Also part of the
+/// search haystack, so it's built in one place for both.
+fn vinyl_sub(v: &VinylRecord) -> String {
+    match (v.year, v.format.as_deref()) {
+        (Some(y), Some(f)) => format!("{y} · {f}"),
+        (Some(y), None) => y.to_string(),
+        (None, Some(f)) => f.to_string(),
+        (None, None) => String::new(),
     }
+}
+
+/// Does this record match the vinyl view's search box? `query` is already
+/// trimmed and lowercased. Every whitespace-separated term must appear somewhere
+/// in the artist, title or the year/format caption, so "warp 1993" narrows the
+/// way you'd expect rather than only matching that exact phrase. Matching on the
+/// record (not the built cell) lets the toolbar count what the grid will show
+/// without building every cell.
+pub(crate) fn vinyl_matches(v: &VinylRecord, query: &str) -> bool {
+    let hay = format!("{} {} {}", v.artist, v.title, vinyl_sub(v)).to_lowercase();
+    query.split_whitespace().all(|term| hay.contains(term))
 }
 
 /// How the vinyl grids are ordered. Persisted as a stable key in
@@ -1120,14 +1131,14 @@ impl App {
         // Snapshot what we render so the scroll closure doesn't borrow the record
         // lists while we read the cover cache. Kick off cover decodes up front
         // (the request is deduplicated, so doing it every frame is cheap).
+        // Filter the records before building cells, so the toolbar's counts (which
+        // filter the same way, without building cells) can't drift from the grid.
         let query = self.vinyl_filter.trim().to_lowercase();
-        let mut owned = self.vinyl_cells(VinylList::Collection, &self.vinyl, sort, ascending);
-        let mut wanted = self.vinyl_cells(VinylList::Wantlist, &self.wantlist, sort, ascending);
-        if !query.is_empty() {
-            owned.retain(|c| c.matches(&query));
-            wanted.retain(|c| c.matches(&query));
-        }
-        let (owned, wanted) = (owned, wanted);
+        let keep = |v: &&VinylRecord| query.is_empty() || vinyl_matches(v, &query);
+        let owned_recs: Vec<VinylRecord> = self.vinyl.iter().filter(keep).cloned().collect();
+        let wanted_recs: Vec<VinylRecord> = self.wantlist.iter().filter(keep).cloned().collect();
+        let owned = self.vinyl_cells(VinylList::Collection, &owned_recs, sort, ascending);
+        let wanted = self.vinyl_cells(VinylList::Wantlist, &wanted_recs, sort, ascending);
         for c in owned.iter().chain(wanted.iter()) {
             if c.has_cover {
                 self.request_vinyl_cover(c.key);
@@ -1304,12 +1315,7 @@ impl App {
         records
             .iter()
             .map(|v| {
-                let sub = match (v.year, v.format.as_deref()) {
-                    (Some(y), Some(f)) => format!("{y} · {f}"),
-                    (Some(y), None) => y.to_string(),
-                    (None, Some(f)) => f.to_string(),
-                    (None, None) => String::new(),
-                };
+                let sub = vinyl_sub(v);
                 VinylCell {
                     key: (list, v.instance_id),
                     release_id: v.release_id,

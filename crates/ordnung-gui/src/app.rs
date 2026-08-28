@@ -1298,13 +1298,34 @@ impl eframe::App for App {
                 let has_filters = active_col_filters > 0 || !self.filter.is_empty();
                 // Live counts: total visible tracks, plus selection and missing
                 // when they apply, so the toolbar always reflects current state.
-                let mut counts = format!("{} tracks", self.rows.len());
-                if !self.selection.is_empty() {
-                    counts.push_str(&format!(" · {} selected", self.selection.len()));
-                }
-                if self.missing_count > 0 {
-                    counts.push_str(&format!(" · {} missing", self.missing_count));
-                }
+                // The vinyl view has no table rows, so it counts records instead
+                // — filtered by its own search box, the way the grid is.
+                let counts = if self.view == LibraryView::Vinyl {
+                    let query = self.vinyl_filter.trim().to_lowercase();
+                    let n = |recs: &[VinylRecord]| {
+                        if query.is_empty() {
+                            recs.len()
+                        } else {
+                            recs.iter()
+                                .filter(|v| crate::views::vinyl_matches(v, &query))
+                                .count()
+                        }
+                    };
+                    format!(
+                        "{} in collection · {} in wantlist",
+                        n(&self.vinyl),
+                        n(&self.wantlist)
+                    )
+                } else {
+                    let mut counts = format!("{} tracks", self.rows.len());
+                    if !self.selection.is_empty() {
+                        counts.push_str(&format!(" · {} selected", self.selection.len()));
+                    }
+                    if self.missing_count > 0 {
+                        counts.push_str(&format!(" · {} missing", self.missing_count));
+                    }
+                    counts
+                };
                 // Right-aligned utility group: counts and Settings live away from
                 // the left-edge library actions so the toolbar reads "do work …
                 // status & config". Laying this out right-to-left FIRST reserves
