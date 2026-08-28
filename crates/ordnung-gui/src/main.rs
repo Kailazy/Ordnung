@@ -1388,6 +1388,8 @@ enum SidebarAction {
     Delete(Id),
     /// Tracks dropped onto a playlist (playlist id, dragged track ids).
     AddTracks(Id, Vec<Id>),
+    /// Open the Library Health window on whichever tab was last used.
+    OpenHealth,
 }
 
 /// A request raised by a track row's right-click context menu. Collected inside

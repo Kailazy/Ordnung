@@ -1544,6 +1544,10 @@ impl eframe::App for App {
                 // while the panel is drawing (`view` is threaded in explicitly).
                 let recent_count = self.recent_count;
                 let vinyl_count = self.vinyl_count;
+                // Library health only earns sidebar space when something is
+                // actually wrong; the tab under "All songs" appears with the
+                // first missing file and vanishes once the catalog is clean.
+                let missing_count = self.missing_count;
 
                 // The digital-library group: the "All songs" / "New" tile pair
                 // and the PLAYLISTS header (the tree itself scrolls in the middle
@@ -1599,6 +1603,27 @@ impl eframe::App for App {
                                 *view = LibraryView::RecentlyAdded;
                             }
                         });
+                        // A slim strip under the tile pair, shown only when the
+                        // catalog has something wrong with it: files the catalog
+                        // points at that are no longer on disk. Clicking it opens
+                        // the Library Health window (Duplicates / Missing tabs).
+                        // A clean catalog gets no row at all.
+                        if missing_count > 0 {
+                            ui.add_space(4.0);
+                            if nav_button(
+                                ui,
+                                &format!("⚠  {missing_count} missing"),
+                                *view == LibraryView::Duplicates
+                                    || *view == LibraryView::Missing,
+                                24.0,
+                                12.0,
+                            )
+                            .on_hover_note("Library health: missing files and duplicate copies")
+                            .clicked()
+                            {
+                                *sidebar_action = Some(SidebarAction::OpenHealth);
+                            }
+                        }
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
                             section_caption(ui, "PLAYLISTS");
@@ -1672,11 +1697,11 @@ impl eframe::App for App {
                     });
 
                 // ── Pinned bottom views (no captions) ─────────────────────────
-                // Two distinct groups, separated by spacing/rule rather than text
-                // headers: external sources (the Discogs vinyl collection) on top,
-                // then library-health diagnostics (Duplicates / Missing) below.
-                // They read as their own group, set off from the playlist tree by
-                // living in a separate pinned section.
+                // External sources — mounted USB devices and the Discogs vinyl
+                // collection — separated from the playlist tree by spacing and a
+                // rule rather than a text header. Library health isn't here: it
+                // only surfaces as a small tab under "All songs", and only when
+                // the catalog actually has something wrong with it.
                 egui::TopBottomPanel::bottom("nav_collections")
                     .frame(egui::Frame::none())
                     .show_separator_line(false)
@@ -1748,30 +1773,6 @@ impl eframe::App for App {
                             ui.separator();
                             ui.add_space(6.0);
                         }
-                        // ── Library health ──
-                        // Duplicates and Missing are two readings of the same
-                        // question ("what's wrong with the catalog?"), so they
-                        // share one sidebar entry and one window; the view itself
-                        // carries the tabs. Opening it returns to whichever tab
-                        // was last used.
-                        let health_label = if self.missing_count > 0 {
-                            format!("⚕  Library Health ({})", self.missing_count)
-                        } else {
-                            "⚕  Library Health".to_string()
-                        };
-                        if nav_button(
-                            ui,
-                            &health_label,
-                            self.view == LibraryView::Duplicates
-                                || self.view == LibraryView::Missing,
-                            34.0,
-                            14.0,
-                        )
-                        .on_hover_note("Duplicate copies and missing files")
-                        .clicked()
-                        {
-                            self.view = self.health_tab.clone();
-                        }
                         ui.add_space(8.0);
                     });
 
@@ -1835,6 +1836,10 @@ impl eframe::App for App {
                     }
                 }
                 self.reload();
+            }
+            Some(SidebarAction::OpenHealth) => {
+                let tab = self.health_tab.clone();
+                self.open_health_tab(tab, ctx);
             }
             None => {}
         }
