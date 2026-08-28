@@ -1024,6 +1024,36 @@ impl Catalog {
         Ok(())
     }
 
+    /// Record which external release a track was matched to, without touching
+    /// any cached image.
+    ///
+    /// The release id is what links a track to a record — it drives the vinyl
+    /// grid's "in catalog" badge and the library's "add to wantlist". Committing
+    /// to a release in the picker establishes that link *whether or not* the
+    /// cover is written: a track that already had art the user chose to keep is
+    /// still matched to the release they picked. [`Self::set_external_artwork`]
+    /// upserts the image columns from `excluded`, so it can't be reused here —
+    /// passing `None` bytes would blank the very cover being preserved. Existing
+    /// images are left exactly as they are, and no `user_edited` flag is set:
+    /// nothing new became embeddable.
+    pub fn set_external_release_link(
+        &self,
+        track_id: Id,
+        source: &str,
+        external_id: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO track_external_artwork (track_id, source, external_id, fetched_at)
+             VALUES (?1, ?2, ?3, unixepoch())
+             ON CONFLICT(track_id) DO UPDATE SET
+                 source      = excluded.source,
+                 external_id = excluded.external_id,
+                 fetched_at  = excluded.fetched_at",
+            params![track_id as i64, source, external_id],
+        )?;
+        Ok(())
+    }
+
     /// External-source artwork (PNG bytes) for `track_id`, if a successful
     /// fetch is on record. Returns `None` for both "no row" and "row records a
     /// no-match attempt".
@@ -4219,6 +4249,45 @@ mod tests {
         assert!(cat.delete_vinyl(own, 1).unwrap());
         assert!(!cat.delete_vinyl(own, 1).unwrap(), "already gone");
         assert_eq!(cat.vinyl_count(own).unwrap(), 0);
+    }
+
+    #[test]
+    fn set_external_release_link_records_the_id_and_keeps_existing_art() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let (a, _) = cat
+            .upsert_scanned(&scanned("/m/a.mp3", "A", "House", 1000))
+            .unwrap();
+
+        // A track that already has cached art from an earlier fetch.
+        cat.set_external_artwork(a, "discogs", Some("111"), Some("u"), Some(&[1, 2]), Some(&[3, 4]))
+            .unwrap();
+
+        // Re-matching to another release without writing a cover: the link moves,
+        // the images survive.
+        cat.set_external_release_link(a, "discogs", "222").unwrap();
+        assert_eq!(cat.release_track_links().unwrap(), vec![(222u64, a)]);
+        let (png, full): (Option<Vec<u8>>, Option<Vec<u8>>) = cat
+            .conn
+            .query_row(
+                "SELECT png_bytes, full_bytes FROM track_external_artwork WHERE track_id=?1",
+                params![a as i64],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(png.as_deref(), Some(&[1u8, 2][..]));
+        assert_eq!(full.as_deref(), Some(&[3u8, 4][..]));
+    }
+
+    #[test]
+    fn set_external_release_link_works_on_a_track_with_no_artwork_row() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let (a, _) = cat
+            .upsert_scanned(&scanned("/m/a.mp3", "A", "House", 1000))
+            .unwrap();
+        // The regression: picking a release for a track that kept its embedded
+        // art used to leave it linked to nothing, so it could never be wantlisted.
+        cat.set_external_release_link(a, "discogs", "4460898").unwrap();
+        assert_eq!(cat.release_track_links().unwrap(), vec![(4460898u64, a)]);
     }
 
     #[test]

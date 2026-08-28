@@ -2611,6 +2611,16 @@ impl App {
             };
 
             if let Ok(catalog) = Catalog::open(&db_path) {
+                // Committing to a release links the track to that record, even
+                // when the cover isn't being written — the user picked it, so
+                // the library knows which record this is and can wantlist it.
+                // The cover branch below writes the same link with the images;
+                // this covers the "keep my existing art" case, which otherwise
+                // left the track matched to nothing.
+                if full_bytes.is_none() {
+                    let _ =
+                        catalog.set_external_release_link(track_id, "discogs", &release_id);
+                }
                 // Write the cover only when asked. In a song-data run the user may
                 // be enriching tags on a track that already has art they want kept.
                 if let Some(full_bytes) = &full_bytes {
@@ -2714,6 +2724,15 @@ impl App {
     /// none survive, say so instead of firing an empty edit.
     pub(crate) fn flush_wantlist_after_fetch(&mut self, ctx: &egui::Context) {
         if self.wantlist_after_fetch.is_empty() || !self.artwork_queue.is_empty() {
+            return;
+        }
+        // The fetch job that fed the picker usually hasn't reported `Done` yet
+        // when the last save lands, so the shared job channel is still occupied.
+        // `spawn_vinyl_edit` refuses to start on top of a running job, so firing
+        // now would drop the want on the floor with a "Busy" message. Hold the
+        // pending state instead — `poll_pending_wantlist` retries once the
+        // channel frees, which is the very next frame after `Done` drains.
+        if self.is_busy() || self.artwork_saving {
             return;
         }
         let pending = std::mem::take(&mut self.wantlist_after_fetch);

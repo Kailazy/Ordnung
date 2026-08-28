@@ -851,12 +851,19 @@ impl eframe::App for App {
         self.poll_thumbs(ctx);
         self.poll_vinyl_covers(ctx);
         self.poll_artwork_save(ctx);
-        // A "wantlist it, matching first" request whose fetch ended without ever
-        // queueing a picker (no candidates, or the run was cancelled) would
-        // otherwise sit pending forever. Once the job is done and the queue is
-        // empty, settle it — the flush is a no-op when nothing is pending.
+        // Settle a pending "wantlist it, matching first" request. This is the
+        // path that actually fires it in the normal case: the flush inside
+        // `poll_artwork_save` runs while the fetch job still owns the shared job
+        // channel, so it defers, and this retries once `poll_worker` has drained
+        // `Done` and freed it. It also covers a fetch that never queued a picker
+        // at all (no candidates, or cancelled). No-op when nothing is pending.
         if !self.is_busy() && !self.artwork_saving && self.artwork_queue.is_empty() {
             self.flush_wantlist_after_fetch(ctx);
+        } else if !self.wantlist_after_fetch.is_empty() {
+            // Still blocked (the fetch's `Done` hasn't drained, or auto-write
+            // took the channel first). Keep the frames coming so the retry above
+            // gets its chance without waiting on the next mouse move.
+            ctx.request_repaint();
         }
         self.poll_discogs_identity();
         self.poll_metadata_preview();
