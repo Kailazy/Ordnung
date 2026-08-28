@@ -51,6 +51,16 @@ impl App {
             return;
         }
 
+        // With auto-write on, a plain "Save" is also a write: the setting is the
+        // user's standing instruction to keep source files in sync, so the edit
+        // never parks behind the bulk-write button. Explicit "Write to source
+        // file" clicks still win when the setting is off.
+        let write_file = write_file.or_else(|| {
+            self.config
+                .auto_write_tags
+                .then(|| PathBuf::from(&track.source_path))
+        });
+
         match write_file {
             Some(path) => match tag::write_to_file(&path, &track.tags, None) {
                 Ok(()) => {
@@ -104,7 +114,11 @@ impl App {
                 }
             })
             .unwrap_or_default();
-        let h = if label.is_empty() { HEAD } else { HEAD + LABEL_H };
+        let h = if label.is_empty() {
+            HEAD
+        } else {
+            HEAD + LABEL_H
+        };
 
         // Horizontal: measured from the window's own right edge, because that's
         // what `inset` (the drawer's width) is measured against. Using

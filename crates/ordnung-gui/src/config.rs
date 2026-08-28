@@ -71,6 +71,15 @@ pub struct Config {
     /// default; defaults to on for older configs that predate the field too.
     #[serde(default = "default_true")]
     pub auto_analyze: bool,
+    /// Write tag edits straight into the source files instead of parking them
+    /// behind the toolbar's "Write N edited to files" button. Off by default:
+    /// source files are sacred and tag writeback is opt-in (see the
+    /// `ordnung-architecture` product rules), so turning this on IS the user's
+    /// standing request to write. When on, the inspector's Save writes the file
+    /// too, and edits made elsewhere (Discogs enrichment, bulk fetches) are
+    /// flushed by a background write as soon as no other job is running.
+    #[serde(default)]
+    pub auto_write_tags: bool,
     /// Default target format pre-selected in the convert dialogs, as a stable
     /// lowercase key (`mp3`/`aac`/`flac`/`wav`/`aiff`; see `util::format_key`).
     /// Empty or unknown falls back to AIFF, the prior hard-coded default.
@@ -345,8 +354,11 @@ impl StartupView {
     }
 
     /// All options, in picker order.
-    pub const ALL: [StartupView; 3] =
-        [StartupView::Library, StartupView::Vinyl, StartupView::Recent];
+    pub const ALL: [StartupView; 3] = [
+        StartupView::Library,
+        StartupView::Vinyl,
+        StartupView::Recent,
+    ];
 }
 
 /// How the player waveform is colored. Parsed from `Config::waveform_color_mode`;
@@ -392,6 +404,7 @@ impl Default for Config {
             nav_primary: default_nav_primary(),
             startup_view: default_startup_view(),
             auto_analyze: true,
+            auto_write_tags: false,
             convert_format: default_convert_format(),
             convert_bitrate_kbps: String::new(),
             convert_out_dir: None,

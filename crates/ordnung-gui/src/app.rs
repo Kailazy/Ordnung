@@ -156,6 +156,9 @@ impl App {
             confirm_bulk_write: false,
             confirm_delete: None,
             write_edits_running: false,
+            auto_write_stalled_at: None,
+            auto_write_job: false,
+            auto_write_pending_latch: false,
             playlists: Vec::new(),
             dup_groups: Vec::new(),
             dup_dirty: false,
@@ -745,6 +748,27 @@ impl eframe::App for App {
             self.reload();
             self.refresh_selected();
             self.recount_missing();
+            // `reload` has just refreshed `edited_count`. If an automatic write
+            // ran and tracks are still pending, those files can't be written —
+            // latch the count so auto-write doesn't spin on them every frame.
+            if self.auto_write_pending_latch {
+                self.auto_write_pending_latch = false;
+                self.auto_write_stalled_at = (self.edited_count > 0).then_some(self.edited_count);
+            }
+        }
+        // Auto-write: with the setting on, edits that landed outside the
+        // inspector (Discogs enrichment, bulk fetches) still leave tracks
+        // pending a file write. Flush them as soon as the worker channel is
+        // free — one job at a time, and never on top of a running job, since
+        // `job_rx` is shared. `edited_count` is refreshed by `reload`, so this
+        // sees a fresh number and settles back to zero once the write lands.
+        if self.config.auto_write_tags
+            && self.edited_count > 0
+            && !self.is_busy()
+            && self.auto_write_stalled_at != Some(self.edited_count)
+        {
+            self.auto_write_job = true;
+            self.spawn_write_edits(ctx.clone());
         }
         self.poll_covers(ctx);
         self.poll_thumbs(ctx);
@@ -1429,9 +1453,10 @@ impl eframe::App for App {
                 // and the PLAYLISTS header (the tree itself scrolls in the middle
                 // panel below). Drawn wherever `nav_primary` puts it, so the same
                 // code serves both the top slot and the vinyl-first layout.
-                let draw_digital_group = |ui: &mut egui::Ui,
-                                              view: &mut LibraryView,
-                                              sidebar_action: &mut Option<SidebarAction>| {
+                let draw_digital_group =
+                    |ui: &mut egui::Ui,
+                     view: &mut LibraryView,
+                     sidebar_action: &mut Option<SidebarAction>| {
                         // "All songs" is the home base — the big tile — paired on the
                         // same row with a smaller "Recent" tile: the self-clearing
                         // inbox of fresh imports still awaiting analysis + a Discogs
@@ -1498,14 +1523,13 @@ impl eframe::App for App {
                                         .on_hover_note("New playlist")
                                         .clicked()
                                     {
-                                        *sidebar_action =
-                                            Some(SidebarAction::NewPlaylist(None));
+                                        *sidebar_action = Some(SidebarAction::NewPlaylist(None));
                                     }
                                 },
                             );
                         });
                         ui.add_space(4.0);
-                };
+                    };
 
                 // The vinyl tile. Like the digital group, it's drawn from one
                 // place into whichever slot `nav_primary` assigns it — big and

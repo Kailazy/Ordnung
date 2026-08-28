@@ -57,6 +57,14 @@ impl App {
             // A write-edits job may have embedded fetched cover art into files;
             // the per-id texture cache survives `reload` (ids stay live), so
             // drop it here to force the new covers to re-decode on next render.
+            // An automatic write has finished (successfully or not). Hand the
+            // stall check to the caller, which re-counts pending edits after the
+            // reload this poll triggers. Done here rather than on the reload path
+            // because a failed job reports `Failed` without asking for a reload.
+            if std::mem::take(&mut self.auto_write_job) {
+                self.auto_write_pending_latch = true;
+                reload = true;
+            }
             if self.write_edits_running {
                 self.write_edits_running = false;
                 self.cover_cache.clear();

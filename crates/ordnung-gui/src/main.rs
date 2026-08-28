@@ -1089,6 +1089,20 @@ struct App {
     /// completion handler drop cover textures, since that job may have embedded
     /// fetched art and the per-id texture cache would otherwise show stale covers.
     write_edits_running: bool,
+    /// Backstop for auto-write (`config.auto_write_tags`): the pending-edit count
+    /// left over after an automatic write finished. Tracks whose files can't be
+    /// written (read-only, missing, unsupported container) keep their
+    /// `user_edited` flag, so without this the update loop would respawn the job
+    /// every frame forever. Auto-write stands down until the count *changes* —
+    /// a fresh edit, or the user clearing the stuck ones by hand.
+    auto_write_stalled_at: Option<u64>,
+    /// True when the running write-edits job was started by auto-write rather
+    /// than the toolbar button. Read once the job finishes and the row counts
+    /// have been refreshed, to decide whether to arm `auto_write_stalled_at`.
+    auto_write_job: bool,
+    /// Set when an auto-write job finished and the stall check is owed, cleared
+    /// once the post-job reload has refreshed `edited_count`.
+    auto_write_pending_latch: bool,
     /// Playlists & folders, refreshed on every `reload`. Drives the left sidebar.
     playlists: Vec<Playlist>,
     /// Duplicate groups for the Duplicates view. Computed off the UI thread (the

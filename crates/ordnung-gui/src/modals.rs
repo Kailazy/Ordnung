@@ -409,6 +409,35 @@ impl App {
                                         ui.add_space(14.0);
                                         ui.separator();
                                         ui.add_space(10.0);
+                                        ui.label(egui::RichText::new("Tags").strong());
+                                        ui.label(
+                    egui::RichText::new(
+                        "Off, edits live in the catalog until you press the toolbar's                          Write button. On, Ordnung keeps the source files in sync as                          you edit and as Discogs fills fields in. Files change on disk,                          so those tracks get re-analyzed on the next Analyze.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                                        ui.add_space(4.0);
+                                        if ui
+                                            .checkbox(
+                                                &mut self.config.auto_write_tags,
+                                                "Write tag edits into source files automatically",
+                                            )
+                                            .on_hover_note("Keep source files in sync with edits")
+                                            .changed()
+                                        {
+                                            // Re-arm the stall backstop: the user
+                                            // flipping the setting is a fresh request
+                                            // to try the files again.
+                                            self.auto_write_stalled_at = None;
+                                            if let Err(e) = self.config.save() {
+                                                self.status =
+                                                    format!("Couldn't save settings: {e}");
+                                            }
+                                        }
+                                        ui.add_space(14.0);
+                                        ui.separator();
+                                        ui.add_space(10.0);
                                         ui.label(egui::RichText::new("Discogs token").strong());
                                         ui.label(
                     egui::RichText::new(
