@@ -332,7 +332,7 @@ impl App {
         let db = self.db_path.clone();
         thread::spawn(move || {
             let client =
-                discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
+                discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
             let mine = client.marketplace_price(release_id);
             // Priced fine, or the request failed — either way there's nothing
             // more to ask.
@@ -407,7 +407,7 @@ impl App {
                     }
                     let client = discogs::Client::new(
                         token,
-                        "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
+                        "Ordnung/0.1 +https://kailazy.github.io/Ordnung/",
                     );
                     cat.release_cached_or(&id, || client.fetch_release(&id))
                         .map_err(|e| e.to_string())

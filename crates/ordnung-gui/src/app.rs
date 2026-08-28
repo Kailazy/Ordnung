@@ -137,6 +137,8 @@ impl App {
             settings_open: false,
             settings_tab: SettingsTab::default(),
             token_input: String::new(),
+            discogs_auth: DiscogsAuth::default(),
+            discogs_auth_rx: None,
             confirm_clear_db: false,
             failure_report_title: String::new(),
             failure_report: Vec::new(),
@@ -197,6 +199,12 @@ impl App {
         let config = Config::load();
         app.token_input = config.discogs_token.clone();
         app.config = config;
+        // A token on disk isn't proof it still works, so start at "unverified"
+        // and let the Discogs tab verify on open rather than checking every
+        // launch — that would spend a rate-limited request nobody asked for.
+        if !app.discogs_token().trim().is_empty() {
+            app.discogs_auth = DiscogsAuth::Unverified;
+        }
         // Open on whichever section the user set as their home. A vinyl-first
         // collector lands on the shelf instead of the digital catalog.
         app.view = match StartupView::from_key(&app.config.startup_view) {
@@ -248,6 +256,72 @@ impl App {
             saved.to_string()
         } else {
             std::env::var("DISCOGS_TOKEN").unwrap_or_default()
+        }
+    }
+
+    /// Verify the saved token against `GET /oauth/identity` on a worker thread.
+    /// This is the whole point of the Discogs tab: it answers "am I actually
+    /// signed in?" up front instead of letting a bad token surface as a failed
+    /// artwork fetch hours later. A confirmed username is persisted to config,
+    /// which also saves the separate lookup the vinyl collection used to need.
+    pub(crate) fn spawn_discogs_identity_check(&mut self, ctx: egui::Context) {
+        let token = self.discogs_token().trim().to_string();
+        if token.is_empty() {
+            self.discogs_auth = DiscogsAuth::SignedOut;
+            self.discogs_auth_rx = None;
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.discogs_auth_rx = Some(rx);
+        self.discogs_auth = DiscogsAuth::Checking;
+        thread::spawn(move || {
+            let client =
+                discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
+            let outcome = match client.identity() {
+                Ok(username) => DiscogsAuth::Connected { username },
+                Err(e) => {
+                    let msg = e.to_string();
+                    // `map_ureq_err` folds every HTTP status into Error::Network,
+                    // so the status code has to be read back out of the message
+                    // to tell "token is bad" from "network is down" — the two
+                    // need very different wording in the UI.
+                    if msg.contains("HTTP 401") || msg.contains("HTTP 403") {
+                        DiscogsAuth::Rejected
+                    } else {
+                        DiscogsAuth::Unreachable { detail: msg }
+                    }
+                }
+            };
+            let _ = tx.send(outcome);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Drain the identity check's result. Persists a confirmed username so the
+    /// collection views can address the user's Discogs account across launches.
+    pub(crate) fn poll_discogs_identity(&mut self) {
+        let Some(rx) = &self.discogs_auth_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(auth) => {
+                if let DiscogsAuth::Connected { username } = &auth {
+                    if &self.config.discogs_username != username {
+                        self.config.discogs_username = username.clone();
+                        let _ = self.config.save();
+                    }
+                }
+                self.discogs_auth = auth;
+                self.discogs_auth_rx = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                // Worker died without sending; don't strand the UI on a spinner.
+                self.discogs_auth = DiscogsAuth::Unreachable {
+                    detail: "the check didn't finish".into(),
+                };
+                self.discogs_auth_rx = None;
+            }
         }
     }
 
@@ -774,6 +848,7 @@ impl eframe::App for App {
         self.poll_thumbs(ctx);
         self.poll_vinyl_covers(ctx);
         self.poll_artwork_save();
+        self.poll_discogs_identity();
         self.poll_metadata_preview();
         self.poll_vinyl_sheet();
         self.poll_sheet_price();

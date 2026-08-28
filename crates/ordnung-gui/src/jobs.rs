@@ -1209,7 +1209,7 @@ pub(crate) fn run_refresh_vinyl(
             return;
         }
     };
-    let client = discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
+    let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
 
     if !quiet {
         let _ = tx.send(JobMsg::Status("Fetching Discogs collection…".into()));
@@ -1395,7 +1395,7 @@ pub(crate) fn run_vinyl_edit(
             return;
         }
     };
-    let client = discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
+    let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
 
     // Every collection/wantlist endpoint is keyed by username. Resolve it once
     // if a previous sync hasn't already, and report it back so the next edit
@@ -1661,7 +1661,7 @@ pub(crate) fn run_fetch_tracks(
             return;
         }
     };
-    let client = discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
+    let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
     let total = ids.len();
     let (mut queued, mut none, mut skipped, mut errored) = (0u64, 0u64, 0u64, 0u64);
     let mut fails: Vec<(String, String)> = Vec::new();

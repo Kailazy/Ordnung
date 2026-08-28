@@ -581,7 +581,7 @@ impl App {
         let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
             let client =
-                discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
+                discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
             // An explicit step is never stood down: it's the request the user
             // is waiting on, so it runs to completion.
             let result = browse_step(&client, thread, entity, page, &skip, &NEVER_CANCEL);
@@ -763,7 +763,7 @@ impl App {
                 }
                 let client = discogs::Client::new(
                     token,
-                    "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
+                    "Ordnung/0.1 +https://kailazy.github.io/Ordnung/",
                 );
                 cat.release_cached_or(&id, || client.fetch_release(&id))
                     .ok()
@@ -865,7 +865,7 @@ impl App {
         let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
             let client =
-                discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
+                discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
             for (thread, entity, page) in jobs {
                 // Checked before each browse rather than only at the top: the
                 // artist thread's page and the label thread's page are two
@@ -966,7 +966,7 @@ impl App {
             thread::spawn(move || {
                 let client = discogs::Client::new(
                     token,
-                    "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
+                    "Ordnung/0.1 +https://kailazy.github.io/Ordnung/",
                 );
                 // Image CDN downloads don't count against the API rate limit,
                 // so a cover fetch never delays the next dig step.

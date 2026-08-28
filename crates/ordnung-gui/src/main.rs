@@ -673,6 +673,29 @@ struct PreviewMsg {
     detail: Option<discogs::ReleaseDetail>,
 }
 
+/// What the Discogs settings tab knows about the saved token. "Connected" is
+/// only ever reached by a real `GET /oauth/identity` round-trip — a token that
+/// merely *exists* in the config proves nothing, since it may have been revoked
+/// or mistyped, and the old UI surfaced that as a confusing mid-fetch failure.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum DiscogsAuth {
+    /// No token saved (and none in `DISCOGS_TOKEN`).
+    #[default]
+    SignedOut,
+    /// A token is saved but hasn't been checked yet this session.
+    Unverified,
+    /// Identity request in flight.
+    Checking,
+    /// Discogs confirmed the token and named its owner.
+    Connected { username: String },
+    /// Discogs rejected the token (HTTP 401/403) — revoked, mistyped, or wrong.
+    Rejected,
+    /// The check itself failed (offline, DNS, timeout). Distinct from
+    /// [`DiscogsAuth::Rejected`]: the token may be perfectly good, so this must
+    /// not read as "your token is bad".
+    Unreachable { detail: String },
+}
+
 /// Category tabs in the Settings window's left rail (Ableton-style). Session-only
 /// selection; the window always opens on the default ([`SettingsTab::General`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -683,17 +706,19 @@ pub(crate) enum SettingsTab {
     Waveform,
     Sorting,
     Conversion,
+    Discogs,
     Advanced,
 }
 
 impl SettingsTab {
     /// All tabs in rail order.
-    pub(crate) const ALL: [SettingsTab; 6] = [
+    pub(crate) const ALL: [SettingsTab; 7] = [
         SettingsTab::General,
         SettingsTab::Analysis,
         SettingsTab::Waveform,
         SettingsTab::Sorting,
         SettingsTab::Conversion,
+        SettingsTab::Discogs,
         SettingsTab::Advanced,
     ];
 
@@ -705,6 +730,7 @@ impl SettingsTab {
             SettingsTab::Waveform => "Waveform",
             SettingsTab::Sorting => "Sorting",
             SettingsTab::Conversion => "Conversion",
+            SettingsTab::Discogs => "Discogs",
             SettingsTab::Advanced => "Advanced",
         }
     }
@@ -1027,6 +1053,12 @@ struct App {
     settings_tab: SettingsTab,
     /// Edit buffer for the token field while the Settings window is open.
     token_input: String,
+    /// Result of the last Discogs identity check — what the Discogs settings tab
+    /// renders. Verified against `GET /oauth/identity`, so it reflects whether
+    /// the saved token *actually works*, not merely that one is present.
+    discogs_auth: DiscogsAuth,
+    /// Delivers the identity check's outcome from its worker thread.
+    discogs_auth_rx: Option<Receiver<DiscogsAuth>>,
     /// Whether the "clear the whole catalog?" confirmation popup is showing.
     confirm_clear_db: bool,
     /// Title of the failure report (which job produced it).

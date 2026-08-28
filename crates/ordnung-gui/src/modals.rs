@@ -275,9 +275,226 @@ impl App {
     /// Settings window: enter and persist the Discogs token. Saved to
     /// `~/.ordnung/config.toml` so it survives restarts and Finder launches
     /// (which inherit no shell environment).
+    /// The Discogs settings tab: connection state up top, then the token field,
+    /// then the attribution Discogs' API terms require us to display.
+    ///
+    /// Returns `true` when the token should be saved (the caller owns the save
+    /// so it stays on the same path as the window's other persistence).
+    ///
+    /// Onboarding shape: the friction in a personal access token isn't pasting
+    /// it, it's *finding* it — so "Get my token" deep-links straight to the
+    /// Discogs page that generates one, and the paste is verified immediately
+    /// instead of failing silently later.
+    fn draw_discogs_tab(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut save = false;
+        let accent = crate::sidebar::NAV_ACCENT;
+
+        ui.label(egui::RichText::new("Discogs account").strong());
+        ui.label(
+            egui::RichText::new(
+                "Ordnung uses Discogs to fetch cover art and release details, and \
+                 to read your collection and wantlist.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(10.0);
+
+        // ---- Identity card ------------------------------------------------
+        // One framed block whose colour and content are driven entirely by
+        // `discogs_auth`, so "connected" is visually unmistakable from "a token
+        // is present but unproven".
+        let (stripe, glyph, heading, body): (egui::Color32, &str, String, String) =
+            match &self.discogs_auth {
+                DiscogsAuth::Connected { username } => (
+                    egui::Color32::from_rgb(70, 155, 90),
+                    "✓",
+                    format!("Connected as {username}"),
+                    "Ordnung can fetch artwork and read your collection.".into(),
+                ),
+                DiscogsAuth::Checking => (
+                    accent,
+                    "◌",
+                    "Checking…".into(),
+                    "Asking Discogs who this token belongs to.".into(),
+                ),
+                DiscogsAuth::Rejected => (
+                    egui::Color32::from_rgb(180, 70, 70),
+                    "✕",
+                    "Token rejected".into(),
+                    "Discogs didn't accept this token. It may have been revoked or \
+                     pasted incompletely. Generate a new one and paste it below."
+                        .into(),
+                ),
+                DiscogsAuth::Unreachable { detail } => (
+                    egui::Color32::from_rgb(190, 145, 60),
+                    "!",
+                    "Couldn't reach Discogs".into(),
+                    format!("The token may be fine; the check itself failed. {detail}"),
+                ),
+                DiscogsAuth::Unverified => (
+                    egui::Color32::from_gray(110),
+                    "•",
+                    "Not checked yet".into(),
+                    "A token is saved. Verify it to confirm it still works.".into(),
+                ),
+                DiscogsAuth::SignedOut => (
+                    egui::Color32::from_gray(110),
+                    "•",
+                    "Not connected".into(),
+                    "Add a personal access token to turn on Discogs features.".into(),
+                ),
+            };
+
+        egui::Frame::none()
+            .fill(ui.visuals().extreme_bg_color)
+            .rounding(egui::Rounding::same(6.0))
+            .stroke(egui::Stroke::new(1.0, stripe.gamma_multiply(0.5)))
+            .inner_margin(egui::Margin::symmetric(12.0, 11.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    // Status glyph in a filled disc — the card's one strong
+                    // colour accent, so state reads at a glance.
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 11.0, stripe);
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        glyph,
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::WHITE,
+                    );
+                    ui.add_space(4.0);
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(&heading).strong().size(14.0));
+                        ui.label(egui::RichText::new(&body).small().weak());
+                    });
+                });
+            });
+
+        // Spinner keeps repainting while the request is in flight.
+        if self.discogs_auth == DiscogsAuth::Checking {
+            ui.ctx().request_repaint();
+        }
+
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            let busy = self.discogs_auth == DiscogsAuth::Checking;
+            let has_token = !self.discogs_token().trim().is_empty();
+            if ui
+                .add_enabled(!busy && has_token, egui::Button::new("Verify connection"))
+                .on_hover_text("Ask Discogs to confirm this token")
+                .clicked()
+            {
+                let ctx = ui.ctx().clone();
+                self.spawn_discogs_identity_check(ctx);
+            }
+            if let DiscogsAuth::Connected { .. } = self.discogs_auth {
+                if ui
+                    .button("Sign out")
+                    .on_hover_text("Forget the saved token")
+                    .clicked()
+                {
+                    self.token_input.clear();
+                    self.config.discogs_token.clear();
+                    self.config.discogs_username.clear();
+                    self.discogs_auth = DiscogsAuth::SignedOut;
+                    if let Err(e) = self.config.save() {
+                        self.status = format!("Couldn't save settings: {e}");
+                    } else {
+                        self.status = "Signed out of Discogs.".into();
+                    }
+                }
+            }
+        });
+
+        ui.add_space(14.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        // ---- Token entry ---------------------------------------------------
+        ui.label(egui::RichText::new("Personal access token").strong());
+        ui.label(
+            egui::RichText::new(
+                "Discogs generates this on your account's Developers page. It's \
+                 stored locally and only ever sent to Discogs.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(6.0);
+        if ui
+            .add(
+                egui::Button::new("Get my token on Discogs ↗")
+                    .fill(crate::sidebar::NAV_ACCENT),
+            )
+            .on_hover_text("Opens discogs.com/settings/developers")
+            .clicked()
+        {
+            crate::util::open_url("https://www.discogs.com/settings/developers");
+        }
+        ui.add_space(8.0);
+        let token_field = ui.add(
+            egui::TextEdit::singleline(&mut self.token_input)
+                .password(true)
+                .hint_text("paste your Discogs token")
+                .desired_width(f32::INFINITY),
+        );
+        // Enter in the field saves, matching the Save button.
+        let submitted = token_field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Save and verify").clicked() || submitted {
+                save = true;
+            }
+            if ui.button("Cancel").clicked() {
+                self.token_input = self.config.discogs_token.clone();
+                self.settings_open = false;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(p) = config::config_path() {
+                    ui.label(
+                        egui::RichText::new(p.display().to_string())
+                            .small()
+                            .weak(),
+                    );
+                }
+            });
+        });
+
+        ui.add_space(14.0);
+        ui.separator();
+        ui.add_space(10.0);
+        // Required verbatim by the Discogs API Terms of Use, which oblige us to
+        // display it "prominently" wherever the API and its content are used.
+        ui.label(
+            egui::RichText::new(
+                "This application uses Discogs' API but is not affiliated with, \
+                 sponsored or endorsed by Discogs. \"Discogs\" is a trademark of \
+                 Zink Media, LLC.",
+            )
+            .small()
+            .weak(),
+        );
+
+        save
+    }
+
     pub(crate) fn draw_settings(&mut self, ctx: &egui::Context) {
         if !self.settings_open {
             return;
+        }
+        // Landing on the Discogs tab with a saved-but-unproven token verifies it
+        // once, so the card shows a real answer rather than asking the user to
+        // press a button to find out. Only from `Unverified`, so this can't loop
+        // or re-spend a request on every frame.
+        if self.settings_tab == SettingsTab::Discogs
+            && self.discogs_auth == DiscogsAuth::Unverified
+        {
+            let c = ctx.clone();
+            self.spawn_discogs_identity_check(c);
         }
         let mut window_open = true;
         let mut save = false;
@@ -439,50 +656,6 @@ impl App {
                                                     format!("Couldn't save settings: {e}");
                                             }
                                         }
-                                        ui.add_space(14.0);
-                                        ui.separator();
-                                        ui.add_space(10.0);
-                                        ui.label(egui::RichText::new("Discogs token").strong());
-                                        ui.label(
-                    egui::RichText::new(
-                        "Used to fetch cover art. Create a personal access token at \
-                         discogs.com → Settings → Developers, then paste it here.",
-                    )
-                    .small()
-                    .weak(),
-                );
-                                        ui.add_space(6.0);
-                                        ui.add(
-                                            egui::TextEdit::singleline(&mut self.token_input)
-                                                .password(true)
-                                                .hint_text("paste your Discogs token")
-                                                .desired_width(f32::INFINITY),
-                                        );
-                                        ui.add_space(10.0);
-                                        ui.horizontal(|ui| {
-                                            if ui.button("Save").clicked() {
-                                                save = true;
-                                            }
-                                            if ui.button("Cancel").clicked() {
-                                                self.token_input =
-                                                    self.config.discogs_token.clone();
-                                                self.settings_open = false;
-                                            }
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    if let Some(p) = config::config_path() {
-                                                        ui.label(
-                                                            egui::RichText::new(
-                                                                p.display().to_string(),
-                                                            )
-                                                            .small()
-                                                            .weak(),
-                                                        );
-                                                    }
-                                                },
-                                            );
-                                        });
                                     }
                                     SettingsTab::Analysis => {
                                         ui.label(egui::RichText::new("Analysis").strong());
@@ -1294,6 +1467,11 @@ impl App {
                                             }
                                         }
                                     }
+                                    SettingsTab::Discogs => {
+                                        if self.draw_discogs_tab(ui) {
+                                            save = true;
+                                        }
+                                    }
                                     SettingsTab::Advanced => {
                                         ui.label(egui::RichText::new("Danger zone").strong());
                                         ui.label(
@@ -1331,12 +1509,20 @@ impl App {
             self.config.discogs_token = self.token_input.trim().to_string();
             match self.config.save() {
                 Ok(()) => {
-                    self.status = if self.config.discogs_token.is_empty() {
-                        "Cleared Discogs token.".into()
+                    if self.config.discogs_token.is_empty() {
+                        self.status = "Cleared Discogs token.".into();
+                        self.config.discogs_username.clear();
+                        let _ = self.config.save();
+                        self.discogs_auth = DiscogsAuth::SignedOut;
                     } else {
-                        "Saved Discogs token to ~/.ordnung/config.toml.".into()
-                    };
-                    self.settings_open = false;
+                        self.status = "Saved Discogs token to ~/.ordnung/config.toml.".into();
+                        // Verify straight away and keep the window open: the
+                        // whole point of this tab is that the user watches the
+                        // token turn into a confirmed identity. Closing here
+                        // would hide the answer they just asked for.
+                        let ctx = ctx.clone();
+                        self.spawn_discogs_identity_check(ctx);
+                    }
                 }
                 Err(e) => self.status = format!("Couldn't save settings: {e}"),
             }
@@ -2272,7 +2458,7 @@ impl App {
         let ctx = ctx.clone();
         thread::spawn(move || {
             let client =
-                discogs::Client::new(token, "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung");
+                discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
             // Open the catalog first so the fetch can go cache-first (reusing a
             // release already pulled, sparing a rate-limited round trip).
             let resolved = Catalog::open(&db_path).and_then(|catalog| {
@@ -2372,7 +2558,7 @@ impl App {
             } else {
                 Some(discogs::Client::new(
                     token,
-                    "Ordnung/0.1 +https://github.com/ordnung-dj/ordnung",
+                    "Ordnung/0.1 +https://kailazy.github.io/Ordnung/",
                 ))
             };
 
