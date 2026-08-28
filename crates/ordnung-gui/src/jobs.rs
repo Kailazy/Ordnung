@@ -895,12 +895,16 @@ pub(crate) fn run_write_edits(
                 // Synced: drop the flag so it won't be written again next time.
                 let _ = catalog.clear_user_edited(t.id);
                 // If we embedded art, re-scan so the catalog's cover_thumb
-                // reflects what now lives in the file (same reasoning as the
-                // single-track embed path).
+                // reflects what now lives in the file, then drop the fetched
+                // row — the cover now lives in the file, so keeping it around
+                // would leave the inspector's "Embed fetched cover into file"
+                // button offering a write that already happened. Same reasoning
+                // (and same order) as the single-track embed path.
                 if art.is_some() {
                     if let Ok(scanned) = scan::scan_file(&path) {
                         let _ = catalog.upsert_scanned(&scanned);
                     }
+                    let _ = catalog.clear_external_artwork(t.id);
                 }
                 written += 1;
             }
