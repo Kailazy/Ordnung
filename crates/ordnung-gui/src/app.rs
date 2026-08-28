@@ -1,5 +1,6 @@
 //! Split out of `main.rs`; part of the GUI `App`.
 use super::*;
+use crate::ui::tokens::space;
 
 /// How long the search box waits for typing to stop before rebuilding the rows
 /// (see `App::filter_apply_at`). Short enough to feel immediate — comfortably
@@ -1392,9 +1393,16 @@ impl eframe::App for App {
                         // this remainder.
                         let reserved = if has_filters { 140.0 } else { 0.0 };
                         let w = (ui.available_width() - reserved).clamp(120.0, 320.0);
+                        // egui's TextEdit defaults to a 4×2 inner margin, which
+                        // leaves the caret and hint text jammed against the
+                        // frame. Give the field real breathing room and a
+                        // comfortable hit height — it's the most-used control in
+                        // the toolbar, so it earns the space.
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut self.filter)
                                 .desired_width(w)
+                                .margin(egui::Margin::symmetric(space::S3, space::S2 + 1.0))
+                                .min_size(egui::vec2(0.0, 26.0))
                                 .hint_text("Search songs and records"),
                         );
                         if resp.changed() {
@@ -1895,6 +1903,14 @@ impl eframe::App for App {
             // tracks expire. `reload` then re-pins whatever Recent shows.
             if prev_view == LibraryView::RecentlyAdded || self.view == LibraryView::RecentlyAdded {
                 self.recent_pinned.clear();
+            }
+            // A record sheet belongs to the Vinyl section. Leaving that section
+            // closes it rather than leaving it stranded over the Library — and,
+            // as everywhere else the sheet closes, takes its video with it so
+            // nothing keeps playing with no sheet on screen to explain it.
+            if prev_view == LibraryView::Vinyl && self.vinyl_sheet.is_some() {
+                self.stop_sheet_video();
+                self.vinyl_sheet = None;
             }
             self.reload();
         }

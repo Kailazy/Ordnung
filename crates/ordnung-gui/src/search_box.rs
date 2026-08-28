@@ -11,6 +11,7 @@
 //! navigation only, per `ordnung-architecture`.
 
 use super::*;
+use crate::ui::tokens::{color, radius, space};
 
 /// How many suggestions the popup shows.
 pub(crate) const MAX_SEARCH_HITS: usize = 5;
@@ -158,8 +159,11 @@ impl App {
             .order(egui::Order::Foreground)
             .fixed_pos(field.rect.left_bottom() + egui::vec2(0.0, 4.0))
             .show(&ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_width(field.rect.width().max(300.0));
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::symmetric(space::S1, space::S2))
+                    .rounding(egui::Rounding::same(radius::MD))
+                    .show(ui, |ui| {
+                    ui.set_width(field.rect.width().max(320.0));
                     for (i, scored) in hits.iter().enumerate() {
                         let selected = cursor == Some(i);
                         // Resolve the row's artwork from whichever cache owns it,
@@ -232,7 +236,7 @@ fn search_hit_row(
     selected: bool,
     tex: Option<Tex>,
 ) -> bool {
-    let (glyph, primary, secondary) = match hit {
+    let (kind, primary, secondary) = match hit {
         SearchHit::Track {
             title,
             artist,
@@ -244,7 +248,7 @@ fn search_hit_row(
                 .filter(|s| !s.trim().is_empty())
                 .collect::<Vec<_>>()
                 .join(" · ");
-            ("♪", title.clone(), sub)
+            (HitKind::Track, title.clone(), sub)
         }
         SearchHit::Vinyl {
             list,
@@ -264,17 +268,18 @@ fn search_hit_row(
             if let Some(t) = matched_track {
                 line = format!("{t} — {line}");
             }
-            let glyph = match list {
-                VinylList::Collection => "◉",
-                VinylList::Wantlist => "☆",
+            let kind = match list {
+                VinylList::Collection => HitKind::Record,
+                VinylList::Wantlist => HitKind::Wanted,
             };
-            (glyph, title.clone(), line)
+            (kind, title.clone(), line)
         }
     };
 
     // Tall enough for the artwork plus breathing room, so the two text lines
-    // sit centred against it rather than crowding the square.
-    let height = HIT_COVER_PX + 12.0;
+    // sit centred against it rather than crowding the square. One S3 gutter
+    // above and below keeps the popup on the same 8-pt rhythm as the toolbar.
+    let height = HIT_COVER_PX + space::S3 * 2.0;
     let (rect, resp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
         egui::Sense::click(),
@@ -286,12 +291,12 @@ fn search_hit_row(
             ui.visuals().widgets.hovered.weak_bg_fill,
         );
     }
-    let pad = ui.spacing().button_padding.x + 2.0;
+    let pad = space::S3;
     let art = egui::Rect::from_min_size(
         egui::pos2(rect.left() + pad, rect.center().y - HIT_COVER_PX / 2.0),
         egui::vec2(HIT_COVER_PX, HIT_COVER_PX),
     );
-    let rounding = egui::Rounding::same(3.0);
+    let rounding = egui::Rounding::same(radius::XS);
     match &tex {
         Some(handle) => {
             egui::Image::new(handle)
@@ -299,58 +304,56 @@ fn search_hit_row(
                 .paint_at(ui, art);
         }
         None => {
-            // No art (or still decoding): a muted square carrying the source
-            // glyph, so the row keeps its shape and still says where it's from.
-            ui.painter()
-                .rect_filled(art, rounding, egui::Color32::from_gray(40));
-            ui.painter().text(
-                art.center(),
-                egui::Align2::CENTER_CENTER,
-                glyph,
-                egui::FontId::proportional(14.0),
-                ui.visuals().weak_text_color(),
-            );
+            // No art (or still decoding): a muted square carrying the kind's
+            // mark, so the row keeps its shape and still says where it's from.
+            ui.painter().rect_filled(art, rounding, color::SURFACE_HI);
+            draw_hit_mark(ui.painter(), art.center(), 9.0, kind, false);
         }
     }
     let painter = ui.painter();
-    // With artwork shown, the glyph moves to a small badge in the corner so the
-    // library a hit came from survives the cover taking its place.
+    // With artwork shown, the mark moves to a badge in the corner so the library
+    // a hit came from survives the cover taking its place.
     if tex.is_some() {
-        let badge = art.right_bottom() + egui::vec2(-6.0, -6.0);
-        // A dark disc behind it: the glyph would otherwise vanish into a pale
-        // sleeve, and plenty of covers are near-white.
-        painter.circle_filled(badge, 7.0, egui::Color32::from_black_alpha(170));
-        painter.text(
-            badge,
-            egui::Align2::CENTER_CENTER,
-            glyph,
-            egui::FontId::proportional(10.0),
-            egui::Color32::from_white_alpha(235),
-        );
+        let badge = art.right_bottom() + egui::vec2(-7.0, -7.0);
+        painter.circle_filled(badge, 8.0, egui::Color32::from_black_alpha(180));
+        draw_hit_mark(painter, badge, 6.0, kind, true);
     }
-    let text_x = art.right() + 10.0;
+    let text_x = art.right() + space::S4 - 2.0;
     // Both lines are truncated to the space actually left in the row.
     // `painter.text` neither wraps nor clips, so a long "artist · year · format
     // · label" ran straight out of the popup and over the table behind it.
     let avail = (rect.right() - pad - text_x).max(0.0);
-    clipped_line(
-        ui,
-        painter,
-        egui::pos2(text_x, rect.center().y - 8.0),
-        avail,
-        primary,
-        egui::TextStyle::Body,
-        ui.visuals().strong_text_color(),
-    );
-    if !secondary.is_empty() {
+    // Two lines stacked around the row's centre. A single-line hit (no artist
+    // or album to show) centres on its own instead of floating high with an
+    // empty gap beneath it.
+    if secondary.is_empty() {
         clipped_line(
             ui,
             painter,
-            egui::pos2(text_x, rect.center().y + 8.0),
+            egui::pos2(text_x, rect.center().y),
+            avail,
+            primary,
+            egui::TextStyle::Body,
+            color::LABEL,
+        );
+    } else {
+        clipped_line(
+            ui,
+            painter,
+            egui::pos2(text_x, rect.center().y - 9.0),
+            avail,
+            primary,
+            egui::TextStyle::Body,
+            color::LABEL,
+        );
+        clipped_line(
+            ui,
+            painter,
+            egui::pos2(text_x, rect.center().y + 9.0),
             avail,
             secondary,
             egui::TextStyle::Small,
-            ui.visuals().weak_text_color(),
+            color::LABEL_3,
         );
     }
     resp.clicked()
@@ -421,4 +424,79 @@ fn clipped_line(
         galley,
         color,
     );
+}
+
+/// Which library a suggestion came from, and therefore which mark it wears.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HitKind {
+    /// A file in the digital catalog.
+    Track,
+    /// A record in the Discogs collection.
+    Record,
+    /// A record on the Discogs wantlist — one you don't own yet.
+    Wanted,
+}
+
+/// Paint the small mark that says where a hit came from, centred on `c` with
+/// radius `r`.
+///
+/// The vinyl marks are drawn rather than set in type: no glyph in a UI font
+/// reads as a *record*, and "◉" landed somewhere between a bullseye and a radio
+/// button. A dark disc with a light centre label and a spindle hole is
+/// unmistakable even at badge size, and the wantlist variant is the same disc
+/// left as an outline — "the shape of a record you don't have yet".
+///
+/// `on_art` brightens the mark for the badge that sits over cover artwork, where
+/// it needs to hold up against an arbitrary image rather than a flat surface.
+fn draw_hit_mark(
+    painter: &egui::Painter,
+    c: egui::Pos2,
+    r: f32,
+    kind: HitKind,
+    on_art: bool,
+) {
+    let ink = if on_art {
+        egui::Color32::from_white_alpha(235)
+    } else {
+        color::LABEL_3
+    };
+    match kind {
+        HitKind::Track => {
+            // A minim: filled notehead with a stem, which reads as "audio file"
+            // at any size a glyph would.
+            let head = egui::pos2(c.x - r * 0.25, c.y + r * 0.45);
+            painter.circle_filled(head, r * 0.42, ink);
+            painter.line_segment(
+                [
+                    egui::pos2(head.x + r * 0.38, head.y),
+                    egui::pos2(head.x + r * 0.38, c.y - r * 0.75),
+                ],
+                egui::Stroke::new((r * 0.18).max(1.0), ink),
+            );
+        }
+        HitKind::Record | HitKind::Wanted => {
+            let owned = kind == HitKind::Record;
+            if owned {
+                painter.circle_filled(c, r, ink.gamma_multiply(0.85));
+            } else {
+                // Wanted: an outline of the same disc, so owning and wanting
+                // read as the same object in two states rather than two symbols.
+                painter.circle_stroke(c, r, egui::Stroke::new((r * 0.2).max(1.0), ink));
+            }
+            // Centre label, then the spindle hole punched through it — the two
+            // details that make a plain circle read as a record.
+            let label_r = r * 0.42;
+            let label = if on_art {
+                egui::Color32::from_black_alpha(190)
+            } else {
+                color::SURFACE
+            };
+            if owned {
+                painter.circle_filled(c, label_r, label);
+            } else {
+                painter.circle_stroke(c, label_r, egui::Stroke::new((r * 0.14).max(0.8), ink));
+            }
+            painter.circle_filled(c, (r * 0.1).max(0.7), ink);
+        }
+    }
 }
