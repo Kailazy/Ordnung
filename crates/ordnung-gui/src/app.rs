@@ -1484,8 +1484,8 @@ impl eframe::App for App {
                 }
                 if self.job_cancel.is_some()
                     && ui
-                        .button("Abort")
-                        .on_hover_note("Stop after the current item")
+                        .button("✖ Cancel")
+                        .on_hover_note("Stop after the items already running")
                         .clicked()
                 {
                     do_abort = true;

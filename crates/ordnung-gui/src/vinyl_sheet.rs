@@ -995,7 +995,7 @@ impl App {
                             // record for pressings you don't already have.
                             if can_dig
                                 && ui
-                                    .button("⛏  Dig")
+                                    .button("🔍  Dig")
                                     .on_hover_note(
                                         "Find records like this one on Discogs that aren't \
                                          in your collection",

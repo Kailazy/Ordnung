@@ -258,7 +258,11 @@ impl App {
     pub(crate) fn spawn_analyze(&mut self, ctx: egui::Context, force: bool) {
         let (tx, rx) = mpsc::channel();
         self.job_rx = Some(rx);
-        self.job_cancel = None; // analyze runs in parallel; not interruptible
+        // Cancellable: a whole-library sweep is thousands of tracks, and the flag
+        // is checked per track, so Abort stops the queue without discarding the
+        // analyses that already landed.
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.job_cancel = Some(cancel.clone());
         self.status = "Analyzing…".into();
         let db = self.db_path.clone();
         let query = if self.filter.trim().is_empty() {
@@ -266,7 +270,9 @@ impl App {
         } else {
             Some(self.filter.clone())
         };
-        thread::spawn(move || run_analyze(db, AnalyzeTargets::Query(query), force, tx, ctx));
+        thread::spawn(move || {
+            run_analyze(db, AnalyzeTargets::Query(query), force, cancel, tx, ctx)
+        });
     }
 
     /// Analyze a specific set of tracks (the context-menu selection) rather than
@@ -275,10 +281,11 @@ impl App {
     pub(crate) fn spawn_analyze_ids(&mut self, ctx: egui::Context, ids: Vec<Id>, force: bool) {
         let (tx, rx) = mpsc::channel();
         self.job_rx = Some(rx);
-        self.job_cancel = None; // analyze runs in parallel; not interruptible
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.job_cancel = Some(cancel.clone());
         self.status = "Analyzing…".into();
         let db = self.db_path.clone();
-        thread::spawn(move || run_analyze(db, AnalyzeTargets::Ids(ids), force, tx, ctx));
+        thread::spawn(move || run_analyze(db, AnalyzeTargets::Ids(ids), force, cancel, tx, ctx));
     }
 
     /// Sync the local vinyl-collection cache from Discogs: pull the user's whole
@@ -555,7 +562,7 @@ pub(crate) fn run_scan(
         return;
     }
     let outcome = import_files(&catalog, &files, &cancel, &tx, &ctx);
-    finish_import(&catalog, outcome, auto_analyze, &tx, &ctx);
+    finish_import(&catalog, outcome, auto_analyze, &cancel, &tx, &ctx);
 }
 
 /// Import a drag-and-drop of paths from Finder: directories are walked for audio
@@ -595,7 +602,7 @@ pub(crate) fn run_import(
         return;
     }
     let outcome = import_files(&catalog, &files, &cancel, &tx, &ctx);
-    finish_import(&catalog, outcome, auto_analyze, &tx, &ctx);
+    finish_import(&catalog, outcome, auto_analyze, &cancel, &tx, &ctx);
 }
 
 /// What an import run touched, so the caller can report it and (optionally)
@@ -725,6 +732,7 @@ fn finish_import(
     catalog: &Catalog,
     outcome: ImportOutcome,
     auto_analyze: bool,
+    cancel: &AtomicBool,
     tx: &Sender<JobMsg>,
     ctx: &egui::Context,
 ) {
@@ -747,7 +755,9 @@ fn finish_import(
     // Lead the analysis tally with what was imported, so the one combined Done
     // reads e.g. "Scanned 5 file(s): … Analyzed 5 track(s), 0 failed."
     let lead = format!("{} ", outcome.summary);
-    analyze_tracks(catalog, tracks, false, &lead, tx, ctx);
+    // The import's cancel flag stays live into the chained analysis, so one
+    // Abort covers the whole scan → analyze run.
+    analyze_tracks(catalog, tracks, false, &lead, cancel, tx, ctx);
 }
 
 /// Locate moved source files and repoint the catalog at them. Reads the missing
@@ -1032,6 +1042,7 @@ pub(crate) fn run_analyze(
     db: PathBuf,
     targets: AnalyzeTargets,
     force: bool,
+    cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
 ) {
@@ -1063,7 +1074,7 @@ pub(crate) fn run_analyze(
         ctx.request_repaint();
         return;
     }
-    analyze_tracks(&catalog, tracks, force, "", &tx, &ctx);
+    analyze_tracks(&catalog, tracks, force, "", &cancel, &tx, &ctx);
 }
 
 /// Analyze `tracks` in parallel, skipping any already current at this analyzer
@@ -1076,6 +1087,7 @@ fn analyze_tracks(
     tracks: Vec<Track>,
     force: bool,
     lead: &str,
+    cancel: &AtomicBool,
     tx: &Sender<JobMsg>,
     ctx: &egui::Context,
 ) {
@@ -1112,17 +1124,30 @@ fn analyze_tracks(
     let params = AnalysisParams::default();
     let done = AtomicUsize::new(0);
     let pool = analysis_pool();
-    let run = || -> Vec<(u64, u64, i64, Result<Analysis, String>)> {
+    let run = || -> Vec<(u64, u64, i64, Option<Result<Analysis, String>>)> {
         pending
             .par_iter()
             .map_init(
                 || tx.clone(),
                 |tx_local, (id, path, size, mtime)| {
+                    // Abort can't interrupt a decode already in flight, but it
+                    // stops every track rayon hasn't started yet — with a queue
+                    // of thousands that's the difference between seconds and
+                    // hours. `None` marks a skipped track: it's neither saved
+                    // nor counted as a failure.
+                    if cancel.load(Ordering::Relaxed) {
+                        // Still tick progress: the bar drains quickly to its
+                        // total instead of freezing where the user clicked.
+                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                        let _ = tx_local.send(JobMsg::Progress { done: n, total });
+                        ctx.request_repaint();
+                        return (*id, *size, *mtime, None);
+                    }
                     let r = analysis::analyze_file(path, params).map_err(|e| e.to_string());
                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                     let _ = tx_local.send(JobMsg::Progress { done: n, total });
                     ctx.request_repaint();
-                    (*id, *size, *mtime, r)
+                    (*id, *size, *mtime, Some(r))
                 },
             )
             .collect()
@@ -1149,7 +1174,12 @@ fn analyze_tracks(
             })
             .unwrap_or_else(|| format!("track {id}"))
     };
+    let mut skipped = 0u64;
     for (id, size, mtime, result) in results {
+        let Some(result) = result else {
+            skipped += 1;
+            continue;
+        };
         match result {
             Ok(a) => match catalog.save_analysis(id, &a, size, mtime) {
                 Ok(()) => ok += 1,
@@ -1170,9 +1200,16 @@ fn analyze_tracks(
             items: fails,
         });
     }
-    let _ = tx.send(JobMsg::Done(format!(
-        "{lead}Analyzed {ok} track(s), {failed} failed."
-    )));
+    // A cancelled run reports what it managed to keep, so the user knows the
+    // finished analyses were saved and only the remainder was dropped.
+    let _ = tx.send(JobMsg::Done(if skipped > 0 {
+        format!(
+            "{lead}Analysis cancelled: {ok} of {total} track(s) analyzed, \
+             {failed} failed, {skipped} skipped."
+        )
+    } else {
+        format!("{lead}Analyzed {ok} track(s), {failed} failed.")
+    }));
     ctx.request_repaint();
 }
 

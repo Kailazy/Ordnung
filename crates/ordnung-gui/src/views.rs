@@ -1544,7 +1544,7 @@ impl App {
                             ui.painter().text(
                                 dig_rect.center(),
                                 egui::Align2::CENTER_CENTER,
-                                "⛏",
+                                "🔍",
                                 egui::FontId::proportional(14.0),
                                 fg,
                             );
@@ -1628,7 +1628,7 @@ impl App {
                                 ui.close_menu();
                             }
                             if ui
-                                .button("⛏  Dig from here")
+                                .button("🔍  Dig from here")
                                 .on_hover_note(
                                     "Walk the collection from this record, by artist or label",
                                 )

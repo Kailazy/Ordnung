@@ -1067,7 +1067,7 @@ impl App {
             .inner_margin(egui::Margin::symmetric(12.0, 10.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("⛏  Digging").strong());
+                    ui.label(egui::RichText::new("🔍  Digging").strong());
                     ui.label(
                         egui::RichText::new(format!("step {} of {}", at + 1, cards.len())).weak(),
                     );
