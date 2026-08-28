@@ -763,6 +763,18 @@ struct App {
     /// `None` means nothing is highlighted and Enter falls through to the plain
     /// filter behaviour.
     search_cursor: Option<usize>,
+    /// Cover textures for the search popup's vinyl rows, keyed like
+    /// `vinyl_covers`.
+    ///
+    /// Deliberately a *separate* cache: `vinyl_covers` is scoped to the Vinyl
+    /// view and cleared by `reload` whenever another view is active (see
+    /// `App::reload`), but the popup shows records from the Library view, where
+    /// that cache is always empty. Sharing it would re-request every cover only
+    /// to have the next reload drop it again. Bounded by the popup's 5 rows plus
+    /// whatever earlier queries left behind, so it stays tiny.
+    search_vinyl_covers: HashMap<VinylCoverKey, ThumbState>,
+    search_cover_req_tx: Sender<VinylCoverKey>,
+    search_cover_rx: Receiver<VinylCoverLoaded>,
     /// The primary/active row — drives the inspector. Always the last row the
     /// user clicked (and a member of `selection` whenever `selection` is non-empty).
     selected: Option<Id>,

@@ -41,6 +41,17 @@ impl App {
             vinyl_cover_req_rx,
             vinyl_cover_tx,
         );
+        // A third loader serving the search popup's vinyl rows. Its own channel
+        // (and cache) because the popup shows records from outside the Vinyl
+        // view, where `vinyl_covers` is cleared on every reload.
+        let (search_cover_req_tx, search_cover_req_rx) = mpsc::channel::<VinylCoverKey>();
+        let (search_cover_tx, search_cover_rx) = mpsc::channel();
+        spawn_vinyl_cover_loader(
+            db_path.clone(),
+            egui_ctx.clone(),
+            search_cover_req_rx,
+            search_cover_tx,
+        );
         // Resolves the now-playing cover to a temp file off-thread (see
         // `now_playing_cover_url`) so the OS Now Playing panel can show artwork
         // without blocking the UI on a catalog read when a track starts.
@@ -54,6 +65,9 @@ impl App {
             search_hits: Vec::new(),
             search_popup_open: false,
             search_cursor: None,
+            search_vinyl_covers: HashMap::new(),
+            search_cover_req_tx,
+            search_cover_rx,
             selected: None,
             selection: HashSet::new(),
             select_anchor: None,
@@ -853,6 +867,7 @@ impl eframe::App for App {
         self.poll_covers(ctx);
         self.poll_thumbs(ctx);
         self.poll_vinyl_covers(ctx);
+        self.poll_search_covers(ctx);
         self.poll_artwork_save(ctx);
         // Settle a pending "wantlist it, matching first" request. This is the
         // path that actually fires it in the normal case: the flush inside

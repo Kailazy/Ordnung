@@ -26,6 +26,10 @@ pub enum SearchHit {
         title: String,
         artist: String,
         album: String,
+        /// Whether any artwork exists for this track — embedded or fetched from
+        /// Discogs. The GUI only asks its cover loader for hits that have one,
+        /// so a coverless row draws its placeholder without a wasted decode.
+        has_cover: bool,
     },
     /// A record in the collection or wantlist. The GUI opens its release sheet.
     ///
@@ -42,6 +46,8 @@ pub enum SearchHit {
         /// Year/format/label line, pre-joined for display.
         sub: String,
         matched_track: Option<String>,
+        /// Whether a cover image is cached locally for this record.
+        has_cover: bool,
     },
 }
 
@@ -112,6 +118,10 @@ pub fn search_library(cat: &Catalog, query: &str, limit: usize) -> Result<Vec<Sc
     // ---- Digital catalog ------------------------------------------------
     // The SQL prefilter is the same LIKE search the table uses, so the scan
     // stays proportional to what matched rather than to the whole library.
+    // One bulk lookup rather than a per-hit query: which tracks carry fetched
+    // Discogs artwork, to combine with the embedded-cover flag.
+    let ext_art: std::collections::HashSet<Id> =
+        cat.external_artwork_ids()?.into_iter().collect();
     for t in cat.list_tracks(Some(query), 400)? {
         let title = t.tags.title.clone().unwrap_or_default();
         let artist = t.tags.artist.clone().unwrap_or_default();
@@ -135,6 +145,7 @@ pub fn search_library(cat: &Catalog, query: &str, limit: usize) -> Result<Vec<Sc
                     title,
                     artist,
                     album,
+                    has_cover: t.tags.has_cover || ext_art.contains(&t.id),
                 },
                 score,
             });
@@ -189,6 +200,7 @@ pub fn search_library(cat: &Catalog, query: &str, limit: usize) -> Result<Vec<Sc
                         artist: rec.artist.clone(),
                         sub,
                         matched_track,
+                        has_cover: rec.has_cover,
                     },
                     score,
                 });
