@@ -1380,16 +1380,13 @@ enum TrackMenuAction {
     /// the track id (to look up a previously-fetched release id) and a search
     /// query (artist + album/title) used when no exact release is on file.
     OpenDiscogs(Id, String),
-    /// Re-open the release picker for a single track to (re)choose its Discogs
-    /// release — applying that release's cover and filling empty tag fields.
-    /// Works regardless of whether the track was already fetched.
-    EditRelease(Id),
-    /// Fetch cover art only for the target track(s): search Discogs, pick a
-    /// release per track, cache its cover. Never touches tags.
-    FetchArtwork(Vec<Id>),
-    /// Fetch full song details for the target track(s): search Discogs, pick a
+    /// Open the release picker for the target track(s): search Discogs, pick a
     /// release per track, cache its cover and fill the track's empty tag fields.
-    FetchSongDetails(Vec<Id>),
+    /// One action for the whole Discogs match — the old separate "Edit release",
+    /// "Fetch artwork" and "Fetch song release details" entries all landed in
+    /// this same picker. Works regardless of whether a track was already
+    /// fetched, so it doubles as the re-pick.
+    FetchRelease(Vec<Id>),
     /// Add the Discogs releases behind the target track(s) to the user's
     /// wantlist. Carries the deduplicated release ids (several tracks off one
     /// record are one want) and a label naming the release for the status line.

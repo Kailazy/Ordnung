@@ -1029,7 +1029,7 @@ impl eframe::App for App {
                             .collect()
                     };
                     // Analysis: one button. Force re-analyze and bulk Discogs
-                    // fetches were dropped — per-track "Edit release…" covers the
+                    // fetches were dropped — the per-track ↻ re-pick covers the
                     // metadata case, and re-analysis is rarely wanted in bulk.
                     let analyze_label = if sel_ids.is_empty() {
                         "⚡ Analyze".to_string()

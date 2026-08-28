@@ -2126,7 +2126,7 @@ impl App {
                                 .button("None of these")
                                 .on_hover_note(
                                     "Mark done so it isn't offered again. Undo later \
-                                     with \"Edit release…\".",
+                                     from the right-click menu.",
                                 )
                                 .clicked()
                         {
@@ -2423,7 +2423,7 @@ impl App {
                     }
                     // The user committed to a release for this track — mark it
                     // fetched so a later run won't re-present it (even if Discogs
-                    // couldn't fill every field). Re-runnable via "Edit release…".
+                    // couldn't fill every field). Re-runnable from the menu's ↻.
                     let _ = catalog.mark_metadata_fetched(track_id);
                 }
             }

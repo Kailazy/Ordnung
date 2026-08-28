@@ -372,11 +372,16 @@ impl App {
         thread::spawn(move || run_vinyl_edit(db, token, username, edit, tx, ctx));
     }
 
-    /// Re-open the release picker for a single track (the "Edit release…" menu
-    /// action): search Discogs for just this track and queue its candidates, in
-    /// song-data mode so committing applies the chosen release's cover + tags.
-    /// Bypasses the fetched-marker — this is an explicit, per-track re-pick.
-    pub(crate) fn spawn_edit_release(&mut self, ctx: egui::Context, track_id: Id) {
+    /// Fetch from Discogs for an explicit set of tracks (the right-click menu's
+    /// "Find Discogs release" entry and its ↻ re-pick). Searches every id and
+    /// queues its candidates for the picker, ignoring the fetched-marker —
+    /// these are deliberate per-track requests. Always a song-data run: the
+    /// chosen release supplies the cover *and* fills empty tag fields, since a
+    /// cover-only mode meant a second trip through the same picker.
+    pub(crate) fn spawn_fetch_tracks(&mut self, ctx: egui::Context, ids: Vec<Id>) {
+        if ids.is_empty() {
+            return;
+        }
         let token = self.discogs_token();
         if token.trim().is_empty() {
             self.status = "No Discogs token set. Add one in Settings \
@@ -392,40 +397,7 @@ impl App {
         self.job_cancel = Some(cancel.clone());
         self.status = "Searching Discogs for releases…".into();
         let db = self.db_path.clone();
-        // Always a song-data re-pick, so a no-match marks the track done.
-        thread::spawn(move || run_fetch_tracks(db, token, vec![track_id], cancel, tx, ctx, true));
-    }
-
-    /// Fetch from Discogs for an explicit set of tracks (the right-click menu
-    /// actions). `enrich = false` caches cover art only ("Fetch artwork");
-    /// `enrich = true` also fills each track's empty tag fields ("Fetch song
-    /// release details"). Searches every id and queues its candidates for the
-    /// picker, ignoring the fetched-marker — these are deliberate per-track
-    /// requests. The flag only changes what committing a pick writes.
-    pub(crate) fn spawn_fetch_tracks(&mut self, ctx: egui::Context, ids: Vec<Id>, enrich: bool) {
-        if ids.is_empty() {
-            return;
-        }
-        let token = self.discogs_token();
-        if token.trim().is_empty() {
-            self.status = "No Discogs token set. Add one in Settings \
-                (https://www.discogs.com/settings/developers)."
-                .into();
-            self.settings_open = true;
-            return;
-        }
-        self.artwork_enrich = enrich;
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
-        self.status = if enrich {
-            "Searching Discogs for song details…".into()
-        } else {
-            "Searching Discogs for artwork…".into()
-        };
-        let db = self.db_path.clone();
-        thread::spawn(move || run_fetch_tracks(db, token, ids, cancel, tx, ctx, enrich));
+        thread::spawn(move || run_fetch_tracks(db, token, ids, cancel, tx, ctx, true));
     }
 
     pub(crate) fn spawn_convert(
@@ -1653,8 +1625,8 @@ fn list_name(list: VinylList) -> &'static str {
 /// stay comfortably under the 60/min authenticated rate limit. Candidate
 /// releases are streamed back to the UI as `ArtworkChoices` for the user to
 /// pick from; nothing is written to the catalog here. Honours `cancel`.
-/// Search Discogs for an explicit set of tracks (the "Edit release…" and the
-/// right-click "Fetch artwork" / "Fetch song release details" actions) and queue
+/// Search Discogs for an explicit set of tracks (the right-click menu's
+/// "Find Discogs release" / ↻ re-pick action) and queue
 /// each track's candidate releases as `ArtworkChoices`, one queued entry per
 /// track, ignoring the fetched-marker. The picker (reading `artwork_enrich`)
 /// applies the chosen release's cover and, in song-details mode, its tags.
@@ -1764,7 +1736,7 @@ pub(crate) fn run_fetch_tracks(
                 // this track — mark it fetched so it leaves the "recently added"
                 // inbox instead of lingering forever with nothing to populate it.
                 // (Artwork-only runs leave the marker alone.) Re-runnable
-                // via "Edit release…".
+                // via the menu's ↻ re-pick.
                 if enrich {
                     let _ = catalog.mark_metadata_fetched(track_id);
                 }

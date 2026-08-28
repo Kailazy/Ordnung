@@ -1607,18 +1607,26 @@ impl App {
                                             ));
                                             ui.close_menu();
                                         }
-                                        // Re-pick the Discogs release for this one track
-                                        // (applies its cover + fills empty tag fields),
-                                        // even if it was already fetched.
-                                        if ui
-                                            .button("Edit release…")
-                                            .on_hover_note(
-                                                "Pick a Discogs release to set the cover \
-                                             and fill empty fields",
-                                            )
-                                            .clicked()
-                                        {
-                                            menu_action = Some(TrackMenuAction::EditRelease(r.id));
+                                        // One entry for the whole Discogs match:
+                                        // find a release, or — once every target
+                                        // track already has one — say so and keep
+                                        // the re-pick behind the ↻ on its right
+                                        // edge. Replaces the old trio of "Edit
+                                        // release…" / "Fetch artwork" / "Fetch
+                                        // song release details", which all opened
+                                        // the same picker.
+                                        let matched = drag_ids
+                                            .iter()
+                                            .filter(|id| track_releases.contains_key(id))
+                                            .count();
+                                        if discogs_release_item(
+                                            ui,
+                                            drag_ids.len(),
+                                            matched,
+                                        ) {
+                                            menu_action = Some(TrackMenuAction::FetchRelease(
+                                                drag_ids.clone(),
+                                            ));
                                             ui.close_menu();
                                         }
                                         // Wantlist the release behind the selection —
@@ -1669,7 +1677,7 @@ impl App {
                                             (
                                                 "Add to Discogs wantlist".to_string(),
                                                 "No Discogs release on file for this \
-                                                 selection. Run Edit release… first."
+                                                 selection. Run Find Discogs release first."
                                                     .to_string(),
                                             )
                                         } else if want.is_empty() {
@@ -1729,47 +1737,6 @@ impl App {
                                             menu_action = Some(TrackMenuAction::AddToWantlist(
                                                 want,
                                                 named.to_string(),
-                                            ));
-                                            ui.close_menu();
-                                        }
-                                        // Fetch from Discogs for the whole selection (or just
-                                        // this row when it isn't part of the selection), using
-                                        // the same per-track release picker as the toolbar.
-                                        let n = drag_ids.len();
-                                        let art_label = if n > 1 {
-                                            format!("Fetch artwork ({n})")
-                                        } else {
-                                            "Fetch artwork".to_string()
-                                        };
-                                        if ui
-                                            .button(art_label)
-                                            .on_hover_note(
-                                                "Pick a Discogs release per track for cover \
-                                             art only. Tags are untouched.",
-                                            )
-                                            .clicked()
-                                        {
-                                            menu_action = Some(TrackMenuAction::FetchArtwork(
-                                                drag_ids.clone(),
-                                            ));
-                                            ui.close_menu();
-                                        }
-                                        let data_label = if n > 1 {
-                                            format!("Fetch song release details ({n})")
-                                        } else {
-                                            "Fetch song release details".to_string()
-                                        };
-                                        if ui
-                                            .button(data_label)
-                                            .on_hover_note(
-                                                "Pick a Discogs release per track to cache \
-                                             the cover and fill empty fields. Edits the \
-                                             catalog, not your files.",
-                                            )
-                                            .clicked()
-                                        {
-                                            menu_action = Some(TrackMenuAction::FetchSongDetails(
-                                                drag_ids.clone(),
                                             ));
                                             ui.close_menu();
                                         }
@@ -2109,14 +2076,11 @@ impl App {
                 open_url(&url);
                 self.status = format!("Opening Discogs: {url}");
             }
-            Some(TrackMenuAction::EditRelease(id)) => {
-                self.spawn_edit_release(ctx_clone.clone(), id);
-            }
-            Some(TrackMenuAction::FetchArtwork(ids)) => {
-                self.spawn_fetch_tracks(ctx_clone.clone(), ids, false);
-            }
-            Some(TrackMenuAction::FetchSongDetails(ids)) => {
-                self.spawn_fetch_tracks(ctx_clone.clone(), ids, true);
+            Some(TrackMenuAction::FetchRelease(ids)) => {
+                // Always the full match: cover *and* empty fields. The picker is
+                // the same either way, and splitting it into a cover-only run
+                // only ever meant a second trip through the same window.
+                self.spawn_fetch_tracks(ctx_clone.clone(), ids);
             }
             Some(TrackMenuAction::AddToWantlist(release_ids, label)) => {
                 self.spawn_vinyl_edit(ctx_clone.clone(), VinylEdit::Want { release_ids, label });
@@ -2160,6 +2124,93 @@ impl App {
                 .collect()
         })
     }
+}
+
+/// The context menu's single Discogs-release entry, drawn as a split row.
+///
+/// Unmatched tracks get a plain "Find Discogs release" button covering the whole
+/// row. Once every target track already carries a release, the left side turns
+/// into a checked, quiet status line ("✓ Discogs release") that is *not*
+/// clickable — the state is the point — and the re-pick moves to a ↻ tucked into
+/// the row's right edge. That keeps one visible answer to "is this matched?"
+/// while leaving the picker one click away.
+///
+/// `total` is how many tracks the menu is acting on, `matched` how many of those
+/// already have a release. Returns true when the picker should open.
+fn discogs_release_item(ui: &mut egui::Ui, total: usize, matched: usize) -> bool {
+    // Partly-matched selections still have work to do, so they read as the
+    // unmatched case with the count of what's left.
+    if matched < total {
+        let label = match total - matched {
+            n if total > 1 => format!("Find Discogs release ({n})"),
+            _ => "Find Discogs release".to_string(),
+        };
+        let tip = if total > 1 {
+            "Pick a Discogs release per track: caches the cover and fills \
+             empty fields. Edits the catalog, not your files."
+        } else {
+            "Pick a Discogs release: caches the cover and fills empty \
+             fields. Edits the catalog, not your files."
+        };
+        return ui.button(label).on_hover_note(tip).clicked();
+    }
+
+    // Fully matched. Lay the row out by hand so the ↻ can sit in the right
+    // edge as its own hit target while the status text fills the rest.
+    let label = if total > 1 {
+        format!("✓  Discogs release ({total})")
+    } else {
+        "✓  Discogs release".to_string()
+    };
+    let height = ui.spacing().interact_size.y;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
+    // The refresh sits in a square at the right end, matching the row height so
+    // it stays a comfortable target without eating the label.
+    let refresh_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.right() - height, rect.top()),
+        rect.max,
+    );
+    let refresh = ui.interact(
+        refresh_rect,
+        ui.id().with(("discogs-release-refresh", total)),
+        egui::Sense::click(),
+    );
+
+    let painter = ui.painter();
+    if refresh.hovered() {
+        painter.rect_filled(
+            refresh_rect,
+            ui.visuals().widgets.hovered.rounding,
+            ui.visuals().widgets.hovered.weak_bg_fill,
+        );
+    }
+    // Checked-and-done reads as settled chrome, the same weak tone the
+    // already-in-your-wantlist entry uses.
+    painter.text(
+        egui::pos2(rect.left() + ui.spacing().button_padding.x, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::TextStyle::Button.resolve(ui.style()),
+        ui.visuals().weak_text_color(),
+    );
+    painter.text(
+        refresh_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "↻",
+        egui::TextStyle::Button.resolve(ui.style()),
+        if refresh.hovered() {
+            ui.visuals().strong_text_color()
+        } else {
+            ui.visuals().weak_text_color()
+        },
+    );
+
+    refresh
+        .on_hover_note("Re-pick the Discogs release for this track")
+        .clicked()
 }
 
 /// Render a track's `added_at` (unix seconds) as a short relative age against
