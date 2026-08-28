@@ -13,6 +13,7 @@ pub mod discogs;
 pub mod error;
 pub mod model;
 pub mod scan;
+pub mod search;
 pub mod tag;
 pub mod update;
 pub mod usb;

@@ -51,6 +51,9 @@ impl App {
             rows: Vec::new(),
             filter: String::new(),
             filter_apply_at: None,
+            search_hits: Vec::new(),
+            search_popup_open: false,
+            search_cursor: None,
             selected: None,
             selection: HashSet::new(),
             select_anchor: None,
@@ -1008,6 +1011,7 @@ impl eframe::App for App {
             if now >= at {
                 self.filter_apply_at = None;
                 self.reload();
+                self.refresh_search_hits();
             } else {
                 ctx.request_repaint_after(at - now);
             }
@@ -1373,8 +1377,11 @@ impl eframe::App for App {
                         // this remainder.
                         let reserved = if has_filters { 140.0 } else { 0.0 };
                         let w = (ui.available_width() - reserved).clamp(120.0, 320.0);
-                        let resp =
-                            ui.add(egui::TextEdit::singleline(&mut self.filter).desired_width(w));
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.filter)
+                                .desired_width(w)
+                                .hint_text("Search songs and records"),
+                        );
                         if resp.changed() {
                             // Park the reload until typing settles (see
                             // `filter_apply_at`); the field itself already shows
@@ -1382,6 +1389,13 @@ impl eframe::App for App {
                             self.filter_apply_at =
                                 Some(std::time::Instant::now() + SEARCH_DEBOUNCE);
                         }
+                        // Re-opening on focus lets a user who dismissed the
+                        // popup get it back by clicking into the box, without
+                        // retyping.
+                        if resp.gained_focus() && !self.search_hits.is_empty() {
+                            self.search_popup_open = true;
+                        }
+                        self.draw_search_popup(&resp);
                         // A prominent "clear all filters" button, shown only while a
                         // filter is actually hiding rows. This rescues the case where
                         // a forgotten column filter leaves the table looking empty.

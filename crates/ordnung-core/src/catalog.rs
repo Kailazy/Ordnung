@@ -3012,7 +3012,7 @@ fn strip_prefix_boundary(path: &str, prefix: &str) -> Option<String> {
 /// accidentally merge). Token canonicalization also bridges the abbreviation and
 /// numeral spellings common in compilation titles, so a downloaded "Club Styling
 /// Vol. 2" links to the Discogs release "Club Styling Volume Two".
-fn norm_match(s: &str) -> String {
+pub(crate) fn norm_match(s: &str) -> String {
     s.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|p| !p.is_empty())

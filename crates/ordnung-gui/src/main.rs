@@ -25,6 +25,7 @@ mod tex;
 mod ui;
 mod util;
 mod views;
+mod search_box;
 mod vinyl_sheet;
 mod webview;
 
@@ -35,6 +36,7 @@ use dig::DigPath;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use ordnung_core::analysis::{self, AnalysisParams, ANALYZER_VERSION, WAVEFORM_FULLTRACK_VERSION};
+use ordnung_core::search::{ScoredHit, SearchHit};
 use ordnung_core::convert::{self, ConvertSpec};
 use ordnung_core::discogs;
 use ordnung_core::model::key::Camelot;
@@ -748,6 +750,19 @@ struct App {
     /// them. Typing instead parks a deadline here and the reload happens once the
     /// user pauses (see `SEARCH_DEBOUNCE`).
     filter_apply_at: Option<std::time::Instant>,
+    /// Ranked search suggestions for the current search box text, spanning the
+    /// digital catalog and the vinyl collection/wantlist. Recomputed on the same
+    /// debounce as the table filter; empty when the box is empty or the popup
+    /// has been dismissed. See [`ordnung_core::search`].
+    search_hits: Vec<ScoredHit>,
+    /// Whether the suggestion popup is showing. Separate from `search_hits`
+    /// being non-empty so Esc (and picking a hit) can dismiss the popup without
+    /// clearing the query the table is still filtered by.
+    search_popup_open: bool,
+    /// Keyboard cursor within `search_hits`, driven by ↑/↓ in the search box.
+    /// `None` means nothing is highlighted and Enter falls through to the plain
+    /// filter behaviour.
+    search_cursor: Option<usize>,
     /// The primary/active row — drives the inspector. Always the last row the
     /// user clicked (and a member of `selection` whenever `selection` is non-empty).
     selected: Option<Id>,
