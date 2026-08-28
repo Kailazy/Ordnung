@@ -2572,6 +2572,39 @@ impl Catalog {
         Ok(rows.into_iter().map(|id| id as u64).collect())
     }
 
+    /// Release ids across both vinyl lists that have no usable `release_cache`
+    /// row yet — i.e. the records whose tracklists the search box can't see.
+    ///
+    /// The vinyl search matches song titles out of the cached
+    /// [`ReleaseDetail`](crate::discogs::ReleaseDetail) tracklist, so a record
+    /// whose detail was never fetched is only findable by its release fields.
+    /// This is the work list the vinyl sync walks to fill that gap in the
+    /// background. Rows below [`DETAIL_SCHEMA_VERSION`] count as missing, the
+    /// same way [`cached_release`](Self::cached_release) treats them.
+    ///
+    /// Deduplicated across the two lists and ordered so the collection is warmed
+    /// before the wantlist — a run cut short leaves the records the user
+    /// actually owns searchable first.
+    pub fn vinyl_releases_missing_detail(&self) -> Result<Vec<u64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT release_id FROM (
+                 SELECT release_id, 0 AS rank FROM vinyl_collection
+                 UNION ALL
+                 SELECT release_id, 1 AS rank FROM vinyl_wantlist
+             )
+             WHERE release_id NOT IN (
+                 SELECT CAST(release_id AS INTEGER) FROM release_cache
+                 WHERE detail_version >= ?1
+             )
+             GROUP BY release_id
+             ORDER BY MIN(rank), release_id",
+        )?;
+        let rows = stmt
+            .query_map(params![DETAIL_SCHEMA_VERSION], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.into_iter().map(|id| id as u64).collect())
+    }
+
     /// `(instance_id, cover_url)` for every record in `list` that has a cover URL
     /// but no cached image yet — the work list a refresh downloads covers for.
     pub fn vinyl_missing_covers(&self, list: VinylList) -> Result<Vec<(u64, String)>> {
@@ -4376,6 +4409,64 @@ mod tests {
             tracklist: Vec::new(),
             videos: Vec::new(),
         }
+    }
+
+    #[test]
+    fn missing_detail_lists_uncached_releases_collection_first() {
+        let cat = Catalog::open(":memory:").unwrap();
+        // Two owned, one wanted; one of the owned already has a cached detail.
+        cat.upsert_vinyl(VinylList::Collection, &vinyl(1, "Plastikman", "Sheet One"))
+            .unwrap();
+        cat.upsert_vinyl(
+            VinylList::Collection,
+            &vinyl(2, "Robert Hood", "Minimal Nation"),
+        )
+        .unwrap();
+        cat.upsert_vinyl(VinylList::Wantlist, &vinyl(3, "Surgeon", "Basictonal"))
+            .unwrap();
+        cat.cache_release(&release_detail("9001", "Sheet One"))
+            .unwrap();
+
+        // The cached one drops out; the collection copy sorts ahead of the want.
+        assert_eq!(
+            cat.vinyl_releases_missing_detail().unwrap(),
+            vec![9002, 9003]
+        );
+
+        // A record in both lists is listed once, ranked by the collection.
+        cat.upsert_vinyl(
+            VinylList::Wantlist,
+            &vinyl(2, "Robert Hood", "Minimal Nation"),
+        )
+        .unwrap();
+        assert_eq!(
+            cat.vinyl_releases_missing_detail().unwrap(),
+            vec![9002, 9003]
+        );
+
+        // Caching the rest empties the work list.
+        cat.cache_release(&release_detail("9002", "Minimal Nation"))
+            .unwrap();
+        cat.cache_release(&release_detail("9003", "Basictonal"))
+            .unwrap();
+        assert!(cat.vinyl_releases_missing_detail().unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_detail_counts_a_stale_schema_row_as_uncached() {
+        let cat = Catalog::open(":memory:").unwrap();
+        cat.upsert_vinyl(VinylList::Collection, &vinyl(1, "Plastikman", "Sheet One"))
+            .unwrap();
+        // A row written by an older build, below the current detail version:
+        // `cached_release` misses it, so the warming pass must re-fetch it.
+        cat.conn
+            .execute(
+                "INSERT INTO release_cache (release_id, detail_json, detail_version)
+                 VALUES ('9001', '{}', ?1)",
+                params![DETAIL_SCHEMA_VERSION - 1],
+            )
+            .unwrap();
+        assert_eq!(cat.vinyl_releases_missing_detail().unwrap(), vec![9001]);
     }
 
     #[test]

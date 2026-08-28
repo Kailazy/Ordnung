@@ -1300,6 +1300,46 @@ pub(crate) fn run_refresh_vinyl(
         let _ = tx.send(JobMsg::Progress { done: total, total });
     }
 
+    // Tracklists next: the search box matches song titles out of the cached
+    // release detail, so a record whose detail was never fetched can only be
+    // found by its release fields. Warming every uncached release here is what
+    // makes "which record is that song on?" answerable for records the user has
+    // never opened. One rate-limited request each, but release metadata doesn't
+    // change, so the cost is paid once per record and never again.
+    let uncached = catalog.vinyl_releases_missing_detail().unwrap_or_default();
+    let detail_total = uncached.len();
+    let mut detailed = 0usize;
+    for (i, release_id) in uncached.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        if !quiet {
+            let _ = tx.send(JobMsg::Status(format!(
+                "Caching song lists… ({}/{detail_total})",
+                i + 1
+            )));
+            let _ = tx.send(JobMsg::Progress {
+                done: i,
+                total: detail_total,
+            });
+            ctx.request_repaint();
+        }
+        // Best-effort: a release that won't fetch (deleted, private, a transient
+        // network error) is left uncached and retried on the next sync.
+        let id = release_id.to_string();
+        if let Ok(detail) = client.fetch_release(&id) {
+            if catalog.cache_release(&detail).is_ok() {
+                detailed += 1;
+            }
+        }
+    }
+    if detail_total > 0 && !quiet {
+        let _ = tx.send(JobMsg::Progress {
+            done: detail_total,
+            total: detail_total,
+        });
+    }
+
     // Prices last: one rate-limited request each, and everything above is
     // already usable without them.
     let stale: Vec<(VinylList, u64, u64)> = [VinylList::Collection, VinylList::Wantlist]
@@ -1367,7 +1407,7 @@ pub(crate) fn run_refresh_vinyl(
     } else {
         format!(
             "Vinyl synced: {} record(s), {} wantlisted{removed_note}, \
-             {fetched} new cover(s), {priced} price(s){stopped}.",
+             {fetched} new cover(s), {detailed} song list(s), {priced} price(s){stopped}.",
             records.len(),
             wants.len()
         )
@@ -1455,6 +1495,9 @@ pub(crate) fn run_vinyl_edit(
                                 );
                             }
                         }
+                        // Warm the tracklist too, so the record is findable by
+                        // song name right away instead of at the next sync.
+                        cache_release_detail(&catalog, &client, rec.release_id);
                         wanted += 1;
                     }
                     Ok(None) => non_vinyl += 1,
@@ -1516,6 +1559,7 @@ pub(crate) fn run_vinyl_edit(
                             );
                         }
                     }
+                    cache_release_detail(&catalog, &client, rec.release_id);
                     format!("Added {label} to your collection.")
                 }
                 Ok(None) => format!(
@@ -1580,6 +1624,8 @@ pub(crate) fn run_vinyl_edit(
                 return;
             }
             let _ = catalog.move_vinyl(from, record.instance_id, to, &moved);
+            // A no-op if the release was already warmed on the list it left.
+            cache_release_detail(&catalog, &client, record.release_id);
             format!("Moved {} to your {}.", record.title, list_name(to))
         }
 
@@ -1600,6 +1646,17 @@ pub(crate) fn run_vinyl_edit(
 
     let _ = tx.send(JobMsg::Done(done));
     ctx.request_repaint();
+}
+
+/// Cache a newly-added release's Discogs detail so its tracklist is searchable
+/// straight away, rather than only after the next vinyl sync's warming pass.
+///
+/// Best-effort and already-cached-aware: `release_cached_or` serves a hit without
+/// a request, so re-adding a record the user previously owned costs nothing. A
+/// failure leaves the release uncached and the next sync retries it.
+fn cache_release_detail(catalog: &Catalog, client: &discogs::Client, release_id: u64) {
+    let id = release_id.to_string();
+    let _ = catalog.release_cached_or(&id, || client.fetch_release(&id));
 }
 
 /// Drop one record from `list` on Discogs. A want is addressed by release id; a
