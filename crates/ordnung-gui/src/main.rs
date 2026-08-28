@@ -755,6 +755,17 @@ struct App {
     /// debounce as the table filter; empty when the box is empty or the popup
     /// has been dismissed. See [`ordnung_core::search`].
     search_hits: Vec<ScoredHit>,
+    /// What's typed in the toolbar search box.
+    ///
+    /// Deliberately *not* `filter`: typing searches, it doesn't filter. The box
+    /// offers a ranked dropdown, and only picking a hit acts on the library —
+    /// otherwise every keystroke on the way to "lawrence" tore the table down
+    /// and rebuilt it around meaningless prefixes. `filter` is still the table's
+    /// own filter, set when a hit is chosen (or by the vinyl grid's jump).
+    search_query: String,
+    /// When a parked search-box edit should rebuild the suggestions. Mirrors
+    /// `filter_apply_at`, but for the dropdown rather than the table.
+    search_apply_at: Option<std::time::Instant>,
     /// Whether the suggestion popup is showing. Separate from `search_hits`
     /// being non-empty so Esc (and picking a hit) can dismiss the popup without
     /// clearing the query the table is still filtered by.

@@ -21,7 +21,7 @@ impl App {
     /// on the search debounce: the digital side is a bounded SQL prefilter and
     /// the vinyl side scans the cached lists, with no network access.
     pub(crate) fn refresh_search_hits(&mut self) {
-        let q = self.filter.trim().to_string();
+        let q = self.search_query.trim().to_string();
         if q.is_empty() {
             self.search_hits.clear();
             self.search_popup_open = false;
@@ -37,7 +37,29 @@ impl App {
                 self.search_cursor = None;
             }
         }
-        self.search_popup_open = !self.search_hits.is_empty();
+        // Open even with nothing to show: typing no longer empties the table, so
+        // an unmatched query would otherwise give no feedback at all. The popup
+        // says "No matches" instead of going quiet.
+        self.search_popup_open = true;
+    }
+
+    /// Clear every active filter *and* the search box that may have produced
+    /// one, then rebuild the rows.
+    ///
+    /// One place for it because "clear filters" is offered from four: the
+    /// toolbar button, the macOS menu command, the empty-state escape hatch, and
+    /// the table's own header UI. Leaving the search box populated while the
+    /// filter it set goes away would be a lie about the current state.
+    pub(crate) fn clear_all_filters(&mut self) {
+        self.filter.clear();
+        self.col_filters.clear();
+        self.filter_apply_at = None;
+        self.search_query.clear();
+        self.search_apply_at = None;
+        self.search_hits.clear();
+        self.search_popup_open = false;
+        self.search_cursor = None;
+        self.reload();
     }
 
     /// Act on a chosen suggestion: go to where the thing actually lives.
@@ -54,12 +76,14 @@ impl App {
 
     /// Show one catalog track in the Library, selected and scrolled into view.
     ///
-    /// The search text is left in place: it's what the user typed to get here,
-    /// and clearing it would yank the surrounding rows out from under the hit
-    /// they just picked. The table is already filtered by it, so the selected
-    /// row is visible among its matches.
+    /// *This* is where the library gets filtered — typing alone never does.
+    /// The query the user typed becomes the table filter, so the chosen track
+    /// lands among its near matches rather than in the full catalog, and the
+    /// toolbar's "Clear filters" button is the way back out.
     fn reveal_track(&mut self, id: Id) {
         self.view = LibraryView::Library;
+        self.filter = self.search_query.trim().to_string();
+        self.filter_apply_at = None;
         self.col_filters.clear();
         // Rebuild rows for the (possibly new) view first: `reload` prunes the
         // selection to live rows, so seed the selection after it.
@@ -80,9 +104,9 @@ impl App {
     /// active one (see `App::reload`).
     fn reveal_vinyl(&mut self, list: VinylList, instance_id: u64, ctx: &egui::Context) {
         self.view = LibraryView::Vinyl;
-        // The grid filters on the same search text as the table. Clearing it
-        // here keeps the record visible behind its own sheet rather than
-        // leaving the user on an empty-looking grid when they close it.
+        // The record is addressed directly by key, so the grid behind the sheet
+        // is left unfiltered — closing the sheet lands on the whole collection
+        // rather than a one-record grid.
         self.filter.clear();
         self.filter_apply_at = None;
         self.col_filters.clear();
@@ -100,27 +124,29 @@ impl App {
     /// alone. Keys are read only while the field has focus, so the arrows still
     /// belong to the track table the rest of the time.
     pub(crate) fn draw_search_popup(&mut self, field: &egui::Response) {
-        if !self.search_popup_open || self.search_hits.is_empty() {
+        if !self.search_popup_open || self.search_query.trim().is_empty() {
             return;
         }
         let ctx = field.ctx.clone();
         let focused = field.has_focus();
         let n = self.search_hits.len();
 
-        if focused {
-            let (down, up, enter, esc) = ctx.input_mut(|i| {
+        // Esc always dismisses, list or no list.
+        if focused && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.search_popup_open = false;
+            self.search_cursor = None;
+            return;
+        }
+        // Arrow/Enter handling only applies when there's a list to move through;
+        // with the popup showing "No matches" the keys still belong to the table.
+        if focused && !self.search_hits.is_empty() {
+            let (down, up, enter) = ctx.input_mut(|i| {
                 (
                     i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
                     i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
                     i.key_pressed(egui::Key::Enter),
-                    i.key_pressed(egui::Key::Escape),
                 )
             });
-            if esc {
-                self.search_popup_open = false;
-                self.search_cursor = None;
-                return;
-            }
             if down {
                 self.search_cursor = Some(match self.search_cursor {
                     Some(i) if i + 1 < n => i + 1,
@@ -134,15 +160,16 @@ impl App {
                     Some(i) => Some(i - 1),
                 };
             }
-            // Enter only commits when something is highlighted; otherwise it
-            // means "just filter", which is what the box already did.
+            // Enter opens the highlighted hit, or the top one when the user
+            // hasn't moved the cursor — typing a name and pressing Enter should
+            // go there, not sit inert. Typing no longer filters on its own, so
+            // there's no other meaning left for the key.
             if enter {
-                if let Some(i) = self.search_cursor {
-                    if let Some(h) = self.search_hits.get(i) {
-                        let hit = h.hit.clone();
-                        self.open_search_hit(hit, &ctx);
-                        return;
-                    }
+                let i = self.search_cursor.unwrap_or(0);
+                if let Some(h) = self.search_hits.get(i) {
+                    let hit = h.hit.clone();
+                    self.open_search_hit(hit, &ctx);
+                    return;
                 }
             }
         }
@@ -164,6 +191,18 @@ impl App {
                     .rounding(egui::Rounding::same(radius::MD))
                     .show(ui, |ui| {
                     ui.set_width(field.rect.width().max(320.0));
+                    if hits.is_empty() {
+                        ui.add_space(space::S2);
+                        ui.horizontal(|ui| {
+                            ui.add_space(space::S3);
+                            ui.label(
+                                egui::RichText::new("No matches in your library")
+                                    .color(color::LABEL_3),
+                            );
+                        });
+                        ui.add_space(space::S2);
+                        return;
+                    }
                     for (i, scored) in hits.iter().enumerate() {
                         let selected = cursor == Some(i);
                         // Resolve the row's artwork from whichever cache owns it,

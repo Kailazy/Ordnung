@@ -64,6 +64,8 @@ impl App {
             filter: String::new(),
             filter_apply_at: None,
             search_hits: Vec::new(),
+            search_query: String::new(),
+            search_apply_at: None,
             search_popup_open: false,
             search_cursor: None,
             search_vinyl_covers: HashMap::new(),
@@ -988,12 +990,7 @@ impl eframe::App for App {
                     self.settings_open = true;
                 }
                 macos_menu::MenuCommand::SelectAll => self.select_all_visible(),
-                macos_menu::MenuCommand::ClearFilters => {
-                    self.filter.clear();
-                    self.col_filters.clear();
-                    self.filter_apply_at = None;
-                    self.reload();
-                }
+                macos_menu::MenuCommand::ClearFilters => self.clear_all_filters(),
                 // Re-injected as the OS copy event the table already listens
                 // for, so the menu and ⌘C land in the identical handler (which
                 // also decides between selection and primary row).
@@ -1027,6 +1024,17 @@ impl eframe::App for App {
             if now >= at {
                 self.filter_apply_at = None;
                 self.reload();
+            } else {
+                ctx.request_repaint_after(at - now);
+            }
+        }
+        // The search box's own debounce. Separate from the table filter's above:
+        // this one only rebuilds the suggestion list, so it never touches the
+        // rows on screen.
+        if let Some(at) = self.search_apply_at {
+            let now = std::time::Instant::now();
+            if now >= at {
+                self.search_apply_at = None;
                 self.refresh_search_hits();
             } else {
                 ctx.request_repaint_after(at - now);
@@ -1399,17 +1407,18 @@ impl eframe::App for App {
                         // comfortable hit height — it's the most-used control in
                         // the toolbar, so it earns the space.
                         let resp = ui.add(
-                            egui::TextEdit::singleline(&mut self.filter)
+                            egui::TextEdit::singleline(&mut self.search_query)
                                 .desired_width(w)
                                 .margin(egui::Margin::symmetric(space::S3, space::S2 + 1.0))
                                 .min_size(egui::vec2(0.0, 26.0))
                                 .hint_text("Search songs and records"),
                         );
                         if resp.changed() {
-                            // Park the reload until typing settles (see
-                            // `filter_apply_at`); the field itself already shows
-                            // the new text, so this costs no responsiveness.
-                            self.filter_apply_at =
+                            // Typing only recomputes the dropdown — the table is
+                            // left alone until a hit is chosen. Parked behind the
+                            // same debounce so a fast typist isn't re-querying
+                            // the catalog on every keystroke.
+                            self.search_apply_at =
                                 Some(std::time::Instant::now() + SEARCH_DEBOUNCE);
                         }
                         // Re-opening on focus lets a user who dismissed the
@@ -1433,10 +1442,7 @@ impl eframe::App for App {
                                 .on_hover_note("Clear search and filters")
                                 .clicked()
                             {
-                                self.filter.clear();
-                                self.col_filters.clear();
-                                self.filter_apply_at = None;
-                                self.reload();
+                                self.clear_all_filters();
                             }
                         }
                     });
@@ -1964,10 +1970,7 @@ impl eframe::App for App {
                                 ))
                                 .clicked()
                             {
-                                self.filter.clear();
-                                self.col_filters.clear();
-                                self.filter_apply_at = None;
-                                self.reload();
+                                self.clear_all_filters();
                             }
                         });
                     });
