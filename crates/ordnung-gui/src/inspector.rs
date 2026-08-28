@@ -425,25 +425,33 @@ impl App {
 
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
+                            // With auto-write on, Save already writes the source
+                            // file, so the second button would be the same action
+                            // under a different name — drop it and let Save's
+                            // tooltip say what it now does.
+                            let auto = self.config.auto_write_tags;
                             ui.add_enabled_ui(dirty && !busy, |ui| {
                                 if ui
                                     .add(egui::Button::new("Save").min_size(egui::vec2(72.0, 24.0)))
-                                    .on_hover_note(
-                                        "Save to the catalog only. The source file is untouched.",
-                                    )
+                                    .on_hover_note(if auto {
+                                        "Save to the catalog and write the tags into the source file"
+                                    } else {
+                                        "Save to the catalog only. The source file is untouched."
+                                    })
                                     .clicked()
                                 {
                                     action = Some(InspectorAction::SaveToCatalog(id));
                                 }
-                                if ui
-                                    .add(
-                                        egui::Button::new("⬇ Write to source file")
-                                            .min_size(egui::vec2(0.0, 24.0)),
-                                    )
-                                    .on_hover_note(
-                                        "Save to the catalog and write the tags into the source file",
-                                    )
-                                    .clicked()
+                                if !auto
+                                    && ui
+                                        .add(
+                                            egui::Button::new("⬇ Write to source file")
+                                                .min_size(egui::vec2(0.0, 24.0)),
+                                        )
+                                        .on_hover_note(
+                                            "Save to the catalog and write the tags into the source file",
+                                        )
+                                        .clicked()
                                 {
                                     action =
                                         Some(InspectorAction::WriteToFile(id, source_path.clone()));
