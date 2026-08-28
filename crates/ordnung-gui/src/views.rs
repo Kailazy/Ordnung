@@ -731,7 +731,7 @@ impl App {
                                     .strong()
                                     .color(egui::Color32::from_rgb(0xE0, 0x6C, 0x6C)),
                             )
-                            .on_hover_note("No copy is kept. All copies move to the Trash.");
+                            .on_hover_note("No copy is kept. All copies move to the Trash");
                         } else {
                             ui.label(
                                 egui::RichText::new(format!("· {marked} to delete"))
@@ -1670,7 +1670,7 @@ impl App {
                             if ui
                                 .add_enabled(!c.also_in_other, egui::Button::new(move_label))
                                 .on_hover_note(move_tip)
-                                .on_disabled_hover_text(move_tip)
+                                .on_disabled_hover_text(crate::ui::hover::note(move_tip))
                                 .clicked()
                             {
                                 action = Some(VinylGridAction::Move(c.key));

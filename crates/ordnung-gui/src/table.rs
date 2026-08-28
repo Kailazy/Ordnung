@@ -978,7 +978,7 @@ impl App {
                                     if resp.clicked() {
                                         toggle_waveform_mode = true;
                                     }
-                                    resp.on_hover_text(tip)
+                                    resp.on_hover_note(tip)
                                 } else {
                                     match col.sort_column() {
                                         // Cover: no label, but the whole cell still opens
@@ -1742,9 +1742,7 @@ impl App {
                                                 "Want these records on Discogs".to_string()
                                             };
                                             if !unmatched.is_empty() {
-                                                tip.push_str(
-                                                    " Finds the missing releases first.",
-                                                );
+                                                tip.push_str(" Finds the missing releases first.");
                                             }
                                             (label, tip)
                                         };
@@ -1754,7 +1752,9 @@ impl App {
                                                 egui::Button::new(want_label),
                                             )
                                             .on_hover_note(want_tip.clone())
-                                            .on_disabled_hover_text(want_tip)
+                                            .on_disabled_hover_text(crate::ui::hover::note(
+                                                want_tip,
+                                            ))
                                             .clicked()
                                         {
                                             // Name the *release* in the status

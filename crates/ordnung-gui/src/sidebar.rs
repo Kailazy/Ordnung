@@ -278,7 +278,7 @@ pub(crate) fn draw_playlist_leaf(
 ) {
     let selected = *view == LibraryView::Playlist(p.id);
     let resp = nav_button(ui, &format!("♪  {}", p.name), selected, 30.0, 13.5)
-        .on_hover_note("Click to view. Drag tracks here to add them.");
+        .on_hover_note("Click to view. Drag tracks here to add them");
     // Small right-aligned track count inside the tile. Muted so the name stays
     // the focus; brighter on the accent fill so it's still readable when selected.
     let count_color = if selected {

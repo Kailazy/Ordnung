@@ -314,7 +314,7 @@ impl App {
             .unwrap_or_else(|| path_str.clone());
         ui.add_space(1.0);
         ui.add(egui::Label::new(egui::RichText::new(file_name).small().weak()).truncate())
-            .on_hover_text(&path_str);
+            .on_hover_note(&path_str);
 
         // Cover art preview. Decoded off-thread (see `cover_full_texture`): once
         // ready we show the high-quality image (embedded art wins, fetched
@@ -442,7 +442,7 @@ impl App {
                                     .on_hover_note(if auto {
                                         "Save to the catalog and write the tags into the source file"
                                     } else {
-                                        "Save to the catalog only. The source file is untouched."
+                                        "Save to the catalog only. The source file is untouched"
                                     })
                                     .clicked()
                                 {

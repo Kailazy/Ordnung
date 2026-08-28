@@ -1164,8 +1164,8 @@ impl eframe::App for App {
                             }
                         });
                         add.response.on_hover_note(
-                        "Add files or a folder to the catalog. Source files are never modified.",
-                    );
+                            "Add files or a folder to the catalog. Source files are never modified",
+                        );
                         ui.separator();
                         // When rows are selected, the toolbar buttons act on just that
                         // selection (in visible order); otherwise they fall back to the
@@ -1255,7 +1255,7 @@ impl eframe::App for App {
                                 if ui
                                     .button(format!("Remove {n} from playlist"))
                                     .on_hover_note(
-                                        "Remove from this playlist. Tracks stay in the catalog.",
+                                        "Remove from this playlist. Tracks stay in the catalog",
                                     )
                                     .clicked()
                                 {
@@ -1684,8 +1684,7 @@ impl eframe::App for App {
                             if nav_button(
                                 ui,
                                 &format!("⚠  {missing_count} missing"),
-                                *view == LibraryView::Duplicates
-                                    || *view == LibraryView::Missing,
+                                *view == LibraryView::Duplicates || *view == LibraryView::Missing,
                                 24.0,
                                 12.0,
                             )
@@ -2088,7 +2087,7 @@ impl eframe::App for App {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| src.display().to_string());
                     ui.label(egui::RichText::new(name).small().weak())
-                        .on_hover_text(src.display().to_string());
+                        .on_hover_note(src.display().to_string());
                     ui.add_space(6.0);
                     ui.separator();
                     ui.add_space(4.0);

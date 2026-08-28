@@ -385,7 +385,7 @@ impl App {
             let has_token = !self.discogs_token().trim().is_empty();
             if ui
                 .add_enabled(!busy && has_token, egui::Button::new("Verify connection"))
-                .on_hover_text("Ask Discogs to confirm this token")
+                .on_hover_note("Ask Discogs to confirm this token")
                 .clicked()
             {
                 let ctx = ui.ctx().clone();
@@ -394,7 +394,7 @@ impl App {
             if let DiscogsAuth::Connected { .. } = self.discogs_auth {
                 if ui
                     .button("Sign out")
-                    .on_hover_text("Forget the saved token")
+                    .on_hover_note("Forget the saved token")
                     .clicked()
                 {
                     self.token_input.clear();
@@ -427,7 +427,7 @@ impl App {
         ui.add_space(6.0);
         if ui
             .add(egui::Button::new("Get my token on Discogs ↗").fill(crate::sidebar::NAV_ACCENT))
-            .on_hover_text("Opens discogs.com/settings/developers")
+            .on_hover_note("Opens discogs.com/settings/developers")
             .clicked()
         {
             crate::util::open_url("https://www.discogs.com/settings/developers");
@@ -466,7 +466,7 @@ impl App {
                 ui.add_space(4.0);
                 if ui
                     .small_button("Reveal in Finder")
-                    .on_hover_text("Show config.toml in Finder")
+                    .on_hover_note("Show config.toml in Finder")
                     .clicked()
                 {
                     crate::util::reveal_in_finder(&p);
@@ -744,7 +744,7 @@ impl App {
                         &mut self.config.auto_analyze,
                         "Analyze tracks automatically when added",
                     )
-                    .on_hover_text(
+                    .on_hover_note(
                         "Analyze tracks as they're imported. Turn off to analyze \
                          on demand instead.",
                     )
@@ -835,7 +835,7 @@ impl App {
                                 )
                                 .fixed_decimals(2),
                             )
-                            .on_hover_text(
+                            .on_hover_note(
                                 "1.0 lifts quiet detail; 2.0 is linear like rekordbox",
                             )
                             .changed()
@@ -853,7 +853,7 @@ impl App {
                                                         )
                                                         .fixed_decimals(2),
                                                     )
-                                                    .on_hover_text("Envelope height in Energy mode")
+                                                    .on_hover_note("Envelope height in Energy mode")
                                                     .changed()
                                                 {
                                                     wave_dirty = true;
@@ -887,7 +887,7 @@ impl App {
                                                             )
                                                             .fixed_decimals(2),
                                                         )
-                                                        .on_hover_text(tip)
+                                                        .on_hover_note(tip)
                                                         .changed()
                                                     {
                                                         wave_dirty = true;
@@ -930,7 +930,7 @@ impl App {
                                                         )
                                                         .fixed_decimals(2),
                                                     )
-                                                    .on_hover_text(
+                                                    .on_hover_note(
                                                         "Scales attack and release together. 0 is \
                                                  raw; 1 uses the full times below.",
                                                     )
@@ -950,8 +950,8 @@ impl App {
                                                 .fixed_decimals(1)
                                                 .suffix(" ms"),
                                             )
-                                            .on_hover_text(
-                                                "Rounds rising edges. Higher softens onsets.",
+                                            .on_hover_note(
+                                                "Rounds rising edges. Higher softens onsets",
                                             )
                                             .changed()
                                         {
@@ -971,7 +971,7 @@ impl App {
                                                         .fixed_decimals(0)
                                                         .suffix(" ms"),
                                                     )
-                                                    .on_hover_text(
+                                                    .on_hover_note(
                                                         "How long tails ring out. Around 450 ms \
                                                  connects beats; shorter pinches between them.",
                                                     )
@@ -1015,7 +1015,7 @@ impl App {
                                                         )
                                                         .fixed_decimals(2),
                                                     )
-                                                    .on_hover_text(
+                                                    .on_hover_note(
                                                         "Bass below this level is dimmed as \
                                                  sustained sub. Higher dims more.",
                                                     )
@@ -1034,7 +1034,7 @@ impl App {
                                                 )
                                                 .fixed_decimals(2),
                                             )
-                                            .on_hover_text(
+                                            .on_hover_note(
                                                 "How hard sub below the threshold is dimmed. \
                                                  0 is off; 1 keeps only bass transients.",
                                             )
@@ -1085,7 +1085,7 @@ impl App {
                                                         )
                                                         .fixed_decimals(0),
                                                     )
-                                                    .on_hover_text(
+                                                    .on_hover_note(
                                                         "Low to mid crossover. Raise to fold \
                                                  low-mids into the bass.",
                                                     )
@@ -1104,7 +1104,7 @@ impl App {
                                                         )
                                                         .fixed_decimals(0),
                                                     )
-                                                    .on_hover_text(
+                                                    .on_hover_note(
                                                         "Mid to high crossover. Everything above \
                                                  reads as highs.",
                                                     )
@@ -1214,7 +1214,7 @@ impl App {
                                                 let label = slot.to_string();
                                                 if ui
                                                     .button(label)
-                                                    .on_hover_text(if filled {
+                                                    .on_hover_note(if filled {
                                                         format!("Overwrite preset {slot}")
                                                     } else {
                                                         format!("Save as preset {slot}")
@@ -1235,9 +1235,9 @@ impl App {
                                                         filled,
                                                         egui::Button::new(slot.to_string()),
                                                     )
-                                                    .on_hover_text(format!("Apply preset {slot}"))
-                                                    .on_disabled_hover_text(format!(
-                                                        "Preset {slot} is empty. Save to it first."
+                                                    .on_hover_note(format!("Apply preset {slot}"))
+                                                    .on_disabled_hover_text(crate::ui::hover::note(
+                                                        format!("Preset {slot} is empty. Save to it first"),
                                                     ));
                                                 if resp.clicked() {
                                                     load_slot = Some(slot);
@@ -1269,7 +1269,7 @@ impl App {
                                         ui.add_space(10.0);
                                         if ui
                                             .button("Reset all to defaults")
-                                            .on_hover_text("Restore all waveform defaults")
+                                            .on_hover_note("Restore all waveform defaults")
                                             .clicked()
                                         {
                                             self.config.waveform_height_exp =
@@ -1524,7 +1524,7 @@ impl App {
                                 &mut self.config.convert_in_place,
                                 "Replace each source file",
                             )
-                            .on_hover_text(
+                            .on_hover_note(
                                 "Conversions replace the original file. The catalog \
                                  is repointed automatically.",
                             )
@@ -2411,7 +2411,7 @@ impl App {
                         }
                         if ui
                             .button("Skip track")
-                            .on_hover_note("Decide later. The track stays in Recently Added.")
+                            .on_hover_note("Decide later. The track stays in Recently Added")
                             .clicked()
                         {
                             skip = true;
@@ -2672,8 +2672,7 @@ impl App {
                 // this covers the "keep my existing art" case, which otherwise
                 // left the track matched to nothing.
                 if full_bytes.is_none() {
-                    let _ =
-                        catalog.set_external_release_link(track_id, "discogs", &release_id);
+                    let _ = catalog.set_external_release_link(track_id, "discogs", &release_id);
                 }
                 // Write the cover only when asked. In a song-data run the user may
                 // be enriching tags on a track that already has art they want kept.
@@ -2819,7 +2818,7 @@ fn subsection_header(ui: &mut egui::Ui, title: &str) -> bool {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             reset = ui
                 .small_button("Reset")
-                .on_hover_text("Restore this section's defaults.")
+                .on_hover_note("Restore this section's defaults")
                 .clicked();
         });
     });
