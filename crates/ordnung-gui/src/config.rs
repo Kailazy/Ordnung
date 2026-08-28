@@ -15,6 +15,17 @@ pub struct Config {
     /// back to the `DISCOGS_TOKEN` environment variable.
     #[serde(default)]
     pub discogs_token: String,
+    /// Release carriers to hide in the Discogs release picker, as stable
+    /// [`ReleaseMedium`] keys. Empty (the default, and what older configs get)
+    /// means show every format.
+    ///
+    /// Stored as what's *hidden* rather than what's shown so the default stays
+    /// "show everything" and a medium added in a later build appears without
+    /// needing a config migration. A collector who only buys records hides
+    /// `cd`/`digital`/`cassette` and stops scrolling past pressings they'd
+    /// never want.
+    #[serde(default)]
+    pub hidden_release_mediums: Vec<String>,
     /// Discogs username of the token owner, captured on the first collection
     /// sync. Lets the "Vinyl Collection" view link to the user's collection
     /// page across launches without re-resolving it. Empty until a sync runs.
@@ -319,6 +330,97 @@ impl NavPrimary {
     pub const ALL: [NavPrimary; 2] = [NavPrimary::Digital, NavPrimary::Vinyl];
 }
 
+/// A physical (or digital) carrier a Discogs release can come on, used to filter
+/// the release picker down to the formats the user actually collects.
+///
+/// Discogs reports a release's format as a free-text list like `Vinyl, 12", 45
+/// RPM` or `CD, Album, Reissue`, mixing the carrier with descriptors. Only the
+/// carrier matters here, so each variant matches on the substrings Discogs
+/// actually uses for it. `Other` is the catch-all that keeps an unrecognized or
+/// blank format visible rather than silently dropping it — better to show one
+/// odd row than to hide the pressing the user was looking for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseMedium {
+    Vinyl,
+    Cd,
+    Digital,
+    Cassette,
+    Other,
+}
+
+impl ReleaseMedium {
+    /// Classify a Discogs format string. Non-vinyl carriers are tested first so
+    /// a `CD, Comp` can't be pulled into `Vinyl` by the `lp` inside a word like
+    /// "sampler" — the same ordering [`crate::dig`]'s vinyl filter relies on.
+    pub fn classify(format: &str) -> Self {
+        let f = format.to_ascii_lowercase();
+        if f.trim().is_empty() {
+            return ReleaseMedium::Other;
+        }
+        if f.contains("cd") || f.contains("dvd") {
+            return ReleaseMedium::Cd;
+        }
+        if f.contains("file") || f.contains("mp3") || f.contains("flac") {
+            return ReleaseMedium::Digital;
+        }
+        if f.contains("cassette") {
+            return ReleaseMedium::Cassette;
+        }
+        if f.contains("vinyl")
+            || f.contains("lp")
+            || f.contains("12\"")
+            || f.contains("10\"")
+            || f.contains("7\"")
+            || f.contains("shellac")
+        {
+            return ReleaseMedium::Vinyl;
+        }
+        ReleaseMedium::Other
+    }
+
+    /// Stable lowercase key stored in the config TOML.
+    pub fn key(self) -> &'static str {
+        match self {
+            ReleaseMedium::Vinyl => "vinyl",
+            ReleaseMedium::Cd => "cd",
+            ReleaseMedium::Digital => "digital",
+            ReleaseMedium::Cassette => "cassette",
+            ReleaseMedium::Other => "other",
+        }
+    }
+
+    /// Label shown next to the setting's checkbox.
+    pub fn label(self) -> &'static str {
+        match self {
+            ReleaseMedium::Vinyl => "Vinyl",
+            ReleaseMedium::Cd => "CD / DVD",
+            ReleaseMedium::Digital => "Digital / file",
+            ReleaseMedium::Cassette => "Cassette",
+            ReleaseMedium::Other => "Other or unlisted",
+        }
+    }
+
+    /// One line of hover help per medium.
+    pub fn hint(self) -> &'static str {
+        match self {
+            ReleaseMedium::Vinyl => "Records: LPs, 12\", 10\", 7\", shellac",
+            ReleaseMedium::Cd => "Compact discs and DVDs",
+            ReleaseMedium::Digital => "Download and streaming releases",
+            ReleaseMedium::Cassette => "Tapes",
+            ReleaseMedium::Other => "Anything Discogs lists no format for",
+        }
+    }
+
+    /// All mediums, in the order the settings list shows them.
+    pub const ALL: [ReleaseMedium; 5] = [
+        ReleaseMedium::Vinyl,
+        ReleaseMedium::Cd,
+        ReleaseMedium::Digital,
+        ReleaseMedium::Cassette,
+        ReleaseMedium::Other,
+    ];
+}
+
 /// Which section the app selects on launch. Parsed from `Config::startup_view`;
 /// presentation policy, so it lives in the GUI boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,6 +502,7 @@ impl Default for Config {
         Self {
             discogs_token: String::new(),
             discogs_username: String::new(),
+            hidden_release_mediums: Vec::new(),
             column_order: Vec::new(),
             hidden_columns: Vec::new(),
             column_widths: BTreeMap::new(),
@@ -434,6 +537,38 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Whether releases on `medium` should be shown in the release picker.
+    pub fn shows_release_medium(&self, medium: ReleaseMedium) -> bool {
+        !self
+            .hidden_release_mediums
+            .iter()
+            .any(|k| k == medium.key())
+    }
+
+    /// Whether a Discogs format string passes the user's medium filter.
+    ///
+    /// Hiding *every* medium would leave the picker permanently empty and make
+    /// the app look broken, so an all-hidden config is treated as no filter at
+    /// all — the setting is a way to narrow the list, never to disable matching.
+    pub fn shows_release_format(&self, format: &str) -> bool {
+        if ReleaseMedium::ALL
+            .iter()
+            .all(|m| !self.shows_release_medium(*m))
+        {
+            return true;
+        }
+        self.shows_release_medium(ReleaseMedium::classify(format))
+    }
+
+    /// Show or hide one medium in the release picker. Caller persists with
+    /// [`Config::save`].
+    pub fn set_release_medium_shown(&mut self, medium: ReleaseMedium, shown: bool) {
+        self.hidden_release_mediums.retain(|k| k != medium.key());
+        if !shown {
+            self.hidden_release_mediums.push(medium.key().to_string());
+        }
+    }
+
     /// The waveform preset saved in 1-based `slot`, if any.
     pub fn waveform_preset(&self, slot: u8) -> Option<&WaveformPreset> {
         self.waveform_presets.iter().find(|p| p.slot == slot)
@@ -517,6 +652,62 @@ pub fn config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_reads_the_carrier_out_of_a_discogs_format_string() {
+        use ReleaseMedium::*;
+        assert_eq!(ReleaseMedium::classify("Vinyl, 12\", 45 RPM"), Vinyl);
+        assert_eq!(ReleaseMedium::classify("Vinyl, LP, Album"), Vinyl);
+        assert_eq!(ReleaseMedium::classify("2 x Vinyl, 12\""), Vinyl);
+        assert_eq!(ReleaseMedium::classify("Shellac, 10\""), Vinyl);
+        assert_eq!(ReleaseMedium::classify("CD, Album, Reissue"), Cd);
+        assert_eq!(ReleaseMedium::classify("DVD, Compilation"), Cd);
+        assert_eq!(ReleaseMedium::classify("File, MP3, 320 kbps"), Digital);
+        assert_eq!(ReleaseMedium::classify("Cassette, Album"), Cassette);
+        // A master row names no format; it must stay visible rather than vanish.
+        assert_eq!(ReleaseMedium::classify(""), Other);
+        assert_eq!(ReleaseMedium::classify("Box Set"), Other);
+    }
+
+    /// The ordering trap the dig filter already guards against: "sampler"
+    /// contains "lp", so a CD comp must be classified before vinyl is tried.
+    #[test]
+    fn classify_does_not_let_a_cd_sampler_pass_as_vinyl() {
+        assert_eq!(ReleaseMedium::classify("CD, Sampler"), ReleaseMedium::Cd);
+    }
+
+    #[test]
+    fn hiding_a_medium_filters_only_that_carrier() {
+        let mut cfg = Config::default();
+        // Default is show-everything.
+        assert!(cfg.shows_release_format("CD, Album"));
+        assert!(cfg.shows_release_format("Vinyl, 12\""));
+
+        cfg.set_release_medium_shown(ReleaseMedium::Cd, false);
+        cfg.set_release_medium_shown(ReleaseMedium::Digital, false);
+        assert!(!cfg.shows_release_format("CD, Album"));
+        assert!(!cfg.shows_release_format("File, FLAC"));
+        assert!(cfg.shows_release_format("Vinyl, 12\""));
+        // Unlisted formats stay visible: better one odd row than a hidden pressing.
+        assert!(cfg.shows_release_format(""));
+
+        // Re-showing removes the key rather than stacking duplicates.
+        cfg.set_release_medium_shown(ReleaseMedium::Cd, true);
+        assert!(cfg.shows_release_format("CD, Album"));
+        assert_eq!(cfg.hidden_release_mediums, vec!["digital".to_string()]);
+    }
+
+    /// Hiding everything would make the picker permanently empty, so it's
+    /// treated as no filter at all.
+    #[test]
+    fn hiding_every_medium_is_ignored_rather_than_hiding_everything() {
+        let mut cfg = Config::default();
+        for m in ReleaseMedium::ALL {
+            cfg.set_release_medium_shown(m, false);
+        }
+        assert!(cfg.shows_release_format("Vinyl, 12\""));
+        assert!(cfg.shows_release_format("CD, Album"));
+    }
 
     /// Proves the token survives a save → fresh-load cycle (the whole point of
     /// the feature). Uses a throwaway HOME so it touches no real config.

@@ -477,6 +477,60 @@ impl App {
         ui.add_space(14.0);
         ui.separator();
         ui.add_space(10.0);
+
+        // ---- Release formats ----------------------------------------------
+        // Narrows the release picker to the carriers the user actually
+        // collects. A records-only digger stops scrolling past CD and digital
+        // pressings they'd never wantlist.
+        ui.label(egui::RichText::new("Release formats").strong());
+        ui.label(
+            egui::RichText::new(
+                "Which formats to show when finding a Discogs release. Turn off \
+                 the ones you don't collect and they stop appearing in the picker.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(6.0);
+        let mut mediums_dirty = false;
+        for medium in config::ReleaseMedium::ALL {
+            let mut shown = self.config.shows_release_medium(medium);
+            if ui
+                .checkbox(&mut shown, medium.label())
+                .on_hover_note(medium.hint())
+                .changed()
+            {
+                self.config.set_release_medium_shown(medium, shown);
+                mediums_dirty = true;
+            }
+        }
+        // Turning everything off would leave the picker permanently empty, which
+        // reads as a broken app rather than a setting. `shows_release_format`
+        // ignores an all-hidden config, so say that plainly instead of letting
+        // the user think they've switched matching off.
+        if config::ReleaseMedium::ALL
+            .iter()
+            .all(|m| !self.config.shows_release_medium(*m))
+        {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(
+                    "Every format is hidden, so the filter is ignored and all \
+                     releases show. Turn at least one back on to filter.",
+                )
+                .small()
+                .color(egui::Color32::from_rgb(190, 145, 60)),
+            );
+        }
+        if mediums_dirty {
+            if let Err(e) = self.config.save() {
+                self.status = format!("Couldn't save settings: {e}");
+            }
+        }
+
+        ui.add_space(14.0);
+        ui.separator();
+        ui.add_space(10.0);
         // Required verbatim by the Discogs API Terms of Use, which oblige us to
         // display it "prominently" wherever the API and its content are used.
         ui.label(

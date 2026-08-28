@@ -405,7 +405,12 @@ impl App {
         self.job_cancel = Some(cancel.clone());
         self.status = "Searching Discogs for releases…".into();
         let db = self.db_path.clone();
-        thread::spawn(move || run_fetch_tracks(db, token, ids, cancel, tx, ctx, true));
+        // Snapshot the medium filter for the worker: the user's picker
+        // preferences can't be read off `self` from another thread.
+        let hidden_mediums = self.config.hidden_release_mediums.clone();
+        thread::spawn(move || {
+            run_fetch_tracks(db, token, ids, cancel, tx, ctx, true, hidden_mediums)
+        });
     }
 
     pub(crate) fn spawn_convert(
@@ -1643,6 +1648,7 @@ fn list_name(list: VinylList) -> &'static str {
 /// track, ignoring the fetched-marker. The picker (reading `artwork_enrich`)
 /// applies the chosen release's cover and, in song-details mode, its tags.
 /// Nothing is written here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_fetch_tracks(
     db: PathBuf,
     token: String,
@@ -1651,8 +1657,15 @@ pub(crate) fn run_fetch_tracks(
     tx: Sender<JobMsg>,
     ctx: egui::Context,
     enrich: bool,
+    hidden_mediums: Vec<String>,
 ) {
     const MAX_CANDIDATES: usize = 6;
+    // The medium filter travels as bare keys; rebuild the tiny bit of `Config`
+    // that answers "show this format?" rather than shipping the whole struct.
+    let medium_filter = config::Config {
+        hidden_release_mediums: hidden_mediums,
+        ..config::Config::default()
+    };
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
@@ -1664,6 +1677,9 @@ pub(crate) fn run_fetch_tracks(
     let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
     let total = ids.len();
     let (mut queued, mut none, mut skipped, mut errored) = (0u64, 0u64, 0u64, 0u64);
+    // Tracks whose only releases were hidden by the medium filter — reported
+    // apart from a true no-match, since the fix is a setting, not more tagging.
+    let mut filtered = 0u64;
     let mut fails: Vec<(String, String)> = Vec::new();
     for track_id in ids {
         if cancel.load(Ordering::Relaxed) {
@@ -1715,8 +1731,22 @@ pub(crate) fn run_fetch_tracks(
             ));
             continue;
         }
-        match client.find_artwork_candidates(&artist, title.as_deref(), album.as_deref()) {
-            Ok(found) if !found.is_empty() => {
+        match client
+            .find_artwork_candidates(&artist, title.as_deref(), album.as_deref())
+            .map(|found| {
+                // Drop the carriers the user doesn't collect *before* the
+                // candidate cap, so a CD-heavy result can't crowd the vinyl
+                // pressings out of the six slots the picker shows. `hit_any`
+                // remembers that Discogs *did* know this track, so a list
+                // emptied purely by the filter isn't mistaken for a no-match.
+                let hit_any = !found.is_empty();
+                let kept: Vec<_> = found
+                    .into_iter()
+                    .filter(|c| medium_filter.shows_release_format(&c.format))
+                    .collect();
+                (kept, hit_any)
+            }) {
+            Ok((found, _)) if !found.is_empty() => {
                 let candidates: Vec<ArtworkChoice> = found
                     .into_iter()
                     .take(MAX_CANDIDATES)
@@ -1742,15 +1772,28 @@ pub(crate) fn run_fetch_tracks(
                 }));
                 queued += 1;
             }
-            Ok(_) => {
-                none += 1;
-                // On a song-data run, a no-match means Discogs has nothing for
-                // this track — mark it fetched so it leaves the "recently added"
-                // inbox instead of lingering forever with nothing to populate it.
-                // (Artwork-only runs leave the marker alone.) Re-runnable
-                // via the menu's ↻ re-pick.
-                if enrich {
-                    let _ = catalog.mark_metadata_fetched(track_id);
+            Ok((_, hit_any)) => {
+                if hit_any {
+                    // Discogs had releases; the medium filter hid all of them.
+                    // Deliberately *not* marked fetched — nothing was reviewed,
+                    // and widening the filter should bring this track back.
+                    filtered += 1;
+                    fails.push((
+                        label,
+                        "every release Discogs found is on a format hidden in \
+                         Settings › Discogs"
+                            .into(),
+                    ));
+                } else {
+                    none += 1;
+                    // A real no-match: Discogs has nothing for this track. Mark
+                    // it fetched so it leaves the "recently added" inbox instead
+                    // of lingering forever with nothing to populate it.
+                    // (Artwork-only runs leave the marker alone.) Re-runnable
+                    // via the menu's ↻ re-pick.
+                    if enrich {
+                        let _ = catalog.mark_metadata_fetched(track_id);
+                    }
                 }
             }
             Err(e) => {
@@ -1771,6 +1814,8 @@ pub(crate) fn run_fetch_tracks(
     let done = if total == 1 {
         if queued == 1 {
             "Pick a release.".to_string()
+        } else if filtered == 1 {
+            "Only hidden formats found. Check Settings › Discogs.".to_string()
         } else if none == 1 {
             "No Discogs release found.".to_string()
         } else if skipped == 1 {
@@ -1779,9 +1824,16 @@ pub(crate) fn run_fetch_tracks(
             "Couldn't search Discogs for that track.".to_string()
         }
     } else {
+        // Only name the filter when it actually cost the run something, so the
+        // usual roll-up doesn't grow a permanent "0 hidden".
+        let hidden_note = if filtered > 0 {
+            format!(", {filtered} hidden by format")
+        } else {
+            String::new()
+        };
         format!(
-            "Discogs fetch: {queued} ready to pick, {none} no match, {skipped} skipped, \
-             {errored} error(s)."
+            "Discogs fetch: {queued} ready to pick, {none} no match{hidden_note}, \
+             {skipped} skipped, {errored} error(s)."
         )
     };
     let _ = tx.send(JobMsg::Done(done));
