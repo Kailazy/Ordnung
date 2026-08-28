@@ -54,6 +54,18 @@ pub struct Config {
     /// first). Defaults to descending, so the default view is newest first.
     #[serde(default)]
     pub vinyl_sort_ascending: bool,
+    /// Which library sits at the top of the left navigation sidebar:
+    /// `"digital"` (All songs / New / playlists first, the default) or
+    /// `"vinyl"` (the Discogs vinyl collection first). A vinyl-led collector
+    /// gets their shelf up top and the digital library pinned below. Unknown
+    /// values fall back to `"digital"`. See `NavPrimary`.
+    #[serde(default = "default_nav_primary")]
+    pub nav_primary: String,
+    /// Which section the app opens on: `"library"` (All songs, the default),
+    /// `"vinyl"` (the vinyl collection), or `"recent"` (new imports). Unknown
+    /// values fall back to `"library"`. See `StartupView`.
+    #[serde(default = "default_startup_view")]
+    pub startup_view: String,
     /// Run analysis (BPM, key, waveform) automatically on each track as it's
     /// imported, instead of waiting for the explicit "Analyze" action. On by
     /// default; defaults to on for older configs that predate the field too.
@@ -187,6 +199,14 @@ fn default_vinyl_sort() -> String {
     "added".to_string()
 }
 
+fn default_nav_primary() -> String {
+    "digital".to_string()
+}
+
+fn default_startup_view() -> String {
+    "library".to_string()
+}
+
 fn default_waveform_color_mode() -> String {
     "energy".to_string()
 }
@@ -245,6 +265,90 @@ pub(crate) fn default_waveform_energy_colors() -> [[u8; 3]; 5] {
     ]
 }
 
+/// Which library leads the left navigation sidebar. Parsed from
+/// `Config::nav_primary`; presentation policy, so it lives in the GUI boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavPrimary {
+    /// All songs / New / playlists on top, vinyl pinned below (the default).
+    Digital,
+    /// The vinyl collection on top, the digital library pinned below.
+    Vinyl,
+}
+
+impl NavPrimary {
+    /// Parse a config string; anything unrecognized falls back to `Digital`.
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "vinyl" => NavPrimary::Vinyl,
+            _ => NavPrimary::Digital,
+        }
+    }
+
+    /// Stable lowercase key stored in the config TOML.
+    pub fn key(self) -> &'static str {
+        match self {
+            NavPrimary::Digital => "digital",
+            NavPrimary::Vinyl => "vinyl",
+        }
+    }
+
+    /// Label shown in the settings picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            NavPrimary::Digital => "Digital library",
+            NavPrimary::Vinyl => "Vinyl collection",
+        }
+    }
+
+    /// Both options, in picker order.
+    pub const ALL: [NavPrimary; 2] = [NavPrimary::Digital, NavPrimary::Vinyl];
+}
+
+/// Which section the app selects on launch. Parsed from `Config::startup_view`;
+/// presentation policy, so it lives in the GUI boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupView {
+    /// The whole catalog ("All songs") — the default.
+    Library,
+    /// The Discogs vinyl collection grid.
+    Vinyl,
+    /// The self-clearing inbox of fresh imports.
+    Recent,
+}
+
+impl StartupView {
+    /// Parse a config string; anything unrecognized falls back to `Library`.
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "vinyl" => StartupView::Vinyl,
+            "recent" => StartupView::Recent,
+            _ => StartupView::Library,
+        }
+    }
+
+    /// Stable lowercase key stored in the config TOML.
+    pub fn key(self) -> &'static str {
+        match self {
+            StartupView::Library => "library",
+            StartupView::Vinyl => "vinyl",
+            StartupView::Recent => "recent",
+        }
+    }
+
+    /// Label shown in the settings picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            StartupView::Library => "All songs",
+            StartupView::Vinyl => "Vinyl collection",
+            StartupView::Recent => "New imports",
+        }
+    }
+
+    /// All options, in picker order.
+    pub const ALL: [StartupView; 3] =
+        [StartupView::Library, StartupView::Vinyl, StartupView::Recent];
+}
+
 /// How the player waveform is colored. Parsed from `Config::waveform_color_mode`;
 /// presentation policy, so it lives in the GUI boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,6 +389,8 @@ impl Default for Config {
             default_sort_ascending: true,
             vinyl_sort: default_vinyl_sort(),
             vinyl_sort_ascending: false,
+            nav_primary: default_nav_primary(),
+            startup_view: default_startup_view(),
             auto_analyze: true,
             convert_format: default_convert_format(),
             convert_bitrate_kbps: String::new(),

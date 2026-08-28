@@ -29,7 +29,7 @@ mod vinyl_sheet;
 mod webview;
 
 use audio::{fmt_time, AudioEngine, PlayState};
-use config::Config;
+use config::{Config, NavPrimary, StartupView};
 use covers::*;
 use dig::DigPath;
 use eframe::egui;

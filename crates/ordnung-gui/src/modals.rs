@@ -336,6 +336,79 @@ impl App {
                             .show(ui, |ui| {
                                 match self.settings_tab {
                                     SettingsTab::General => {
+                                        ui.label(egui::RichText::new("Navigation").strong());
+                                        ui.label(
+                    egui::RichText::new(
+                        "Which library leads the sidebar, and which section the app \
+                         opens on. A vinyl-first collector can put the shelf on top \
+                         and keep the digital library below it.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                                        ui.add_space(4.0);
+                                        let mut nav_dirty = false;
+                                        let nav_primary =
+                                            NavPrimary::from_key(&self.config.nav_primary);
+                                        let startup_view =
+                                            StartupView::from_key(&self.config.startup_view);
+                                        egui::Grid::new("settings_nav_grid")
+                                            .num_columns(2)
+                                            .spacing([12.0, 8.0])
+                                            .show(ui, |ui| {
+                                                ui.label("Top of sidebar:");
+                                                egui::ComboBox::from_id_salt("settings_nav_primary")
+                                                    .selected_text(nav_primary.label())
+                                                    .show_ui(ui, |ui| {
+                                                        for opt in NavPrimary::ALL {
+                                                            if ui
+                                                                .selectable_label(
+                                                                    nav_primary == opt,
+                                                                    opt.label(),
+                                                                )
+                                                                .clicked()
+                                                                && nav_primary != opt
+                                                            {
+                                                                self.config.nav_primary =
+                                                                    opt.key().to_string();
+                                                                nav_dirty = true;
+                                                            }
+                                                        }
+                                                    });
+                                                ui.end_row();
+
+                                                ui.label("Open on:");
+                                                egui::ComboBox::from_id_salt(
+                                                    "settings_startup_view",
+                                                )
+                                                .selected_text(startup_view.label())
+                                                .show_ui(ui, |ui| {
+                                                    for opt in StartupView::ALL {
+                                                        if ui
+                                                            .selectable_label(
+                                                                startup_view == opt,
+                                                                opt.label(),
+                                                            )
+                                                            .clicked()
+                                                            && startup_view != opt
+                                                        {
+                                                            self.config.startup_view =
+                                                                opt.key().to_string();
+                                                            nav_dirty = true;
+                                                        }
+                                                    }
+                                                });
+                                                ui.end_row();
+                                            });
+                                        if nav_dirty {
+                                            if let Err(e) = self.config.save() {
+                                                self.status =
+                                                    format!("Couldn't save settings: {e}");
+                                            }
+                                        }
+                                        ui.add_space(14.0);
+                                        ui.separator();
+                                        ui.add_space(10.0);
                                         ui.label(egui::RichText::new("Discogs token").strong());
                                         ui.label(
                     egui::RichText::new(

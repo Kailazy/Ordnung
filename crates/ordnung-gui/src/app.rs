@@ -194,6 +194,13 @@ impl App {
         let config = Config::load();
         app.token_input = config.discogs_token.clone();
         app.config = config;
+        // Open on whichever section the user set as their home. A vinyl-first
+        // collector lands on the shelf instead of the digital catalog.
+        app.view = match StartupView::from_key(&app.config.startup_view) {
+            StartupView::Library => LibraryView::Library,
+            StartupView::Vinyl => LibraryView::Vinyl,
+            StartupView::Recent => LibraryView::RecentlyAdded,
+        };
         app.load_column_layout();
         // Seed the initial sort from the user's saved default (e.g. "Added,
         // newest first") before the first load so it's applied on launch.
@@ -1409,14 +1416,22 @@ impl eframe::App for App {
                     );
                 };
 
-                // ── Library (top) ─────────────────────────────────────────────
-                // The whole catalog. Biggest tile in the sidebar — it's the home
-                // base every other view branches off from.
-                egui::TopBottomPanel::top("nav_library")
-                    .frame(egui::Frame::none())
-                    .show_separator_line(false)
-                    .show_inside(ui, |ui| {
-                        ui.add_space(8.0);
+                // Which library leads the sidebar. A vinyl-first collector puts
+                // the shelf on top and the digital catalog underneath it; the
+                // default keeps the digital catalog as the home base.
+                let nav_primary = NavPrimary::from_key(&self.config.nav_primary);
+                // Copied out so the section closures below don't borrow `self`
+                // while the panel is drawing (`view` is threaded in explicitly).
+                let recent_count = self.recent_count;
+                let vinyl_count = self.vinyl_count;
+
+                // The digital-library group: the "All songs" / "New" tile pair
+                // and the PLAYLISTS header (the tree itself scrolls in the middle
+                // panel below). Drawn wherever `nav_primary` puts it, so the same
+                // code serves both the top slot and the vinyl-first layout.
+                let draw_digital_group = |ui: &mut egui::Ui,
+                                              view: &mut LibraryView,
+                                              sidebar_action: &mut Option<SidebarAction>| {
                         // "All songs" is the home base — the big tile — paired on the
                         // same row with a smaller "Recent" tile: the self-clearing
                         // inbox of fresh imports still awaiting analysis + a Discogs
@@ -1429,7 +1444,7 @@ impl eframe::App for App {
                             if nav_button_sized(
                                 ui,
                                 "♪  All songs",
-                                self.view == LibraryView::Library,
+                                *view == LibraryView::Library,
                                 all_w,
                                 46.0,
                                 17.0,
@@ -1437,19 +1452,19 @@ impl eframe::App for App {
                             .on_hover_note("Every track in the catalog")
                             .clicked()
                             {
-                                self.view = LibraryView::Library;
+                                *view = LibraryView::Library;
                             }
                             // Named, not just a glyph: on its own the ✦ tile gave no
                             // clue it holds freshly imported songs.
-                            let recent_label = if self.recent_count > 0 {
-                                format!("✦ New  {}", self.recent_count)
+                            let recent_label = if recent_count > 0 {
+                                format!("✦ New  {recent_count}")
                             } else {
                                 "✦ New".to_string()
                             };
                             if nav_button_sized(
                                 ui,
                                 &recent_label,
-                                self.view == LibraryView::RecentlyAdded,
+                                *view == LibraryView::RecentlyAdded,
                                 RECENT_W,
                                 46.0,
                                 14.0,
@@ -1460,7 +1475,7 @@ impl eframe::App for App {
                             )
                             .clicked()
                             {
-                                self.view = LibraryView::RecentlyAdded;
+                                *view = LibraryView::RecentlyAdded;
                             }
                         });
                         ui.add_space(10.0);
@@ -1483,12 +1498,57 @@ impl eframe::App for App {
                                         .on_hover_note("New playlist")
                                         .clicked()
                                     {
-                                        sidebar_action = Some(SidebarAction::NewPlaylist(None));
+                                        *sidebar_action =
+                                            Some(SidebarAction::NewPlaylist(None));
                                     }
                                 },
                             );
                         });
                         ui.add_space(4.0);
+                };
+
+                // The vinyl tile. Like the digital group, it's drawn from one
+                // place into whichever slot `nav_primary` assigns it — big and
+                // leading when vinyl is primary, a compact pinned row otherwise.
+                let draw_vinyl_tile = |ui: &mut egui::Ui, view: &mut LibraryView, lead: bool| {
+                    let vinyl_label = if vinyl_count > 0 {
+                        format!("💿  Vinyl Collection ({vinyl_count})")
+                    } else {
+                        "💿  Vinyl Collection".to_string()
+                    };
+                    let (h, size) = if lead { (46.0, 17.0) } else { (34.0, 14.0) };
+                    if nav_button(ui, &vinyl_label, *view == LibraryView::Vinyl, h, size)
+                        .on_hover_note("Your Discogs vinyl collection")
+                        .clicked()
+                    {
+                        *view = LibraryView::Vinyl;
+                    }
+                };
+
+                // ── Leading section (top) ─────────────────────────────────────
+                // Whichever library the user leads with sits here: the digital
+                // catalog (default) or the vinyl shelf. When vinyl leads, the
+                // digital group follows under its own caption so the playlist
+                // tree below it still reads as belonging to the catalog.
+                egui::TopBottomPanel::top("nav_library")
+                    .frame(egui::Frame::none())
+                    .show_separator_line(false)
+                    .show_inside(ui, |ui| {
+                        ui.add_space(8.0);
+                        match nav_primary {
+                            NavPrimary::Digital => {
+                                draw_digital_group(ui, &mut self.view, &mut sidebar_action);
+                            }
+                            NavPrimary::Vinyl => {
+                                draw_vinyl_tile(ui, &mut self.view, true);
+                                ui.add_space(10.0);
+                                ui.separator();
+                                ui.add_space(8.0);
+                                section_caption(ui, "DIGITAL LIBRARY");
+                                ui.add_space(4.0);
+                                draw_digital_group(ui, &mut self.view, &mut sidebar_action);
+                            }
+                        }
                     });
 
                 // ── Pinned bottom views (no captions) ─────────────────────────
@@ -1560,26 +1620,14 @@ impl eframe::App for App {
                             ui.add_space(6.0);
                         }
                         // ── Sources ──
-                        let vinyl_label = if self.vinyl_count > 0 {
-                            format!("💿  Vinyl Collection ({})", self.vinyl_count)
-                        } else {
-                            "💿  Vinyl Collection".to_string()
-                        };
-                        if nav_button(
-                            ui,
-                            &vinyl_label,
-                            self.view == LibraryView::Vinyl,
-                            34.0,
-                            14.0,
-                        )
-                        .on_hover_note("Your Discogs vinyl collection")
-                        .clicked()
-                        {
-                            self.view = LibraryView::Vinyl;
+                        // Only when the digital library leads; if vinyl is the
+                        // primary library its tile lives at the top instead.
+                        if nav_primary == NavPrimary::Digital {
+                            draw_vinyl_tile(ui, &mut self.view, false);
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.add_space(6.0);
                         }
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.add_space(6.0);
                         // ── Library health ──
                         // Duplicates and Missing are two readings of the same
                         // question ("what's wrong with the catalog?"), so they
