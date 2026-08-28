@@ -277,5 +277,14 @@ fn apply_style(ctx: &egui::Context) {
     s.interact_size.y = 24.0;
     s.scroll.bar_width = 8.0;
 
+    // Chrome text is chrome, not content. egui makes every `Label` selectable by
+    // default, so dragging across the settings window, the sidebar or a status
+    // line painted a text selection over UI copy that nobody wants to copy —
+    // and left the I-beam cursor implying the app has a text field where it
+    // doesn't. The text worth copying (file paths, Soulseek queries, the failure
+    // report) all has an explicit Copy action or ⌘C, so none of it relies on
+    // hand-selection; `TextEdit` fields are unaffected by this flag.
+    style.interaction.selectable_labels = false;
+
     ctx.set_style(style);
 }
