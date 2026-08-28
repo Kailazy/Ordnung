@@ -553,16 +553,20 @@ impl App {
                     let sep_x = ui.cursor().left();
                     ui.add_space(7.0);
                     // Right: the active tab's controls.
-                    // Cap the scroll viewport well under the screen height: tall
-                    // tabs (Waveform runs ~760px) scroll instead of stretching
-                    // the window toward the screen edges, which read as too tall.
-                    let max_scroll_h = (ctx.screen_rect().height() - 160.0).clamp(360.0, 620.0);
+                    // One fixed viewport height for *every* tab, not a cap: the
+                    // window must not resize as you switch tabs, or the tab you
+                    // want next slides out from under the pointer. Tall tabs
+                    // (Waveform runs ~760px) scroll; short ones leave empty
+                    // space rather than shrinking the frame. Sized well under
+                    // the screen height so the window never reaches the edges.
+                    let scroll_h = (ctx.screen_rect().height() - 160.0).clamp(360.0, 620.0);
                     ui.vertical(|ui| {
                         ui.set_min_width(360.0);
                         ui.set_max_width(360.0);
                         egui::ScrollArea::vertical()
-                            .max_height(max_scroll_h)
-                            .auto_shrink([false, true])
+                            .min_scrolled_height(scroll_h)
+                            .max_height(scroll_h)
+                            .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 match self.settings_tab {
                                     SettingsTab::General => {
