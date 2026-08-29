@@ -60,9 +60,12 @@ pub(crate) struct VinylSheet {
     /// `None` for a record opened from a dig: it isn't in either list, so it has
     /// no cached cover to key — `cover_url` carries its art instead.
     pub key: Option<VinylCoverKey>,
-    /// Cover thumbnail URL for a record with no local cache entry (a dug
-    /// record). Loaded through [`App::dig_covers`], which the strip already
-    /// fills for the same release.
+    /// Cover thumbnail URL, loaded through [`App::dig_covers`] (which the strip
+    /// already fills for the same release). Set for *every* record, keyed or
+    /// not: a dug record has no cached cover at all, and a keyed one loses its
+    /// cached cover the moment it leaves its list, while its sheet stays open.
+    /// This is what the sheet falls back to in both cases, so don't drop it on
+    /// the assumption that a key makes it redundant.
     pub cover_url: Option<String>,
     pub release_id: u64,
     pub title: String,
@@ -205,7 +208,10 @@ impl App {
 
         self.vinyl_sheet = Some(VinylSheet {
             key: Some(key),
-            cover_url: None,
+            // Set even though the cache normally serves a keyed record's cover:
+            // it's the fallback for when the record leaves its list. See the
+            // field's docs.
+            cover_url: record.thumb_url.clone(),
             release_id: record.release_id,
             title: record.title.clone(),
             artist: record.artist.clone(),
@@ -673,13 +679,19 @@ impl App {
                 webview::is_open(),
             )
         };
-        // Cover from whichever cache holds it: the local one for a record in a
-        // list, the dig's URL cache for one that isn't.
-        let cover = match key {
-            Some(k) => match self.vinyl_covers.get(&k) {
-                Some(ThumbState::Ready(Some(t))) => Some(t.clone()),
-                _ => None,
-            },
+        // Cover from the local cache when it has one, falling back to the URL.
+        // The fallback covers a keyed record too, not just a dug one: a key is
+        // live only while the record is in a list, and the sheet outlives that.
+        // Removing the record evicts its texture (and deletes the row its PNG
+        // sits on); leaving the Vinyl view clears the cache outright. Both used
+        // to blank an open sheet. `dig_cover` refetches on a miss, so the worst
+        // case is the cover returning a moment later rather than vanishing.
+        let cached = key.and_then(|k| match self.vinyl_covers.get(&k) {
+            Some(ThumbState::Ready(Some(t))) => Some(t.clone()),
+            _ => None,
+        });
+        let cover = match cached {
+            Some(t) => Some(t),
             None => cover_url
                 .as_deref()
                 .and_then(|u| self.dig_cover(u))
