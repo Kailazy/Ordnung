@@ -69,6 +69,11 @@ pub(crate) struct DigStep {
     /// How this step was reached, and the value that was matched. `None` on the
     /// first step, which was chosen outright rather than dug to.
     pub via: Option<(DigThread, String)>,
+    /// When this record landed on the path, so the strip can play it in rather
+    /// than have it blink into place. Set once, on the push, and never
+    /// refreshed: walking back over a card is navigation, not a new find, and
+    /// re-animating there would make the path feel like it was being rebuilt.
+    pub landed_at: std::time::Instant,
 }
 
 /// An in-progress dig: the records visited, and which one is on screen.
@@ -105,6 +110,10 @@ pub(crate) struct DigPath {
     /// two threads it has yet to deliver. Empty set means nothing is in flight.
     /// Used to avoid starting a second worker for a head already being primed.
     pub priming: Option<(u64, Vec<DigThread>)>,
+    /// When the dig started, driving the strip's entrance. The strip is a panel
+    /// that shoves the whole shelf down when it appears, so it eases in rather
+    /// than snapping the grid out from under the pointer.
+    pub opened_at: std::time::Instant,
     /// Raised to tell the prefetch worker to stop between requests.
     ///
     /// Speculation shares one process-wide request pace with everything else,
@@ -155,6 +164,33 @@ pub(crate) struct DigFetched {
     /// count against.
     pub entity: u64,
     pub result: std::result::Result<BrowsePage, String>,
+}
+
+/// Motion for the strip's entrance: long enough to read as the crate being
+/// pulled out, short enough that the first click never waits on it. Matches the
+/// search popup's pacing so the two panels in the app open at the same speed.
+const OPEN_ANIM: f32 = 0.18;
+
+/// How far above its resting position the strip starts, in points. It pushes
+/// the shelf down as it arrives, so it slides *out* of the toolbar edge rather
+/// than appearing whole.
+const OPEN_RISE: f32 = 10.0;
+
+/// Motion for one newly dug record arriving on the path, and how far along the
+/// strip it starts. A find is the payoff of the whole interaction, so its card
+/// gets a longer, more deliberate entrance than the panel around it.
+const CARD_ANIM: f32 = 0.34;
+const CARD_SLIDE: f32 = 26.0;
+
+/// How small a landing card starts, as a fraction of its settled size. Not zero
+/// — a card that grows from nothing reads as a popup, where one that grows from
+/// most of its size reads as a record being pushed into the row.
+const CARD_MIN_SCALE: f32 = 0.72;
+
+/// How far along `since` the card's entrance has run, eased. Shared by the
+/// card's slide, its scale and its fade so the three can't drift apart.
+fn card_enter_t(since: f32) -> f32 {
+    egui::emath::easing::cubic_out((since / CARD_ANIM).clamp(0.0, 1.0))
 }
 
 /// A flag that is never raised, for the call sites that must not be cancelled.
@@ -338,6 +374,24 @@ mod tests {
         differ("XDB", "Descap", "Losoul", "Descap");
     }
 
+    /// A newly landed card must start hidden and finish settled, and never
+    /// run backwards in between — the strip reads `enter < 1.0` to decide
+    /// whether to keep requesting frames, so a value that never reaches 1.0
+    /// would repaint the app forever.
+    #[test]
+    fn card_enter_starts_hidden_and_settles() {
+        assert_eq!(card_enter_t(0.0), 0.0);
+        assert_eq!(card_enter_t(CARD_ANIM), 1.0);
+        assert_eq!(card_enter_t(CARD_ANIM * 10.0), 1.0);
+        let mut prev = 0.0;
+        for i in 0..=20 {
+            let t = card_enter_t(CARD_ANIM * i as f32 / 20.0);
+            assert!(t >= prev, "entrance went backwards at step {i}");
+            assert!((0.0..=1.0).contains(&t), "entrance left 0..=1 at step {i}");
+            prev = t;
+        }
+    }
+
     /// A title made only of folded-away words must not collapse every such
     /// record onto one key — that would wall the dig off from all of them.
     #[test]
@@ -470,6 +524,7 @@ impl App {
                 thumb_url: None,
                 owned: true,
                 via: None,
+                landed_at: std::time::Instant::now(),
             }],
             at: 0,
             seen,
@@ -479,6 +534,7 @@ impl App {
             pages: HashMap::new(),
             ready: HashMap::new(),
             priming: None,
+            opened_at: std::time::Instant::now(),
             cancel_prime: Arc::new(AtomicBool::new(false)),
         });
         // The local cover cache is keyed by list + instance id, so make sure the
@@ -732,6 +788,7 @@ impl App {
             thumb_url: (!pick.thumb_url.trim().is_empty()).then(|| pick.thumb_url.clone()),
             owned: false,
             via: Some((msg_thread, matched)),
+            landed_at: std::time::Instant::now(),
         };
         // Choosing from here makes this the new future.
         dig.steps.truncate(dig.at + 1);
@@ -1023,8 +1080,21 @@ impl App {
             owned: bool,
             via: Option<(DigThread, String)>,
             label: Option<String>,
+            /// Seconds since this record landed on the path, driving its
+            /// entrance. Settled cards report a large value and animate nothing.
+            since_landed: f32,
         }
-        let (cards, at, pending, error, head_artist, head_label, has_artist_id, has_label_id) = {
+        let (
+            cards,
+            at,
+            pending,
+            error,
+            head_artist,
+            head_label,
+            has_artist_id,
+            has_label_id,
+            since_opened,
+        ) = {
             let dig = self.dig.as_ref().expect("checked above");
             let head = dig.head();
             (
@@ -1044,6 +1114,7 @@ impl App {
                             Some((DigThread::Label, name)) => Some(name.clone()),
                             _ => None,
                         }),
+                        since_landed: s.landed_at.elapsed().as_secs_f32(),
                     })
                     .collect::<Vec<_>>(),
                 dig.at,
@@ -1053,6 +1124,7 @@ impl App {
                 head.label.clone(),
                 !head.artist_ids.is_empty(),
                 !head.label_ids.is_empty(),
+                dig.opened_at.elapsed().as_secs_f32(),
             )
         };
 
@@ -1061,10 +1133,27 @@ impl App {
         let mut goto: Option<usize> = None;
         let mut end = false;
 
-        egui::Frame::none()
+        // The strip's own entrance. `open_t` runs once per dig from the moment
+        // it started; a settled strip clamps to 1.0 and pays for nothing.
+        let open_t = egui::emath::easing::cubic_out((since_opened / OPEN_ANIM).clamp(0.0, 1.0));
+        if open_t < 1.0 {
+            ui.ctx().request_repaint();
+        }
+        // Slide down out of the toolbar edge: the panel's top margin starts
+        // squeezed and opens to its resting value, which moves the whole strip
+        // *and* the shelf below it rather than letting it overlap either.
+        let rise = OPEN_RISE * (1.0 - open_t);
+        ui.scope(|ui| {
+            ui.multiply_opacity(open_t);
+            egui::Frame::none()
             .fill(egui::Color32::from_gray(26))
             .rounding(egui::Rounding::same(8.0))
-            .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+            .inner_margin(egui::Margin {
+                left: 12.0,
+                right: 12.0,
+                top: 10.0 - rise * 0.5,
+                bottom: 10.0 - rise * 0.5,
+            })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("🔍  Digging").strong());
@@ -1103,15 +1192,28 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             for (i, card) in cards.iter().enumerate() {
+                                // How far into its arrival this card is. Every
+                                // card but a just-dug one is settled at 1.0, so
+                                // the path as a whole stays still while the new
+                                // find is the only thing moving.
+                                let enter = card_enter_t(card.since_landed);
+                                if enter < 1.0 {
+                                    ui.ctx().request_repaint();
+                                }
                                 if let Some((thread, matched)) = &card.via {
                                     // The connector names what was followed, so
-                                    // a finished path explains itself.
+                                    // a finished path explains itself. It draws
+                                    // itself in ahead of the record it points
+                                    // at, so the arrow reads as the thread being
+                                    // pulled and the card as what came up on it.
                                     ui.vertical(|ui| {
                                         ui.add_space(COVER * 0.5 - 8.0);
+                                        let arrow = (enter * 1.6).min(1.0);
                                         ui.label(
-                                            egui::RichText::new("→")
-                                                .size(16.0)
-                                                .color(egui::Color32::from_gray(120)),
+                                            egui::RichText::new("→").size(16.0).color(
+                                                egui::Color32::from_gray(120)
+                                                    .gamma_multiply(arrow),
+                                            ),
                                         )
                                         .on_hover_note(
                                             format!("Same {}: {matched}", thread.label()),
@@ -1119,14 +1221,50 @@ impl App {
                                     });
                                 }
                                 let current = i == at;
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(COVER, COVER + 60.0),
-                                    egui::Layout::top_down(egui::Align::Min),
-                                    |ui| {
+                                // A landing card slides in from the right of
+                                // its slot and fades up, like a sleeve being
+                                // pushed into the row. Only the contents move:
+                                // the slot below is allocated at full size
+                                // either way, so the rest of the path holds
+                                // still while the new find settles.
+                                let card_size = egui::vec2(COVER, COVER + 60.0);
+                                let slot = egui::Rect::from_min_size(ui.cursor().min, card_size);
+                                let shifted = slot
+                                    .translate(egui::vec2(CARD_SLIDE * (1.0 - enter), 0.0));
+                                ui.allocate_rect(slot, egui::Sense::hover());
+                                let mut card_ui = ui.new_child(
+                                    egui::UiBuilder::new()
+                                        .max_rect(shifted)
+                                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                                );
+                                card_ui.multiply_opacity(enter);
+                                {
+                                    let ui = &mut card_ui;
+                                    {
                                         let (rect, resp) = ui.allocate_exact_size(
                                             egui::vec2(COVER, COVER),
                                             egui::Sense::click(),
                                         );
+                                        // The sleeve itself grows the last of
+                                        // the way into its square. Shrinking
+                                        // `rect` here scales the whole tile at
+                                        // once — art, the dim wash, the current
+                                        // ring and the "yours" chip all read off
+                                        // it — so the cover can't drift out of
+                                        // its own border mid-entrance.
+                                        let rect = rect.shrink(
+                                            COVER * (1.0 - CARD_MIN_SCALE) * 0.5 * (1.0 - enter),
+                                        );
+                                        // Keep the record on screen in view as
+                                        // the path outgrows the window —
+                                        // otherwise a dig past the right edge
+                                        // animates a card the user can't see.
+                                        // Only while it's still arriving, so a
+                                        // deliberate scroll back down the path
+                                        // isn't yanked forward again.
+                                        if current && enter < 1.0 {
+                                            resp.scroll_to_me(Some(egui::Align::Center));
+                                        }
                                         let resp =
                                             resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                                         // The starting record's cover is in the
@@ -1263,8 +1401,8 @@ impl App {
                                                 .truncate(),
                                             );
                                         }
-                                    },
-                                );
+                                    }
+                                }
                             }
                             // The step being fetched, as a placeholder tile at
                             // the end of the path — so a dig in flight looks
@@ -1359,6 +1497,7 @@ impl App {
                     }
                 });
             });
+        });
 
         // Vary the roll between clicks (see `dig_roll`).
         self.dig_seed = self.dig_seed.wrapping_add(0x2545_F491_4F6C_DD1D);
