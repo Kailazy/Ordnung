@@ -67,7 +67,16 @@ pub mod color {
     /// The inspector drawer and its pull tab. One token for both so the handle
     /// reads as part of the panel it grows out of, rather than two greys that
     /// drift apart the next time either is touched.
-    pub const DRAWER: Color32 = Color32::from_gray(54);
+    ///
+    /// Darker than `CONTENT_BG`, not lighter: a right-hand utility panel is
+    /// chrome beside the content, so it recedes the way Finder's preview pane
+    /// and Spotify's now-playing rail do. The old `gray(54)` was brighter than
+    /// the table it bordered, which made the panel read as a slab laid on top
+    /// of the app instead of part of its frame.
+    pub const DRAWER: Color32 = Color32::from_rgb(30, 30, 32);
+    /// The pull tab's hovered fill — one elevation step up from `DRAWER`, so
+    /// the handle lifts under the pointer instead of flashing to a light grey.
+    pub const DRAWER_HOVER: Color32 = Color32::from_rgb(46, 46, 50);
 
     // --- Hairlines ---
     /// Translucent separator that adapts to whatever sits behind it (white α20,

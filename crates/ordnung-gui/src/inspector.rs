@@ -160,16 +160,19 @@ impl App {
                     se: 0.0,
                 };
                 let bg = if hovered {
-                    egui::Color32::from_gray(82)
+                    crate::ui::tokens::color::DRAWER_HOVER
                 } else {
                     crate::ui::tokens::color::DRAWER
                 };
                 ui.painter().rect_filled(rect, rounding, bg);
 
+                // Resting state is tertiary, not near-white: the tab is a
+                // persistent affordance sitting over the table, so it should be
+                // quiet until pointed at and only then step up to full contrast.
                 let fg = if hovered {
-                    egui::Color32::from_gray(235)
+                    crate::ui::tokens::color::LABEL
                 } else {
-                    egui::Color32::from_gray(170)
+                    crate::ui::tokens::color::LABEL_3
                 };
                 // The chevron points where the panel is headed: outward (▶) to
                 // push it away, inward (◀) to pull it back open. Painted as a
@@ -246,11 +249,23 @@ impl App {
         ui: &mut egui::Ui,
         ctx: &egui::Context,
     ) -> Option<InspectorAction> {
+        use crate::ui::tokens::{color, space};
+
         // Small all-caps caption rather than a big heading: the track's own
-        // name below is what should read as the panel's title.
-        ui.add_space(6.0);
-        ui.add(egui::Label::new(egui::RichText::new("T R A C K").small().weak()).truncate());
-        ui.add_space(2.0);
+        // name below is what should read as the panel's title. The letter
+        // spacing is real spaces because egui has no tracking control; keeping
+        // it here rather than in the string means the eyebrow reads as a label
+        // and not as a word someone mistyped.
+        ui.add_space(space::S4);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("T R A C K")
+                    .font(crate::ui::tokens::font::caption())
+                    .color(color::LABEL_3),
+            )
+            .truncate(),
+        );
+        ui.add_space(space::S3);
 
         // Copied out before borrowing `selected_track` so the button below can
         // act on them without holding an immutable borrow of `self`.
@@ -276,12 +291,34 @@ impl App {
         };
 
         let Some(t) = &self.selected_track else {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new("Click a track in the table to inspect.").weak(),
-                )
-                .wrap(),
-            );
+            // A panel with nothing in it still owes the user a reason it is
+            // there. Centred in the panel's upper third rather than pinned to
+            // the top-left corner, the way Finder's preview pane and Xcode's
+            // inspectors place their "no selection" state: a muted glyph, one
+            // short line, and nothing else competing with it.
+            ui.vertical_centered(|ui| {
+                ui.add_space(space::S7 * 2.0);
+                ui.label(
+                    egui::RichText::new("♪")
+                        .font(crate::ui::tokens::font::large_title())
+                        .color(color::LABEL_4),
+                );
+                ui.add_space(space::S4);
+                ui.label(
+                    egui::RichText::new("No track selected")
+                        .font(crate::ui::tokens::font::body())
+                        .color(color::LABEL_2),
+                );
+                ui.add_space(space::S1);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Select a track to see its details.")
+                            .font(crate::ui::tokens::font::footnote())
+                            .color(color::LABEL_4),
+                    )
+                    .wrap(),
+                );
+            });
             return None;
         };
         let id = t.id;
@@ -289,19 +326,23 @@ impl App {
 
         // Title on its own line at heading weight, artist beneath it — the
         // "A — B" run-together line read as one undifferentiated string.
+        // Three descending label colours (primary / secondary / tertiary) do
+        // the hierarchy here, so size alone isn't carrying it.
         ui.add(
             egui::Label::new(
                 egui::RichText::new(t.tags.title.as_deref().unwrap_or("Untitled"))
-                    .heading()
-                    .size(17.0),
+                    .font(crate::ui::tokens::font::headline())
+                    .color(color::LABEL)
+                    .strong(),
             )
             .truncate(),
         );
+        ui.add_space(space::S1);
         ui.add(
             egui::Label::new(
                 egui::RichText::new(t.tags.artist.as_deref().unwrap_or("Unknown"))
-                    .size(13.0)
-                    .weak(),
+                    .font(crate::ui::tokens::font::body())
+                    .color(color::LABEL_2),
             )
             .truncate(),
         );
@@ -312,71 +353,36 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path_str.clone());
-        ui.add_space(1.0);
-        ui.add(egui::Label::new(egui::RichText::new(file_name).small().weak()).truncate())
-            .on_hover_note(&path_str);
+        ui.add_space(space::S1);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(file_name)
+                    .font(crate::ui::tokens::font::footnote())
+                    .color(color::LABEL_4),
+            )
+            .truncate(),
+        )
+        .on_hover_note(&path_str);
 
         // Cover art preview. Decoded off-thread (see `cover_full_texture`): once
         // ready we show the high-quality image (embedded art wins, fetched
         // Discogs art is the fallback), scaled to a square that fits the panel
         // width. While the worker decodes, show a spinner so a large source
         // image never makes the panel look empty or frozen.
-        if let Some(tex) = &cover_tex {
-            ui.add_space(10.0);
-            let side = ui.available_width().min(240.0);
-            ui.vertical_centered(|ui| {
-                ui.add(
-                    egui::Image::new(tex)
-                        .maintain_aspect_ratio(true)
-                        .fit_to_exact_size(egui::vec2(side, side))
-                        .rounding(6.0),
-                );
-            });
-            ui.add_space(4.0);
-        } else if cover_loading {
-            ui.add_space(10.0);
-            let side = ui.available_width().min(240.0);
-            ui.vertical_centered(|ui| {
-                // Reserve the same square the artwork will occupy so the panel
-                // below doesn't jump once the decode lands.
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
-                ui.painter()
-                    .rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
-                ui.put(rect, egui::Spinner::new());
-            });
-            ui.add_space(4.0);
-        }
-
-        // The user's requested action this frame, if any. Acted on by the caller
-        // after this method's borrow of `self` ends.
-        let mut action: Option<InspectorAction> = None;
-
-        // Writeback action: imprint the fetched cover into the source file.
-        // Mirrors the CLI's `tag --write --art` — explicit and source-mutating,
-        // so it only appears when fetched artwork actually exists.
-        //
-        // With auto-write on it never appears at all: fetched art already flags
-        // the track `user_edited`, so the background write embeds it within a
-        // frame or two and clears the row. Showing the button there would put a
-        // decision in front of the user that has already been made for them,
-        // and it would vanish under the pointer as the write lands.
-        if has_ext_art && !self.config.auto_write_tags {
-            ui.add_space(6.0);
-            ui.add_enabled_ui(!busy, |ui| {
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 24.0],
-                        egui::Button::new("⬇ Embed fetched cover into file"),
-                    )
-                    .on_hover_note("Write the fetched cover into the source file's tags")
-                    .clicked()
-                {
-                    action = Some(InspectorAction::EmbedCover(id, source_path.clone()));
-                }
-            });
-        }
-        ui.add_space(8.0);
+        // The identity above (eyebrow, title, artist, file name) is the panel's
+        // header and stays put; everything below it scrolls. Pinning the header
+        // is what keeps "which track am I looking at" answerable after the user
+        // has scrolled down into ReplayGain or MusicBrainz ids — the same split
+        // Finder's preview pane and Spotify's now-playing rail use. The cover
+        // deliberately sits on the scrolling side: at full panel width it would
+        // otherwise consume most of a short window.
+        ui.add_space(space::S4);
+        let hdr = ui.available_rect_before_wrap();
+        ui.painter().hline(
+            (hdr.left() - space::S5)..=(hdr.right() + space::S4),
+            hdr.top(),
+            egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE),
+        );
 
         // --- Editable Core tags ------------------------------------------
         // The fields a user most often fixes or fills (e.g. from Discogs), plus
@@ -384,11 +390,72 @@ impl App {
         // Edits live in `self.tag_edit`; "Save" commits them to the catalog,
         // "Write to source file" also writes them into the original file. Both
         // are disabled until something actually changes.
+        // The user's requested action this frame, if any. Acted on by the caller
+        // after this method's borrow of `self` ends. Declared outside the scroll
+        // area because the buttons that set it now live inside it.
+        let mut action: Option<InspectorAction> = None;
         let dirty = self.tag_edit != self.tag_edit_saved;
         // One scroll area over the edit form *and* the read-only sections: with
         // the form outside it, a tall inspector clipped the form instead of
         // scrolling the column as a whole.
         egui::ScrollArea::vertical().show(ui, |ui| {
+            // Full panel width rather than a centred 240px square: artwork is the
+            // one thing here that benefits from size, and a media panel's hero
+            // image spans its column (Music, Spotify, Finder's preview all do
+            // this) instead of floating with gutters either side.
+            if let Some(tex) = &cover_tex {
+                ui.add_space(space::S4);
+                let side = ui.available_width();
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+                egui::Image::new(tex)
+                    .maintain_aspect_ratio(true)
+                    .fit_to_exact_size(egui::vec2(side, side))
+                    .rounding(crate::ui::tokens::radius::MD)
+                    .paint_at(ui, rect);
+                // Hairline over the artwork's own edge: album art often fades to
+                // near-black at the border, which without this dissolves into the
+                // panel instead of reading as a bounded image.
+                ui.painter().rect_stroke(
+                    rect,
+                    crate::ui::tokens::radius::MD,
+                    egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE),
+                );
+            } else if cover_loading {
+                ui.add_space(space::S4);
+                let side = ui.available_width();
+                // Reserve the same square the artwork will occupy so the panel
+                // below doesn't jump once the decode lands.
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(rect, crate::ui::tokens::radius::MD, color::FIELD);
+                ui.put(rect, egui::Spinner::new());
+            }
+
+            // Writeback action: imprint the fetched cover into the source file.
+            // Mirrors the CLI's `tag --write --art` — explicit and source-mutating,
+            // so it only appears when fetched artwork actually exists.
+            //
+            // With auto-write on it never appears at all: fetched art already flags
+            // the track `user_edited`, so the background write embeds it within a
+            // frame or two and clears the row. Showing the button there would put a
+            // decision in front of the user that has already been made for them,
+            // and it would vanish under the pointer as the write lands.
+            if has_ext_art && !self.config.auto_write_tags {
+                ui.add_space(space::S4);
+                ui.add_enabled_ui(!busy, |ui| {
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 24.0],
+                            egui::Button::new("⬇ Embed fetched cover into file"),
+                        )
+                        .on_hover_note("Write the fetched cover into the source file's tags")
+                        .clicked()
+                    {
+                        action = Some(InspectorAction::EmbedCover(id, source_path.clone()));
+                    }
+                });
+            }
+
             // Edit mode is off by default: the same fields render as plain
             // rows, so the panel reads as a summary rather than eight text
             // boxes. `editing` is copied out because the closures below borrow
@@ -417,7 +484,7 @@ impl App {
                     if editing {
                         egui::Grid::new("tag-edit-grid")
                             .num_columns(2)
-                            .spacing(egui::vec2(8.0, 4.0))
+                            .spacing(egui::vec2(space::S3, space::S2))
                             .show(ui, |ui| {
                                 edit_row(ui, "Title", &mut self.tag_edit.title);
                                 edit_row(ui, "Artist", &mut self.tag_edit.artist);
@@ -467,7 +534,7 @@ impl App {
                                 ui.label(
                                     egui::RichText::new("● unsaved")
                                         .small()
-                                        .color(egui::Color32::from_rgb(220, 190, 90)),
+                                        .color(color::YELLOW),
                                 );
                             }
                         });
@@ -489,7 +556,7 @@ impl App {
                             ui.label(
                                 egui::RichText::new("● unsaved edits — reopen Edit to save")
                                     .small()
-                                    .color(egui::Color32::from_rgb(220, 190, 90)),
+                                    .color(color::YELLOW),
                             );
                         }
                     }
@@ -530,20 +597,32 @@ impl App {
                             // a flag — so they read identically here.
                             TranscodeVerdict::Clean | TranscodeVerdict::Inconclusive => (
                                 "No transcode signature",
-                                egui::Color32::from_rgb(120, 200, 130),
+                                color::GREEN,
                             ),
                             TranscodeVerdict::Suspect => (
                                 "Cutoff ~20 kHz — possible 320k transcode",
-                                egui::Color32::from_rgb(220, 190, 90),
+                                color::YELLOW,
                             ),
                             TranscodeVerdict::LikelyLossy => (
                                 "Brick wall — likely lossy transcode",
-                                egui::Color32::from_rgb(225, 110, 100),
+                                color::RED,
                             ),
                         };
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Verdict:").weak().small());
-                            ui.label(egui::RichText::new(label).color(color).strong());
+                            ui.label(
+                                egui::RichText::new("Verdict")
+                                    .font(crate::ui::tokens::font::footnote())
+                                    .color(crate::ui::tokens::color::LABEL_3),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(label)
+                                        .font(crate::ui::tokens::font::callout())
+                                        .color(color)
+                                        .strong(),
+                                )
+                                .truncate(),
+                            );
                         });
                         if let Some(hz) = a.lowpass_hz {
                             inspector_row(
@@ -694,12 +773,19 @@ impl App {
                     // above, so it's intentionally not repeated here.
                     if let Some(lyr) = &g.lyrics {
                         if !lyr.is_empty() {
-                            ui.label(egui::RichText::new("Lyrics").weak());
+                            ui.label(
+                                egui::RichText::new("Lyrics")
+                                    .font(crate::ui::tokens::font::footnote())
+                                    .color(color::LABEL_3),
+                            );
                             ui.label(lyr);
                         }
                     }
                 });
             }
+            // Breathing room under the last section: without it the final row
+            // sits flush against the window's bottom edge at full scroll.
+            ui.add_space(space::S7);
         });
 
         action
@@ -886,12 +972,25 @@ pub(crate) fn inspector_section(
     title: &str,
     add_body: impl FnOnce(&mut egui::Ui),
 ) {
-    ui.add_space(12.0);
-    ui.label(egui::RichText::new(title.to_uppercase()).strong().small());
-    ui.add_space(3.0);
-    section_rule(ui);
-    ui.add_space(5.0);
+    section_head(ui, title);
     add_body(ui);
+}
+
+/// The caption + rule that opens a section. Space *above* is much larger than
+/// the space below: a heading belongs to what follows it, and equal gaps on
+/// both sides are what makes a long settings-style column read as undifferentiated.
+fn section_head(ui: &mut egui::Ui, title: &str) {
+    use crate::ui::tokens::{color, font, space};
+    ui.add_space(space::S6);
+    ui.label(
+        egui::RichText::new(title.to_uppercase())
+            .font(font::caption())
+            .color(color::LABEL_3)
+            .strong(),
+    );
+    ui.add_space(space::S2);
+    section_rule(ui);
+    ui.add_space(space::S3);
 }
 
 /// Like [`inspector_section`] but with a trailing control on the caption row
@@ -902,14 +1001,20 @@ pub(crate) fn inspector_section_with_action(
     add_action: impl FnOnce(&mut egui::Ui),
     add_body: impl FnOnce(&mut egui::Ui),
 ) {
-    ui.add_space(12.0);
+    use crate::ui::tokens::{color, font, space};
+    ui.add_space(space::S6);
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(title.to_uppercase()).strong().small());
+        ui.label(
+            egui::RichText::new(title.to_uppercase())
+                .font(font::caption())
+                .color(color::LABEL_3)
+                .strong(),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add_action);
     });
-    ui.add_space(3.0);
+    ui.add_space(space::S2);
     section_rule(ui);
-    ui.add_space(5.0);
+    ui.add_space(space::S3);
     add_body(ui);
 }
 
@@ -917,11 +1022,8 @@ pub(crate) fn inspector_section_with_action(
 fn section_rule(ui: &mut egui::Ui) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), egui::Sense::hover());
-    ui.painter().rect_filled(
-        rect,
-        0.0,
-        ui.visuals().weak_text_color().gamma_multiply(0.3),
-    );
+    ui.painter()
+        .rect_filled(rect, 0.0, crate::ui::tokens::color::SEPARATOR_OPAQUE);
 }
 
 /// A tag field shown read-only (edit mode off). Unlike [`opt_row`] an empty
@@ -950,24 +1052,47 @@ pub(crate) fn inspector_row_dim(ui: &mut egui::Ui, label: &str, value: &str) {
 }
 
 fn row_impl(ui: &mut egui::Ui, label: &str, value: &str, value_color: Option<egui::Color32>) {
-    const LABEL_W: f32 = 108.0;
+    use crate::ui::tokens::{color, font, space};
+    /// Width of the label column. Values line up against this, so it is the
+    /// panel's one alignment guide — narrow enough to leave the value room on a
+    /// 360px drawer, wide enough for "Original release" without truncating.
+    const LABEL_W: f32 = 104.0;
+    /// Row height. 18px gives the 12.5px value text room to breathe; at the old
+    /// 16 the rows packed into a solid block with no line rhythm.
+    const ROW_H: f32 = 18.0;
+
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = space::S3;
         let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(LABEL_W.min(ui.available_width() * 0.5), 16.0),
+            egui::vec2(LABEL_W.min(ui.available_width() * 0.5), ROW_H),
             egui::Sense::hover(),
         );
+        // Painted rather than laid out as a `Label` so the label column is a
+        // fixed measure the value can align to, and a long label is clipped by
+        // the panel rather than pushing the value out of alignment.
         ui.painter().text(
             rect.left_center(),
             egui::Align2::LEFT_CENTER,
             label,
-            egui::FontId::proportional(11.0),
-            ui.visuals().weak_text_color(),
+            font::footnote(),
+            color::LABEL_3,
         );
-        let mut txt = egui::RichText::new(value).size(12.5);
+        // The value is the row's content, so it takes the primary label colour
+        // while the field name stays tertiary. Previously both were weak, which
+        // gave a name and its value the same visual weight.
+        let mut txt = egui::RichText::new(value).font(font::callout()).color(color::LABEL);
         if let Some(c) = value_color {
             txt = txt.color(c);
         }
-        ui.label(txt);
+        // Truncated, not wrapped: a wrapped value breaks the label/value grid
+        // and long ids (MusicBrainz, paths) would each become a paragraph.
+        let avail = ui.available_width();
+        let resp = ui.add(egui::Label::new(txt).truncate());
+        // Only a value that actually got clipped earns a tooltip — a note that
+        // repeats what is already fully on screen is noise under the pointer.
+        if resp.rect.width() >= avail - 0.5 {
+            resp.on_hover_note(value);
+        }
     });
 }
 
@@ -980,7 +1105,12 @@ pub(crate) fn opt_row(ui: &mut egui::Ui, label: &str, value: &Option<String>) {
 /// One editable label + single-line field row inside the inspector's edit grid.
 /// `ui.end_row()` advances the surrounding `egui::Grid`.
 pub(crate) fn edit_row(ui: &mut egui::Ui, label: &str, value: &mut String) {
-    ui.label(egui::RichText::new(label).weak().small());
+    use crate::ui::tokens::{color, font};
+    ui.label(
+        egui::RichText::new(label)
+            .font(font::footnote())
+            .color(color::LABEL_3),
+    );
     ui.add(
         egui::TextEdit::singleline(value)
             .hint_text("—")
@@ -992,7 +1122,12 @@ pub(crate) fn edit_row(ui: &mut egui::Ui, label: &str, value: &mut String) {
 /// Like [`edit_row`] but a wrapping, multi-line box — for free-form text such as
 /// the comment/notes field, which is often longer than one line.
 pub(crate) fn edit_row_multiline(ui: &mut egui::Ui, label: &str, value: &mut String) {
-    ui.label(egui::RichText::new(label).weak().small());
+    use crate::ui::tokens::{color, font};
+    ui.label(
+        egui::RichText::new(label)
+            .font(font::footnote())
+            .color(color::LABEL_3),
+    );
     ui.add(
         egui::TextEdit::multiline(value)
             .hint_text("—")
