@@ -1278,13 +1278,17 @@ impl App {
                 self.vinyl_sheet = None;
                 return;
             }
-            // Branching moves the dig to a new record, so the sheet standing
-            // on the old one closes — same as starting a dig, and it uncovers
-            // the strip that's now showing where you landed.
+            // Branching moves the dig to a new record, and the sheet rides
+            // along: digging from the window is a chain of listens, so it
+            // re-points at whatever the step lands on rather than closing and
+            // sending the user back to the strip to reopen the next find. The
+            // old record's playback stops here — what's on screen is about to
+            // be a different record. See `sheet_follows_dig`, spent in
+            // `apply_page`.
             Some(Act::Branch(thread)) => {
-                self.dig_step(thread);
                 self.stop_sheet_video();
-                self.vinyl_sheet = None;
+                self.sheet_follows_dig = true;
+                self.dig_step(thread);
                 return;
             }
             Some(Act::Play(row)) => self.play_sheet_row(row, frame),
@@ -1396,6 +1400,18 @@ fn draw_screen_glyph(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, showi
     );
 }
 
+/// The tracklist's two fixed left-hand columns: the play marker, then the
+/// position. Shared with the transport bar, whose own play button is drawn
+/// [`MARKER_W`] wide over the same left edge, so the bar's pause icon sits
+/// directly above the triangles in the rows beneath it instead of a few pixels
+/// to their right.
+const MARKER_W: f32 = 22.0;
+const POS_W: f32 = 34.0;
+/// The tracklist's duration column, wide enough for a long side ("10:57") so
+/// the figures right-align in a straight column instead of each starting
+/// wherever its own text happens to begin.
+const DUR_W: f32 = 38.0;
+
 /// What the transport bar's controls asked for this frame.
 enum VideoAct {
     TogglePause,
@@ -1437,13 +1453,18 @@ fn video_transport_ui(
     egui::Frame::none()
         .fill(ui.visuals().faint_bg_color)
         .rounding(6.0)
-        .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+        // No horizontal inset: the bar's play button is the same MARKER_W
+        // column the rows below start with, so insetting the frame would push
+        // the pause icon off the line the row triangles sit on.
+        .inner_margin(egui::Margin::symmetric(0.0, 6.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Play/pause. Sized so it stays a comfortable target next to the
-                // scrubber rather than a text-height button.
+                // Play/pause. The rows' marker column, so this sits directly
+                // above the triangles in the tracklist; still 28 tall, which
+                // keeps it a comfortable target beside the scrubber rather
+                // than a text-height button.
                 let (btn_rect, btn) =
-                    ui.allocate_exact_size(egui::vec2(30.0, 28.0), egui::Sense::click());
+                    ui.allocate_exact_size(egui::vec2(MARKER_W, 28.0), egui::Sense::click());
                 let col = if btn.hovered() {
                     egui::Color32::WHITE
                 } else {
@@ -1486,8 +1507,7 @@ fn video_transport_ui(
                 // stale the next time a control moves. Derived from
                 // `content_w`, never from the space left in the row (see the
                 // note on this function).
-                const BESIDE: f32 = 20.0   // frame margin, both sides
-                    + 30.0 + 6.0           // play button, then its gap
+                const BESIDE: f32 = MARKER_W + 6.0 // play button, then its gap
                     + 42.0                 // elapsed clock
                     + 6.0 + 42.0           // gap, total clock
                     + 8.0 + 24.0           // gap, video toggle
@@ -1630,17 +1650,35 @@ fn sheet_row_ui(
                 } else {
                     egui::Color32::from_gray(90)
                 };
-                ui.allocate_ui(egui::vec2(22.0, 20.0), |ui| {
-                    ui.label(egui::RichText::new(glyph).size(11.0).color(colour));
-                });
-                // Position.
-                ui.allocate_ui(egui::vec2(34.0, 20.0), |ui| {
-                    ui.label(
-                        egui::RichText::new(&row.position)
-                            .small()
-                            .color(egui::Color32::from_gray(150)),
+                // Fixed cells, left-aligned: `allocate_ui` shrinks to the
+                // content it's given, so a row playing "❚❚" reserved a wider
+                // marker than one showing "▶" and shunted the position and
+                // title of that one row to the right. These columns hold their
+                // width whatever glyph is in them, so the tracklist reads as
+                // straight edges down the sheet.
+                // A column that holds its width whatever it's given:
+                // `allocate_ui` shrinks back to the content it actually used,
+                // so the reserved size has to be taken outright and the text
+                // painted into it.
+                let cell = |ui: &mut egui::Ui, w: f32, text: egui::RichText| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::hover());
+                    ui.put(
+                        rect,
+                        egui::Label::new(text)
+                            .selectable(false)
+                            .halign(egui::Align::LEFT),
                     );
-                });
+                };
+                cell(ui, MARKER_W, egui::RichText::new(glyph).size(11.0).color(colour));
+                // Position.
+                cell(
+                    ui,
+                    POS_W,
+                    egui::RichText::new(&row.position)
+                        .small()
+                        .color(egui::Color32::from_gray(150)),
+                );
                 let title = egui::RichText::new(&row.title).color(if playable {
                     egui::Color32::from_gray(230)
                 } else {
@@ -1686,10 +1724,21 @@ fn sheet_row_ui(
                     }
                     if !row.duration.is_empty() {
                         ui.add_space(10.0);
-                        ui.label(
-                            egui::RichText::new(&row.duration)
-                                .small()
-                                .color(egui::Color32::from_gray(130)),
+                        // Fixed and right-aligned, like the transport's clocks:
+                        // a bare label is as wide as its text, so "10:57" and
+                        // "9:59" started at different x and the durations read
+                        // as a ragged column down the sheet.
+                        let (rect, _) = ui
+                            .allocate_exact_size(egui::vec2(DUR_W, 20.0), egui::Sense::hover());
+                        ui.put(
+                            rect,
+                            egui::Label::new(
+                                egui::RichText::new(&row.duration)
+                                    .small()
+                                    .color(egui::Color32::from_gray(130)),
+                            )
+                            .selectable(false)
+                            .halign(egui::Align::RIGHT),
                         );
                     }
                 });

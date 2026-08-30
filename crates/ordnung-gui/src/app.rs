@@ -107,6 +107,7 @@ impl App {
             vinyl_wanted_tracks: HashSet::new(),
             confirm_vinyl_edit: None,
             vinyl_sheet: None,
+            sheet_follows_dig: false,
             sheet_rx: None,
             sheet_price_rx: None,
             egui_ctx: egui_ctx.clone(),

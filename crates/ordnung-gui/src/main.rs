@@ -906,6 +906,13 @@ struct App {
     /// position (a local file, a Discogs-listed YouTube video, or nothing).
     /// `None` when no record is open. See [`vinyl_sheet`].
     vinyl_sheet: Option<VinylSheet>,
+    /// The open sheet is riding the dig: a thread was taken from the sheet's own
+    /// branch buttons, so when the step lands the sheet re-points at the record
+    /// the dig walked to instead of closing. Digging from the sheet is a chain
+    /// of listens, and closing the window between each one would make the user
+    /// chase the strip with the pointer to hear the next find. Cleared when the
+    /// step lands, when it fails, or when the sheet closes.
+    sheet_follows_dig: bool,
     /// Receives the release detail (tracklist + videos) fetched for the open
     /// sheet. One release per lookup, off the UI thread; results for a record
     /// the user has since closed are dropped.

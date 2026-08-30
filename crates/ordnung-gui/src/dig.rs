@@ -581,6 +581,9 @@ impl App {
     fn dig_fetch_step(&mut self, thread: DigThread) {
         let token = self.discogs_token();
         if token.trim().is_empty() {
+            // No request goes out, so nothing will land to move an open sheet
+            // onto — it stays where it is.
+            self.sheet_follows_dig = false;
             if let Some(dig) = self.dig.as_mut() {
                 dig.error = Some(
                     "No Discogs token set. Add one in Settings to dig for new records.".to_string(),
@@ -598,6 +601,7 @@ impl App {
             DigThread::Artist => head.artist_ids.first().copied(),
             DigThread::Label => head.label_ids.first().copied(),
         }) else {
+            self.sheet_follows_dig = false;
             return;
         };
         let from = head.release_id;
@@ -657,18 +661,24 @@ impl App {
         let Some(rx) = &self.dig_rx else { return };
         let Ok(msg) = rx.try_recv() else { return };
         self.dig_rx = None;
+        let mut stalled = false;
         {
             let Some(dig) = self.dig.as_mut() else { return };
             dig.pending = None;
             // The user moved somewhere else while this was in flight — the
             // answer is about a record they're no longer standing on.
             if dig.head().release_id != msg.from {
-                return;
-            }
-            if let Err(e) = &msg.result {
+                stalled = true;
+            } else if let Err(e) = &msg.result {
                 dig.error = Some(e.clone());
-                return;
+                stalled = true;
             }
+        }
+        // Nothing landed, so an open sheet stops waiting for a record to move
+        // to and stays on the one it's showing.
+        if stalled {
+            self.sheet_follows_dig = false;
+            return;
         }
         let page = msg.result.expect("error returned above");
         self.apply_page(msg.thread, msg.entity, page);
@@ -688,6 +698,10 @@ impl App {
         // make a dig a discovery tool rather than a shuffle of what you have.
         let owned = self.vinyl_owned.clone();
         let wanted = self.vinyl_wanted.clone();
+        // Taken here, before the borrow below: whether this page produces a
+        // find or an error, the sheet's ride on the dig ends with this step. It
+        // is spent at the bottom, on the branch that actually lands somewhere.
+        let follow = std::mem::take(&mut self.sheet_follows_dig);
         let Some(dig) = self.dig.as_mut() else { return };
         dig.pending = None;
         dig.error = None;
@@ -794,10 +808,30 @@ impl App {
         dig.steps.truncate(dig.at + 1);
         dig.seen.insert(release_id);
         dig.works.insert(work_key(&step.artist, &step.title));
+        // What an open sheet riding the dig needs to re-point at this record,
+        // taken before the step is moved into the path.
+        let landed = follow.then(|| {
+            (
+                step.artist.clone(),
+                step.title.clone(),
+                step.sub.clone(),
+                step.thumb_url.clone(),
+            )
+        });
         dig.steps.push(step);
         dig.at = dig.steps.len() - 1;
         // The new step can't be dug from until we know its artist/label ids.
         self.dig_resolve_ids(release_id);
+        // A thread taken from the open sheet's own branch buttons: the window
+        // stayed up through the fetch, so it now shows the record the dig
+        // walked to. Same call the strip makes when a card is clicked, so the
+        // sheet arrives in exactly the state it would have opened in.
+        if let Some((artist, title, sub, cover_url)) = landed {
+            if self.vinyl_sheet.is_some() {
+                let ctx = self.egui_ctx.clone();
+                self.open_release_sheet(release_id, artist, title, sub, cover_url, &ctx);
+            }
+        }
     }
 
     /// Fetch the artist and label ids for a release the dig just landed on, so
