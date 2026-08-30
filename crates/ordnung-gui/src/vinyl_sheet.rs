@@ -614,6 +614,33 @@ impl App {
         }
     }
 
+    /// Draw the video mini-player's transport, docked across the bottom of the
+    /// window while a video is loaded. Independent of the record sheet: the
+    /// video keeps playing when the sheet is closed, so the bar that drives it
+    /// has to outlive the sheet too.
+    pub(crate) fn draw_video_transport(&mut self, ctx: &egui::Context) {
+        if !webview::is_open() {
+            return;
+        }
+        // The scrub lives on the sheet when there is one; a video outliving its
+        // sheet just drags against a local that resets each frame, which is all
+        // an in-flight drag needs.
+        let mut scrub = self.vinyl_sheet.as_ref().and_then(|s| s.video_scrub);
+        let act = video_transport_ui(ctx, &mut scrub);
+        if let Some(s) = self.vinyl_sheet.as_mut() {
+            s.video_scrub = scrub;
+        }
+        // The transport talks straight to the panel — nothing here touches the
+        // sheet's own state except the stop, which also clears the row marker.
+        match act {
+            Some(VideoAct::TogglePause) => webview::toggle_pause(),
+            Some(VideoAct::Seek(secs)) => webview::seek(secs),
+            Some(VideoAct::Stop) => self.stop_sheet_video(),
+            Some(VideoAct::ToggleVideo) => webview::set_video_visible(!webview::video_visible()),
+            None => {}
+        }
+    }
+
     /// Start the whole record: the first row that can play anything.
     fn play_sheet_from_start(&mut self, frame: &eframe::Frame) {
         let first = self.vinyl_sheet.as_ref().and_then(|s| {
@@ -801,9 +828,6 @@ impl App {
             WantAlternative(u64),
         }
         let mut act: Option<Act> = None;
-        // The transport bar's own action, kept apart from `act` so a scrub and
-        // a row click in the same frame don't shadow each other.
-        let mut video_act: Option<VideoAct> = None;
         let mut open = true;
 
         egui::Window::new(format!("{artist} — {title}"))
@@ -1112,19 +1136,6 @@ impl App {
                 ui.add_space(10.0);
                 ui.separator();
 
-                // The transport for whatever the mini-player is playing. Sits
-                // above the tracklist so it's in reach of the rows that feed it,
-                // and only while there's a panel to drive.
-                if video_open {
-                    ui.add_space(8.0);
-                    let mut scrub = self.vinyl_sheet.as_ref().and_then(|s| s.video_scrub);
-                    video_act = video_transport_ui(ui, SHEET_W, &mut scrub);
-                    if let Some(s) = self.vinyl_sheet.as_mut() {
-                        s.video_scrub = scrub;
-                    }
-                    ui.add_space(4.0);
-                }
-
                 if loading {
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
@@ -1217,16 +1228,6 @@ impl App {
                     }
                 });
             });
-
-        // The transport talks straight to the panel — nothing here touches the
-        // sheet's own state except the stop, which also clears the row marker.
-        match video_act {
-            Some(VideoAct::TogglePause) => webview::toggle_pause(),
-            Some(VideoAct::Seek(secs)) => webview::seek(secs),
-            Some(VideoAct::Stop) => self.stop_sheet_video(),
-            Some(VideoAct::ToggleVideo) => webview::set_video_visible(!webview::video_visible()),
-            None => {}
-        }
 
         match act {
             // Starting a dig closes the sheet: the strip it drives sits behind
@@ -1412,6 +1413,11 @@ const POS_W: f32 = 34.0;
 /// wherever its own text happens to begin.
 const DUR_W: f32 = 38.0;
 
+/// The transport's two clocks. Both are given the same fixed width so the
+/// elapsed side can't shove the scrubber sideways as its digits tick over, and
+/// wide enough for an hour-long set ("1:07:59") rather than only a track.
+const CLOCK_W: f32 = 48.0;
+
 /// What the transport bar's controls asked for this frame.
 enum VideoAct {
     TogglePause,
@@ -1421,9 +1427,9 @@ enum VideoAct {
     ToggleVideo,
 }
 
-/// The record sheet's own transport for the video mini-player: a play/pause
-/// button, a wide draggable scrubber and the clock, drawn at egui's scale
-/// rather than YouTube's.
+/// The transport for the video mini-player: a play/pause button, a wide
+/// draggable scrubber and the clock, drawn at egui's scale rather than
+/// YouTube's.
 ///
 /// The panel's own controls are a few pixels tall inside a 480px window and
 /// vanish under the page's chrome styling, so scrubbing there is guesswork.
@@ -1432,37 +1438,38 @@ enum VideoAct {
 /// paints comes back from the page on the next poll, so the bar always shows
 /// what the video is really doing.
 ///
+/// Docked as a bottom panel across the whole window rather than drawn inside
+/// the record sheet. Playback outlives the sheet — closing the record used to
+/// take the only transport with it — and a window-wide bar is where every
+/// desktop player puts one. A panel also has a real width of its own, so the
+/// scrubber can fill the space left beside the controls instead of being sized
+/// against a constant: the auto-sizing-window feedback loop that forced that
+/// (this frame's layout becoming next frame's width demand) doesn't exist here.
+///
 /// `scrub` is the in-flight drag fraction, borrowed mutably so the drag can own
 /// the playhead until it's released.
-///
-/// `content_w` is [`SHEET_W`], passed in rather than measured. The bar must
-/// never derive its width from the `Ui` — not `available_width`, not
-/// `max_rect` — because this lives in an auto-sizing [`egui::Window`] that
-/// grows to fit its content: anything measured off the layout makes this
-/// frame's width next frame's demand, and the window walks out to the screen
-/// edge. A constant in, a constant out.
-fn video_transport_ui(
-    ui: &mut egui::Ui,
-    content_w: f32,
-    scrub: &mut Option<f32>,
-) -> Option<VideoAct> {
+fn video_transport_ui(ctx: &egui::Context, scrub: &mut Option<f32>) -> Option<VideoAct> {
+    use crate::ui::tokens::{color, space};
+
     const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
+    /// Breathing room at the window edges. The bar runs the full width, so the
+    /// controls need a margin of their own or the pause button and the close
+    /// cross sit flush against the frame.
+    const EDGE: f32 = space::S6;
     let t = webview::transport();
     let mut act = None;
 
-    egui::Frame::none()
-        .fill(ui.visuals().faint_bg_color)
-        .rounding(6.0)
-        // No horizontal inset: the bar's play button is the same MARKER_W
-        // column the rows below start with, so insetting the frame would push
-        // the pause icon off the line the row triangles sit on.
-        .inner_margin(egui::Margin::symmetric(0.0, 6.0))
-        .show(ui, |ui| {
+    egui::TopBottomPanel::bottom("video_transport")
+        .frame(
+            egui::Frame::none()
+                .fill(color::SURFACE)
+                .inner_margin(egui::Margin::symmetric(EDGE, space::S4)),
+        )
+        .show_separator_line(true)
+        .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                // Play/pause. The rows' marker column, so this sits directly
-                // above the triangles in the tracklist; still 28 tall, which
-                // keeps it a comfortable target beside the scrubber rather
-                // than a text-height button.
+                // Play/pause, 28 tall so it stays a comfortable target beside
+                // the scrubber rather than a text-height button.
                 let (btn_rect, btn) =
                     ui.allocate_exact_size(egui::vec2(MARKER_W, 28.0), egui::Sense::click());
                 let col = if btn.hovered() {
@@ -1478,7 +1485,7 @@ fn video_transport_ui(
                 if btn.clicked() {
                     act = Some(VideoAct::TogglePause);
                 }
-                ui.add_space(6.0);
+                ui.add_space(space::S4);
 
                 // The fraction the bar paints: the drag while one is in flight,
                 // the video's real position otherwise.
@@ -1492,7 +1499,7 @@ fn video_transport_ui(
                 // Elapsed. Fixed width, so digits changing mid-scrub can't shift
                 // the scrubber that follows them (same reason as the player bar).
                 ui.add_sized(
-                    egui::vec2(42.0, 18.0),
+                    egui::vec2(CLOCK_W, 18.0),
                     egui::Label::new(
                         egui::RichText::new(fmt_time(shown * t.duration))
                             .monospace()
@@ -1500,20 +1507,16 @@ fn video_transport_ui(
                             .color(egui::Color32::from_gray(170)),
                     ),
                 );
+                ui.add_space(space::S4);
 
-                // Scrubber: the sheet's width less everything sitting beside
-                // it, added up from the sizes this function itself allocates
-                // rather than kept as one hand-tuned figure that silently goes
-                // stale the next time a control moves. Derived from
-                // `content_w`, never from the space left in the row (see the
-                // note on this function).
-                const BESIDE: f32 = MARKER_W + 6.0 // play button, then its gap
-                    + 42.0                 // elapsed clock
-                    + 6.0 + 42.0           // gap, total clock
-                    + 8.0 + 24.0           // gap, video toggle
-                    + 2.0 + 24.0           // gap, close
-                    + 12.0; // slack, so the row never wraps
-                let track_w = (content_w - BESIDE).max(60.0);
+                // Scrubber: everything the controls beside it don't claim. The
+                // trailing controls are laid out right-to-left first, so this
+                // takes the gap that's actually left rather than a width added
+                // up by hand from the sizes of its neighbours.
+                const TRAILING: f32 = space::S4 + CLOCK_W // gap, total clock
+                    + space::S4 + 24.0                    // gap, video toggle
+                    + space::S3 + 24.0;                   // gap, close
+                let track_w = (ui.available_width() - TRAILING).max(60.0);
                 let (rect, resp) = ui
                     .allocate_exact_size(egui::vec2(track_w, 26.0), egui::Sense::click_and_drag());
                 let y = rect.center().y;
@@ -1564,9 +1567,9 @@ fn video_transport_ui(
                 // Total. Sized like the elapsed clock beside it: a bare label
                 // would be as wide as its text, so an hour-long set ("1:07:59")
                 // would take width the scrubber had already been given.
-                ui.add_space(6.0);
+                ui.add_space(space::S4);
                 ui.add_sized(
-                    egui::vec2(42.0, 18.0),
+                    egui::vec2(CLOCK_W, 18.0),
                     egui::Label::new(
                         egui::RichText::new(if t.ready && t.duration > 0.0 {
                             fmt_time(t.duration)
@@ -1585,7 +1588,7 @@ fn video_transport_ui(
                 // parked off screen otherwise, since this bar is the interface.
                 // Painted rather than a text glyph in button chrome, so both of
                 // these sit beside the play triangle as the same kind of mark.
-                ui.add_space(8.0);
+                ui.add_space(space::S4);
                 let showing = webview::video_visible();
                 let (rect, resp) =
                     ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
@@ -1607,7 +1610,7 @@ fn video_transport_ui(
                     act = Some(VideoAct::ToggleVideo);
                 }
 
-                ui.add_space(2.0);
+                ui.add_space(space::S3);
                 if crate::ui::icon::close_button(ui, "Close the video player") {
                     act = Some(VideoAct::Stop);
                 }

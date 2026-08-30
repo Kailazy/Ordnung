@@ -1519,6 +1519,12 @@ impl eframe::App for App {
         // track is loaded in (or decoding for) the player.
         self.draw_player(ctx);
 
+        // The video mini-player's transport, docked under the audio bar so both
+        // players read as the same row of the window. Drawn here rather than
+        // inside the record sheet: the video outlives the sheet, and a bar that
+        // spans the window is where a transport belongs.
+        self.draw_video_transport(ctx);
+
         // The inspector is the single surface for per-track detail and tag
         // editing (the convert dialog no longer duplicates name editing), so it
         // is always present rather than behind a toolbar toggle.
