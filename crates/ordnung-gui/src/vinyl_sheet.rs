@@ -929,8 +929,27 @@ impl App {
                                     "Play from the first track that has a source"
                                 }
                             };
-                            let (rect, resp) = ui
-                                .allocate_exact_size(egui::vec2(44.0, 24.0), egui::Sense::click());
+                            // Exactly as tall as the text buttons beside it.
+                            // A hardcoded height drifts from whatever the font
+                            // and padding actually produce, and a play square
+                            // shorter than its neighbours sits inset from them
+                            // top and bottom, so the row reads as misaligned.
+                            // Measure the way egui sizes a button instead: one
+                            // line of button text plus the vertical padding,
+                            // floored at the interact height.
+                            // Rounded because egui rounds a galley's height to
+                            // whole pixels before padding it; the raw text
+                            // height lands a fraction of a pixel short of the
+                            // real buttons (26.94 against their 27).
+                            let btn_h = (ui
+                                .text_style_height(&egui::TextStyle::Button)
+                                .round()
+                                + 2.0 * ui.spacing().button_padding.y)
+                                .max(ui.spacing().interact_size.y);
+                            let (rect, resp) = ui.allocate_exact_size(
+                                egui::vec2(44.0, btn_h),
+                                egui::Sense::click(),
+                            );
                             let resp = resp.on_hover_note(play_tip);
                             // Same chrome the text buttons beside it wear, so
                             // the row reads as one set of controls.
