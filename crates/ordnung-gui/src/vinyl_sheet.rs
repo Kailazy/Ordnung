@@ -1411,6 +1411,11 @@ const POS_W: f32 = 34.0;
 /// the figures right-align in a straight column instead of each starting
 /// wherever its own text happens to begin.
 const DUR_W: f32 = 38.0;
+/// The BPM/key column, wide enough for the longest reading ("125 · 12A"). The
+/// row lays out right-to-left, so without a fixed width a two-character key
+/// ("2A") left the "♪ your copy" chip beside it sitting further right than a
+/// three-character one ("12A") and the chips read as a ragged column.
+const FIG_W: f32 = 58.0;
 
 /// The transport's two clocks. Both are given the same fixed width so the
 /// elapsed side can't shove the scrubber sideways as its digits tick over, and
@@ -1703,10 +1708,19 @@ fn sheet_row_ui(
                                 (None, None) => String::new(),
                             };
                             if !figures.is_empty() {
-                                ui.label(
-                                    egui::RichText::new(figures)
-                                        .small()
-                                        .color(egui::Color32::from_gray(140)),
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(FIG_W, 20.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.put(
+                                    rect,
+                                    egui::Label::new(
+                                        egui::RichText::new(figures)
+                                            .small()
+                                            .color(egui::Color32::from_gray(140)),
+                                    )
+                                    .selectable(false)
+                                    .halign(egui::Align::RIGHT),
                                 );
                                 ui.add_space(8.0);
                             }
