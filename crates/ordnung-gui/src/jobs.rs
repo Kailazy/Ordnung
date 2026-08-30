@@ -163,7 +163,7 @@ impl App {
                         rect.right_center() - egui::vec2(8.0, 0.0),
                         egui::Align2::RIGHT_CENTER,
                         "Set as cover",
-                        egui::FontId::proportional(12.0),
+                        crate::ui::tokens::font::callout(),
                         egui::Color32::from_rgb(120, 170, 240),
                     );
                 }
@@ -173,7 +173,7 @@ impl App {
                     screen.center(),
                     egui::Align2::CENTER_CENTER,
                     "Drop music to add it to your catalog",
-                    egui::FontId::proportional(22.0),
+                    crate::ui::tokens::font::title(),
                     egui::Color32::WHITE,
                 );
             }

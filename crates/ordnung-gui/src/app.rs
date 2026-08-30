@@ -1624,7 +1624,7 @@ impl eframe::App for App {
                 let section_caption = |ui: &mut egui::Ui, text: &str| {
                     ui.label(
                         egui::RichText::new(text)
-                            .size(11.0)
+                            .font(crate::ui::tokens::font::footnote())
                             .color(egui::Color32::from_gray(140))
                             .strong(),
                     );
@@ -1999,7 +1999,7 @@ impl eframe::App for App {
                             ui.add_space(14.0);
                             if ui
                                 .add(egui::Button::new(
-                                    egui::RichText::new("  Clear filters  ").size(15.0),
+                                    egui::RichText::new("  Clear filters  ").font(crate::ui::tokens::font::headline()),
                                 ))
                                 .clicked()
                             {
@@ -2048,7 +2048,7 @@ impl eframe::App for App {
                                 ui.add_space(14.0);
                                 if ui
                                     .add(egui::Button::new(
-                                        egui::RichText::new("  Add songs…  ").size(15.0),
+                                        egui::RichText::new("  Add songs…  ").font(crate::ui::tokens::font::headline()),
                                     ))
                                     .clicked()
                                 {

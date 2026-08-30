@@ -848,8 +848,8 @@ impl App {
                     }
                     ui.add_space(14.0);
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(&artist).size(15.0).strong());
-                        ui.label(egui::RichText::new(&title).size(15.0));
+                        ui.label(egui::RichText::new(&artist).font(crate::ui::tokens::font::strong(crate::ui::tokens::font::headline().size)));
+                        ui.label(egui::RichText::new(&title).font(crate::ui::tokens::font::headline()));
                         if !sub.is_empty() {
                             ui.label(egui::RichText::new(&sub).weak());
                         }
@@ -1528,8 +1528,7 @@ fn video_transport_ui(ui: &mut egui::Ui, scrub: &mut Option<f32>) -> Option<Vide
                     egui::vec2(CLOCK_W, 18.0),
                     egui::Label::new(
                         egui::RichText::new(fmt_time(shown * t.duration))
-                            .monospace()
-                            .size(11.0)
+                            .font(crate::ui::tokens::font::mono_small())
                             .color(egui::Color32::from_gray(170)),
                     ),
                 );
@@ -1604,8 +1603,7 @@ fn video_transport_ui(ui: &mut egui::Ui, scrub: &mut Option<f32>) -> Option<Vide
                             // no end — neither has a total to show.
                             "--:--".to_string()
                         })
-                        .monospace()
-                        .size(11.0)
+                        .font(crate::ui::tokens::font::mono_small())
                         .color(egui::Color32::from_gray(170)),
                     ),
                 );

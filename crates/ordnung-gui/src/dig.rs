@@ -1406,7 +1406,7 @@ impl App {
                                         }
                                         ui.set_max_width(COVER);
                                         ui.add_space(3.0);
-                                        let t = egui::RichText::new(&card.title).size(11.0);
+                                        let t = egui::RichText::new(&card.title).font(crate::ui::tokens::font::footnote());
                                         ui.add(
                                             egui::Label::new(if current {
                                                 t.strong()
@@ -1417,7 +1417,7 @@ impl App {
                                         );
                                         ui.add(
                                             egui::Label::new(
-                                                egui::RichText::new(&card.artist).size(11.0).weak(),
+                                                egui::RichText::new(&card.artist).font(crate::ui::tokens::font::footnote()).weak(),
                                             )
                                             .truncate(),
                                         );
@@ -1429,7 +1429,7 @@ impl App {
                                             ui.add(
                                                 egui::Label::new(
                                                     egui::RichText::new(label)
-                                                        .size(10.0)
+                                                        .font(crate::ui::tokens::font::caption())
                                                         .color(egui::Color32::from_gray(125)),
                                                 )
                                                 .truncate(),

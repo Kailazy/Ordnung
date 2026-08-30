@@ -205,7 +205,7 @@ impl App {
                     let galley = ui.painter().layout_job({
                         let mut job = egui::text::LayoutJob::simple_singleline(
                             label,
-                            egui::FontId::proportional(11.0),
+                            crate::ui::tokens::font::footnote(),
                             fg,
                         );
                         // One row, capped at the label run's length: anything

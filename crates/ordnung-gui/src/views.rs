@@ -30,7 +30,7 @@ fn health_tabs(
 ) -> Option<LibraryView> {
     let mut switch = None;
     let tab = |ui: &mut egui::Ui, label: String, active: bool| {
-        ui.selectable_label(active, egui::RichText::new(label).size(15.0).strong())
+        ui.selectable_label(active, egui::RichText::new(label).font(crate::ui::tokens::font::strong(crate::ui::tokens::font::headline().size)))
             .clicked()
     };
     let dup_label = match dup_count {
@@ -1113,7 +1113,7 @@ impl App {
                     ui.add_enabled_ui(!busy, |ui| {
                         if ui
                             .add(egui::Button::new(
-                                egui::RichText::new("  ↻ Sync from Discogs  ").size(15.0),
+                                egui::RichText::new("  ↻ Sync from Discogs  ").font(crate::ui::tokens::font::headline()),
                             ))
                             .clicked()
                         {
@@ -1404,7 +1404,7 @@ impl App {
                                     rect.center(),
                                     egui::Align2::CENTER_CENTER,
                                     "💿",
-                                    egui::FontId::proportional(40.0),
+                                    crate::ui::tokens::font::display(),
                                     egui::Color32::from_gray(90),
                                 );
                             }
@@ -1567,7 +1567,7 @@ impl App {
                             let text = format_price(p, c.price_currency.as_deref(), false);
                             let galley = ui.painter().layout_no_wrap(
                                 text,
-                                egui::FontId::proportional(12.0),
+                                crate::ui::tokens::font::callout(),
                                 egui::Color32::from_gray(240),
                             );
                             let pad = egui::vec2(6.0, 3.0);

@@ -368,7 +368,7 @@ impl App {
                     );
                     ui.add_space(4.0);
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(&heading).strong().size(14.0));
+                        ui.label(egui::RichText::new(&heading).font(crate::ui::tokens::font::strong(crate::ui::tokens::font::headline().size)));
                         ui.label(egui::RichText::new(&body).small().weak());
                     });
                 });
@@ -598,7 +598,7 @@ impl App {
                         ui.add_space(10.0);
                         ui.label(
                             egui::RichText::new(concat!("Ordnung v", env!("CARGO_PKG_VERSION")))
-                                .size(10.5)
+                                .font(crate::ui::tokens::font::caption())
                                 .color(egui::Color32::from_gray(120)),
                         );
                     });

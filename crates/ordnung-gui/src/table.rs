@@ -321,7 +321,7 @@ impl App {
                 // reads as one card): title left, frameless close button right,
                 // then a one-line hint.
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Columns").strong().size(15.0));
+                    ui.label(egui::RichText::new("Columns").font(crate::ui::tokens::font::strong(crate::ui::tokens::font::headline().size)));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if crate::ui::icon::close_button(ui, "Close") {
                             open = false;
@@ -1131,7 +1131,7 @@ impl App {
                                         egui::pos2(r.right() - 5.0, r.center().y),
                                         egui::Align2::RIGHT_CENTER,
                                         format!("{}", idx + 1),
-                                        egui::FontId::proportional(11.0),
+                                        crate::ui::tokens::font::footnote(),
                                         ui.visuals().weak_text_color(),
                                     );
                                 }
@@ -1999,7 +1999,7 @@ impl App {
                 let at = pos + egui::vec2(14.0, 6.0);
                 let galley = painter.layout_no_wrap(
                     text,
-                    egui::FontId::proportional(12.0),
+                    crate::ui::tokens::font::callout(),
                     egui::Color32::WHITE,
                 );
                 let pad = egui::vec2(6.0, 3.0);

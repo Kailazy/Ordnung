@@ -30,6 +30,10 @@ fn install_fonts(ctx: &egui::Context) {
         FontData::from_static(include_bytes!("../../assets/fonts/Inter-Regular.ttf")),
     );
     fonts.font_data.insert(
+        "InterSemiBold".to_owned(),
+        FontData::from_static(include_bytes!("../../assets/fonts/Inter-SemiBold.ttf")),
+    );
+    fonts.font_data.insert(
         "DejaVuSans".to_owned(),
         FontData::from_static(include_bytes!("../../assets/fonts/DejaVuSans.ttf")),
     );
@@ -65,6 +69,16 @@ fn install_fonts(ctx: &egui::Context) {
         FontFamily::Name(super::hover::SERIF_FAMILY.into()),
         vec!["SourceSerif".to_owned(), "DejaVuSans".to_owned()],
     );
+    // egui 0.29 has no weight axis on `FontId`, so a second weight has to be its
+    // own named family. `tokens::font::strong()` builds `FontId`s against this
+    // name; everything behind Inter SemiBold mirrors the proportional chain so a
+    // bolded string with non-Latin glyphs still resolves instead of going tofu
+    // (those fallbacks are regular-weight — better an unbolded glyph than none).
+    let mut strong_chain = vec!["InterSemiBold".to_owned(), "DejaVuSans".to_owned()];
+    strong_chain.extend(fallbacks.iter().cloned());
+    fonts
+        .families
+        .insert(FontFamily::Name(super::tokens::font::STRONG_FAMILY.into()), strong_chain);
     ctx.set_fonts(fonts);
 }
 

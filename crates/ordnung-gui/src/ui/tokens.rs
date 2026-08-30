@@ -111,6 +111,25 @@ pub mod color {
 /// pick them up automatically; call them directly for bespoke text.
 pub mod font {
     use super::FontId;
+    use eframe::egui::FontFamily;
+
+    /// Name of the Inter SemiBold family installed by [`super::super::theme`].
+    /// egui 0.29 has no weight axis, so the second weight is a named family.
+    pub const STRONG_FAMILY: &str = "strong";
+
+    /// The same size at SemiBold. Weight is the *first* tool for emphasis —
+    /// reach for this before a larger size, so hierarchy doesn't inflate the
+    /// type scale. `size` should come from the ramp below, e.g.
+    /// `font::strong(font::body().size)`.
+    pub fn strong(size: f32) -> FontId {
+        FontId::new(size, FontFamily::Name(STRONG_FAMILY.into()))
+    }
+
+    /// Oversized numerals / empty-state art — the one step above `large_title`,
+    /// for display type that is deliberately graphic rather than read as prose.
+    pub fn display() -> FontId {
+        FontId::proportional(40.0)
+    }
 
     pub fn large_title() -> FontId {
         FontId::proportional(26.0)
@@ -135,5 +154,11 @@ pub mod font {
     }
     pub fn mono() -> FontId {
         FontId::monospace(12.5)
+    }
+    /// Small monospace — transport timecodes and other tabular numerals that sit
+    /// beside `footnote`-sized copy. Matched to `footnote` so a clock next to a
+    /// label shares its baseline weight rather than looking a step larger.
+    pub fn mono_small() -> FontId {
+        FontId::monospace(11.0)
     }
 }

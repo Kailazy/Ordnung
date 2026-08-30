@@ -303,7 +303,7 @@ impl App {
                         egui::pos2(block.left(), block.top() + 8.0),
                         LABEL_W,
                         &title,
-                        egui::FontId::proportional(14.0),
+                        crate::ui::tokens::font::strong(crate::ui::tokens::font::headline().size),
                         egui::Color32::from_gray(240),
                         now,
                     );
@@ -312,7 +312,7 @@ impl App {
                         egui::pos2(block.left(), block.top() + 32.0),
                         LABEL_W,
                         &artist,
-                        egui::FontId::proportional(12.0),
+                        crate::ui::tokens::font::callout(),
                         egui::Color32::from_gray(165),
                         now,
                     );
@@ -467,8 +467,7 @@ impl App {
                         egui::vec2(46.0, 18.0),
                         egui::Label::new(
                             egui::RichText::new(fmt_time(shown_frac * dur))
-                                .monospace()
-                                .size(11.0)
+                                .font(crate::ui::tokens::font::mono_small())
                                 .color(egui::Color32::from_gray(170)),
                         ),
                     );
@@ -538,8 +537,7 @@ impl App {
                     ui.add_space(6.0);
                     ui.label(
                         egui::RichText::new(fmt_time(dur))
-                            .monospace()
-                            .size(11.0)
+                            .font(crate::ui::tokens::font::mono_small())
                             .color(egui::Color32::from_gray(170)),
                     );
 

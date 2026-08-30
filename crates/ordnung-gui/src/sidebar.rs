@@ -187,7 +187,7 @@ pub(crate) fn draw_playlist_nodes(
             continue;
         }
         if p.is_folder {
-            egui::CollapsingHeader::new(egui::RichText::new(p.name.as_str()).size(13.5))
+            egui::CollapsingHeader::new(egui::RichText::new(p.name.as_str()).font(crate::ui::tokens::font::body()))
                 .id_salt(("pl-folder", p.id))
                 .default_open(true)
                 .show(ui, |ui| {
@@ -290,7 +290,7 @@ pub(crate) fn draw_playlist_leaf(
         egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y),
         egui::Align2::RIGHT_CENTER,
         p.track_ids.len().to_string(),
-        egui::FontId::proportional(11.0),
+        crate::ui::tokens::font::footnote(),
         count_color,
     );
     if resp.dnd_hover_payload::<DraggedTracks>().is_some() {
@@ -342,7 +342,7 @@ pub(crate) fn draw_usb_playlist_nodes(
 ) {
     for p in all.iter().filter(|p| p.parent_id == parent) {
         if p.is_folder {
-            egui::CollapsingHeader::new(egui::RichText::new(p.name.as_str()).size(12.5))
+            egui::CollapsingHeader::new(egui::RichText::new(p.name.as_str()).font(crate::ui::tokens::font::callout()))
                 .id_salt(("usb-pl-folder", vol, p.id))
                 .default_open(false)
                 .show(ui, |ui| {
@@ -367,7 +367,7 @@ pub(crate) fn draw_usb_playlist_nodes(
                     .map(Vec::len)
                     .unwrap_or(0)
                     .to_string(),
-                egui::FontId::proportional(10.5),
+                crate::ui::tokens::font::caption(),
                 count_color,
             );
             if resp.clicked() {
