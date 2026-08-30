@@ -1365,7 +1365,7 @@ impl App {
                                         if card.owned {
                                             let chip = egui::Rect::from_min_size(
                                                 rect.min + egui::vec2(4.0, 4.0),
-                                                egui::vec2(38.0, 15.0),
+                                                egui::vec2(44.0, 15.0),
                                             );
                                             ui.painter().rect_filled(
                                                 chip,
@@ -1375,7 +1375,7 @@ impl App {
                                             ui.painter().text(
                                                 chip.center(),
                                                 egui::Align2::CENTER_CENTER,
-                                                "yours",
+                                                "owned",
                                                 egui::FontId::proportional(9.5),
                                                 egui::Color32::from_gray(210),
                                             );
