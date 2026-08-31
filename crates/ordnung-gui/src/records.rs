@@ -441,6 +441,13 @@ pub(crate) const SCOPE_TOGGLE_W: f32 = 132.0;
 /// Motion for the selected segment sliding between the two halves.
 const SCOPE_SLIDE_ANIM: f32 = 0.16;
 
+/// Fill for the selected half, by scope. Deliberately not the saturated
+/// `color::BLUE`/`color::GREEN` status hues — those are tuned for small marks
+/// and glare as a filled pill under white text. This is the app's accent blue
+/// and a green matched to its weight, so the two positions read as equals.
+const SCOPE_LIBRARY: egui::Color32 = color::ACCENT;
+const SCOPE_DISCOGS: egui::Color32 = egui::Color32::from_rgb(58, 158, 92);
+
 impl App {
     /// The two-position switch on the right of the search field: **Library** or
     /// **Discogs**.
@@ -474,7 +481,13 @@ impl App {
             egui::vec2(half, h),
         )
         .shrink(2.0);
-        painter.rect_filled(pill, egui::Rounding::same(radius::XS), color::SURFACE_HOVER);
+        // The pill carries the scope's colour: blue for the local library, green
+        // for Discogs. It's the same cue the rest of the app uses for "yours" vs
+        // "out on Discogs", so the switch says which world you're searching
+        // without reading the label. Crossfading along the slide keeps it one
+        // moving object — a hard colour swap mid-travel would read as two.
+        let pill_fill = SCOPE_LIBRARY.lerp_to_gamma(SCOPE_DISCOGS, t);
+        painter.rect_filled(pill, egui::Rounding::same(radius::XS), pill_fill);
 
         let mut clicked: Option<SearchScope> = None;
         for (i, (scope, label)) in [
@@ -497,10 +510,12 @@ impl App {
                 clicked = Some(scope);
             }
             let selected = self.search_scope == scope;
+            // White on the coloured pill — `LABEL` is a near-white tuned for dark
+            // surfaces and goes muddy over a saturated fill.
             // The unselected half brightens on hover so the control advertises
             // that both sides are live, not just the lit one.
             let ink = if selected {
-                color::LABEL
+                egui::Color32::WHITE
             } else if resp.hovered() {
                 color::LABEL_2
             } else {
