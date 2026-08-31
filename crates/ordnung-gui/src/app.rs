@@ -222,6 +222,7 @@ impl App {
             sort: None,
             now_playing: None,
             scrub: None,
+            volume_dirty: false,
             wave_zoom_secs: crate::player::DEFAULT_ZOOM_SECS,
             wave_lane_h: crate::player::DEFAULT_LANE_H,
             grid_edit_open: false,
@@ -232,6 +233,12 @@ impl App {
         let config = Config::load();
         app.token_input = config.discogs_token.clone();
         app.config = config;
+        // The engine is built before the config is read, so hand it the saved
+        // level now — otherwise the first track plays at unity while the knob
+        // shows whatever the user left it at.
+        if let Some(a) = &mut app.audio {
+            a.set_volume(app.config.volume);
+        }
         // A token on disk isn't proof it still works, so start at "unverified"
         // and let the Discogs tab verify on open rather than checking every
         // launch — that would spend a rate-limited request nobody asked for.
@@ -1415,6 +1422,28 @@ impl eframe::App for App {
                     // Reloading the table is a Cmd/Ctrl+R shortcut rather than a
                     // button: it's rarely needed, since every job reloads on finish.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Master volume sits at the very top right, the corner
+                        // rekordbox puts its master level in — a global control
+                        // that isn't tied to whatever the current view is, so it
+                        // stays out of the per-track player bar at the bottom.
+                        // The engine is `None` on a machine with no audio output;
+                        // showing a dead knob there would be a control that lies.
+                        if self.audio.is_some() {
+                            if let Some(v) = crate::ui::knob::volume(ui, self.config.volume) {
+                                self.config.volume = v;
+                                if let Some(a) = &mut self.audio {
+                                    a.set_volume(v);
+                                }
+                                // Persist on release rather than every drag frame,
+                                // so a gesture writes the file once.
+                                self.volume_dirty = true;
+                            }
+                            if self.volume_dirty && !ui.ctx().input(|i| i.pointer.any_down()) {
+                                self.volume_dirty = false;
+                                let _ = self.config.save();
+                            }
+                            ui.separator();
+                        }
                         // Settings stays reachable even while a job runs.
                         if ui
                             .button("⚙ Settings")

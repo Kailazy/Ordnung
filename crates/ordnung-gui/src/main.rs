@@ -1316,6 +1316,9 @@ struct App {
     /// actual seek fires on release so we rebuild the audio sink once, not per
     /// frame; `None` when not scrubbing.
     scrub: Option<f32>,
+    /// Set while the volume knob is being dragged, so the config is written once
+    /// on release rather than on every frame of the gesture.
+    volume_dirty: bool,
     /// Seconds of audio visible in the zoomed detail lane above the overview
     /// strip. Adjusted by scrolling the wheel over the lane; the window centers on
     /// the playhead and scrolls under it during playback. See [`player`].

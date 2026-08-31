@@ -114,6 +114,11 @@ pub struct Config {
     /// On by default, preserving the prior hard-coded behavior.
     #[serde(default = "default_true")]
     pub convert_in_place: bool,
+    /// Master playback volume as a linear amplitude factor, `0.0`–`1.0`. Driven
+    /// by the toolbar knob and restored at startup so the app comes back at the
+    /// level it was left at.
+    #[serde(default = "default_volume")]
+    pub volume: f32,
     /// How the player's waveform is colored: `"energy"` (cool→hot gradient by
     /// each section's energy — perceived loudness × spectral occupancy) or
     /// `"spectrum"` (additive RGB from the low/mid/high band balance, like
@@ -231,6 +236,10 @@ fn default_nav_primary() -> String {
 
 fn default_startup_view() -> String {
     "library".to_string()
+}
+
+pub(crate) fn default_volume() -> f32 {
+    1.0
 }
 
 fn default_waveform_color_mode() -> String {
@@ -518,6 +527,7 @@ impl Default for Config {
             convert_bitrate_kbps: String::new(),
             convert_out_dir: None,
             convert_in_place: true,
+            volume: default_volume(),
             waveform_color_mode: default_waveform_color_mode(),
             waveform_height_exp: default_waveform_height_exp(),
             waveform_band_gain: default_waveform_band_gain(),

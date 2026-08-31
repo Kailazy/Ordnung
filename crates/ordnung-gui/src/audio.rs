@@ -140,6 +140,11 @@ pub struct AudioEngine {
     /// Set when a seek/toggle/load changed playback so `poll` re-pushes the OS
     /// playback status even if the play/paused flag itself didn't flip.
     status_dirty: bool,
+    /// Master output volume as a linear amplitude factor, `0.0`–`1.0`. Held here
+    /// rather than only on the sink because `start_sink_at` rebuilds the sink on
+    /// every seek and resume — a fresh `Sink` starts at unity, so the level is
+    /// re-applied from this field each time.
+    volume: f32,
     /// Last decode/output error, surfaced to the status bar by the caller.
     pub last_error: Option<String>,
 }
@@ -176,6 +181,7 @@ impl AudioEngine {
             np_meta: None,
             reported_playing: None,
             status_dirty: false,
+            volume: 1.0,
             last_error: None,
         })
     }
@@ -328,6 +334,7 @@ impl AudioEngine {
                     sample_rate: self.sample_rate,
                     channels: self.channels.max(1),
                 });
+                sink.set_volume(self.volume);
                 sink.play();
                 self.sink = Some(sink);
                 self.base_secs = secs;
@@ -335,6 +342,16 @@ impl AudioEngine {
                 self.status_dirty = true;
             }
             Err(e) => self.last_error = Some(format!("audio output error: {e}")),
+        }
+    }
+
+    /// Set the master output volume. Applies to the live sink immediately and is
+    /// remembered for sinks rebuilt by a later seek or resume. Takes effect even
+    /// when nothing is loaded, so the knob is meaningful before playback starts.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.clamp(0.0, 1.0);
+        if let Some(s) = &self.sink {
+            s.set_volume(self.volume);
         }
     }
 
