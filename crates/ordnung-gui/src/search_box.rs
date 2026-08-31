@@ -107,13 +107,18 @@ impl App {
 
     /// Show one catalog track in the Library, selected and scrolled into view.
     ///
-    /// *This* is where the library gets filtered — typing alone never does.
-    /// The query the user typed becomes the table filter, so the chosen track
-    /// lands among its near matches rather than in the full catalog, and the
-    /// toolbar's "Clear filters" button is the way back out.
+    /// Deliberately does *not* filter. Picking a hit answers "where does this
+    /// live?", and the answer is more useful in situ — the track highlighted
+    /// among its neighbours in the whole library, so what's above and below it
+    /// is still there to see. A filtered table shows the same row against an
+    /// empty background and hides everything it was next to, and then needs a
+    /// "Clear filters" trip to undo. Mirrors `reveal_vinyl`, which has always
+    /// left the grid behind its sheet unfiltered for the same reason.
     fn reveal_track(&mut self, id: Id) {
         self.view = LibraryView::Library;
-        self.filter = self.search_query.trim().to_string();
+        // Whatever narrowed the table before is cleared, so the row can't land
+        // outside the visible set and silently fail to scroll to.
+        self.filter.clear();
         self.filter_apply_at = None;
         self.col_filters.clear();
         // Rebuild rows for the (possibly new) view first: `reload` prunes the
@@ -233,6 +238,26 @@ impl App {
         }
 
         let mut chosen: Option<SearchHit> = None;
+        // A play disc clicked this frame. Acted on after the Area closure —
+        // starting playback needs `&mut self`, which the closure has borrowed.
+        let mut play_id: Option<Id> = None;
+        // What each track row should show on its disc, snapshotted before the
+        // closure for the same reason: the closure holds `&mut self`, so it
+        // can't reach `self.audio`. Empty when the build has no audio engine,
+        // which leaves the discs off entirely.
+        let play_states: HashMap<Id, PlayState> = self
+            .audio
+            .as_ref()
+            .map(|a| {
+                self.search_hits
+                    .iter()
+                    .filter_map(|h| match &h.hit {
+                        SearchHit::Track { id, .. } => Some((*id, a.state_for(*id))),
+                        SearchHit::Vinyl { .. } => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut record_chosen: Option<ordnung_core::discogs::RecordHit> = None;
         let discogs_mode = self.searching_discogs();
         let mut dismiss = false;
@@ -270,65 +295,79 @@ impl App {
                     .inner_margin(egui::Margin::symmetric(space::S1, space::S2))
                     .rounding(egui::Rounding::same(radius::MD))
                     .show(ui, |ui| {
-                    // The Discogs list is wider: it carries a third line of
-                    // pressing detail and a membership pill that a library hit
-                    // doesn't have.
-                    let min_w = if discogs_mode { 460.0 } else { 320.0 };
-                    ui.set_width(field.rect.width().max(min_w));
-                    if discogs_mode {
-                        // The remote list owns the whole popup in this mode —
-                        // its own states (loading, empty, failed) are rendered
-                        // by `draw_record_results`.
-                        record_chosen = self.draw_record_results(ui);
-                        return;
-                    }
-                    if hits.is_empty() {
-                        ui.add_space(space::S2);
-                        ui.horizontal(|ui| {
-                            ui.add_space(space::S3);
-                            ui.label(
-                                egui::RichText::new("No matches in your library")
-                                    .color(color::LABEL_3),
-                            );
-                        });
-                        ui.add_space(space::S2);
-                        return;
-                    }
-                    for (i, scored) in hits.iter().enumerate() {
-                        let selected = cursor == Some(i);
-                        // Each row trails the one above it, so the list unrolls
-                        // top-down instead of five things appearing at once.
-                        let enter = row_enter_t(since_shown, i);
-                        // Resolve the row's artwork from whichever cache owns it,
-                        // and note a miss so the loader is asked *after* the
-                        // closure (it needs `&mut self`, borrowed here).
-                        let (tex, wants_load) = match &scored.hit {
-                            SearchHit::Track { id, has_cover, .. } => {
-                                match self.cover_cache.get(id) {
+                        // The Discogs list is wider: it carries a third line of
+                        // pressing detail and a membership pill that a library hit
+                        // doesn't have.
+                        let min_w = if discogs_mode { 460.0 } else { 320.0 };
+                        ui.set_width(field.rect.width().max(min_w));
+                        if discogs_mode {
+                            // The remote list owns the whole popup in this mode —
+                            // its own states (loading, empty, failed) are rendered
+                            // by `draw_record_results`.
+                            record_chosen = self.draw_record_results(ui);
+                            return;
+                        }
+                        if hits.is_empty() {
+                            ui.add_space(space::S2);
+                            ui.horizontal(|ui| {
+                                ui.add_space(space::S3);
+                                ui.label(
+                                    egui::RichText::new("No matches in your library")
+                                        .color(color::LABEL_3),
+                                );
+                            });
+                            ui.add_space(space::S2);
+                            return;
+                        }
+                        for (i, scored) in hits.iter().enumerate() {
+                            let selected = cursor == Some(i);
+                            // Each row trails the one above it, so the list unrolls
+                            // top-down instead of five things appearing at once.
+                            let enter = row_enter_t(since_shown, i);
+                            // Resolve the row's artwork from whichever cache owns it,
+                            // and note a miss so the loader is asked *after* the
+                            // closure (it needs `&mut self`, borrowed here).
+                            let (tex, wants_load) = match &scored.hit {
+                                SearchHit::Track { id, has_cover, .. } => {
+                                    match self.cover_cache.get(id) {
+                                        Some(ThumbState::Ready(Some(h))) => {
+                                            (Some(h.clone()), false)
+                                        }
+                                        Some(_) => (None, false),
+                                        None => (None, *has_cover),
+                                    }
+                                }
+                                SearchHit::Vinyl {
+                                    list,
+                                    instance_id,
+                                    has_cover,
+                                    ..
+                                } => match self.search_vinyl_covers.get(&(*list, *instance_id)) {
                                     Some(ThumbState::Ready(Some(h))) => (Some(h.clone()), false),
                                     Some(_) => (None, false),
                                     None => (None, *has_cover),
+                                },
+                            };
+                            if wants_load {
+                                load_covers.push(scored.hit.clone());
+                            }
+                            // Only a library track has a file to play; a record's
+                            // row keeps its plain artwork.
+                            let state = match &scored.hit {
+                                SearchHit::Track { id, .. } => play_states.get(id).copied(),
+                                SearchHit::Vinyl { .. } => None,
+                            };
+                            let act = search_hit_row(ui, &scored.hit, selected, tex, enter, state);
+                            if act.open {
+                                chosen = Some(scored.hit.clone());
+                            }
+                            if act.play {
+                                if let SearchHit::Track { id, .. } = &scored.hit {
+                                    play_id = Some(*id);
                                 }
                             }
-                            SearchHit::Vinyl {
-                                list,
-                                instance_id,
-                                has_cover,
-                                ..
-                            } => match self.search_vinyl_covers.get(&(*list, *instance_id)) {
-                                Some(ThumbState::Ready(Some(h))) => (Some(h.clone()), false),
-                                Some(_) => (None, false),
-                                None => (None, *has_cover),
-                            },
-                        };
-                        if wants_load {
-                            load_covers.push(scored.hit.clone());
                         }
-                        if search_hit_row(ui, &scored.hit, selected, tex, enter) {
-                            chosen = Some(scored.hit.clone());
-                        }
-                    }
-                });
+                    });
             });
 
         for hit in load_covers {
@@ -367,6 +406,20 @@ impl App {
             && record_chosen.is_none()
         {
             dismiss = true;
+        }
+        // Playing from a hit deliberately leaves the popup up and navigates
+        // nowhere: the point of the disc is to audition a result *before*
+        // deciding to go to it. The path isn't in the hit (search returns tags
+        // only), so it's read back by primary key — the same one-row lookup
+        // `play_track` already falls back to for its display tags.
+        if let Some(id) = play_id {
+            if let Some(path) = Catalog::open(&self.db_path)
+                .and_then(|c| c.get_track(id))
+                .ok()
+                .map(|t| PathBuf::from(t.source_path))
+            {
+                self.play_track(id, path);
+            }
         }
         if let Some(hit) = record_chosen {
             self.open_record_hit(hit, &ctx);
@@ -416,12 +469,28 @@ fn row_enter_t(since: f32, i: usize) -> f32 {
 /// The artwork square at the head of each suggestion row.
 const HIT_COVER_PX: f32 = 32.0;
 
-/// One suggestion row. Returns true when clicked.
+/// What a suggestion row wants done, as of this frame.
+#[derive(Default)]
+struct RowAction {
+    /// The row itself was clicked: go to where the thing lives.
+    open: bool,
+    /// The play disc over the artwork was clicked: start (or stop) the track
+    /// without leaving the popup.
+    play: bool,
+}
+
+/// One suggestion row.
 ///
 /// Each row leads with its cover art, falling back to a glyph naming which
 /// library the hit came from — so "the file" and "the record" are never confused
 /// at a glance, which is the whole point of searching both at once. The glyph
 /// stays visible as a small badge over the artwork for the same reason.
+///
+/// A library track's artwork doubles as a play control: hovering the row puts a
+/// play disc over the square, so a search can be *listened to* without first
+/// navigating away from it. `play_state` is `None` for hits that have nothing to
+/// play (records, or a build with no audio engine), which is what keeps the disc
+/// off those rows.
 ///
 /// `enter` is the row's entrance progress (0→1, see [`row_enter_t`]): the row
 /// fades up and slides the last few points left into place, staggered behind the
@@ -434,7 +503,8 @@ fn search_hit_row(
     selected: bool,
     tex: Option<Tex>,
     enter: f32,
-) -> bool {
+    play_state: Option<PlayState>,
+) -> RowAction {
     let (kind, primary, secondary) = match hit {
         SearchHit::Track {
             title,
@@ -491,12 +561,27 @@ fn search_hit_row(
     let ui = &mut ui;
     ui.multiply_opacity(enter);
 
+    let pad = space::S3;
+    let art = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + pad, rect.center().y - HIT_COVER_PX / 2.0),
+        egui::vec2(HIT_COVER_PX, HIT_COVER_PX),
+    );
+    // The play disc claims the artwork square, so it has to be registered
+    // *before* anything reads hover: the disc sits on top of the row, and
+    // pointing at it would otherwise take `resp.hovered()` away from the row
+    // that reveals it — the disc would vanish the moment you aimed at it.
+    // (Same ordering trap as the vinyl grid's cover buttons.)
+    let play_resp =
+        play_state.map(|_| ui.interact(art, resp.id.with("play"), egui::Sense::click()));
+    let play_hovered = play_resp.as_ref().is_some_and(|r| r.hovered());
+    let mut action = RowAction::default();
+
     // The hover/selection wash fades rather than switching on, and widens the
     // last couple of points into the row — the same "settling" motion as the
     // panel, at row scale.
     let hot = ui.ctx().animate_bool_with_time(
         resp.id.with("hot"),
-        selected || resp.hovered(),
+        selected || resp.hovered() || play_hovered,
         ROW_HIGHLIGHT_ANIM,
     );
     if hot > 0.0 {
@@ -511,18 +596,13 @@ fn search_hit_row(
                 .gamma_multiply(hot),
         );
     }
-    let pad = space::S3;
-    let art = egui::Rect::from_min_size(
-        egui::pos2(rect.left() + pad, rect.center().y - HIT_COVER_PX / 2.0),
-        egui::vec2(HIT_COVER_PX, HIT_COVER_PX),
-    );
     let rounding = egui::Rounding::same(radius::XS);
     // Covers arrive from a decode thread, whenever they arrive. Cross-fading the
     // artwork up over its placeholder keeps a late texture from punching a hole
     // in an otherwise settled list.
-    let art_t = ui
-        .ctx()
-        .animate_bool_with_time(resp.id.with("art"), tex.is_some(), COVER_FADE_ANIM);
+    let art_t =
+        ui.ctx()
+            .animate_bool_with_time(resp.id.with("art"), tex.is_some(), COVER_FADE_ANIM);
     // The placeholder holds underneath for the whole cross-fade, so the square
     // is never briefly transparent between the two.
     if art_t < 1.0 {
@@ -549,6 +629,57 @@ fn search_hit_row(
             egui::Color32::from_black_alpha(180).gamma_multiply(art_t),
         );
         draw_hit_mark(painter, badge, 6.0, kind, true);
+    }
+
+    // The play disc, over everything the square already carries. Revealed by
+    // hovering the row (not just the square) so it reads as this row's control,
+    // and pinned open while this track is loading or playing so the stop is
+    // still reachable after the pointer moves on. Fades with the row's own
+    // entrance and hover wash rather than snapping in.
+    if let (Some(state), Some(pr)) = (play_state, play_resp.as_ref()) {
+        let show = ui.ctx().animate_bool_with_time(
+            pr.id.with("shown"),
+            resp.hovered() || play_hovered || state != PlayState::Idle,
+            ROW_HIGHLIGHT_ANIM,
+        );
+        if show > 0.0 {
+            let (scrim, glyph, glyph_col) = match state {
+                PlayState::Idle => (
+                    if play_hovered { 170 } else { 120 },
+                    "▶",
+                    egui::Color32::WHITE,
+                ),
+                PlayState::Loading => (170, "…", egui::Color32::WHITE),
+                PlayState::Playing => (170, "■", egui::Color32::from_rgb(130, 210, 130)),
+            };
+            // Darken the whole square, not just behind the disc: a bright cover
+            // otherwise swallows a small glyph sitting on it.
+            painter.rect_filled(
+                art,
+                rounding,
+                egui::Color32::from_black_alpha(scrim).gamma_multiply(show),
+            );
+            let c = art.center();
+            painter.circle_filled(
+                c,
+                10.0,
+                egui::Color32::from_black_alpha(if play_hovered { 230 } else { 190 })
+                    .gamma_multiply(show),
+            );
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                egui::FontId::proportional(11.0),
+                glyph_col.gamma_multiply(show),
+            );
+        }
+        if play_hovered {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if pr.clicked() {
+            action.play = true;
+        }
     }
     let text_x = art.right() + space::S4 - 2.0;
     // Both lines are truncated to the space actually left in the row.
@@ -588,7 +719,10 @@ fn search_hit_row(
             color::LABEL_3,
         );
     }
-    resp.clicked()
+    // A click on the disc is a preview, not a navigation — the row must not
+    // also open underneath it.
+    action.open = resp.clicked() && !action.play;
+    action
 }
 
 impl App {
@@ -619,7 +753,8 @@ impl App {
                 self.tex_graveyard
                     .wrap(ctx.load_texture(name, img, egui::TextureOptions::LINEAR))
             });
-            self.search_vinyl_covers.insert(msg.key, ThumbState::Ready(tex));
+            self.search_vinyl_covers
+                .insert(msg.key, ThumbState::Ready(tex));
         }
     }
 }
@@ -640,11 +775,8 @@ pub(crate) fn clipped_line(
     color: egui::Color32,
 ) {
     let galley = ui.fonts(|f| {
-        let mut job = egui::text::LayoutJob::simple_singleline(
-            text,
-            style.resolve(ui.style()),
-            color,
-        );
+        let mut job =
+            egui::text::LayoutJob::simple_singleline(text, style.resolve(ui.style()), color);
         job.wrap.max_width = width;
         job.wrap.max_rows = 1;
         job.wrap.break_anywhere = false;
@@ -680,13 +812,7 @@ enum HitKind {
 ///
 /// `on_art` brightens the mark for the badge that sits over cover artwork, where
 /// it needs to hold up against an arbitrary image rather than a flat surface.
-fn draw_hit_mark(
-    painter: &egui::Painter,
-    c: egui::Pos2,
-    r: f32,
-    kind: HitKind,
-    on_art: bool,
-) {
+fn draw_hit_mark(painter: &egui::Painter, c: egui::Pos2, r: f32, kind: HitKind, on_art: bool) {
     let ink = if on_art {
         egui::Color32::from_white_alpha(235)
     } else {

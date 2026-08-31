@@ -69,6 +69,7 @@ impl App {
             search_apply_at: None,
             search_popup_open: false,
             search_row_shown_at: None,
+            focus_search: false,
             search_cursor: None,
             search_vinyl_covers: HashMap::new(),
             search_cover_req_tx,
@@ -956,6 +957,22 @@ impl eframe::App for App {
             }
         }
 
+        // Cmd/Ctrl+F puts the caret in the toolbar search box — the standard
+        // "Find" chord, and the fastest way into the one control that answers
+        // "where is this?" for both halves of the library.
+        //
+        // Unlike ⌘A this is *not* gated on `wants_keyboard_input`: ⌘F has no
+        // in-field meaning to protect, and pressing it while some other field
+        // has focus should still take you to the search box. The flag is read
+        // by the toolbar a few lines later, once the field exists.
+        //
+        // On macOS the Edit ▸ Find menu item owns this chord and gets here via
+        // `MenuCommand::FocusSearch` instead; the branch is kept for platforms
+        // with no native menu bar.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+            self.focus_search = true;
+        }
+
         // Cmd/Ctrl+R reloads the table from the catalog. This used to be a
         // toolbar button, but it's a rare manual escape hatch (jobs reload on
         // their own), so it lives as a shortcut instead of taking up chrome.
@@ -1021,6 +1038,7 @@ impl eframe::App for App {
                     }
                 }
                 macos_menu::MenuCommand::PlayPause => self.toggle_play_pause(),
+                macos_menu::MenuCommand::FocusSearch => self.focus_search = true,
             }
         }
 
@@ -1466,8 +1484,7 @@ impl eframe::App for App {
                             // Room for the Clear-filters button *and* the
                             // scope toggle, so the field shrinks rather than
                             // pushing either past the edge of this remainder.
-                            let reserved =
-                                (if has_filters { 140.0 } else { 0.0 }) + SCOPE_TOGGLE_W;
+                            let reserved = (if has_filters { 140.0 } else { 0.0 }) + SCOPE_TOGGLE_W;
                             let w = (ui.available_width() - reserved).clamp(120.0, 320.0);
                             // egui's TextEdit defaults to a 4×2 inner margin, which
                             // leaves the caret and hint text jammed against the
@@ -1488,6 +1505,31 @@ impl eframe::App for App {
                                     .min_size(egui::vec2(0.0, 26.0))
                                     .hint_text(hint),
                             );
+                            // ⌘F (or Edit ▸ Find) asked for this field. Focus
+                            // it and select whatever's already typed, so the
+                            // chord means "search for something else" as well
+                            // as "search" — the same as every other Find box.
+                            if std::mem::take(&mut self.focus_search) {
+                                resp.request_focus();
+                                let chars = self.search_query.chars().count();
+                                if let Some(mut state) =
+                                    egui::TextEdit::load_state(ui.ctx(), resp.id)
+                                {
+                                    state.cursor.set_char_range(Some(
+                                        egui::text::CCursorRange::two(
+                                            egui::text::CCursor::new(0),
+                                            egui::text::CCursor::new(chars),
+                                        ),
+                                    ));
+                                    state.store(ui.ctx(), resp.id);
+                                }
+                                // Bring back the suggestions the box last
+                                // showed, rather than an empty popup over a
+                                // query that's still there.
+                                if !self.search_hits.is_empty() {
+                                    self.search_popup_open = true;
+                                }
+                            }
                             if resp.changed() {
                                 // Typing only recomputes the dropdown — the table is
                                 // left alone until a hit is chosen. Parked behind the
@@ -2073,7 +2115,8 @@ impl eframe::App for App {
                             ui.add_space(14.0);
                             if ui
                                 .add(egui::Button::new(
-                                    egui::RichText::new("  Clear filters  ").font(crate::ui::tokens::font::headline()),
+                                    egui::RichText::new("  Clear filters  ")
+                                        .font(crate::ui::tokens::font::headline()),
                                 ))
                                 .clicked()
                             {
@@ -2122,7 +2165,8 @@ impl eframe::App for App {
                                 ui.add_space(14.0);
                                 if ui
                                     .add(egui::Button::new(
-                                        egui::RichText::new("  Add songs…  ").font(crate::ui::tokens::font::headline()),
+                                        egui::RichText::new("  Add songs…  ")
+                                            .font(crate::ui::tokens::font::headline()),
                                     ))
                                     .clicked()
                                 {

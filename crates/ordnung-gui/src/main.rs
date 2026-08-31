@@ -19,14 +19,14 @@ mod macos_menu;
 mod macos_pasteboard;
 mod modals;
 mod player;
+mod records;
+mod search_box;
 mod sidebar;
 mod table;
 mod tex;
 mod ui;
 mod util;
 mod views;
-mod records;
-mod search_box;
 mod vinyl_sheet;
 mod webview;
 
@@ -34,22 +34,22 @@ use audio::{fmt_time, AudioEngine, PlayState};
 use config::{Config, NavPrimary, StartupView};
 use covers::*;
 use dig::DigPath;
-use records::{RecordFetched, RecordSearch, SearchScope, RECORD_DEBOUNCE, SCOPE_TOGGLE_W};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use ordnung_core::analysis::{self, AnalysisParams, ANALYZER_VERSION, WAVEFORM_FULLTRACK_VERSION};
-use ordnung_core::search::{ScoredHit, SearchHit};
 use ordnung_core::convert::{self, ConvertSpec};
 use ordnung_core::discogs;
 use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
     Analysis, Format, Id, Playlist, Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
 };
+use ordnung_core::search::{ScoredHit, SearchHit};
 use ordnung_core::{
     best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind, ScannedTrack,
 };
 use player::*;
 use rayon::prelude::*;
+use records::{RecordFetched, RecordSearch, SearchScope, RECORD_DEBOUNCE, SCOPE_TOGGLE_W};
 use sidebar::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -778,6 +778,11 @@ struct App {
     /// cascade while an unchanged list stays put. `None` while the popup is
     /// fully closed.
     search_row_shown_at: Option<std::time::Instant>,
+    /// Set for one frame when ⌘F (or Edit ▸ Find) asks for the search box.
+    /// The toolbar consumes it right after building the field — the request has
+    /// to outlive the keypress by exactly that long, because the field's
+    /// `Response` doesn't exist yet at the point the shortcut is read.
+    focus_search: bool,
     /// Keyboard cursor within `search_hits`, driven by ↑/↓ in the search box.
     /// `None` means nothing is highlighted and Enter falls through to the plain
     /// filter behaviour.

@@ -45,6 +45,8 @@ pub enum MenuCommand {
     /// Play or pause the selected track (Space is handled in egui; this is the
     /// menu's discoverable equivalent).
     PlayPause,
+    /// Put the caret in the toolbar search box (⌘F).
+    FocusSearch,
 }
 
 /// Slot holding at most one pending command. A `u8` rather than a channel so the
@@ -63,6 +65,7 @@ fn encode(cmd: MenuCommand) -> u8 {
         MenuCommand::Copy => 5,
         MenuCommand::AddFolder => 6,
         MenuCommand::PlayPause => 7,
+        MenuCommand::FocusSearch => 8,
     }
 }
 
@@ -75,6 +78,7 @@ fn decode(v: u8) -> Option<MenuCommand> {
         5 => MenuCommand::Copy,
         6 => MenuCommand::AddFolder,
         7 => MenuCommand::PlayPause,
+        8 => MenuCommand::FocusSearch,
         _ => return None,
     })
 }
@@ -308,6 +312,19 @@ mod imp {
             None,
             Some(sel!(paste:)),
             None,
+        ));
+        separator(mtm, &edit);
+        // Find owns its chord outright, unlike ⌘A/⌘C below: ⌘F has no meaning
+        // inside a text field to protect, and pressing it while some other
+        // field has focus should still land you in the search box.
+        edit.addItem(&item(
+            mtm,
+            "Find",
+            "f",
+            CMD,
+            Some(MenuCommand::FocusSearch),
+            None,
+            Some(&target),
         ));
         separator(mtm, &edit);
         // ⌘A stays owned by egui: in a focused text field it must keep its
