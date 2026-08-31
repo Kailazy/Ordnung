@@ -25,6 +25,7 @@ mod tex;
 mod ui;
 mod util;
 mod views;
+mod records;
 mod search_box;
 mod vinyl_sheet;
 mod webview;
@@ -33,6 +34,7 @@ use audio::{fmt_time, AudioEngine, PlayState};
 use config::{Config, NavPrimary, StartupView};
 use covers::*;
 use dig::DigPath;
+use records::{RecordFetched, RecordSearch, SearchScope, RECORD_DEBOUNCE, SCOPE_TOGGLE_W};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use ordnung_core::analysis::{self, AnalysisParams, ANALYZER_VERSION, WAVEFORM_FULLTRACK_VERSION};
@@ -792,6 +794,25 @@ struct App {
     search_vinyl_covers: HashMap<VinylCoverKey, ThumbState>,
     search_cover_req_tx: Sender<VinylCoverKey>,
     search_cover_rx: Receiver<VinylCoverLoaded>,
+    /// Which database the search box is pointed at — the local library or all
+    /// of Discogs. Toggled by the control on the right of the field; see
+    /// `records.rs` for why these are modes rather than one blended list.
+    search_scope: SearchScope,
+    /// State of the current Discogs lookup: idle, in flight, answered, or failed.
+    record_search: RecordSearch,
+    /// Monotonic id for lookup requests. A reply carrying anything other than
+    /// the current value is a stale answer for a query the user has typed past,
+    /// and is dropped on arrival.
+    record_generation: u64,
+    /// Queries already answered this session, so backspacing to a previous one
+    /// is instant instead of costing another rate-limited request.
+    record_cache: HashMap<String, (Vec<ordnung_core::discogs::RecordHit>, u32)>,
+    record_tx: Sender<RecordFetched>,
+    record_rx: Receiver<RecordFetched>,
+    /// When a parked keystroke should fire the Discogs lookup. Separate from
+    /// `search_apply_at` because a network lookup wants a much longer pause than
+    /// the local suggestion rebuild.
+    record_apply_at: Option<std::time::Instant>,
     /// The primary/active row — drives the inspector. Always the last row the
     /// user clicked (and a member of `selection` whenever `selection` is non-empty).
     selected: Option<Id>,

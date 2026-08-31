@@ -173,7 +173,12 @@ impl App {
             return;
         }
         let focused = field.has_focus();
-        let n = self.search_hits.len();
+        // Arrow/Enter navigate whichever list is on screen.
+        let n = if self.searching_discogs() {
+            self.record_hit_count()
+        } else {
+            self.search_hits.len()
+        };
 
         // Esc always dismisses, list or no list. Only the flag is flipped here:
         // this frame still paints the popup at its current `open_t`, and the
@@ -187,7 +192,7 @@ impl App {
         }
         // Arrow/Enter handling only applies when there's a list to move through;
         // with the popup showing "No matches" the keys still belong to the table.
-        if want_open && !dismissing && focused && !self.search_hits.is_empty() {
+        if want_open && !dismissing && focused && n > 0 {
             let (down, up, enter) = ctx.input_mut(|i| {
                 (
                     i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
@@ -214,7 +219,12 @@ impl App {
             // there's no other meaning left for the key.
             if enter {
                 let i = self.search_cursor.unwrap_or(0);
-                if let Some(h) = self.search_hits.get(i) {
+                if self.searching_discogs() {
+                    if let Some(hit) = self.record_hit_at(i) {
+                        self.open_record_hit(hit, &ctx);
+                        return;
+                    }
+                } else if let Some(h) = self.search_hits.get(i) {
                     let hit = h.hit.clone();
                     self.open_search_hit(hit, &ctx);
                     return;
@@ -223,6 +233,8 @@ impl App {
         }
 
         let mut chosen: Option<SearchHit> = None;
+        let mut record_chosen: Option<ordnung_core::discogs::RecordHit> = None;
+        let discogs_mode = self.searching_discogs();
         let mut dismiss = false;
         // Cover loads discovered while drawing; issued after the Area closure so
         // no borrow of the caches is live when the loaders mutate them.
@@ -258,7 +270,18 @@ impl App {
                     .inner_margin(egui::Margin::symmetric(space::S1, space::S2))
                     .rounding(egui::Rounding::same(radius::MD))
                     .show(ui, |ui| {
-                    ui.set_width(field.rect.width().max(320.0));
+                    // The Discogs list is wider: it carries a third line of
+                    // pressing detail and a membership pill that a library hit
+                    // doesn't have.
+                    let min_w = if discogs_mode { 460.0 } else { 320.0 };
+                    ui.set_width(field.rect.width().max(min_w));
+                    if discogs_mode {
+                        // The remote list owns the whole popup in this mode —
+                        // its own states (loading, empty, failed) are rendered
+                        // by `draw_record_results`.
+                        record_chosen = self.draw_record_results(ui);
+                        return;
+                    }
                     if hits.is_empty() {
                         ui.add_space(space::S2);
                         ui.horizontal(|ui| {
@@ -327,11 +350,17 @@ impl App {
 
         // A click anywhere else closes the popup — the usual dismiss gesture,
         // and without it the list would hang around over the table.
-        if want_open && ctx.input(|i| i.pointer.any_click()) && !field.has_focus() && chosen.is_none()
+        if want_open
+            && ctx.input(|i| i.pointer.any_click())
+            && !field.has_focus()
+            && chosen.is_none()
+            && record_chosen.is_none()
         {
             dismiss = true;
         }
-        if let Some(hit) = chosen {
+        if let Some(hit) = record_chosen {
+            self.open_record_hit(hit, &ctx);
+        } else if let Some(hit) = chosen {
             self.open_search_hit(hit, &ctx);
         } else if dismiss {
             self.search_popup_open = false;
@@ -591,7 +620,7 @@ impl App {
 /// overflows its container. Laying the galley out with an explicit wrap width
 /// and `truncate` gives the usual single-line "…" instead.
 #[allow(clippy::too_many_arguments)]
-fn clipped_line(
+pub(crate) fn clipped_line(
     ui: &egui::Ui,
     painter: &egui::Painter,
     pos: egui::Pos2,

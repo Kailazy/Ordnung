@@ -47,6 +47,7 @@ impl App {
         // view, where `vinyl_covers` is cleared on every reload.
         let (search_cover_req_tx, search_cover_req_rx) = mpsc::channel::<VinylCoverKey>();
         let (search_cover_tx, search_cover_rx) = mpsc::channel();
+        let (record_tx, record_rx) = mpsc::channel();
         spawn_vinyl_cover_loader(
             db_path.clone(),
             egui_ctx.clone(),
@@ -72,6 +73,13 @@ impl App {
             search_vinyl_covers: HashMap::new(),
             search_cover_req_tx,
             search_cover_rx,
+            search_scope: SearchScope::default(),
+            record_search: RecordSearch::Idle,
+            record_generation: 0,
+            record_cache: HashMap::new(),
+            record_tx,
+            record_rx,
+            record_apply_at: None,
             selected: None,
             selection: HashSet::new(),
             select_anchor: None,
@@ -893,6 +901,7 @@ impl eframe::App for App {
         self.poll_vinyl_sheet();
         self.poll_sheet_price();
         self.poll_dig();
+        self.poll_records();
         self.poll_dig_primed();
         self.poll_dig_ids();
         self.poll_dig_covers(ctx);
@@ -1038,6 +1047,19 @@ impl eframe::App for App {
             if now >= at {
                 self.search_apply_at = None;
                 self.refresh_search_hits();
+            } else {
+                ctx.request_repaint_after(at - now);
+            }
+        }
+        // The Discogs lookup's own, much longer debounce. Separate from the
+        // local one above because this one spends a rate-limited network
+        // request, so it waits for a real pause in typing rather than a gap
+        // between keystrokes.
+        if let Some(at) = self.record_apply_at {
+            let now = std::time::Instant::now();
+            if now >= at {
+                self.record_apply_at = None;
+                self.start_record_search();
             } else {
                 ctx.request_repaint_after(at - now);
             }
@@ -1412,19 +1434,30 @@ impl eframe::App for App {
                             // Reserve room for the Clear-filters button so the text
                             // field shrinks rather than pushing it past the edge of
                             // this remainder.
-                            let reserved = if has_filters { 140.0 } else { 0.0 };
+                            // Room for the Clear-filters button *and* the
+                            // scope toggle, so the field shrinks rather than
+                            // pushing either past the edge of this remainder.
+                            let reserved =
+                                (if has_filters { 140.0 } else { 0.0 }) + SCOPE_TOGGLE_W;
                             let w = (ui.available_width() - reserved).clamp(120.0, 320.0);
                             // egui's TextEdit defaults to a 4×2 inner margin, which
                             // leaves the caret and hint text jammed against the
                             // frame. Give the field real breathing room and a
                             // comfortable hit height — it's the most-used control in
                             // the toolbar, so it earns the space.
+                            // Read before the field borrows `search_query`
+                            // mutably, so the hint can depend on the scope.
+                            let hint = if self.searching_discogs() {
+                                "Search all of Discogs"
+                            } else {
+                                "Search songs and records"
+                            };
                             let resp = ui.add(
                                 egui::TextEdit::singleline(&mut self.search_query)
                                     .desired_width(w)
                                     .margin(egui::Margin::symmetric(space::S3, space::S2 + 1.0))
                                     .min_size(egui::vec2(0.0, 26.0))
-                                    .hint_text("Search songs and records"),
+                                    .hint_text(hint),
                             );
                             if resp.changed() {
                                 // Typing only recomputes the dropdown — the table is
@@ -1433,6 +1466,14 @@ impl eframe::App for App {
                                 // the catalog on every keystroke.
                                 self.search_apply_at =
                                     Some(std::time::Instant::now() + SEARCH_DEBOUNCE);
+                                if self.searching_discogs() {
+                                    // The remote lookup rides its own, longer
+                                    // debounce; until it fires the popup keeps
+                                    // showing the last answer rather than
+                                    // blanking on every keystroke.
+                                    self.record_apply_at =
+                                        Some(std::time::Instant::now() + RECORD_DEBOUNCE);
+                                }
                             }
                             // Re-opening on focus lets a user who dismissed the
                             // popup get it back by clicking into the box, without
@@ -1440,6 +1481,10 @@ impl eframe::App for App {
                             if resp.gained_focus() && !self.search_hits.is_empty() {
                                 self.search_popup_open = true;
                             }
+                            // The scope switch sits immediately right of the
+                            // field, reading as part of the same control: it
+                            // says what the box you just typed in will search.
+                            self.draw_scope_toggle(ui);
                             self.draw_search_popup(&resp);
                             // A prominent "clear all filters" button, shown only while a
                             // filter is actually hiding rows. This rescues the case where

@@ -102,6 +102,41 @@ pub struct ReleaseCandidate {
     pub cover_image_url: String,
 }
 
+/// One release returned by a free-text record lookup ([`Client::search_records`]).
+///
+/// Distinct from [`ReleaseCandidate`], which answers "which release is *this
+/// track* from" and so carries only what the artwork picker needs. A lookup hit
+/// is a record the user is considering on its own terms, so it splits artist
+/// from title (Discogs returns them joined as `"Artist - Title"`) and carries
+/// the catalog number — the two fields that disambiguate pressings at a glance.
+#[derive(Debug, Clone)]
+pub struct RecordHit {
+    pub release_id: u64,
+    /// Credited artist, split off the joined `"Artist - Title"` search label.
+    /// Empty when Discogs gave a title with no ` - ` separator.
+    pub artist: String,
+    pub title: String,
+    pub year: String,
+    pub label: String,
+    pub catno: String,
+    pub country: String,
+    /// Format summary as Discogs lists it, e.g. `2xLP, Album, Repress`.
+    pub format: String,
+    pub thumb_url: String,
+    pub cover_image_url: String,
+}
+
+/// One page of free-text record-lookup results. See [`Client::search_records`].
+#[derive(Debug, Clone)]
+pub struct RecordSearchPage {
+    pub hits: Vec<RecordHit>,
+    /// Total pages Discogs reports for this query, so a caller can tell "that's
+    /// everything" from "there's more".
+    pub pages: u32,
+    /// Total matching releases across all pages.
+    pub items: u32,
+}
+
 /// One pressing of a master — a specific release, with how many people own and
 /// want it. See [`Client::master_versions`].
 #[derive(Debug, Clone)]
@@ -662,6 +697,71 @@ impl Client {
             }));
         }
         Ok(None)
+    }
+
+    /// Free-text record lookup: search all of Discogs for releases matching a
+    /// user-typed query, the way the discogs.com search box does.
+    ///
+    /// This is the general search [`Client::find_artwork`] and
+    /// [`Client::find_artwork_candidates`] are not — those anchor on a known
+    /// artist to identify *one track's* release and return nothing without one.
+    /// Here the query is whatever the user typed ("metro area", "environ 006",
+    /// "theo parrish"), so it goes straight to `q` with no fallback ladder.
+    ///
+    /// Results are releases only (never masters or artists), so every hit has a
+    /// concrete `release_id` that can be wanted, collected, or opened. `page` is
+    /// 1-based. One API request per call, paced by the shared throttle.
+    ///
+    /// An empty or whitespace-only query returns an empty page without touching
+    /// the network — a caller debouncing keystrokes shouldn't spend a request on
+    /// a cleared search box.
+    pub fn search_records(&self, query: &str, page: u32, per_page: u32) -> Result<RecordSearchPage> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(RecordSearchPage {
+                hits: Vec::new(),
+                pages: 0,
+                items: 0,
+            });
+        }
+        let page = page.max(1).to_string();
+        let per_page = per_page.clamp(1, 100).to_string();
+        let resp = self.call_with_retry(|| {
+            self.agent
+                .get(SEARCH_URL)
+                .set("User-Agent", &self.user_agent)
+                .set("Authorization", &format!("Discogs token={}", self.token))
+                .query("q", query)
+                .query("type", "release")
+                .query("per_page", &per_page)
+                .query("page", &page)
+        })?;
+        let body: SearchResponse = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs search response: {e}")))?;
+        Ok(RecordSearchPage {
+            pages: body.pagination.pages,
+            items: body.pagination.items,
+            hits: body
+                .results
+                .into_iter()
+                .map(|h| {
+                    let (artist, title) = split_artist_title(&h.title);
+                    RecordHit {
+                        release_id: h.id,
+                        artist,
+                        title,
+                        year: h.year,
+                        label: h.label.into_iter().next().unwrap_or_default(),
+                        catno: h.catno,
+                        country: h.country,
+                        format: h.format.join(", "),
+                        thumb_url: h.thumb,
+                        cover_image_url: h.cover_image,
+                    }
+                })
+                .collect(),
+        })
     }
 
     /// Like [`Client::find_artwork`] but returns *every* candidate release
@@ -1320,8 +1420,23 @@ struct BrowseEntry {
     role: String,
 }
 
+/// Split Discogs's joined `"Artist - Title"` release label into its two parts.
+///
+/// Discogs's search endpoint has no separate artist field — it returns one
+/// combined string — so a lookup result has to be split to be rendered as an
+/// artist over a title. A label with no ` - ` separator is taken as all title,
+/// leaving the artist empty rather than guessing.
+fn split_artist_title(combined: &str) -> (String, String) {
+    match combined.split_once(" - ") {
+        Some((a, t)) => (a.trim().to_string(), t.trim().to_string()),
+        None => (String::new(), combined.trim().to_string()),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pagination: SearchPagination,
     #[serde(default, deserialize_with = "null_as_default")]
     results: Vec<SearchHit>,
 }
@@ -1344,6 +1459,9 @@ struct SearchHit {
     /// Full-size release image. Empty when Discogs has no high-res cover.
     #[serde(default, deserialize_with = "null_as_default")]
     cover_image: String,
+    /// Catalog number, e.g. `ENV 006`. Empty when Discogs has none.
+    #[serde(default, deserialize_with = "null_as_default")]
+    catno: String,
     /// "Artist - Title" as Discogs labels the release.
     #[serde(default, deserialize_with = "null_as_default")]
     title: String,
@@ -1911,6 +2029,31 @@ mod throttle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_artist_title_separates_on_first_dash() {
+        let (a, t) = split_artist_title("Metro Area - Miura");
+        assert_eq!(a, "Metro Area");
+        assert_eq!(t, "Miura");
+    }
+
+    /// Titles routinely contain their own hyphens; only the first ` - ` is the
+    /// artist boundary, so the rest has to survive intact.
+    #[test]
+    fn split_artist_title_keeps_later_dashes_in_the_title() {
+        let (a, t) = split_artist_title("Theo Parrish - Summertime Is Here - Remixes");
+        assert_eq!(a, "Theo Parrish");
+        assert_eq!(t, "Summertime Is Here - Remixes");
+    }
+
+    /// No separator means Discogs gave us a bare title (common for untitled
+    /// white labels). Guessing an artist would be worse than leaving it blank.
+    #[test]
+    fn split_artist_title_leaves_artist_empty_without_a_separator() {
+        let (a, t) = split_artist_title("Untitled");
+        assert_eq!(a, "");
+        assert_eq!(t, "Untitled");
+    }
 
     fn detail() -> ReleaseDetail {
         ReleaseDetail {
