@@ -43,18 +43,29 @@ use std::thread;
 /// typist spends one request per query rather than one per keystroke.
 pub(crate) const RECORD_DEBOUNCE: Duration = Duration::from_millis(450);
 
-/// How many results one lookup asks Discogs for. The popup is scrollable, so
-/// this is about how much a single request is worth fetching, not how much fits.
+/// How many results one lookup asks Discogs for. Only [`RECORD_HITS_SHOWN`] are
+/// ever drawn, but the extras cost nothing (one request either way) and cover
+/// the case where the first few are dropped as unusable.
 const RECORD_PER_PAGE: u32 = 25;
+
+/// How many results the popup shows. Five, with the total count in the footer
+/// standing in for the rest — a lookup popup is a quick answer, not a browser,
+/// and five large rows read at a glance where a scrolling list of twenty-five
+/// has to be worked through.
+const RECORD_HITS_SHOWN: usize = 5;
 
 /// Cap on the memoised query cache. Small: entries are only worth keeping for
 /// the backspace-and-retype case within a session.
 const RECORD_CACHE_MAX: usize = 32;
 
-/// Height of one result row. Taller than a local hit row — a record carries a
-/// third line (label · catalog number · country) that a library hit doesn't.
-const ROW_H: f32 = 62.0;
-const ROW_COVER_PX: f32 = 46.0;
+/// Height of one result row and the cover square inside it.
+///
+/// Considerably taller than a library hit row: a lookup result is four stacked
+/// lines (format eyebrow, title, artist, year · country) against a large cover,
+/// which is what makes a list of near-identical pressings scannable. With only
+/// [`RECORD_HITS_SHOWN`] rows on screen there's room to spend on it.
+const ROW_H: f32 = 84.0;
+const ROW_COVER_PX: f32 = 68.0;
 
 /// Motion for a row's hover wash and the "in your library" pill fading in.
 const ROW_HIGHLIGHT_ANIM: f32 = 0.11;
@@ -222,6 +233,7 @@ impl App {
         // Snapshot what we're drawing so the row loop can borrow `self` for
         // cover lookups without fighting the borrow on `record_search`.
         let state = self.record_search.clone();
+        let query = self.search_query.trim().to_string();
         match state {
             RecordSearch::Idle => {
                 note(ui, "Type to search Discogs");
@@ -253,51 +265,48 @@ impl App {
                 }
                 let mut chosen = None;
                 let mut want_covers: Vec<String> = Vec::new();
-                // Cap the popup's height and let it scroll: a lookup returns far
-                // more than the five hits the local list is built around, and a
-                // popup taller than the window would be unreachable.
-                egui::ScrollArea::vertical()
-                    .max_height(360.0)
-                    .show(ui, |ui| {
-                        for (i, hit) in hits.iter().enumerate() {
-                            let selected = self.search_cursor == Some(i);
-                            let tex = match self.dig_covers.get(&hit.thumb_url) {
-                                Some(ThumbState::Ready(t)) => t.clone(),
-                                Some(_) => None,
-                                None => {
-                                    if !hit.thumb_url.is_empty() {
-                                        want_covers.push(hit.thumb_url.clone());
-                                    }
-                                    None
-                                }
-                            };
-                            // Owning or wanting a record is the single most
-                            // useful thing to know while digging, and it's free:
-                            // both id sets are already in memory.
-                            let owned = self.vinyl_owned.contains(&hit.release_id);
-                            let wanted = self.vinyl_wanted.contains(&hit.release_id);
-                            if record_row(ui, hit, selected, tex, owned, wanted) {
-                                chosen = Some(hit.clone());
+                // Only the first few are drawn. The popup is a quick answer, so
+                // it shows a glanceable handful and lets the footer account for
+                // the rest, rather than becoming a list to scroll through.
+                let shown = hits.len().min(RECORD_HITS_SHOWN);
+                for (i, hit) in hits.iter().take(shown).enumerate() {
+                    let selected = self.search_cursor == Some(i);
+                    let tex = match self.dig_covers.get(&hit.thumb_url) {
+                        Some(ThumbState::Ready(t)) => t.clone(),
+                        Some(_) => None,
+                        None => {
+                            if !hit.thumb_url.is_empty() {
+                                want_covers.push(hit.thumb_url.clone());
                             }
+                            None
                         }
-                        // Say how much more there is, so a scrolled-to-bottom
-                        // list doesn't imply it's the whole answer.
-                        let shown = hits.len() as u32;
-                        if items > shown {
-                            ui.add_space(space::S2);
-                            ui.horizontal(|ui| {
-                                ui.add_space(space::S3);
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "Showing {shown} of {items} matches"
-                                    ))
-                                    .small()
-                                    .color(color::LABEL_3),
-                                );
-                            });
-                            ui.add_space(space::S1);
-                        }
-                    });
+                    };
+                    // Owning or wanting a record is the single most useful thing
+                    // to know while digging, and it's free: both id sets are
+                    // already in memory.
+                    let owned = self.vinyl_owned.contains(&hit.release_id);
+                    let wanted = self.vinyl_wanted.contains(&hit.release_id);
+                    if record_row(ui, hit, selected, tex, owned, wanted) {
+                        chosen = Some(hit.clone());
+                    }
+                    // Hairlines between rows, not around them — the list reads
+                    // as one block the way the rows on discogs.com do.
+                    if i + 1 < shown {
+                        let y = ui.min_rect().bottom();
+                        ui.painter().hline(
+                            ui.min_rect().x_range(),
+                            y,
+                            egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE),
+                        );
+                    }
+                }
+                // Account for everything the five rows didn't show, so the list
+                // never implies it's the whole answer.
+                if items as usize > shown {
+                    if footer(ui, items).clicked() {
+                        crate::util::open_url(&crate::util::discogs_url(None, &query));
+                    }
+                }
                 // Cover requests are issued after the render borrow ends.
                 for url in want_covers {
                     self.dig_cover(&url);
@@ -327,16 +336,20 @@ impl App {
             hit.release_id,
             hit.artist.clone(),
             hit.title.clone(),
-            pressing_line(&hit),
+            sheet_subtitle(&hit),
             cover,
             ctx,
         );
     }
 
     /// How many rows the Discogs list currently has, for keyboard navigation.
+    ///
+    /// Counts what's *drawn*, not what was fetched: arrowing past the last
+    /// visible row would otherwise highlight nothing and Enter would open a
+    /// record the user can't see.
     pub(crate) fn record_hit_count(&self) -> usize {
         match &self.record_search {
-            RecordSearch::Done { hits, .. } => hits.len(),
+            RecordSearch::Done { hits, .. } => hits.len().min(RECORD_HITS_SHOWN),
             _ => 0,
         }
     }
@@ -436,6 +449,73 @@ impl App {
     }
 }
 
+/// The strip under the five rows: how many matches there are in total, and a
+/// way out to the full result set on discogs.com.
+///
+/// The count is the honest part — a lookup that found 1,204 matches and drew
+/// five of them should say so, or the list quietly misrepresents itself as the
+/// whole answer. The click-through goes to the browser rather than paginating
+/// in-app: past the first handful the user is browsing, and the browser is
+/// better at that than a popup under a search field.
+fn footer(ui: &mut egui::Ui, items: u32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 30.0),
+        egui::Sense::click(),
+    );
+    let hot = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("hot"), resp.hovered(), ROW_HIGHLIGHT_ANIM);
+    if hot > 0.0 {
+        ui.painter().rect_filled(
+            rect,
+            ui.visuals().widgets.hovered.rounding,
+            ui.visuals()
+                .widgets
+                .hovered
+                .weak_bg_fill
+                .gamma_multiply(hot),
+        );
+    }
+    ui.painter().hline(
+        rect.x_range(),
+        rect.top(),
+        egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE),
+    );
+    let style = egui::TextStyle::Small.resolve(ui.style());
+    ui.painter().text(
+        egui::pos2(rect.left() + space::S3, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        format!("{} matches on Discogs", thousands(items)),
+        style.clone(),
+        color::LABEL_3,
+    );
+    // The affordance brightens with the row, so it reads as the thing the click
+    // does rather than as decoration.
+    ui.painter().text(
+        egui::pos2(rect.right() - space::S3, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        "View all  →",
+        style,
+        if hot > 0.0 { color::LABEL } else { color::LABEL_3 },
+    );
+    resp
+}
+
+/// Group a count with thin separators: `1204` reads as `1,204`. Big numbers are
+/// the normal case here (a common word matches thousands of releases), and an
+/// ungrouped five-digit run is genuinely hard to size up at a glance.
+fn thousands(n: u32) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// One line of muted text in the popup, for every state that has no rows.
 fn note(ui: &mut egui::Ui, text: &str) {
     ui.add_space(space::S2);
@@ -448,11 +528,16 @@ fn note(ui: &mut egui::Ui, text: &str) {
 
 /// Paint one Discogs result. Returns true when clicked.
 ///
-/// Three lines, densest at the bottom: title, then artist, then the pressing
-/// details (year · format · label · catalog number · country). That order is
-/// deliberate — the first two identify the record, the third is what you read
-/// only when you're deciding *which pressing*, which is exactly the job the
-/// design brief calls out as the picker's whole purpose.
+/// Four stacked lines against a large cover, in the order a digger reads them:
+/// the **format** as a small eyebrow, the **title** in bold, the **artist**, and
+/// finally `year · country`. Identity first, provenance last — the eyebrow says
+/// what kind of object this is before you've read a word of it, which is the
+/// question that decides whether a row is worth your attention at all.
+///
+/// The label and catalog number are deliberately *not* here. They're what
+/// separates two pressings of the same record, which matters once you've picked
+/// a record and are choosing between its versions — the release sheet's job.
+/// In a five-row lookup they'd crowd out the identity the list exists to show.
 fn record_row(
     ui: &mut egui::Ui,
     hit: &RecordHit,
@@ -503,42 +588,60 @@ fn record_row(
             .paint_at(ui, art);
     }
 
-    let text_x = art.right() + space::S4 - 2.0;
+    let text_x = art.right() + space::S4;
     // The membership pill is laid out first so the text lines know to stop
     // short of it rather than running underneath.
-    let pill = if owned {
-        Some(("In your collection", color::LABEL_3))
-    } else if wanted {
-        Some(("On your wantlist", color::LABEL_3))
-    } else {
-        None
-    };
     let mut right_edge = slot.right() - pad;
-    if let Some((label, tint)) = pill {
+    if let Some(label) = owned
+        .then_some("In your collection")
+        .or(wanted.then_some("On your wantlist"))
+    {
         let galley = ui.painter().layout_no_wrap(
             label.to_string(),
             egui::TextStyle::Small.resolve(ui.style()),
-            tint,
+            color::LABEL_3,
         );
         let w = galley.size().x + space::S2 * 2.0;
-        let pill_rect = egui::Rect::from_min_size(
+        let pill = egui::Rect::from_min_size(
             egui::pos2(right_edge - w, slot.center().y - 9.0),
             egui::vec2(w, 18.0),
         );
-        ui.painter().rect_filled(
-            pill_rect,
-            egui::Rounding::same(9.0),
-            color::SURFACE_HI,
-        );
+        ui.painter()
+            .rect_filled(pill, egui::Rounding::same(9.0), color::SURFACE_HI);
         ui.painter().galley(
-            egui::pos2(pill_rect.left() + space::S2, pill_rect.center().y - galley.size().y / 2.0),
+            egui::pos2(
+                pill.left() + space::S2,
+                pill.center().y - galley.size().y / 2.0,
+            ),
             galley,
-            tint,
+            color::LABEL_3,
         );
-        right_edge = pill_rect.left() - space::S2;
+        right_edge = pill.left() - space::S2;
     }
     let avail = (right_edge - text_x).max(0.0);
     let painter = ui.painter();
+
+    // Four baselines measured off the row centre, so the block stays vertically
+    // centred against the cover however tall the row is.
+    let eyebrow_y = slot.center().y - 27.0;
+    let title_y = slot.center().y - 9.0;
+    let artist_y = slot.center().y + 10.0;
+    let meta_y = slot.center().y + 27.0;
+
+    // The format eyebrow: letter-spaced small caps, the way a category label
+    // reads on a record sleeve rather than as another line of prose.
+    let eyebrow = format_eyebrow(&hit.format);
+    if !eyebrow.is_empty() {
+        clipped_line(
+            ui,
+            painter,
+            egui::pos2(text_x, eyebrow_y),
+            avail,
+            eyebrow,
+            egui::TextStyle::Small,
+            color::LABEL_3,
+        );
+    }
 
     let title = if hit.title.is_empty() {
         format!("Release {}", hit.release_id)
@@ -548,7 +651,7 @@ fn record_row(
     clipped_line(
         ui,
         painter,
-        egui::pos2(text_x, slot.center().y - 16.0),
+        egui::pos2(text_x, title_y),
         avail,
         title,
         egui::TextStyle::Body,
@@ -558,21 +661,21 @@ fn record_row(
         clipped_line(
             ui,
             painter,
-            egui::pos2(text_x, slot.center().y),
+            egui::pos2(text_x, artist_y),
             avail,
             hit.artist.clone(),
             egui::TextStyle::Small,
             color::LABEL_2,
         );
     }
-    let details = pressing_line(hit);
-    if !details.is_empty() {
+    let meta = pressing_line(hit);
+    if !meta.is_empty() {
         clipped_line(
             ui,
             painter,
-            egui::pos2(text_x, slot.center().y + 16.0),
+            egui::pos2(text_x, meta_y),
             avail,
-            details,
+            meta,
             egui::TextStyle::Small,
             color::LABEL_3,
         );
@@ -580,14 +683,68 @@ fn record_row(
     resp.clicked()
 }
 
-/// The disambiguating third line: everything that separates one pressing of a
-/// record from another, in the order a digger reads them. Empty fields drop out
-/// rather than leaving stray separators.
+/// The small category label above the title: the *carrier*, not the full format
+/// string.
+///
+/// Discogs hands back `Vinyl, 12", 33 ⅓ RPM, Album` — accurate but far too long
+/// to sit above a title. What a digger reads at this position is only "is this a
+/// record?", so this reduces to the carrier and spaces it out as small caps.
+/// The sizes and speeds still appear on the meta line via [`pressing_line`].
+fn format_eyebrow(format: &str) -> String {
+    let f = format.to_ascii_lowercase();
+    // Order matters: the non-vinyl carriers are checked first so a "CD, Comp"
+    // can't match on the `lp` inside a word like "sampler".
+    let carrier = if f.contains("cassette") {
+        "CASSETTE"
+    } else if f.contains("dvd") {
+        "DVD"
+    } else if f.contains("shellac") {
+        "SHELLAC"
+    } else if f.contains("cd") {
+        "CD"
+    } else if f.contains("file") {
+        "DIGITAL"
+    } else if f.contains("vinyl")
+        || f.contains("lp")
+        || f.contains("12\"")
+        || f.contains("10\"")
+        || f.contains("7\"")
+    {
+        "VINYL"
+    } else {
+        return String::new();
+    };
+    // Letter-spaced, since egui has no tracking control and the eyebrow needs
+    // to read as a label rather than a shouted word.
+    carrier
+        .chars()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join("\u{2009}")
+}
+
+/// The row's last line: `year · country`, the two facts that place a pressing
+/// in time and space.
+///
+/// Label and catalog number are left out on purpose — see [`record_row`]. They
+/// still reach the user through the release sheet, whose subtitle is built by
+/// [`sheet_subtitle`] and has room for the full citation.
 fn pressing_line(hit: &RecordHit) -> String {
-    let catno = hit.catno.trim();
-    let label = hit.label.trim();
-    // Label and catalog number belong together — "Environ ENV 006", not
-    // "Environ · ENV 006" — because that's how a record is actually cited.
+    [hit.year.trim(), hit.country.trim()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// The fuller citation handed to the release sheet when a lookup result is
+/// opened: everything that identifies this exact pressing, including the format
+/// details and the label/catalog number the row omits.
+///
+/// Label and catalog number are joined with a space rather than a separator —
+/// "Environ ENV 006", the way a record is actually cited, not "Environ · ENV 006".
+fn sheet_subtitle(hit: &RecordHit) -> String {
+    let (label, catno) = (hit.label.trim(), hit.catno.trim());
     let imprint = match (label.is_empty(), catno.is_empty()) {
         (false, false) => format!("{label} {catno}"),
         (false, true) => label.to_string(),
@@ -613,45 +770,79 @@ mod tests {
     fn hit() -> RecordHit {
         RecordHit {
             release_id: 1,
-            artist: "Metro Area".into(),
-            title: "Metro Area".into(),
-            year: "2001".into(),
-            label: "Environ".into(),
-            catno: "ENV 006".into(),
+            artist: "Drexciya".into(),
+            title: "Deep Sea Dweller".into(),
+            year: "1992".into(),
+            label: "Shockwave Records".into(),
+            catno: "SW1007".into(),
             country: "US".into(),
-            format: "2xLP, Album".into(),
+            format: "Vinyl, 12\", 33 ⅓ RPM".into(),
             thumb_url: String::new(),
             cover_image_url: String::new(),
         }
     }
 
     #[test]
-    fn pressing_line_reads_label_and_catno_as_one_citation() {
-        assert_eq!(
-            pressing_line(&hit()),
-            "2001 · 2xLP, Album · Environ ENV 006 · US"
-        );
+    fn meta_line_is_year_and_country() {
+        assert_eq!(pressing_line(&hit()), "1992 · US");
     }
 
     /// Discogs leaves plenty of these blank; a missing field should vanish
     /// rather than leave a dangling separator.
     #[test]
-    fn pressing_line_drops_empty_fields() {
+    fn meta_line_drops_empty_fields() {
         let mut h = hit();
-        h.year = String::new();
         h.country = String::new();
-        h.catno = String::new();
-        assert_eq!(pressing_line(&h), "2xLP, Album · Environ");
+        assert_eq!(pressing_line(&h), "1992");
+        h.year = String::new();
+        assert_eq!(pressing_line(&h), "");
+    }
+
+    /// The sheet gets the full citation the compact row leaves out.
+    #[test]
+    fn sheet_subtitle_carries_the_full_citation() {
+        assert_eq!(
+            sheet_subtitle(&hit()),
+            "1992 · Vinyl, 12\", 33 ⅓ RPM · Shockwave Records SW1007 · US"
+        );
     }
 
     #[test]
-    fn pressing_line_is_empty_when_nothing_is_known() {
+    fn sheet_subtitle_joins_label_and_catno_without_a_separator() {
         let mut h = hit();
-        h.year = String::new();
-        h.country = String::new();
-        h.catno = String::new();
-        h.label = String::new();
         h.format = String::new();
-        assert_eq!(pressing_line(&h), "");
+        h.country = String::new();
+        assert_eq!(sheet_subtitle(&h), "1992 · Shockwave Records SW1007");
+    }
+
+    /// The eyebrow reduces a long format string to just the carrier.
+    #[test]
+    fn eyebrow_reduces_format_to_the_carrier() {
+        assert_eq!(format_eyebrow("Vinyl, 12\", 33 ⅓ RPM, Album"), spaced("VINYL"));
+        assert_eq!(format_eyebrow("LP, Album, Reissue"), spaced("VINYL"));
+        assert_eq!(format_eyebrow("CD, Compilation"), spaced("CD"));
+        assert_eq!(format_eyebrow("Cassette, Album"), spaced("CASSETTE"));
+        assert_eq!(format_eyebrow("File, FLAC, Album"), spaced("DIGITAL"));
+    }
+
+    /// A CD compilation must not match on the `lp` hiding inside "Sampler".
+    #[test]
+    fn eyebrow_does_not_read_a_cd_as_vinyl() {
+        assert_eq!(format_eyebrow("CD, Sampler"), spaced("CD"));
+    }
+
+    /// Discogs sometimes gives no format at all; the eyebrow then says nothing
+    /// rather than guessing a carrier.
+    #[test]
+    fn eyebrow_is_empty_when_the_format_is_unknown() {
+        assert_eq!(format_eyebrow(""), "");
+        assert_eq!(format_eyebrow("Box Set"), "");
+    }
+
+    fn spaced(s: &str) -> String {
+        s.chars()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join("\u{2009}")
     }
 }
