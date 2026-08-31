@@ -18,8 +18,10 @@ use std::path::Path;
 /// `release_cache`. Bumped whenever a new field means an already-cached row is
 /// missing data the app now needs — rows below the current version read as a
 /// cache miss and are re-fetched. Version 2 added the tracklist and the release's
-/// YouTube videos, which the vinyl record sheet plays from.
-pub const DETAIL_SCHEMA_VERSION: i64 = 4;
+/// YouTube videos, which the vinyl record sheet plays from. Version 5 added
+/// each track's own artist credit, which is what names the performers on a
+/// "Various" compilation.
+pub const DETAIL_SCHEMA_VERSION: i64 = 5;
 
 /// Which table backs a vinyl list. The two caches share an identical schema and
 /// every query below, so the list only ever picks the table name — never its own

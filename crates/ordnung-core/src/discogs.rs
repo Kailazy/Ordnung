@@ -266,6 +266,18 @@ pub struct ReleaseTrack {
     /// Duration as Discogs writes it (`5:18`), not a parsed count of seconds —
     /// it's display-only and frequently blank or malformed.
     pub duration: String,
+    /// Who performed this track, when the track credits someone other than the
+    /// release does. Set on compilations and split releases — where the
+    /// release-level artist is "Various" and so names nobody — and `None` on a
+    /// single-artist album, whose release credit already covers every track.
+    ///
+    /// Pre-joined for display ("A & B", "A Feat. B"), because Discogs's own
+    /// connectors are the only thing that gets multi-artist credits right.
+    /// `#[serde(default)]` so a `release_cache` row written before this field
+    /// existed still deserializes; [`crate::catalog::DETAIL_SCHEMA_VERSION`]
+    /// is what actually re-fetches those.
+    #[serde(default)]
+    pub artist: Option<String>,
 }
 
 /// A YouTube video attached to a Discogs release.
@@ -1767,12 +1779,20 @@ struct ReleaseLabel {
 
 /// An artist credit on a release — only the id is used, to browse that exact
 /// artist's other records.
+///
+/// The same shape is reused for a *track's* own credit on a compilation, where
+/// `name` and `join` are what matter instead: see [`TracklistEntry::artists`].
 #[derive(Debug, Deserialize)]
 struct ReleaseArtist {
     #[serde(default, deserialize_with = "null_as_default")]
     id: u64,
     #[serde(default, deserialize_with = "null_as_default")]
     name: String,
+    /// How this credit joins to the next one — Discogs writes the literal
+    /// connector ("&", "Feat.", ","). Empty on the last credit, and on every
+    /// credit of a single-artist track.
+    #[serde(default, deserialize_with = "null_as_default")]
+    join: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1787,6 +1807,13 @@ struct TracklistEntry {
     title: String,
     #[serde(default, deserialize_with = "null_as_default")]
     duration: String,
+    /// Who performed *this track*, when the release itself doesn't say.
+    /// Discogs populates it on compilations and split releases — exactly the
+    /// records whose release-level artist is "Various" and therefore names
+    /// nobody. Absent on a single-artist album, where the release credit
+    /// already covers every track.
+    #[serde(default, deserialize_with = "null_as_default")]
+    artists: Vec<ReleaseArtist>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1935,6 +1962,7 @@ impl ReleaseResponse {
                     position: t.position,
                     title: t.title,
                     duration: t.duration,
+                    artist: join_credits(&t.artists),
                 })
                 .collect(),
             videos: self
@@ -1950,6 +1978,43 @@ impl ReleaseResponse {
                 .collect(),
         }
     }
+}
+
+/// Render a track's artist credits the way Discogs punctuates them: each name
+/// followed by its own `join` connector, which is how "A & B" and "A Feat. B"
+/// keep their intended meaning rather than being flattened to a comma list.
+///
+/// Discogs writes the connector bare ("&"), so it gets spaces around it — but a
+/// comma is already attached to the preceding name ("A, B", not "A , B"), so
+/// punctuation-only connectors are appended tight. `None` when nothing is
+/// credited, which is the common case: only compilations carry these.
+fn join_credits(artists: &[ReleaseArtist]) -> Option<String> {
+    let mut out = String::new();
+    for a in artists {
+        let name = a.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !out.is_empty() && !out.ends_with(|c: char| c.is_whitespace()) {
+            out.push(' ');
+        }
+        out.push_str(name);
+        let join = a.join.trim();
+        if !join.is_empty() {
+            // A bare comma/semicolon hugs the name it follows; a word or
+            // symbol connector ("&", "Feat.") stands on its own with spaces.
+            if join.chars().all(|c| matches!(c, ',' | ';')) {
+                out.push_str(join);
+            } else {
+                out.push(' ');
+                out.push_str(join);
+            }
+        }
+    }
+    // A trailing connector (Discogs sometimes leaves one on the last credit)
+    // would otherwise read as a dangling "A &".
+    let out = out.trim().trim_end_matches([',', ';', '&', '/']).trim().to_string();
+    (!out.is_empty()).then_some(out)
 }
 
 fn none_if_empty(s: String) -> Option<String> {
@@ -2088,7 +2153,75 @@ mod tests {
             position: position.into(),
             title: title.into(),
             duration: "5:00".into(),
+            artist: None,
         }
+    }
+
+    fn credit(name: &str, join: &str) -> ReleaseArtist {
+        ReleaseArtist { id: 0, name: name.into(), join: join.into() }
+    }
+
+    /// A single credit is just the name; nothing to join.
+    #[test]
+    fn join_credits_renders_a_lone_artist() {
+        assert_eq!(join_credits(&[credit("Herbert", "")]), Some("Herbert".into()));
+    }
+
+    /// Discogs writes the connector bare, so it needs spaces on both sides —
+    /// otherwise a collaboration reads "Theo Parrish&Marcellus Pittman".
+    #[test]
+    fn join_credits_spaces_word_and_symbol_connectors() {
+        assert_eq!(
+            join_credits(&[credit("Theo Parrish", "&"), credit("Marcellus Pittman", "")]),
+            Some("Theo Parrish & Marcellus Pittman".into())
+        );
+        assert_eq!(
+            join_credits(&[credit("Moodymann", "Feat."), credit("Andrés", "")]),
+            Some("Moodymann Feat. Andrés".into())
+        );
+    }
+
+    /// A comma belongs to the name before it, not between two spaces.
+    #[test]
+    fn join_credits_hugs_comma_connectors() {
+        assert_eq!(
+            join_credits(&[credit("A", ","), credit("B", "")]),
+            Some("A, B".into())
+        );
+    }
+
+    /// Discogs sometimes leaves a connector on the final credit, which would
+    /// otherwise render as a dangling "Artist &".
+    #[test]
+    fn join_credits_drops_a_trailing_connector() {
+        assert_eq!(join_credits(&[credit("Solo", "&")]), Some("Solo".into()));
+    }
+
+    /// The common case by far: an ordinary album track credits nobody
+    /// separately, and must not produce an empty string to draw.
+    #[test]
+    fn join_credits_is_none_when_nothing_is_credited() {
+        assert_eq!(join_credits(&[]), None);
+        assert_eq!(join_credits(&[credit("   ", "")]), None);
+    }
+
+    /// The whole point: a compilation's per-track credits survive parsing, so
+    /// the sheet can name performers a "Various" header can't.
+    #[test]
+    fn tracklist_keeps_per_track_artists() {
+        let json = r#"{
+            "id": 1, "title": "Efflorescence III",
+            "tracklist": [
+                {"type_": "track", "position": "A1", "title": "Six Castles", "duration": "5:18",
+                 "artists": [{"id": 7, "name": "Some Artist", "join": ""}]},
+                {"type_": "track", "position": "A2", "title": "Summer Sun", "duration": "4:02"}
+            ]
+        }"#;
+        let resp: ReleaseResponse = serde_json::from_str(json).unwrap();
+        let detail = resp.into_detail();
+        assert_eq!(detail.tracklist[0].artist.as_deref(), Some("Some Artist"));
+        // No `artists` key at all is the single-artist case, not an error.
+        assert_eq!(detail.tracklist[1].artist, None);
     }
 
     /// Discogs sends `"country": null` (and nulls elsewhere) rather than

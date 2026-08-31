@@ -48,6 +48,11 @@ pub(crate) struct SheetRow {
     pub title: String,
     /// Duration as Discogs writes it; blank when it lists none.
     pub duration: String,
+    /// Who performed this track, shown when the track credits someone the
+    /// release itself doesn't name — a compilation's "Various", or a split.
+    /// `None` on a single-artist album, where repeating the release's own
+    /// artist on every row would be noise rather than information.
+    pub artist: Option<String>,
     pub source: SheetSource,
     /// A video for a row whose primary source is a local file, so the sheet can
     /// still offer "watch it" alongside "play my copy".
@@ -438,6 +443,10 @@ impl App {
         sheet.loading = false;
         match msg.result {
             Ok(detail) => {
+                // The name in the sheet's header, to suppress per-track credits
+                // that only repeat it.
+                let release_artist = sheet.artist.trim().to_string();
+                let release_artist = release_artist.as_str();
                 let local_titles: Vec<String> =
                     sheet.local.iter().map(|l| l.title.clone()).collect();
                 let files = detail.file_matches(&local_titles);
@@ -453,6 +462,20 @@ impl App {
                             position: t.position.clone(),
                             title: t.title.clone(),
                             duration: t.duration.clone(),
+                            // Only worth showing when it says something the
+                            // header doesn't. On a compilation the header reads
+                            // "Various", so every track's credit is news; on a
+                            // single-artist album Discogs still sometimes
+                            // repeats the release artist per track, and drawing
+                            // it down the whole list adds nothing.
+                            artist: t
+                                .artist
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|a| {
+                                    !a.is_empty() && !a.eq_ignore_ascii_case(release_artist)
+                                })
+                                .map(str::to_string),
                             // Your own file wins: it's lossless, analyzed, and
                             // plays in the real player bar.
                             source: match (file, video) {
@@ -1712,6 +1735,18 @@ fn sheet_row_ui(
                     egui::Color32::from_gray(120)
                 });
                 ui.label(if playing { title.strong() } else { title });
+                // Who played it, on the records where the header can't say —
+                // a compilation credits "Various", so the per-track artist is
+                // the only place the performer's name appears. Dimmer than the
+                // title and set after it, so the tracklist still reads as a
+                // list of songs with the credit as support.
+                if let Some(artist) = &row.artist {
+                    ui.label(
+                        egui::RichText::new(artist)
+                            .small()
+                            .color(egui::Color32::from_gray(if playable { 150 } else { 105 })),
+                    );
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Source chip: which of the two engines this row uses.

@@ -416,6 +416,7 @@ mod tests {
                 position: "B2".into(),
                 title: "Frocks (P.Scott Mix)".into(),
                 duration: "6:12".into(),
+                artist: None,
             }],
             videos: Vec::new(),
         })
