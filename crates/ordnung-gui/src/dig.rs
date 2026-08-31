@@ -1191,9 +1191,6 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("🔍  Digging").strong());
-                    ui.label(
-                        egui::RichText::new(format!("step {} of {}", at + 1, cards.len())).weak(),
-                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if crate::ui::icon::close_button(ui, "Stop digging and clear this path") {
                             end = true;
@@ -1526,8 +1523,6 @@ impl App {
                     }
                     if busy {
                         ui.label(egui::RichText::new("Searching Discogs…").weak());
-                    } else if at + 1 < cards.len() {
-                        ui.label(egui::RichText::new("— picking here drops the path ahead").weak());
                     }
                 });
             });
