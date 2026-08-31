@@ -67,7 +67,10 @@ const RECORD_CACHE_MAX: usize = 32;
 const ROW_H: f32 = 84.0;
 const ROW_COVER_PX: f32 = 68.0;
 
-/// Motion for a row's hover wash and the "in your library" pill fading in.
+/// Radius of the two membership buttons on the right of each row.
+const LIST_BTN_R: f32 = 9.0;
+
+/// Motion for a row's hover wash and the cover fading in.
 const ROW_HIGHLIGHT_ANIM: f32 = 0.11;
 const COVER_FADE_ANIM: f32 = 0.22;
 
@@ -264,6 +267,7 @@ impl App {
                     return None;
                 }
                 let mut chosen = None;
+                let mut toggled: Option<(VinylList, RecordHit, bool, bool)> = None;
                 let mut want_covers: Vec<String> = Vec::new();
                 // Only the first few are drawn. The popup is a quick answer, so
                 // it shows a glanceable handful and lets the footer account for
@@ -286,8 +290,16 @@ impl App {
                     // already in memory.
                     let owned = self.vinyl_owned.contains(&hit.release_id);
                     let wanted = self.vinyl_wanted.contains(&hit.release_id);
-                    if record_row(ui, hit, selected, tex, owned, wanted) {
-                        chosen = Some(hit.clone());
+                    match record_row(ui, hit, selected, tex, owned, wanted) {
+                        Some(RowAct::Open) => chosen = Some(hit.clone()),
+                        // Wanting or collecting leaves the popup up: the whole
+                        // point of a lookup list is to work down it, and
+                        // dismissing after each add would mean re-running the
+                        // search for every record.
+                        Some(RowAct::Toggle(list)) => {
+                            toggled = Some((list, hit.clone(), owned, wanted))
+                        }
+                        None => {}
                     }
                     // Hairlines between rows, not around them — the list reads
                     // as one block the way the rows on discogs.com do.
@@ -307,13 +319,72 @@ impl App {
                         crate::util::open_url(&crate::util::discogs_url(None, &query));
                     }
                 }
-                // Cover requests are issued after the render borrow ends.
+                // Cover requests and the membership edit are both issued after
+                // the render borrow ends.
                 for url in want_covers {
                     self.dig_cover(&url);
+                }
+                if let Some((list, hit, owned, wanted)) = toggled {
+                    self.toggle_record_list(list, &hit, owned, wanted);
                 }
                 chosen
             }
         }
+    }
+
+    /// Add a looked-up record to a list, or take it back out.
+    ///
+    /// Mirrors the release sheet's own membership toggle so both surfaces
+    /// behave identically — including the confirmation `request_vinyl_edit`
+    /// interposes when an edit would destroy a collection copy (its date added,
+    /// rating and notes can't be restored).
+    ///
+    /// Adding is by bare release id, which is all a lookup result has. Removing
+    /// needs the *cached* row, since a collection copy is addressed by folder and
+    /// instance id rather than release id; anything actually in a list has one,
+    /// because that's where membership is read from.
+    fn toggle_record_list(
+        &mut self,
+        list: VinylList,
+        hit: &RecordHit,
+        owned: bool,
+        wanted: bool,
+    ) {
+        // One background job at a time — the shared worker channel is
+        // single-slot, and a second edit would silently displace the first.
+        if self.is_busy() {
+            self.status = "Still working on the last change — one moment.".into();
+            return;
+        }
+        let label = edit_label(hit);
+        let present = match list {
+            VinylList::Collection => owned,
+            VinylList::Wantlist => wanted,
+        };
+        let edit = if present {
+            let Some(record) = self.vinyl_record_in(list, hit.release_id) else {
+                self.status =
+                    "That record isn't in the local cache yet — sync and try again.".into();
+                return;
+            };
+            VinylEdit::Remove {
+                list,
+                record: Box::new(record),
+            }
+        } else {
+            match list {
+                VinylList::Collection => VinylEdit::Collect {
+                    release_id: hit.release_id,
+                    label,
+                },
+                VinylList::Wantlist => VinylEdit::Want {
+                    release_ids: vec![hit.release_id],
+                    label,
+                },
+            }
+        };
+        let ctx = self.egui_ctx.clone();
+        self.request_vinyl_edit(ctx, edit);
     }
 
     /// Act on a chosen lookup result: open the record's sheet.
@@ -526,7 +597,17 @@ fn note(ui: &mut egui::Ui, text: &str) {
     ui.add_space(space::S2);
 }
 
-/// Paint one Discogs result. Returns true when clicked.
+/// What a click on a result row asked for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowAct {
+    /// The row itself — open this record's sheet.
+    Open,
+    /// One of the two membership buttons. Adds when the record isn't in that
+    /// list, removes when it is.
+    Toggle(VinylList),
+}
+
+/// Paint one Discogs result. Returns what the user clicked, if anything.
 ///
 /// Four stacked lines against a large cover, in the order a digger reads them:
 /// the **format** as a small eyebrow, the **title** in bold, the **artist**, and
@@ -545,7 +626,7 @@ fn record_row(
     tex: Option<Tex>,
     owned: bool,
     wanted: bool,
-) -> bool {
+) -> Option<RowAct> {
     let (slot, resp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), ROW_H),
         egui::Sense::click(),
@@ -588,37 +669,44 @@ fn record_row(
             .paint_at(ui, art);
     }
 
-    let text_x = art.right() + space::S4;
-    // The membership pill is laid out first so the text lines know to stop
-    // short of it rather than running underneath.
+    // The two membership buttons, laid out from the right edge inward. Done
+    // before the text so the lines know where to stop rather than running
+    // underneath them.
+    let mut act = None;
     let mut right_edge = slot.right() - pad;
-    if let Some(label) = owned
-        .then_some("In your collection")
-        .or(wanted.then_some("On your wantlist"))
-    {
-        let galley = ui.painter().layout_no_wrap(
-            label.to_string(),
-            egui::TextStyle::Small.resolve(ui.style()),
-            color::LABEL_3,
+    for (list, present) in [
+        (VinylList::Collection, owned),
+        (VinylList::Wantlist, wanted),
+    ] {
+        let c = egui::pos2(right_edge - LIST_BTN_R, slot.center().y);
+        let hit_rect =
+            egui::Rect::from_center_size(c, egui::vec2(LIST_BTN_R * 2.2, LIST_BTN_R * 2.2));
+        let br = ui.interact(
+            hit_rect,
+            resp.id.with(("list", list == VinylList::Collection)),
+            egui::Sense::click(),
         );
-        let w = galley.size().x + space::S2 * 2.0;
-        let pill = egui::Rect::from_min_size(
-            egui::pos2(right_edge - w, slot.center().y - 9.0),
-            egui::vec2(w, 18.0),
-        );
-        ui.painter()
-            .rect_filled(pill, egui::Rounding::same(9.0), color::SURFACE_HI);
-        ui.painter().galley(
-            egui::pos2(
-                pill.left() + space::S2,
-                pill.center().y - galley.size().y / 2.0,
-            ),
-            galley,
-            color::LABEL_3,
-        );
-        right_edge = pill.left() - space::S2;
+        if br.clicked() {
+            act = Some(RowAct::Toggle(list));
+        }
+        draw_list_button(ui, c, list, present, br.hovered(), hot);
+        // A tooltip, because a symbol alone can't say that clicking a filled one
+        // takes the record back out again.
+        br.on_hover_text(match (list, present) {
+            (VinylList::Collection, false) => "Add to your collection",
+            (VinylList::Collection, true) => "Remove from your collection",
+            (VinylList::Wantlist, false) => "Add to your wantlist",
+            (VinylList::Wantlist, true) => "Remove from your wantlist",
+        });
+        right_edge -= LIST_BTN_R * 2.0 + space::S3;
     }
-    let avail = (right_edge - text_x).max(0.0);
+    // Clicking a button must not also open the sheet behind it.
+    if act.is_none() && resp.clicked() {
+        act = Some(RowAct::Open);
+    }
+
+    let text_x = art.right() + space::S4;
+    let avail = (right_edge - space::S2 - text_x).max(0.0);
     let painter = ui.painter();
 
     // Four baselines measured off the row centre, so the block stays vertically
@@ -680,7 +768,107 @@ fn record_row(
             color::LABEL_3,
         );
     }
-    resp.clicked()
+    act
+}
+
+/// How a record names itself in the status line and the confirmation dialog for
+/// a membership edit.
+///
+/// Discogs regularly returns a release with no parsed artist (an untitled white
+/// label, or a title with no ` - ` separator). Formatting unconditionally would
+/// leave a dangling "— Title" in the status bar, so a missing artist collapses
+/// to the title alone.
+fn edit_label(hit: &RecordHit) -> String {
+    if hit.artist.is_empty() {
+        hit.title.clone()
+    } else {
+        format!("{} — {}", hit.artist, hit.title)
+    }
+}
+
+/// Paint one membership button: a record disc for the collection, a heart for
+/// the wantlist.
+///
+/// **Filled means you have it.** The same symbol carries both the state and the
+/// action, so a row needs no separate badge — an outline is an invitation, a
+/// filled one is a fact. That's why the collection mark is the record disc
+/// already used for this meaning elsewhere in the app (`draw_hit_mark` in the
+/// search popup): owning a record is the same idea in both places and should
+/// not be two different symbols.
+///
+/// The buttons stay dim until the row is hovered, then rise to full strength —
+/// five rows each showing two lit controls would fight the titles for
+/// attention, and you only need them on the row you're pointing at.
+fn draw_list_button(
+    ui: &egui::Ui,
+    c: egui::Pos2,
+    list: VinylList,
+    present: bool,
+    hovered: bool,
+    row_hot: f32,
+) {
+    let p = ui.painter();
+    // A present mark stays legible on an unhovered row — it's reporting a fact
+    // the user should see without pointing at anything. An absent one is only
+    // an offer, so it fades up with the row.
+    let base = if present {
+        color::LABEL_2
+    } else {
+        color::LABEL_3.gamma_multiply(0.35 + 0.65 * row_hot)
+    };
+    let ink = if hovered { color::LABEL } else { base };
+    let r = LIST_BTN_R;
+    if hovered {
+        p.circle_filled(c, r + 3.0, color::SURFACE_HI);
+    }
+    match list {
+        VinylList::Collection => {
+            // The record disc, matching the search popup's owned/wanted marks.
+            if present {
+                p.circle_filled(c, r, ink);
+                p.circle_filled(c, r * 0.42, color::SURFACE);
+                p.circle_filled(c, (r * 0.1).max(0.7), ink);
+            } else {
+                p.circle_stroke(c, r, egui::Stroke::new(1.4, ink));
+                // A plus in the middle: an empty disc alone reads as "not
+                // owned", but says nothing about what a click would do.
+                let a = r * 0.42;
+                p.line_segment(
+                    [egui::pos2(c.x - a, c.y), egui::pos2(c.x + a, c.y)],
+                    egui::Stroke::new(1.4, ink),
+                );
+                p.line_segment(
+                    [egui::pos2(c.x, c.y - a), egui::pos2(c.x, c.y + a)],
+                    egui::Stroke::new(1.4, ink),
+                );
+            }
+        }
+        VinylList::Wantlist => draw_heart(p, c, r, ink, present),
+    }
+}
+
+/// A heart, filled when the record is on the wantlist and outlined when it
+/// isn't. Drawn rather than set in type: the font's ♥ sits off its baseline and
+/// has no outline twin, so the two states wouldn't align or match in weight.
+fn draw_heart(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, filled: bool) {
+    // Two lobes and a point, sampled as one closed path so the fill and the
+    // stroke describe exactly the same shape.
+    let pts: Vec<egui::Pos2> = (0..=48)
+        .map(|i| {
+            let t = i as f32 / 48.0 * std::f32::consts::TAU;
+            // The classic heart curve, scaled to the button radius and flipped
+            // in y (egui's y grows downward).
+            let x = 16.0 * t.sin().powi(3);
+            let y = 13.0 * t.cos() - 5.0 * (2.0 * t).cos() - 2.0 * (3.0 * t).cos()
+                - (4.0 * t).cos();
+            egui::pos2(c.x + x * r / 17.0, c.y - y * r / 17.0)
+        })
+        .collect();
+    if filled {
+        p.add(egui::Shape::convex_polygon(pts, ink, egui::Stroke::NONE));
+    } else {
+        p.add(egui::Shape::closed_line(pts, egui::Stroke::new(1.4, ink)));
+    }
 }
 
 /// The small category label above the title: the *carrier*, not the full format
@@ -837,6 +1025,19 @@ mod tests {
     fn eyebrow_is_empty_when_the_format_is_unknown() {
         assert_eq!(format_eyebrow(""), "");
         assert_eq!(format_eyebrow("Box Set"), "");
+    }
+
+    #[test]
+    fn edit_label_names_artist_and_title() {
+        assert_eq!(edit_label(&hit()), "Drexciya — Deep Sea Dweller");
+    }
+
+    /// A white label with no parsed artist must not produce a dangling dash.
+    #[test]
+    fn edit_label_drops_the_dash_without_an_artist() {
+        let mut h = hit();
+        h.artist = String::new();
+        assert_eq!(edit_label(&h), "Deep Sea Dweller");
     }
 
     fn spaced(s: &str) -> String {

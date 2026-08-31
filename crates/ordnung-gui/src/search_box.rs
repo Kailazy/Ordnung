@@ -350,9 +350,19 @@ impl App {
 
         // A click anywhere else closes the popup — the usual dismiss gesture,
         // and without it the list would hang around over the table.
+        //
+        // A click that landed *inside* the popup is not "anywhere else": the
+        // membership buttons on a result deliberately leave the list up so you
+        // can work down it, and dismissing here would close the popup out from
+        // under the record you just wanted.
+        let clicked_inside = ctx.input(|i| i.pointer.interact_pos()).is_some_and(|p| {
+            ctx.memory(|m| m.area_rect(egui::Id::new("search_suggestions")))
+                .is_some_and(|r| r.contains(p))
+        });
         if want_open
             && ctx.input(|i| i.pointer.any_click())
             && !field.has_focus()
+            && !clicked_inside
             && chosen.is_none()
             && record_chosen.is_none()
         {
