@@ -9,6 +9,15 @@
 > rich *confirmed-match* view from §4.2 (release identity strip, Discogs Styles chips,
 > expandable tracklist, "other versions", marketplace snippet, link-out/refresh/unlink
 > actions) and the error/offline/rate-limit match states from §4.1.
+>
+> **Update (v0.36.0):** the *"No match found → manual search box"* state from §4.1 is
+> now served generally rather than per-track. The toolbar search box has a
+> **Library / Discogs** scope toggle (`ordnung-gui/src/records.rs`), backed by a new
+> free-text `discogs::search_records`. Results carry the §5 disambiguating fields
+> (thumbnail, artist, title, year, label + catalog number, country, format) and are
+> badged when already in the collection or wantlist; picking one opens the release
+> sheet. Confidence signals and the ranked-by-score picker from §5 are still future
+> work — results come back in Discogs's own relevance order.
 
 **Status:** Draft for design exploration (backend + picker implemented; full inspector view pending)
 **Target surface:** Ordnung GUI (desktop app, `ordnung-gui` crate)

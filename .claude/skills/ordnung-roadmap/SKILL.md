@@ -142,6 +142,19 @@ intra-playlist track reordering by drag, multi-select batch conversion, waveform
 preview (inline table waveforms + full-track player lane with zoom/smoothing/band
 settings), and the multi-candidate Discogs release picker (below).
 
+**Record lookup (v0.36.0).** The toolbar search box now has a **Library / Discogs**
+scope toggle on its right. In Discogs mode the same box searches the whole Discogs
+release database via `discogs::search_records` (the free-text lookup the older
+artist-anchored searches couldn't serve). Modes rather than one blended list, so
+ordinary library filtering stays offline and an absent record is never ambiguous
+between "you don't own it" and "it isn't there". Kept responsive against a blocking
+~1 req/1.1s API by: an off-thread one-shot fetch (thread + mpsc + `try_recv`), a
+generation counter that drops answers for queries typed past, a 450ms debounce (vs
+the local 150ms), and a per-query memo so backspacing costs nothing. Rows show the
+pressing-disambiguating fields (year · format · label + catalog number · country)
+and are marked when already owned or wanted; picking one opens the existing
+`open_release_sheet`. Lives in `ordnung-gui/src/records.rs`.
+
 Still to do for full GUI parity: a dedicated **harmonic-mixing key view** (the table
 already color-codes the Camelot wheel, but there's no separate mixing view).
 
