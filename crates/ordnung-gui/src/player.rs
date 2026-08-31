@@ -3,22 +3,42 @@ use super::*;
 
 impl App {
     /// Start playing `id` in the now-playing bar, or toggle pause if it's already
-    /// the loaded track. Captures the title/artist (from the visible row, falling
-    /// back to the file name) so the bar can render even when the track later
-    /// scrolls out of, or isn't in, the table.
+    /// the loaded track. Captures the title/artist so the bar can render even when
+    /// the track later scrolls out of, or isn't in, the table: the visible row
+    /// first, then the track's own catalog tags, and only then the file name.
+    ///
+    /// The catalog step is what makes a record played from the Records tab read
+    /// the same as the library row for the same file. Playback from there never
+    /// has the track in `rows` — the table is showing something else entirely, or
+    /// nothing — so without it every linked track announced itself by filename.
     pub(crate) fn play_track(&mut self, id: Id, path: PathBuf) {
         let toggling = self.audio.as_ref().and_then(|a| a.current()) == Some(id);
         let display = self
             .rows
             .iter()
             .find(|r| r.id == id)
-            .map(|r| (r.artist.clone(), r.title.clone(), r.album.clone()));
+            .map(|r| (r.artist.clone(), r.title.clone(), r.album.clone()))
+            .or_else(|| {
+                // Not on screen (playing a record from the Records tab, or the
+                // table is filtered past it). The catalog holds the same tags the
+                // library row is built from, so read them straight back — one
+                // row by primary key, like the analysis read just below. A
+                // synthetic USB id isn't in the catalog and falls through.
+                let t = Catalog::open(&self.db_path).and_then(|c| c.get_track(id)).ok()?;
+                Some((
+                    t.tags.artist.unwrap_or_default(),
+                    t.tags.title.unwrap_or_default(),
+                    t.tags.album.unwrap_or_default(),
+                ))
+            })
+            .filter(|(artist, title, _)| !(artist.is_empty() && title.is_empty()));
         if let Some(a) = self.audio.as_mut() {
             a.play_or_toggle(id, path.clone());
         }
         // Only (re)seed the bar when switching to a different track; a same-track
         // click is just a pause/resume and keeps the existing display + scrub.
         if !toggling {
+            // Nothing named it — an untagged file. Its name is all there is.
             let (artist, title, album) = display.unwrap_or_else(|| {
                 let stem = path
                     .file_stem()
