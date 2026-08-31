@@ -786,15 +786,17 @@ fn edit_label(hit: &RecordHit) -> String {
     }
 }
 
-/// Paint one membership button: a record disc for the collection, a heart for
-/// the wantlist.
+/// Paint one membership button: a record in its sleeve for the collection, an
+/// eye for the wantlist.
+///
+/// The two metaphors are about *where a record is*, not about generic approval:
+/// a collection is the record on your shelf, and a wantlist is the set you're
+/// keeping an eye on. Both read at 18px without a label, which a checkmark
+/// only manages by convention.
 ///
 /// **Filled means you have it.** The same symbol carries both the state and the
 /// action, so a row needs no separate badge — an outline is an invitation, a
-/// filled one is a fact. That's why the collection mark is the record disc
-/// already used for this meaning elsewhere in the app (`draw_hit_mark` in the
-/// search popup): owning a record is the same idea in both places and should
-/// not be two different symbols.
+/// solid one is a fact.
 ///
 /// The buttons stay dim until the row is hovered, then rise to full strength —
 /// five rows each showing two lit controls would fight the titles for
@@ -817,57 +819,83 @@ fn draw_list_button(
         color::LABEL_3.gamma_multiply(0.35 + 0.65 * row_hot)
     };
     let ink = if hovered { color::LABEL } else { base };
-    let r = LIST_BTN_R;
     if hovered {
-        p.circle_filled(c, r + 3.0, color::SURFACE_HI);
+        p.circle_filled(c, LIST_BTN_R + 3.0, color::SURFACE_HI);
     }
     match list {
-        VinylList::Collection => {
-            // The record disc, matching the search popup's owned/wanted marks.
-            if present {
-                p.circle_filled(c, r, ink);
-                p.circle_filled(c, r * 0.42, color::SURFACE);
-                p.circle_filled(c, (r * 0.1).max(0.7), ink);
-            } else {
-                p.circle_stroke(c, r, egui::Stroke::new(1.4, ink));
-                // A plus in the middle: an empty disc alone reads as "not
-                // owned", but says nothing about what a click would do.
-                let a = r * 0.42;
-                p.line_segment(
-                    [egui::pos2(c.x - a, c.y), egui::pos2(c.x + a, c.y)],
-                    egui::Stroke::new(1.4, ink),
-                );
-                p.line_segment(
-                    [egui::pos2(c.x, c.y - a), egui::pos2(c.x, c.y + a)],
-                    egui::Stroke::new(1.4, ink),
-                );
-            }
-        }
-        VinylList::Wantlist => draw_heart(p, c, r, ink, present),
+        VinylList::Collection => draw_sleeve(p, c, LIST_BTN_R, ink, present),
+        VinylList::Wantlist => draw_eye(p, c, LIST_BTN_R, ink, present),
     }
 }
 
-/// A heart, filled when the record is on the wantlist and outlined when it
-/// isn't. Drawn rather than set in type: the font's ♥ sits off its baseline and
-/// has no outline twin, so the two states wouldn't align or match in weight.
-fn draw_heart(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, filled: bool) {
-    // Two lobes and a point, sampled as one closed path so the fill and the
-    // stroke describe exactly the same shape.
-    let pts: Vec<egui::Pos2> = (0..=48)
-        .map(|i| {
-            let t = i as f32 / 48.0 * std::f32::consts::TAU;
-            // The classic heart curve, scaled to the button radius and flipped
-            // in y (egui's y grows downward).
-            let x = 16.0 * t.sin().powi(3);
-            let y = 13.0 * t.cos() - 5.0 * (2.0 * t).cos() - 2.0 * (3.0 * t).cos()
-                - (4.0 * t).cos();
-            egui::pos2(c.x + x * r / 17.0, c.y - y * r / 17.0)
-        })
-        .collect();
+/// A record half out of its sleeve: a rounded square with a disc emerging from
+/// its right edge. Solid when the record is in the collection, outlined when
+/// it isn't.
+///
+/// Went through a stack of slabs first, which rendered as a hamburger menu —
+/// three equal bars is far too overloaded a glyph to mean "records", and the
+/// taper that would have distinguished it disappears at 18px. A sleeve with a
+/// disc sliding out is unmistakable at this size, and one record is the right
+/// unit anyway: the row *is* one record, and the question the button answers is
+/// whether **it** is on your shelf.
+fn draw_sleeve(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, filled: bool) {
+    let w = r * 0.92;
+    // The sleeve sits left of centre so the disc has somewhere to emerge to,
+    // keeping the pair balanced on `c` rather than hanging off it.
+    let sleeve = egui::Rect::from_min_max(
+        egui::pos2(c.x - w * 1.02, c.y - w),
+        egui::pos2(c.x + w * 0.30, c.y + w),
+    );
+    let rounding = egui::Rounding::same(1.3);
+    let disc_c = egui::pos2(c.x + w * 0.34, c.y);
+    let disc_r = w * 0.86;
+    if filled {
+        p.rect_filled(sleeve, rounding, ink);
+        p.circle_filled(disc_c, disc_r, ink);
+        // The spindle hole is punched in the row's own ground, which is what
+        // keeps a solid disc reading as a record rather than as a dot.
+        p.circle_filled(disc_c, disc_r * 0.24, color::SURFACE);
+    } else {
+        p.rect_stroke(sleeve, rounding, egui::Stroke::new(1.3, ink));
+        p.circle_stroke(disc_c, disc_r, egui::Stroke::new(1.3, ink));
+        p.circle_filled(disc_c, disc_r * 0.22, ink);
+    }
+}
+
+/// An eye: a pointed-oval outline with a pupil, filled when the record is on
+/// the wantlist.
+///
+/// The lid is two mirrored quadratic arcs meeting at sharp corners — a plain
+/// ellipse reads as a coin, and the corners are what make it an eye. Sampled
+/// into one closed path so the outline and the fill describe the same shape.
+fn draw_eye(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, filled: bool) {
+    let hw = r * 1.15; // half-width, corner to corner
+    let hh = r * 0.72; // how far the lids bow from the centre line
+    const STEPS: usize = 14;
+    let mut pts: Vec<egui::Pos2> = Vec::with_capacity(STEPS * 2 + 2);
+    // Upper lid left→right, then lower lid back, giving one closed outline.
+    for side in [-1.0_f32, 1.0] {
+        for i in 0..=STEPS {
+            // Traverse the lower lid in reverse so the path stays continuous.
+            let t = if side < 0.0 {
+                i as f32 / STEPS as f32
+            } else {
+                1.0 - i as f32 / STEPS as f32
+            };
+            let x = -hw + 2.0 * hw * t;
+            // Quadratic bow: zero at the corners, `hh` at the centre.
+            let bow = (1.0 - (2.0 * t - 1.0).powi(2)) * hh;
+            pts.push(egui::pos2(c.x + x, c.y + side * bow));
+        }
+    }
     if filled {
         p.add(egui::Shape::convex_polygon(pts, ink, egui::Stroke::NONE));
+        // The pupil is punched back out in the row's own background so a solid
+        // eye still reads as an eye rather than as a filled leaf.
+        p.circle_filled(c, r * 0.34, color::SURFACE);
     } else {
-        p.add(egui::Shape::closed_line(pts, egui::Stroke::new(1.4, ink)));
+        p.add(egui::Shape::closed_line(pts, egui::Stroke::new(1.3, ink)));
+        p.circle_filled(c, r * 0.30, ink);
     }
 }
 
