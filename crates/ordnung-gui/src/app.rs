@@ -240,6 +240,10 @@ impl App {
         if let Some(a) = &mut app.audio {
             a.set_volume(app.config.volume);
         }
+        // Same for the video player. It has no panel yet — that's built on the
+        // first video — but the level is recorded now so the first one to play
+        // comes in at the saved volume rather than at full.
+        webview::set_volume(app.config.volume);
         // A token on disk isn't proof it still works, so start at "unverified"
         // and let the Discogs tab verify on open rather than checking every
         // launch — that would spend a rate-limited request nobody asked for.
@@ -1452,6 +1456,11 @@ impl eframe::App for App {
                                 if let Some(a) = &mut self.audio {
                                     a.set_volume(v);
                                 }
+                                // The knob is the master level, so it rules the
+                                // video player too — a record's YouTube tracks
+                                // and your own files are the same record, and
+                                // one of them ignoring the knob reads as broken.
+                                webview::set_volume(v);
                                 // Persist on release rather than every drag frame,
                                 // so a gesture writes the file once.
                                 self.volume_dirty = true;

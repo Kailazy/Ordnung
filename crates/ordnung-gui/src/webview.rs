@@ -142,6 +142,17 @@ pub fn seek(secs: f32) {
 #[cfg(not(target_os = "macos"))]
 pub fn seek(_secs: f32) {}
 
+/// Hold YouTube audio at `volume` (`0.0`–`1.0`), so the app's master knob rules
+/// the video player as well as the file player. Safe to call with nothing
+/// playing: the level is remembered and applied to the next video that loads.
+#[cfg(target_os = "macos")]
+pub fn set_volume(volume: f32) {
+    imp::set_volume(volume);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_volume(_volume: f32) {}
+
 /// Show or hide the video panel without interrupting playback. Hidden is the
 /// default: the record sheet's own transport is the interface, and the panel is
 /// only worth looking at when the user wants the picture.
@@ -189,7 +200,7 @@ pub fn status() -> PlayerStatus {
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::time::{Duration, Instant};
 
     use objc2::rc::Retained;
@@ -249,6 +260,11 @@ mod imp {
         /// panel keeps its position. Main-thread-only by construction — every
         /// entry point below takes a `MainThreadMarker` first.
         static PANEL: RefCell<Option<Mini>> = const { RefCell::new(None) };
+        /// The volume the app's knob is currently at, kept outside `PANEL` so a
+        /// setting made before the first video ever plays isn't lost — the
+        /// panel is built lazily on the first `play`, and reads this to start
+        /// at the right level instead of at the element's full-volume default.
+        static VOLUME: Cell<f32> = const { Cell::new(1.0) };
     }
 
     impl Mini {
@@ -290,6 +306,13 @@ mod imp {
         position: f32,
         duration: f32,
         reported_at: Instant,
+        /// Master volume to hold the page's `<video>` at, `0.0`–`1.0`. Mirrors
+        /// the app's own knob so YouTube audio and the file player answer to
+        /// one control. Re-applied on every poll rather than only when the knob
+        /// moves: each queued video is a fresh page load that starts at the
+        /// element default, so a set-once command would be lost at the first
+        /// track change.
+        volume: f32,
         /// When the current video was loaded, for the stuck check.
         loaded_at: Instant,
         /// When the page was last asked.
@@ -440,6 +463,42 @@ mod imp {
         });
     }
 
+    /// Hold YouTube audio at `volume` (`0.0`–`1.0`).
+    ///
+    /// Recorded even with no panel built yet, so the knob still decides how the
+    /// first video comes in. The live page is nudged immediately for a
+    /// responsive knob; [`ask_state`] is what actually keeps it there across
+    /// page loads and YouTube's own SPA navigations.
+    pub fn set_volume(volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        VOLUME.with(|v| v.set(volume));
+        if MainThreadMarker::new().is_none() {
+            return;
+        }
+        PANEL.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let Some(mini) = slot.as_mut() else { return };
+            mini.volume = volume;
+            if !mini.live {
+                return;
+            }
+            // Muting via `volume` alone leaves YouTube's own mute button out of
+            // step, and a page that autoplayed muted ignores volume entirely
+            // until unmuted — so both are set together.
+            let js = format!(
+                "(function(){{\
+                   var v=document.querySelector('video');\
+                   if(v){{v.volume={volume};v.muted={muted};}}\
+                 }})()",
+                muted = if volume <= 0.0 { "true" } else { "false" }
+            );
+            unsafe {
+                mini.web
+                    .evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
+            }
+        });
+    }
+
     /// Run `body` against the page's `<video>` (bound as `v`), and apply
     /// `optimistic` to the local state so the UI reflects the command now.
     fn with_video(body: &str, optimistic: impl FnOnce(&mut Mini)) {
@@ -476,7 +535,7 @@ mod imp {
             }
             if mini.polled_at.elapsed() >= mini.poll_interval() {
                 mini.polled_at = Instant::now();
-                ask_state(&mini.web);
+                ask_state(&mini.web, mini.volume);
             }
             // Take the next video the moment the current one reports it's done.
             (mini.state == "ended" && !mini.queue.is_empty()).then(|| mini.queue.remove(0))
@@ -591,6 +650,7 @@ mod imp {
             position: 0.0,
             duration: 0.0,
             reported_at: Instant::now(),
+            volume: VOLUME.with(|v| v.get()),
             loaded_at: Instant::now(),
             polled_at: Instant::now(),
         }
@@ -694,19 +754,28 @@ mod imp {
     }
 
     /// Ask the page what its video element is doing, and re-apply the styling
-    /// while we're in there (see [`inject_js`]). The answer lands
+    /// and volume while we're in there (see [`inject_js`]). The answer lands
     /// asynchronously in `Mini::state`; nothing waits on it.
-    fn ask_state(web: &WKWebView) {
+    ///
+    /// Volume rides along here rather than being set once at load because each
+    /// queued video is a fresh page that starts at the element default, and
+    /// YouTube's SPA navigations swap the `<video>` out from under us. Writing
+    /// it only when it differs keeps this from fighting a user who set the
+    /// level in YouTube's own control mid-poll.
+    fn ask_state(web: &WKWebView, volume: f32) {
         let js = format!(
             "(function(){{\
                {inject};\
                var v=document.querySelector('video');\
                if(!v)return 'novideo';\
+               if(v.volume!={volume}||v.muted!={muted})\
+                 {{v.volume={volume};v.muted={muted};}}\
                var s=v.ended?'ended':(v.paused?'paused':'playing');\
                var d=isFinite(v.duration)?v.duration:0;\
                return s+'|'+v.currentTime+'|'+d;\
              }})()",
-            inject = inject_js()
+            inject = inject_js(),
+            muted = if volume <= 0.0 { "true" } else { "false" }
         );
         let js: &str = &js;
         let handler = block2::RcBlock::new(move |res: *mut AnyObject, _err: *mut NSError| {
