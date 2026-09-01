@@ -463,6 +463,30 @@ mod imp {
         });
     }
 
+    /// Silence the whole web view from the client side, leaving the page none
+    /// the wiser.
+    ///
+    /// `_setPageMuted:` is WebKit's own per-view mute — the same one Safari's
+    /// tab speaker button drives — taking a bitfield where bit 0 is audio. It
+    /// is private API, hence the `respondsToSelector:` guard: an OS that drops
+    /// it silently falls back to volume-only control rather than crashing.
+    ///
+    /// This is the reason muting isn't done with `v.muted`: that writes into
+    /// YouTube's own player, flipping the mute button in its UI and fighting a
+    /// user who touches it. Muting out here is invisible to the page.
+    fn set_page_muted(web: &WKWebView, muted: bool) {
+        let sel = objc2::sel!(_setPageMuted:);
+        let responds: bool = unsafe { objc2::msg_send![web, respondsToSelector: sel] };
+        if !responds {
+            return;
+        }
+        // Bit 0 = audio. Other bits (capture) are deliberately left clear.
+        let flags: usize = if muted { 1 } else { 0 };
+        unsafe {
+            let _: () = objc2::msg_send![web, _setPageMuted: flags];
+        }
+    }
+
     /// Hold YouTube audio at `volume` (`0.0`–`1.0`).
     ///
     /// Recorded even with no panel built yet, so the knob still decides how the
@@ -482,19 +506,21 @@ mod imp {
             if !mini.live {
                 return;
             }
-            // Muting via `volume` alone leaves YouTube's own mute button out of
-            // step, and a page that autoplayed muted ignores volume entirely
-            // until unmuted — so both are set together.
-            let js = format!(
-                "(function(){{\
-                   var v=document.querySelector('video');\
-                   if(v){{v.volume={volume};v.muted={muted};}}\
-                 }})()",
-                muted = if volume <= 0.0 { "true" } else { "false" }
-            );
-            unsafe {
-                mini.web
-                    .evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
+            // Zero is a client-side mute, so nothing in the page changes and
+            // YouTube's own mute button stays where the user left it. The
+            // element is then left untouched — see `ask_state`.
+            set_page_muted(&mini.web, volume <= 0.0);
+            if volume > 0.0 {
+                let js = format!(
+                    "(function(){{\
+                       var v=document.querySelector('video');\
+                       if(v){{v.volume={volume};}}\
+                     }})()"
+                );
+                unsafe {
+                    mini.web
+                        .evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
+                }
             }
         });
     }
@@ -762,20 +788,32 @@ mod imp {
     /// YouTube's SPA navigations swap the `<video>` out from under us. Writing
     /// it only when it differs keeps this from fighting a user who set the
     /// level in YouTube's own control mid-poll.
+    ///
+    /// A knob at zero is handled by [`set_page_muted`] instead, out here on the
+    /// view — the page keeps whatever level it had, so unmuting restores it
+    /// without this having to remember what YouTube's own default was.
     fn ask_state(web: &WKWebView, volume: f32) {
+        let muted = volume <= 0.0;
+        set_page_muted(web, muted);
+        // While muted, the element is left completely alone: the client mute
+        // already silences it, and writing 0 in here would throw away the
+        // page's own level so unmuting couldn't restore it.
+        let set_vol = if muted {
+            String::new()
+        } else {
+            format!("if(v.volume!={volume})v.volume={volume};")
+        };
         let js = format!(
             "(function(){{\
                {inject};\
                var v=document.querySelector('video');\
                if(!v)return 'novideo';\
-               if(v.volume!={volume}||v.muted!={muted})\
-                 {{v.volume={volume};v.muted={muted};}}\
+               {set_vol}\
                var s=v.ended?'ended':(v.paused?'paused':'playing');\
                var d=isFinite(v.duration)?v.duration:0;\
                return s+'|'+v.currentTime+'|'+d;\
              }})()",
-            inject = inject_js(),
-            muted = if volume <= 0.0 { "true" } else { "false" }
+            inject = inject_js()
         );
         let js: &str = &js;
         let handler = block2::RcBlock::new(move |res: *mut AnyObject, _err: *mut NSError| {
