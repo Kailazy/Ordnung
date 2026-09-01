@@ -30,8 +30,13 @@ fn health_tabs(
 ) -> Option<LibraryView> {
     let mut switch = None;
     let tab = |ui: &mut egui::Ui, label: String, active: bool| {
-        ui.selectable_label(active, egui::RichText::new(label).font(crate::ui::tokens::font::strong(crate::ui::tokens::font::headline().size)))
-            .clicked()
+        ui.selectable_label(
+            active,
+            egui::RichText::new(label).font(crate::ui::tokens::font::strong(
+                crate::ui::tokens::font::headline().size,
+            )),
+        )
+        .clicked()
     };
     let dup_label = match dup_count {
         Some(n) if n > 0 => format!("⧉  Duplicates ({n})"),
@@ -1113,7 +1118,8 @@ impl App {
                     ui.add_enabled_ui(!busy, |ui| {
                         if ui
                             .add(egui::Button::new(
-                                egui::RichText::new("  ↻ Sync from Discogs  ").font(crate::ui::tokens::font::headline()),
+                                egui::RichText::new("  ↻ Sync from Discogs  ")
+                                    .font(crate::ui::tokens::font::headline()),
                             ))
                             .clicked()
                         {
@@ -1387,6 +1393,56 @@ impl App {
                         let (rect, resp) =
                             ui.allocate_exact_size(egui::vec2(COVER, COVER), egui::Sense::click());
                         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        // Both corner discs claim their hit areas here, before
+                        // anything is painted, so every element below can read
+                        // every hover state. Registering each at its point of use
+                        // instead made the paint order matter: the play disc was
+                        // drawn first and so could not see the dig disc's hover,
+                        // and the cover's frame — drawn before either — could see
+                        // neither.
+                        const D: f32 = 30.0;
+                        let disc = egui::Rect::from_min_size(
+                            egui::pos2(rect.right() - D - 6.0, rect.bottom() - D - 6.0),
+                            egui::vec2(D, D),
+                        );
+                        let hit = ui.interact(
+                            disc,
+                            ui.id().with(("vinyl-play", c.key)),
+                            egui::Sense::click(),
+                        );
+                        let dig_rect = egui::Rect::from_min_size(
+                            egui::pos2(disc.left() - D - 5.0, rect.bottom() - D - 6.0),
+                            egui::vec2(D, D),
+                        );
+                        let dig_hit = ui.interact(
+                            dig_rect,
+                            ui.id().with(("vinyl-dig", c.key)),
+                            egui::Sense::click(),
+                        );
+                        // The catalog badge is the card's third overlay button,
+                        // so it registers here for the same reason.
+                        let badge = (!c.linked.is_empty()).then(|| {
+                            const B: f32 = 22.0;
+                            let badge_rect = egui::Rect::from_min_size(
+                                egui::pos2(rect.right() - B - 4.0, rect.top() + 4.0),
+                                egui::vec2(B, B),
+                            );
+                            let badge = ui.interact(
+                                badge_rect,
+                                ui.id().with(("vinyl-cat", c.key)),
+                                egui::Sense::click(),
+                            );
+                            (badge_rect, badge)
+                        });
+                        let play_hovered = hit.hovered();
+                        let dig_hovered = dig_hit.hovered();
+                        let badge_hovered = badge.as_ref().is_some_and(|(_, b)| b.hovered());
+                        // The discs sit on top of the cover, so pointing at one
+                        // takes the hover away from it. Count the card as hovered
+                        // whenever the pointer is on it at all, so the frame stays
+                        // lit and the pair reveals and hides together.
+                        let card_hovered =
+                            resp.hovered() || play_hovered || dig_hovered || badge_hovered;
                         match &tex {
                             Some(h) => {
                                 egui::Image::new(h)
@@ -1410,7 +1466,7 @@ impl App {
                             }
                         }
                         // Subtle hover frame to signal the cover is clickable.
-                        if resp.hovered() {
+                        if card_hovered {
                             ui.painter().rect_stroke(
                                 rect,
                                 egui::Rounding::same(6.0),
@@ -1423,18 +1479,8 @@ impl App {
                         // priority so tapping it jumps to the catalog instead of
                         // opening Discogs.
                         let mut badge_clicked = false;
-                        if !c.linked.is_empty() {
-                            const B: f32 = 22.0;
-                            let badge_rect = egui::Rect::from_min_size(
-                                egui::pos2(rect.right() - B - 4.0, rect.top() + 4.0),
-                                egui::vec2(B, B),
-                            );
-                            let badge = ui.interact(
-                                badge_rect,
-                                ui.id().with(("vinyl-cat", c.key)),
-                                egui::Sense::click(),
-                            );
-                            let bg = if badge.hovered() {
+                        if let Some((badge_rect, badge)) = badge {
+                            let bg = if badge_hovered {
                                 egui::Color32::from_rgb(120, 220, 150)
                             } else {
                                 egui::Color32::from_rgb(90, 200, 120)
@@ -1461,39 +1507,22 @@ impl App {
                                     Some(VinylGridAction::Goto(c.title.clone(), c.linked.clone()));
                             }
                         }
-                        // Play disc, bottom-right: start the record. Shown on
-                        // hover, so the wall stays a wall until you reach for it.
-                        //
-                        // The hit area is registered every frame, not only while
-                        // the disc is visible: it sits on top of the cover, so
-                        // pointing at it takes the hover *away* from the cover.
-                        // Gating the whole widget on the cover's hover therefore
-                        // made the disc vanish from under the cursor and dropped
-                        // the click onto the cover behind it. Visibility follows
-                        // either hover instead.
+                        // Play disc, bottom-right: start the record. Shown while
+                        // the pointer is anywhere on the card, so the wall stays a
+                        // wall until you reach for it. Its hit area is claimed
+                        // above every frame, not only while the disc is visible —
+                        // gating that on the cover's hover made the disc vanish
+                        // from under the cursor and dropped the click onto the
+                        // cover behind it.
                         let mut play_clicked = false;
-                        const D: f32 = 30.0;
-                        let disc = egui::Rect::from_min_size(
-                            egui::pos2(rect.right() - D - 6.0, rect.bottom() - D - 6.0),
-                            egui::vec2(D, D),
-                        );
-                        let hit = ui.interact(
-                            disc,
-                            ui.id().with(("vinyl-play", c.key)),
-                            egui::Sense::click(),
-                        );
                         let playing_this = playing_key == Some(c.key);
-                        // Read before the block below consumes `hit`; the dig
-                        // disc reveals on the play disc's hover too, so the pair
-                        // appears and disappears together.
-                        let play_hovered = hit.hovered();
-                        if resp.hovered() || hit.hovered() || playing_this {
-                            let bg = if hit.hovered() {
+                        if card_hovered || playing_this {
+                            let bg = if play_hovered {
                                 egui::Color32::from_rgb(120, 220, 150)
                             } else {
                                 egui::Color32::from_black_alpha(190)
                             };
-                            let fg = if hit.hovered() {
+                            let fg = if play_hovered {
                                 egui::Color32::from_gray(20)
                             } else {
                                 egui::Color32::from_gray(240)
@@ -1516,26 +1545,15 @@ impl App {
                         }
                         // Dig disc, left of the play disc: start a crate dig
                         // from this record. Same hover-reveal and same
-                        // always-registered hit area as the play disc above —
-                        // see that comment for why the interact() is
-                        // unconditional.
+                        // always-claimed hit area as the play disc above.
                         let mut dig_clicked = false;
-                        let dig_rect = egui::Rect::from_min_size(
-                            egui::pos2(disc.left() - D - 5.0, rect.bottom() - D - 6.0),
-                            egui::vec2(D, D),
-                        );
-                        let dig_hit = ui.interact(
-                            dig_rect,
-                            ui.id().with(("vinyl-dig", c.key)),
-                            egui::Sense::click(),
-                        );
-                        if resp.hovered() || dig_hit.hovered() || play_hovered {
-                            let bg = if dig_hit.hovered() {
+                        if card_hovered {
+                            let bg = if dig_hovered {
                                 egui::Color32::from_rgb(120, 220, 150)
                             } else {
                                 egui::Color32::from_black_alpha(190)
                             };
-                            let fg = if dig_hit.hovered() {
+                            let fg = if dig_hovered {
                                 egui::Color32::from_gray(20)
                             } else {
                                 egui::Color32::from_gray(240)
