@@ -1535,6 +1535,15 @@ pub(crate) fn run_vinyl_edit(
                         // Warm the tracklist too, so the record is findable by
                         // song name right away instead of at the next sync.
                         cache_release_detail(&catalog, &client, rec.release_id);
+                        // …and its price, so the grid's price column isn't
+                        // blank on the record you just added.
+                        cache_release_price(
+                            &catalog,
+                            &client,
+                            VinylList::Wantlist,
+                            rec.instance_id,
+                            rec.release_id,
+                        );
                         wanted += 1;
                     }
                     Ok(None) => non_vinyl += 1,
@@ -1597,6 +1606,13 @@ pub(crate) fn run_vinyl_edit(
                         }
                     }
                     cache_release_detail(&catalog, &client, rec.release_id);
+                    cache_release_price(
+                        &catalog,
+                        &client,
+                        VinylList::Collection,
+                        rec.instance_id,
+                        rec.release_id,
+                    );
                     format!("Added {label} to your collection.")
                 }
                 Ok(None) => format!(
@@ -1663,6 +1679,10 @@ pub(crate) fn run_vinyl_edit(
             let _ = catalog.move_vinyl(from, record.instance_id, to, &moved);
             // A no-op if the release was already warmed on the list it left.
             cache_release_detail(&catalog, &client, record.release_id);
+            // The price does *not* survive the move: `upsert_vinyl` doesn't
+            // write that column (it's set separately by the price pass), so the
+            // re-keyed row starts blank and has to be priced again.
+            cache_release_price(&catalog, &client, to, moved.instance_id, moved.release_id);
             format!("Moved {} to your {}.", record.title, list_name(to))
         }
 
@@ -1694,6 +1714,36 @@ pub(crate) fn run_vinyl_edit(
 fn cache_release_detail(catalog: &Catalog, client: &discogs::Client, release_id: u64) {
     let id = release_id.to_string();
     let _ = catalog.release_cached_or(&id, || client.fetch_release(&id));
+}
+
+/// Price a newly-added record so it lands complete rather than showing a blank
+/// price until the next sync.
+///
+/// Prices are otherwise filled only by the sync's price pass, so without this an
+/// add left the grid's price column blank on exactly the record the user just
+/// chose — until they happened to run a sync. That's the one column that says
+/// whether a record is worth anything, so a fresh add showing nothing there
+/// reads as broken rather than as pending.
+///
+/// One request, and best-effort like the cover and tracklist beside it: a record
+/// that can't be priced (blocked from sale, or a failed call) simply stays
+/// unpriced and the next sync retries it, rather than failing the add that
+/// already succeeded on Discogs.
+fn cache_release_price(
+    catalog: &Catalog,
+    client: &discogs::Client,
+    list: VinylList,
+    instance_id: u64,
+    release_id: u64,
+) {
+    if let Ok(price) = client.marketplace_price(release_id) {
+        let _ = catalog.set_vinyl_price(
+            list,
+            instance_id,
+            price.as_ref().map(|p| p.value),
+            price.as_ref().map(|p| p.currency.as_str()),
+        );
+    }
 }
 
 /// Drop one record from `list` on Discogs. A want is addressed by release id; a
