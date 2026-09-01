@@ -378,6 +378,7 @@ impl App {
                 VinylList::Collection => "Removing from your collection…".into(),
                 VinylList::Wantlist => "Removing from your wantlist…".into(),
             },
+            VinylEdit::Swap { .. } => "Swapping the pressing…".into(),
         };
         let db = self.db_path.clone();
         // The username keys every collection/wantlist endpoint. Reuse the one a
@@ -1698,6 +1699,78 @@ pub(crate) fn run_vinyl_edit(
             }
             let _ = catalog.delete_vinyl(list, record.instance_id);
             format!("Removed {} from your {}.", record.title, list_name(list))
+        }
+
+        VinylEdit::Swap {
+            list,
+            record,
+            to_release,
+            to_label,
+        } => {
+            // Add the replacement first. If this fails nothing has changed, so
+            // the user still owns the pressing they started with.
+            let added = match list {
+                VinylList::Wantlist => client
+                    .add_to_wantlist(&username, to_release)
+                    .map(|rec| rec.map(|r| (r.instance_id, Some(r)))),
+                VinylList::Collection => client
+                    .add_to_collection(&username, to_release)
+                    .map(|instance_id| Some((instance_id, None))),
+            };
+            let added = match added {
+                Ok(a) => a,
+                Err(e) => {
+                    let _ = tx.send(JobMsg::Failed(format!(
+                        "adding {to_label} to your {}: {e}",
+                        list_name(list)
+                    )));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+            // Now drop the pressing being replaced. A failure here leaves both
+            // pressings in the list on Discogs — say exactly that, and leave the
+            // cache alone so the next sync shows the user that real state.
+            if let Err(e) = remove_from(&client, &username, list, &record) {
+                let _ = tx.send(JobMsg::Failed(format!(
+                    "{to_label} is now in your {}, but removing {} failed: {e}",
+                    list_name(list),
+                    record.title
+                )));
+                ctx.request_repaint();
+                return;
+            }
+            let _ = catalog.delete_vinyl(list, record.instance_id);
+            // Cache the incoming row so the grid shows the new pressing straight
+            // away rather than a gap until the next sync. The wantlist add hands
+            // back the row itself; a collection add answers with an instance id
+            // only, so that one is looked up.
+            let fetched = match added {
+                Some((instance_id, Some(rec))) => Some((instance_id, Some(rec))),
+                Some((instance_id, None)) => Some((
+                    instance_id,
+                    client
+                        .collection_record(&username, to_release, instance_id)
+                        .ok()
+                        .flatten(),
+                )),
+                None => None,
+            };
+            if let Some((instance_id, Some(rec))) = fetched {
+                let _ = catalog.upsert_vinyl(list, &rec);
+                if let Some(url) = rec.cover_url.as_deref() {
+                    if let Some(png) = client.fetch_cover(url) {
+                        let _ = catalog.set_vinyl_cover(list, rec.instance_id, &png);
+                    }
+                }
+                cache_release_detail(&catalog, &client, to_release);
+                cache_release_price(&catalog, &client, list, instance_id, to_release);
+            }
+            format!(
+                "Swapped {} for {to_label} in your {}.",
+                record.title,
+                list_name(list)
+            )
         }
     };
 

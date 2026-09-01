@@ -261,6 +261,9 @@ enum VinylGridAction {
     Play(VinylCoverKey),
     /// Start a dig from this record — see [`crate::dig`].
     Dig(VinylCoverKey),
+    /// List every other pressing of this record, to swap one in — see
+    /// [`crate::versions`].
+    Versions(VinylCoverKey),
 }
 
 impl App {
@@ -1244,6 +1247,7 @@ impl App {
             }
             Some(VinylGridAction::Open(key)) => self.open_vinyl_sheet(key, ctx),
             Some(VinylGridAction::Dig(key)) => self.start_dig(key),
+            Some(VinylGridAction::Versions(key)) => self.open_versions(key, ctx),
             Some(VinylGridAction::Play(key)) => {
                 // The tracklist may still be loading; the sheet starts playback
                 // itself once it has one (see `pending_play`).
@@ -1653,6 +1657,17 @@ impl App {
                                 .clicked()
                             {
                                 action = Some(VinylGridAction::Dig(c.key));
+                                ui.close_menu();
+                            }
+                            // Which pressing you hold is the collector's
+                            // question, and the answer often is "the wrong one".
+                            // This lists the siblings and swaps one in.
+                            if ui
+                                .button("See other releases")
+                                .on_hover_note("Other pressings of this record, to swap one in")
+                                .clicked()
+                            {
+                                action = Some(VinylGridAction::Versions(c.key));
                                 ui.close_menu();
                             }
                             ui.separator();

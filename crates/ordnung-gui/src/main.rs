@@ -26,6 +26,7 @@ mod table;
 mod tex;
 mod ui;
 mod util;
+mod versions;
 mod views;
 mod vinyl_sheet;
 mod webview;
@@ -638,6 +639,19 @@ pub(crate) enum VinylEdit {
         list: VinylList,
         record: Box<VinylRecord>,
     },
+    /// Replace one cached record with a different pressing of the same record —
+    /// the "hotswap" from the versions panel. Structurally a [`VinylEdit::Move`]
+    /// that changes release rather than list: add `to_release` to the list the
+    /// record is already in, then drop the old copy. Ordered that way so a
+    /// failure leaves the user with both pressings rather than neither.
+    Swap {
+        list: VinylList,
+        record: Box<VinylRecord>,
+        to_release: u64,
+        /// How to name the incoming pressing in the status line, since its id
+        /// means nothing to the user.
+        to_label: String,
+    },
 }
 
 impl VinylEdit {
@@ -653,6 +667,9 @@ impl VinylEdit {
                 from: VinylList::Collection,
                 ..
             } | VinylEdit::Remove {
+                list: VinylList::Collection,
+                ..
+            } | VinylEdit::Swap {
                 list: VinylList::Collection,
                 ..
             }
@@ -956,6 +973,14 @@ struct App {
             )>,
         )>,
     >,
+    /// The open "other pressings" panel — every release hanging off the same
+    /// Discogs master as one record, and the swap that trades your copy for one
+    /// of them. `None` when it isn't open. See [`versions`].
+    versions: Option<versions::VersionsPanel>,
+    /// Receives the sibling-pressing lookup for the open versions panel. Tagged
+    /// with the release it was asked for, so a reply for a panel the user has
+    /// since closed or re-pointed is dropped.
+    versions_rx: Option<Receiver<versions::VersionsFetched>>,
     /// A clone of the egui context, so background work started from a place
     /// that isn't handed one (the dig's browse and cover fetches) can still ask
     /// for a repaint when it lands.

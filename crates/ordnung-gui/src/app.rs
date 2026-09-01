@@ -119,6 +119,8 @@ impl App {
             sheet_follows_dig: false,
             sheet_rx: None,
             sheet_price_rx: None,
+            versions: None,
+            versions_rx: None,
             egui_ctx: egui_ctx.clone(),
             dig: None,
             dig_seed: 0x853C_49E6_748F_EA9B,
@@ -912,6 +914,7 @@ impl eframe::App for App {
         self.poll_metadata_preview();
         self.poll_vinyl_sheet();
         self.poll_sheet_price();
+        self.poll_versions();
         self.poll_dig();
         self.poll_records();
         self.poll_dig_primed();
@@ -2383,6 +2386,7 @@ impl eframe::App for App {
         self.draw_delete_confirm(ctx);
         self.draw_vinyl_edit_confirm(ctx);
         self.draw_vinyl_sheet(ctx, frame);
+        self.draw_versions(ctx);
         self.draw_failure_report(ctx);
 
         // Keep the UI moving while a worker thread is active, or while there are

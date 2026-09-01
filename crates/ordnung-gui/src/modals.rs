@@ -1902,17 +1902,28 @@ impl App {
             return;
         };
         // Only collection-destroying edits are parked here (see
-        // `request_vinyl_edit`), so both arms describe leaving the collection.
-        let (record, moving) = match &edit {
-            VinylEdit::Move { record, .. } => (record, true),
-            VinylEdit::Remove { record, .. } => (record, false),
+        // `request_vinyl_edit`), so every arm describes leaving the collection.
+        // Which one it is decides the wording: they cost the user different
+        // things, and a swap in particular gives the copy back in another
+        // pressing rather than simply taking it away.
+        enum Kind<'a> {
+            Move,
+            Remove,
+            Swap(&'a str),
+        }
+        let (record, kind) = match &edit {
+            VinylEdit::Move { record, .. } => (record, Kind::Move),
+            VinylEdit::Remove { record, .. } => (record, Kind::Remove),
+            VinylEdit::Swap {
+                record, to_label, ..
+            } => (record, Kind::Swap(to_label)),
             // Neither adds anything to confirm: they only ever create.
             VinylEdit::Want { .. } | VinylEdit::Collect { .. } => return,
         };
-        let title = if moving {
-            "Move out of your collection?"
-        } else {
-            "Remove from your collection?"
+        let title = match kind {
+            Kind::Move => "Move out of your collection?",
+            Kind::Remove => "Remove from your collection?",
+            Kind::Swap(_) => "Swap this pressing?",
         };
         let mut open = true;
         let mut confirm = false;
@@ -1928,12 +1939,18 @@ impl App {
                     egui::RichText::new(format!("{} — {}", record.artist, record.title)).strong(),
                 );
                 ui.add_space(4.0);
-                let detail = if moving {
-                    "This gives up your copy on Discogs and adds the release to your \
-                     wantlist instead. The copy's date added, rating and notes are lost."
-                } else {
-                    "This deletes your copy from your Discogs collection, along with its \
-                     date added, rating and notes."
+                let detail = match kind {
+                    Kind::Move => "This gives up your copy on Discogs and adds the release \
+                         to your wantlist instead. The copy's date added, rating and notes \
+                         are lost."
+                        .to_string(),
+                    Kind::Remove => "This deletes your copy from your Discogs collection, \
+                         along with its date added, rating and notes."
+                        .to_string(),
+                    Kind::Swap(to) => format!(
+                        "This puts {to} in your collection and deletes the copy above from \
+                         it. The old copy's date added, rating and notes are lost."
+                    ),
                 };
                 ui.label(
                     egui::RichText::new(format!(
@@ -1950,8 +1967,12 @@ impl App {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let btn = egui::Button::new(
-                            egui::RichText::new(if moving { "Move" } else { "Remove" })
-                                .color(egui::Color32::WHITE),
+                            egui::RichText::new(match kind {
+                                Kind::Move => "Move",
+                                Kind::Remove => "Remove",
+                                Kind::Swap(_) => "Swap",
+                            })
+                            .color(egui::Color32::WHITE),
                         )
                         .fill(egui::Color32::from_rgb(150, 60, 60));
                         if ui.add(btn).clicked() {
