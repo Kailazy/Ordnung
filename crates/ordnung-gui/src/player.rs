@@ -231,6 +231,9 @@ impl App {
         // (jumping rebuilds rows and selection, which needs `&mut self`).
         let mut filter_album = false;
         let mut filter_artist = false;
+        // A ⌥-drag begun on the artwork this frame. Parked on `self` below, for
+        // the frame's single `begin_file_drag` dispatch in `update`.
+        let mut native_drag = false;
 
         // Fraction the bar reflects: the live position, or the in-progress scrub
         // before release. Shared by the zoom lane and the overview strip so both
@@ -284,9 +287,26 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.add_space(10.0);
 
-                    // Artwork.
+                    // Artwork — also the bar's drag handle. It's the one part of
+                    // the now-playing block with nothing else bound to it (the
+                    // title and artist are filter links), so grabbing the cover
+                    // drags the playing track the way its table row would:
+                    // plain drag carries the egui payload for a drop onto a
+                    // sidebar playlist, ⌥-drag starts the native file drag-out
+                    // to rekordbox/Finder.
                     let art_sz = egui::vec2(56.0, 56.0);
-                    let (art_rect, _) = ui.allocate_exact_size(art_sz, egui::Sense::hover());
+                    let (art_rect, art_resp) =
+                        ui.allocate_exact_size(art_sz, egui::Sense::click_and_drag());
+                    let alt_drag = ui.input(|i| i.modifiers.alt);
+                    if art_resp.drag_started() && alt_drag {
+                        native_drag = true;
+                    }
+                    if art_resp.dragged() && !alt_drag {
+                        art_resp.dnd_set_drag_payload(DraggedTracks(vec![np_id]));
+                    }
+                    if art_resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                    }
                     match &art {
                         Some(h) => {
                             egui::Image::new(h)
@@ -340,19 +360,26 @@ impl App {
                         ui.ctx().request_repaint();
                     }
 
-                    // Title → album filter, artist → artist filter. Only the text
-                    // itself is the hit target; hover shows a pointer + underline
-                    // (link affordance). Skipped when the tag is empty (nothing to
-                    // filter by).
-                    let link = |pos: egui::Pos2,
-                                size: egui::Vec2,
-                                salt: &str,
-                                color: egui::Color32,
-                                note: &str,
-                                hit: &mut bool| {
+                    // Title → album filter, artist → artist filter, and both are
+                    // drag handles for the playing track like the cover beside
+                    // them. Only the text itself is the hit target; hover shows a
+                    // pointer + underline (link affordance). Skipped when the tag
+                    // is empty (nothing to filter by).
+                    //
+                    // `click_and_drag` keeps the click meaning what it did — egui
+                    // only reports `clicked()` when the press ended without a
+                    // drag, so a filter click and a drag-out never both fire.
+                    let link = |ui: &mut egui::Ui,
+                                    pos: egui::Pos2,
+                                    size: egui::Vec2,
+                                    salt: &str,
+                                    color: egui::Color32,
+                                    note: &str,
+                                    hit: &mut bool,
+                                    native_drag: &mut bool| {
                         let rect = egui::Rect::from_min_size(pos, size);
                         let resp = ui
-                            .interact(rect, ui.id().with(salt), egui::Sense::click())
+                            .interact(rect, ui.id().with(salt), egui::Sense::click_and_drag())
                             .on_hover_note(note);
                         if resp.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -364,28 +391,39 @@ impl App {
                                 egui::Stroke::new(1.0, color),
                             );
                         }
+                        let alt = ui.input(|i| i.modifiers.alt);
+                        if resp.drag_started() && alt {
+                            *native_drag = true;
+                        }
+                        if resp.dragged() && !alt {
+                            resp.dnd_set_drag_payload(DraggedTracks(vec![np_id]));
+                        }
                         if resp.clicked() {
                             *hit = true;
                         }
                     };
                     if !album.trim().is_empty() {
                         link(
+                            ui,
                             egui::pos2(block.left(), block.top() + 8.0),
                             title_size,
                             "np_title_link",
                             egui::Color32::from_gray(240),
                             "Show this album",
                             &mut filter_album,
+                            &mut native_drag,
                         );
                     }
                     if !artist.trim().is_empty() {
                         link(
+                            ui,
                             egui::pos2(block.left(), block.top() + 32.0),
                             artist_size,
                             "np_artist_link",
                             egui::Color32::from_gray(165),
                             "Show this artist",
                             &mut filter_artist,
+                            &mut native_drag,
                         );
                     }
                     ui.add_space(16.0);
@@ -581,6 +619,9 @@ impl App {
         }
         if shuffle || smart_shuffle {
             self.shuffle_next(np_id, smart_shuffle);
+        }
+        if native_drag {
+            self.player_native_drag = Some(PathBuf::from(&np_path));
         }
         if close {
             if let Some(a) = self.audio.as_mut() {

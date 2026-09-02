@@ -1342,6 +1342,11 @@ struct App {
     /// the source path (used to lazily load its cover). Set when playback starts;
     /// the bar is shown while the engine still has this track loaded or decoding.
     now_playing: Option<NowPlaying>,
+    /// A native drag-out started this frame from the now-playing bar's artwork,
+    /// holding the playing track's source file. `draw_player` runs long before
+    /// the frame's `begin_file_drag` dispatch, so the path parks here and is
+    /// taken alongside the table's own drag (see `update`).
+    player_native_drag: Option<PathBuf>,
     /// Fraction `[0, 1]` the user is dragging the scrubber to, before release. The
     /// actual seek fires on release so we rebuild the audio sink once, not per
     /// frame; `None` when not scrubbing.

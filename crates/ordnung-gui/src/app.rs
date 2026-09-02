@@ -224,6 +224,7 @@ impl App {
             renaming: None,
             sort: None,
             now_playing: None,
+            player_native_drag: None,
             scrub: None,
             volume_dirty: false,
             wave_zoom_secs: crate::player::DEFAULT_ZOOM_SECS,
@@ -2203,6 +2204,11 @@ impl eframe::App for App {
         // `begin_file_drag` blocks on AppKit's nested loop until the drop completes.
         // A plain (non-⌥) drag never reaches here: it carries an egui payload for
         // in-window reorder / drop onto a sidebar playlist instead.
+        // The now-playing bar's artwork drag, taken from where `draw_player`
+        // parked it earlier this frame. Same dispatch point as the table's, so
+        // AppKit's nested loop is entered once, with no borrows outstanding.
+        let from_player = self.player_native_drag.take().map(|p| vec![p]);
+        let native_drag = native_drag.or(from_player);
         if let Some(paths) = native_drag {
             let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
             if !refs.is_empty() {
