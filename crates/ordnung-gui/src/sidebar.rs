@@ -146,7 +146,10 @@ pub(crate) fn nav_button_sized(
     // than text crammed against the border. `button_padding` is the left inset
     // for the (left-aligned) content; restore it so only this button is affected.
     let prev_padding = ui.spacing().button_padding;
-    ui.spacing_mut().button_padding.x = 12.0;
+    // A narrow icon-tier tile has no room for a left gutter — the glyph would
+    // sit off-centre or clip — so pad it symmetrically instead and let egui
+    // centre the single character.
+    ui.spacing_mut().button_padding.x = if w < 90.0 { 4.0 } else { 12.0 };
 
     // The tile fills the sidebar's full width, so its left/right edges sit on the
     // panel clip boundary. egui's default hover/active state draws a 1px outline
@@ -174,6 +177,7 @@ pub(crate) fn nav_button_sized(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_playlist_nodes(
     ui: &mut egui::Ui,
+    density: NavDensity,
     all: &[Playlist],
     parent: Option<Id>,
     view: &mut LibraryView,
@@ -187,17 +191,19 @@ pub(crate) fn draw_playlist_nodes(
             continue;
         }
         if p.is_folder {
-            egui::CollapsingHeader::new(egui::RichText::new(p.name.as_str()).font(crate::ui::tokens::font::body()))
-                .id_salt(("pl-folder", p.id))
-                .default_open(true)
-                .show(ui, |ui| {
-                    draw_playlist_nodes(ui, all, Some(p.id), view, renaming, action);
-                })
-                .header_response
-                .context_menu(|ui| folder_context_menu(ui, p, renaming, action));
+            egui::CollapsingHeader::new(
+                egui::RichText::new(p.name.as_str()).font(crate::ui::tokens::font::body()),
+            )
+            .id_salt(("pl-folder", p.id))
+            .default_open(true)
+            .show(ui, |ui| {
+                draw_playlist_nodes(ui, density, all, Some(p.id), view, renaming, action);
+            })
+            .header_response
+            .context_menu(|ui| folder_context_menu(ui, p, renaming, action));
             ui.add_space(3.0);
         } else {
-            draw_playlist_leaf(ui, p, view, renaming, action);
+            draw_playlist_leaf(ui, density, p, view, renaming, action);
         }
     }
 }
@@ -271,13 +277,22 @@ pub(crate) fn draw_inline_rename(
 /// that highlights on drag-hover and adds the dragged tracks when dropped on.
 pub(crate) fn draw_playlist_leaf(
     ui: &mut egui::Ui,
+    density: NavDensity,
     p: &Playlist,
     view: &mut LibraryView,
     renaming: &mut Option<Renaming>,
     action: &mut Option<SidebarAction>,
 ) {
     let selected = *view == LibraryView::Playlist(p.id);
-    let resp = nav_button(ui, &format!("♪  {}", p.name), selected, 30.0, 13.5)
+    // Playlist names survive every tier — a playlist is only identifiable by
+    // its name, so the icon tier keeps the text and drops the ♪ glyph and the
+    // track count instead, which is the opposite trade from every other tile.
+    let label = if density.icons_only() {
+        p.name.clone()
+    } else {
+        format!("♪  {}", p.name)
+    };
+    let resp = nav_button(ui, &label, selected, 30.0, 13.5)
         .on_hover_note("Click to view. Drag tracks here to add them");
     // Small right-aligned track count inside the tile. Muted so the name stays
     // the focus; brighter on the accent fill so it's still readable when selected.
@@ -286,13 +301,15 @@ pub(crate) fn draw_playlist_leaf(
     } else {
         egui::Color32::from_gray(130)
     };
-    ui.painter().text(
-        egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        p.track_ids.len().to_string(),
-        crate::ui::tokens::font::footnote(),
-        count_color,
-    );
+    if !density.icons_only() {
+        ui.painter().text(
+            egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            p.track_ids.len().to_string(),
+            crate::ui::tokens::font::footnote(),
+            count_color,
+        );
+    }
     if resp.dnd_hover_payload::<DraggedTracks>().is_some() {
         // Inset the highlight so the stroke sits inside the tile's rounded box
         // (drawn on the edge, not floating outside it) and the corners stay round.
@@ -334,6 +351,7 @@ pub(crate) fn draw_playlist_leaf(
 /// the pdb node id whose children are drawn (`0` = top level).
 pub(crate) fn draw_usb_playlist_nodes(
     ui: &mut egui::Ui,
+    density: NavDensity,
     all: &[ordnung_rbdb::pdb::RbPlaylist],
     tracks_by_playlist: &HashMap<u32, Vec<usize>>,
     parent: u32,
@@ -342,16 +360,23 @@ pub(crate) fn draw_usb_playlist_nodes(
 ) {
     for p in all.iter().filter(|p| p.parent_id == parent) {
         if p.is_folder {
-            egui::CollapsingHeader::new(egui::RichText::new(p.name.as_str()).font(crate::ui::tokens::font::callout()))
-                .id_salt(("usb-pl-folder", vol, p.id))
-                .default_open(false)
-                .show(ui, |ui| {
-                    draw_usb_playlist_nodes(ui, all, tracks_by_playlist, p.id, vol, view);
-                });
+            egui::CollapsingHeader::new(
+                egui::RichText::new(p.name.as_str()).font(crate::ui::tokens::font::callout()),
+            )
+            .id_salt(("usb-pl-folder", vol, p.id))
+            .default_open(false)
+            .show(ui, |ui| {
+                draw_usb_playlist_nodes(ui, density, all, tracks_by_playlist, p.id, vol, view);
+            });
             ui.add_space(2.0);
         } else {
             let selected = *view == LibraryView::Usb(vol.to_path_buf(), Some(p.id));
-            let resp = nav_button(ui, &format!("♪  {}", p.name), selected, 26.0, 12.5)
+            let label = if density.icons_only() {
+                p.name.clone()
+            } else {
+                format!("♪  {}", p.name)
+            };
+            let resp = nav_button(ui, &label, selected, 26.0, 12.5)
                 .on_hover_note("Playlist from this device's rekordbox export");
             // Right-aligned track count, mirroring the catalog playlist rows.
             let count_color = if selected {
@@ -359,17 +384,19 @@ pub(crate) fn draw_usb_playlist_nodes(
             } else {
                 egui::Color32::from_gray(130)
             };
-            ui.painter().text(
-                egui::pos2(resp.rect.right() - 10.0, resp.rect.center().y),
-                egui::Align2::RIGHT_CENTER,
-                tracks_by_playlist
-                    .get(&p.id)
-                    .map(Vec::len)
-                    .unwrap_or(0)
-                    .to_string(),
-                crate::ui::tokens::font::caption(),
-                count_color,
-            );
+            if !density.icons_only() {
+                ui.painter().text(
+                    egui::pos2(resp.rect.right() - 10.0, resp.rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    tracks_by_playlist
+                        .get(&p.id)
+                        .map(Vec::len)
+                        .unwrap_or(0)
+                        .to_string(),
+                    crate::ui::tokens::font::caption(),
+                    count_color,
+                );
+            }
             if resp.clicked() {
                 *view = LibraryView::Usb(vol.to_path_buf(), Some(p.id));
             }
@@ -401,5 +428,90 @@ pub(crate) fn folder_context_menu(
     if ui.button("Delete folder").clicked() {
         *action = Some(SidebarAction::Delete(p.id));
         ui.close_menu();
+    }
+}
+
+// ── Sidebar width tiers ───────────────────────────────────────────────────────
+// The sidebar isn't a free splitter. Dragging it anywhere in between only ever
+// produced half-truncated labels ("Vinyl Collection (130)" wrapping mid-word,
+// then clipping), so the panel instead locks into three designed layouts and
+// the drag snaps to whichever is nearest. Each tier is a real layout, not the
+// same layout at a different size:
+//
+//   Icon    — glyphs only, no captions; playlist names still shown (that's the
+//             one label you can't infer from an icon) with the count dropped.
+//   Narrow  — one tile per row: "All songs" and "New" stack instead of sharing.
+//   Wide    — the designed default: the tile pair sits on one row.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum NavDensity {
+    Icon,
+    Narrow,
+    Wide,
+}
+
+impl NavDensity {
+    /// Snapped panel width for this tier, in points.
+    pub(crate) fn width(self) -> f32 {
+        match self {
+            NavDensity::Icon => 64.0,
+            NavDensity::Narrow => 176.0,
+            NavDensity::Wide => 248.0,
+        }
+    }
+
+    /// The tier whose width is closest to `w` — what a drag release lands on.
+    pub(crate) fn nearest(w: f32) -> Self {
+        [NavDensity::Icon, NavDensity::Narrow, NavDensity::Wide]
+            .into_iter()
+            .min_by(|a, b| {
+                (a.width() - w)
+                    .abs()
+                    .total_cmp(&(b.width() - w).abs())
+            })
+            .unwrap()
+    }
+
+    /// Icon tier hides every text label except playlist names.
+    pub(crate) fn icons_only(self) -> bool {
+        self == NavDensity::Icon
+    }
+
+    /// Parse the persisted `Config::nav_density` key; anything unrecognised
+    /// falls back to the designed default.
+    pub(crate) fn from_key(key: &str) -> Self {
+        match key {
+            "icon" => NavDensity::Icon,
+            "narrow" => NavDensity::Narrow,
+            _ => NavDensity::Wide,
+        }
+    }
+
+    /// The config key for this tier.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            NavDensity::Icon => "icon",
+            NavDensity::Narrow => "narrow",
+            NavDensity::Wide => "wide",
+        }
+    }
+}
+
+/// A nav tile that collapses to its glyph at the icon tier. `icon` is the
+/// leading glyph, `label` the text that follows it at the wider tiers; the
+/// hover note carries the name when the text is gone, so an icon-only sidebar
+/// is still navigable.
+pub(crate) fn nav_button_dense(
+    ui: &mut egui::Ui,
+    density: NavDensity,
+    icon: &str,
+    label: &str,
+    selected: bool,
+    height: f32,
+    text_size: f32,
+) -> egui::Response {
+    if density.icons_only() {
+        nav_button(ui, icon, selected, height, text_size)
+    } else {
+        nav_button(ui, &format!("{icon}  {label}"), selected, height, text_size)
     }
 }

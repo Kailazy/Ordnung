@@ -171,6 +171,7 @@ impl App {
             tex_graveyard: TexGraveyard::default(),
             inspector_open: true,
             menu_installed: false,
+            tour: None,
             settings_open: false,
             settings_tab: SettingsTab::default(),
             token_input: String::new(),
@@ -221,6 +222,7 @@ impl App {
             usb_selected: None,
             usb_edit: UsbEdit::default(),
             usb_edit_saved: UsbEdit::default(),
+            nav_density: NavDensity::Wide,
             view: LibraryView::Library,
             renaming: None,
             sort: None,
@@ -261,6 +263,8 @@ impl App {
             StartupView::Vinyl => LibraryView::Vinyl,
             StartupView::Recent => LibraryView::RecentlyAdded,
         };
+        // Restore the sidebar to the width tier it was left at.
+        app.nav_density = NavDensity::from_key(&app.config.nav_density);
         app.load_column_layout();
         // Seed the initial sort from the user's saved default (e.g. "Added,
         // newest first") before the first load so it's applied on launch.
@@ -273,6 +277,9 @@ impl App {
         // Ask GitHub once, off-thread, whether a newer release is out. The result
         // drives a dismissible banner; a network failure is swallowed (no banner).
         app.spawn_update_check(startup_ctx);
+        // Last, so the tour draws over a fully built window rather than an
+        // empty one: a new user should see what they're being told about.
+        app.maybe_open_tour();
         app
     }
 
@@ -1743,15 +1750,56 @@ impl eframe::App for App {
         // reload so the table follows the sidebar.
         let prev_view = self.view.clone();
         let mut sidebar_action: Option<SidebarAction> = None;
+        // The sidebar snaps between three designed layouts (see `NavDensity`)
+        // rather than resizing freely. While the edge is being dragged the panel
+        // tracks the pointer so the drag still feels direct; on release it eases
+        // into the nearest tier's width, and every tier is a layout that fits its
+        // own width — nothing is left mid-truncation.
+        let drag_id = egui::Id::new("library_nav").with("__resize");
+        let dragging = ctx.is_being_dragged(drag_id);
+        let target = self.nav_density.width();
+        // Ease toward the snapped width once the drag lets go. `animate_value`
+        // repaints until it settles, so the lock-into-place is visible rather
+        // than an instant jump. While the drag is live the animation is fed the
+        // pointer's own width so it starts the ease from wherever the edge
+        // actually was, not from the previous tier.
+        let live = ctx
+            .pointer_interact_pos()
+            .map(|p| {
+                (p.x - ctx.screen_rect().left()).clamp(
+                    NavDensity::Icon.width(),
+                    NavDensity::Wide.width(),
+                )
+            })
+            .unwrap_or(target);
+        let settled = ctx.animate_value_with_time(
+            egui::Id::new("nav_snap"),
+            if dragging { live } else { target },
+            0.13,
+        );
+        let density = self.nav_density;
         egui::SidePanel::left("library_nav")
             .resizable(true)
-            .default_width(200.0)
-            .width_range(150.0..=360.0)
+            .default_width(target)
+            // Free travel only while the pointer holds the edge; the moment it
+            // is released the range collapses to the snapped width, which is
+            // what makes the panel spring back into a tier.
+            .width_range(if dragging {
+                NavDensity::Icon.width()..=NavDensity::Wide.width()
+            } else {
+                settled..=settled
+            })
             .show(ctx, |ui| {
                 // Header for a section: a small dimmed all-caps caption that sets
                 // the playlist / collection groups apart without competing with
                 // the big nav tiles below it.
                 let section_caption = |ui: &mut egui::Ui, text: &str| {
+                    // An all-caps caption has no legible short form, so the
+                    // icon tier drops it entirely and lets the spacing and
+                    // rules do the grouping.
+                    if density.icons_only() {
+                        return;
+                    }
                     ui.label(
                         egui::RichText::new(text)
                             .font(crate::ui::tokens::font::footnote())
@@ -1786,47 +1834,86 @@ impl eframe::App for App {
                         // inbox of fresh imports still awaiting analysis + a Discogs
                         // fetch. Recent gets a fixed, narrower width; All songs flexes
                         // to fill the rest so the pair always spans the sidebar.
-                        ui.horizontal(|ui| {
-                            const RECENT_W: f32 = 100.0;
-                            let gap = ui.spacing().item_spacing.x;
-                            let all_w = (ui.available_width() - RECENT_W - gap).max(60.0);
-                            if nav_button_sized(
+                        // Named, not just a glyph: on its own the ✦ tile gave no
+                        // clue it holds freshly imported songs.
+                        let recent_label = if recent_count > 0 {
+                            format!("New  {recent_count}")
+                        } else {
+                            "New".to_string()
+                        };
+                        const RECENT_NOTE: &str = "New imports awaiting analysis or a \
+                                                   Discogs fetch. They drop off once both \
+                                                   are done.";
+                        if density == NavDensity::Wide {
+                            // Only the widest tier fits the pair side by side.
+                            // "New" takes a fixed slice and "All songs" flexes
+                            // to fill the rest, so the row always spans the panel.
+                            ui.horizontal(|ui| {
+                                const RECENT_W: f32 = 100.0;
+                                let gap = ui.spacing().item_spacing.x;
+                                let all_w = (ui.available_width() - RECENT_W - gap).max(60.0);
+                                if nav_button_sized(
+                                    ui,
+                                    "♪  All songs",
+                                    *view == LibraryView::Library,
+                                    all_w,
+                                    46.0,
+                                    17.0,
+                                )
+                                .on_hover_note("Every track in the catalog")
+                                .clicked()
+                                {
+                                    *view = LibraryView::Library;
+                                }
+                                if nav_button_sized(
+                                    ui,
+                                    &format!("✦ {recent_label}"),
+                                    *view == LibraryView::RecentlyAdded,
+                                    RECENT_W,
+                                    46.0,
+                                    14.0,
+                                )
+                                .on_hover_note(RECENT_NOTE)
+                                .clicked()
+                                {
+                                    *view = LibraryView::RecentlyAdded;
+                                }
+                            });
+                        } else {
+                            // Narrow and icon tiers stack the pair instead of
+                            // squeezing it: two full-width rows, each still wide
+                            // enough for its whole label (or, at the icon tier,
+                            // its glyph alone).
+                            if nav_button_dense(
                                 ui,
-                                "♪  All songs",
+                                density,
+                                "♪",
+                                "All songs",
                                 *view == LibraryView::Library,
-                                all_w,
-                                46.0,
-                                17.0,
+                                40.0,
+                                16.0,
                             )
                             .on_hover_note("Every track in the catalog")
                             .clicked()
                             {
                                 *view = LibraryView::Library;
                             }
-                            // Named, not just a glyph: on its own the ✦ tile gave no
-                            // clue it holds freshly imported songs.
-                            let recent_label = if recent_count > 0 {
-                                format!("✦ New  {recent_count}")
-                            } else {
-                                "✦ New".to_string()
-                            };
-                            if nav_button_sized(
+                            ui.add_space(4.0);
+                            if nav_button_dense(
                                 ui,
+                                density,
+                                "✦",
                                 &recent_label,
                                 *view == LibraryView::RecentlyAdded,
-                                RECENT_W,
-                                46.0,
+                                36.0,
                                 14.0,
                             )
-                            .on_hover_note(
-                                "New imports awaiting analysis or a Discogs fetch. \
-                                 They drop off once both are done.",
-                            )
+                            .on_hover_note(RECENT_NOTE)
                             .clicked()
                             {
                                 *view = LibraryView::RecentlyAdded;
                             }
-                        });
+                        }
                         // A slim strip under the tile pair, shown only when the
                         // catalog has something wrong with it: files the catalog
                         // points at that are no longer on disk. Clicking it opens
@@ -1834,9 +1921,11 @@ impl eframe::App for App {
                         // A clean catalog gets no row at all.
                         if missing_count > 0 {
                             ui.add_space(4.0);
-                            if nav_button(
+                            if nav_button_dense(
                                 ui,
-                                &format!("⚠  {missing_count} missing"),
+                                density,
+                                "⚠",
+                                &format!("{missing_count} missing"),
                                 *view == LibraryView::Duplicates || *view == LibraryView::Missing,
                                 24.0,
                                 12.0,
@@ -1879,13 +1968,25 @@ impl eframe::App for App {
                 // place into whichever slot `nav_primary` assigns it — big and
                 // leading when vinyl is primary, a compact pinned row otherwise.
                 let draw_vinyl_tile = |ui: &mut egui::Ui, view: &mut LibraryView, lead: bool| {
-                    let vinyl_label = if vinyl_count > 0 {
-                        format!("💿  Vinyl Collection ({vinyl_count})")
-                    } else {
-                        "💿  Vinyl Collection".to_string()
+                    // "Vinyl Collection (130)" is the longest label in the
+                    // sidebar and the first thing to truncate, so the narrow
+                    // tier trims it to "Vinyl (130)" rather than clipping it.
+                    let vinyl_label = match (density, vinyl_count) {
+                        (NavDensity::Wide, 0) => "Vinyl Collection".to_string(),
+                        (NavDensity::Wide, n) => format!("Vinyl Collection ({n})"),
+                        (_, 0) => "Vinyl".to_string(),
+                        (_, n) => format!("Vinyl ({n})"),
                     };
                     let (h, size) = if lead { (46.0, 17.0) } else { (34.0, 14.0) };
-                    if nav_button(ui, &vinyl_label, *view == LibraryView::Vinyl, h, size)
+                    if nav_button_dense(
+                        ui,
+                        density,
+                        "💿",
+                        &vinyl_label,
+                        *view == LibraryView::Vinyl,
+                        h,
+                        size,
+                    )
                         .on_hover_note("Your Discogs vinyl collection")
                         .clicked()
                     {
@@ -1941,13 +2042,19 @@ impl eframe::App for App {
                             section_caption(ui, "DEVICES");
                             ui.add_space(4.0);
                             for v in self.usb_volumes.clone() {
-                                let label = if v.is_rekordbox_export {
-                                    format!("⏏  {}  (rekordbox)", v.name)
+                                // The "(rekordbox)" suffix is the first thing
+                                // to go when width is short; the volume's own
+                                // name is what identifies it.
+                                let label = if v.is_rekordbox_export && density == NavDensity::Wide
+                                {
+                                    format!("{}  (rekordbox)", v.name)
                                 } else {
-                                    format!("⏏  {}", v.name)
+                                    v.name.clone()
                                 };
-                                if nav_button(
+                                if nav_button_dense(
                                     ui,
+                                    density,
+                                    "⏏",
                                     &label,
                                     self.view == LibraryView::Usb(v.path.clone(), None),
                                     34.0,
@@ -1973,6 +2080,7 @@ impl eframe::App for App {
                                     ui.indent(("usb-pl-tree", &v.path), |ui| {
                                         draw_usb_playlist_nodes(
                                             ui,
+                                            density,
                                             &self.usb_playlists.clone(),
                                             &self.usb_playlist_tracks,
                                             0,
@@ -2009,6 +2117,7 @@ impl eframe::App for App {
                                 let all = self.playlists.clone();
                                 draw_playlist_nodes(
                                     ui,
+                                    density,
                                     &all,
                                     None,
                                     &mut self.view,
@@ -2018,6 +2127,22 @@ impl eframe::App for App {
                             });
                     });
             });
+        // Commit the drag: while the edge is held the panel follows the pointer
+        // freely, and the tier it will lock into is whichever is nearest at that
+        // moment. Latched every frame of the drag so releasing needs no separate
+        // event — the width the panel already has is the width it keeps.
+        if dragging {
+            // The panel's left edge is the screen's left edge, so the pointer's
+            // x is the width the user is asking for.
+            if let Some(pos) = ctx.pointer_interact_pos() {
+                let snapped = NavDensity::nearest(pos.x - ctx.screen_rect().left());
+                if snapped != self.nav_density {
+                    self.nav_density = snapped;
+                    self.config.nav_density = snapped.key().to_string();
+                    let _ = self.config.save();
+                }
+            }
+        }
         match sidebar_action {
             Some(SidebarAction::NewPlaylist(parent)) => {
                 if let Ok(cat) = Catalog::open(&self.db_path) {
@@ -2395,6 +2520,9 @@ impl eframe::App for App {
         self.draw_vinyl_sheet(ctx, frame);
         self.draw_versions(ctx);
         self.draw_failure_report(ctx);
+        // Drawn last so the welcome tour sits above every other window on a
+        // first launch.
+        self.draw_tour(ctx);
 
         // Keep the UI moving while a worker thread is active, or while there are
         // still fetched covers queued for the user to review.

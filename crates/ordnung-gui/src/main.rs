@@ -18,6 +18,7 @@ mod macos_drag;
 mod macos_menu;
 mod macos_pasteboard;
 mod modals;
+mod onboarding;
 mod player;
 mod records;
 mod search_box;
@@ -44,6 +45,7 @@ use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
     Analysis, Format, Id, Playlist, Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
 };
+use onboarding::Tour;
 use ordnung_core::search::{ScoredHit, SearchHit};
 use ordnung_core::{
     best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind, ScannedTrack,
@@ -1165,6 +1167,9 @@ struct App {
     /// the first frame rather than at construction, because the `NSApplication`
     /// it attaches to doesn't exist until eframe has started (see `macos_menu`).
     menu_installed: bool,
+    /// The first-run welcome tour, when it's showing. `None` once finished or
+    /// dismissed; see [`onboarding`] for why it owns the writeback choice.
+    tour: Option<Tour>,
     /// Whether the Settings window is open.
     settings_open: bool,
     /// Which category tab is active in the Settings window. Session-only — the
@@ -1334,6 +1339,11 @@ struct App {
     /// snapshot as loaded — differing means unsaved edits (enables Save).
     usb_edit: UsbEdit,
     usb_edit_saved: UsbEdit,
+    /// Which of the sidebar's three width tiers is in force. The panel snaps
+    /// between designed layouts instead of resizing freely, so this — not a
+    /// pixel width — is the resize state, and it persists via
+    /// `Config::nav_density`.
+    nav_density: NavDensity,
     /// Which track set the table shows — the whole library or one playlist.
     view: LibraryView,
     /// Inline rename in progress for a sidebar entry, or `None` when no row is

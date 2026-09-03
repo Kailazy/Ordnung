@@ -72,6 +72,12 @@ pub struct Config {
     /// values fall back to `"digital"`. See `NavPrimary`.
     #[serde(default = "default_nav_primary")]
     pub nav_primary: String,
+    /// Which of the sidebar's three width tiers is in force: `"icon"`,
+    /// `"narrow"` or `"wide"` (the default). The sidebar snaps between designed
+    /// layouts rather than resizing freely, so what persists is the chosen tier,
+    /// not a pixel width. Unknown values fall back to `"wide"`. See `NavDensity`.
+    #[serde(default = "default_nav_density")]
+    pub nav_density: String,
     /// Which section the app opens on: `"library"` (All songs, the default),
     /// `"vinyl"` (the vinyl collection), or `"recent"` (new imports). Unknown
     /// values fall back to `"library"`. See `StartupView`.
@@ -97,6 +103,13 @@ pub struct Config {
     /// the field get the new default too.
     #[serde(default = "default_true")]
     pub auto_write_tags: bool,
+    /// Version of the first-run welcome tour this install has completed (see
+    /// `onboarding::TOUR_VERSION`). `0` — the default, and what every config
+    /// predating the tour gets — means "never seen it", which is what opens the
+    /// tour on a fresh install. Storing a version rather than a bool lets a
+    /// materially changed tour show once more to existing users.
+    #[serde(default)]
+    pub onboarding_completed_version: u32,
     /// Default target format pre-selected in the convert dialogs, as a stable
     /// lowercase key (`mp3`/`aac`/`flac`/`wav`/`aiff`; see `util::format_key`).
     /// Empty or unknown falls back to AIFF, the prior hard-coded default.
@@ -228,6 +241,10 @@ fn default_convert_format() -> String {
 
 fn default_vinyl_sort() -> String {
     "added".to_string()
+}
+
+fn default_nav_density() -> String {
+    "wide".into()
 }
 
 fn default_nav_primary() -> String {
@@ -520,9 +537,11 @@ impl Default for Config {
             vinyl_sort: default_vinyl_sort(),
             vinyl_sort_ascending: false,
             nav_primary: default_nav_primary(),
+            nav_density: default_nav_density(),
             startup_view: default_startup_view(),
             auto_analyze: true,
             auto_write_tags: true,
+            onboarding_completed_version: 0,
             convert_format: default_convert_format(),
             convert_bitrate_kbps: String::new(),
             convert_out_dir: None,
