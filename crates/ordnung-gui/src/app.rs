@@ -104,6 +104,7 @@ impl App {
             vinyl: Vec::new(),
             wantlist: Vec::new(),
             vinyl_count: 0,
+            vinyl_tab: VinylList::Collection,
             vinyl_filter: String::new(),
             vinyl_covers: HashMap::new(),
             vinyl_cover_req_tx,

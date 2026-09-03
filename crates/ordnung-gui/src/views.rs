@@ -56,6 +56,106 @@ fn health_tabs(
     switch
 }
 
+/// The vinyl view's shelf tabs: Collection and Wantlist, drawn as browser-style
+/// tabs — rounded on top only, the active one filled and seated on the hairline
+/// so it reads as continuous with the shelf below it while the inactive one
+/// recedes. Both shelves are the same grid of the same records, so stacking them
+/// buried the wantlist under a large collection; as tabs, either is one click
+/// away. Counts follow the active search, so you can see which shelf holds the
+/// hits without switching. Returns the tab the user clicked, if any; the caller
+/// owns the switch.
+fn vinyl_tabs(
+    ui: &mut egui::Ui,
+    current: VinylList,
+    owned: usize,
+    wanted: usize,
+) -> Option<VinylList> {
+    use crate::ui::tokens::{color, font, radius, space};
+
+    let tab = |ui: &mut egui::Ui, label: String, active: bool, tip: &str| -> bool {
+        // Size the tab from its own text, so the two sit shoulder to shoulder at
+        // whatever width their counts need.
+        let text_font = if active {
+            font::strong(font::headline().size)
+        } else {
+            font::headline()
+        };
+        // Colour is overridden at paint time (hover lifts an inactive label), so
+        // the galley is laid out in a placeholder ink.
+        let galley = ui.painter().layout_no_wrap(label, text_font, color::LABEL);
+        let size = egui::vec2(
+            galley.size().x + space::S4 * 2.0,
+            galley.size().y + space::S3 * 2.0,
+        );
+        let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+
+        // Top-rounded only: the bottom edge runs into the content below, which is
+        // what makes a tab read as a tab rather than a pill.
+        let rounding = egui::Rounding {
+            nw: radius::SM,
+            ne: radius::SM,
+            sw: 0.0,
+            se: 0.0,
+        };
+        let fill = if active {
+            Some(color::SURFACE_HI)
+        } else if resp.hovered() {
+            Some(color::SURFACE)
+        } else {
+            None
+        };
+        if let Some(fill) = fill {
+            ui.painter().rect_filled(rect, rounding, fill);
+        }
+        // The active tab is underlined in the accent, the way a selected browser
+        // tab is marked — colour, not just fill, so it's legible at a glance.
+        if active {
+            let y = rect.bottom() - 1.0;
+            ui.painter().line_segment(
+                [
+                    egui::pos2(rect.left() + space::S2, y),
+                    egui::pos2(rect.right() - space::S2, y),
+                ],
+                egui::Stroke::new(2.0, color::ACCENT),
+            );
+        }
+        let text_pos = rect.center() - galley.size() * 0.5;
+        // Hover lifts an inactive label toward full contrast, so the tab answers
+        // the pointer before it's clicked.
+        let ink = if active || resp.hovered() {
+            color::LABEL
+        } else {
+            color::LABEL_2
+        };
+        ui.painter().galley(text_pos, galley, ink);
+        resp.on_hover_note(tip).clicked()
+    };
+
+    // Browser tabs abut: no gap between them, so they read as one strip.
+    let prev_spacing = ui.spacing().item_spacing.x;
+    ui.spacing_mut().item_spacing.x = space::S1;
+
+    let mut clicked = None;
+    if tab(
+        ui,
+        format!("Collection ({owned})"),
+        current == VinylList::Collection,
+        "Records you own",
+    ) {
+        clicked = Some(VinylList::Collection);
+    }
+    if tab(
+        ui,
+        format!("Wantlist ({wanted})"),
+        current == VinylList::Wantlist,
+        "Records you want but don't own yet",
+    ) {
+        clicked = Some(VinylList::Wantlist);
+    }
+    ui.spacing_mut().item_spacing.x = prev_spacing;
+    clicked
+}
+
 /// Show a small confirmation dialog. When `pos` is set (the screen point where
 /// the user clicked the action), the dialog opens right there so the confirm
 /// button lands under the cursor — no swipe across the window. Without a
@@ -1013,9 +1113,15 @@ impl App {
         let mut refresh = false;
         // The user's Discogs collection page, known once a sync has resolved the
         // username. `None` until the first sync.
+        // Whichever shelf is showing, its own Discogs page is what the link
+        // opens — the button belongs to the tab, not to the view.
+        let (list_path, list_tip) = match self.vinyl_tab {
+            VinylList::Collection => ("collection", "Open your collection on discogs.com"),
+            VinylList::Wantlist => ("wants", "Open your wantlist on discogs.com"),
+        };
         let collection_url = {
             let u = self.config.discogs_username.trim();
-            (!u.is_empty()).then(|| format!("https://www.discogs.com/user/{u}/collection"))
+            (!u.is_empty()).then(|| format!("https://www.discogs.com/user/{u}/{list_path}"))
         };
 
         // Sort choice, persisted across launches. Read once per frame so the
@@ -1023,10 +1129,23 @@ impl App {
         let mut sort = VinylSort::from_key(&self.config.vinyl_sort);
         let mut ascending = self.config.vinyl_sort_ascending;
 
+        // Counts for the tab labels. They filter the same way the grids do, so a
+        // search narrows both tabs and you can see which shelf holds the hits
+        // without switching to it.
+        let query = self.vinyl_filter.trim().to_lowercase();
+        let keep = |v: &&VinylRecord| query.is_empty() || vinyl_matches(v, &query);
+        let owned_recs: Vec<VinylRecord> = self.vinyl.iter().filter(keep).cloned().collect();
+        let wanted_recs: Vec<VinylRecord> = self.wantlist.iter().filter(keep).cloned().collect();
+
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.heading("Vinyl Collection");
-            // Search sits right beside the heading: it's the fastest way through
+            // Collection and wantlist are two shelves of the same kind, so they're
+            // tabs: with a big collection the wantlist used to sit a full scroll
+            // below, and neither shelf could be reached quickly from the other.
+            if let Some(tab) = vinyl_tabs(ui, self.vinyl_tab, owned_recs.len(), wanted_recs.len()) {
+                self.vinyl_tab = tab;
+            }
+            // Search sits right of the tabs: it's the fastest way through
             // a wall of covers, so it shouldn't be hiding out with the utility
             // buttons on the far right.
             ui.add_space(10.0);
@@ -1059,7 +1178,7 @@ impl App {
                 if let Some(url) = &collection_url {
                     if ui
                         .button("↗ Open in Discogs")
-                        .on_hover_note("Open your collection on discogs.com")
+                        .on_hover_note(list_tip)
                         .clicked()
                     {
                         open_url(url);
@@ -1094,6 +1213,9 @@ impl App {
                 .on_hover_note("Order both shelves by date added, price or artist");
             });
         });
+        // The tab strip sits directly on the separator below, so the active tab's
+        // underline and that hairline read as one baseline.
+        ui.add_space(-2.0);
         if sort.key() != self.config.vinyl_sort || ascending != self.config.vinyl_sort_ascending {
             self.config.vinyl_sort = sort.key().to_string();
             self.config.vinyl_sort_ascending = ascending;
@@ -1140,24 +1262,18 @@ impl App {
         // Snapshot what we render so the scroll closure doesn't borrow the record
         // lists while we read the cover cache. Kick off cover decodes up front
         // (the request is deduplicated, so doing it every frame is cheap).
-        // Filter the records before building cells, so the toolbar's counts (which
-        // filter the same way, without building cells) can't drift from the grid.
-        let query = self.vinyl_filter.trim().to_lowercase();
-        let keep = |v: &&VinylRecord| query.is_empty() || vinyl_matches(v, &query);
-        let owned_recs: Vec<VinylRecord> = self.vinyl.iter().filter(keep).cloned().collect();
-        let wanted_recs: Vec<VinylRecord> = self.wantlist.iter().filter(keep).cloned().collect();
-        let owned = self.vinyl_cells(VinylList::Collection, &owned_recs, sort, ascending);
-        let wanted = self.vinyl_cells(VinylList::Wantlist, &wanted_recs, sort, ascending);
-        for c in owned.iter().chain(wanted.iter()) {
+        // Only the active tab's shelf is built: the other one isn't on screen.
+        let tab = self.vinyl_tab;
+        let recs = match tab {
+            VinylList::Collection => &owned_recs,
+            VinylList::Wantlist => &wanted_recs,
+        };
+        let cells = self.vinyl_cells(tab, recs, sort, ascending);
+        for c in cells.iter() {
             if c.has_cover {
                 self.request_vinyl_cover(c.key);
             }
         }
-        // The user's Discogs wantlist page, for the section's own link out.
-        let wantlist_url = {
-            let u = self.config.discogs_username.trim();
-            (!u.is_empty()).then(|| format!("https://www.discogs.com/user/{u}/wants"))
-        };
 
         ui.add_space(4.0);
         // What the user asked of a cell (jump to the catalog, or a list edit).
@@ -1176,42 +1292,27 @@ impl App {
         }
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(4.0);
-            if owned.is_empty() {
-                let msg = if query.is_empty() {
-                    "Nothing in your Discogs collection yet."
-                } else if wanted.is_empty() {
-                    "No records match that search."
-                } else {
-                    "Nothing in your collection matches that search."
+            if cells.is_empty() {
+                // The other tab's count decides the wording: with a search on,
+                // "no records match" only holds if neither shelf has a hit.
+                let other = match tab {
+                    VinylList::Collection => wanted_recs.len(),
+                    VinylList::Wantlist => owned_recs.len(),
+                };
+                let msg = match (tab, query.is_empty(), other) {
+                    (VinylList::Collection, true, _) => "Nothing in your Discogs collection yet.",
+                    (VinylList::Wantlist, true, _) => "Nothing on your Discogs wantlist yet.",
+                    (_, false, 0) => "No records match that search.",
+                    (VinylList::Collection, false, _) => {
+                        "Nothing in your collection matches that search."
+                    }
+                    (VinylList::Wantlist, false, _) => {
+                        "Nothing on your wantlist matches that search."
+                    }
                 };
                 ui.label(egui::RichText::new(msg).weak());
-            } else if let Some(a) = self.vinyl_grid(ui, &owned) {
+            } else if let Some(a) = self.vinyl_grid(ui, &cells) {
                 action = Some(a);
-            }
-            // Wantlist: the same grid under its own header, so records you want
-            // read as a distinct shelf rather than blending into what you own.
-            if !wanted.is_empty() {
-                ui.add_space(18.0);
-                ui.horizontal(|ui| {
-                    ui.heading(format!("Wantlist ({})", wanted.len()));
-                    if let Some(url) = &wantlist_url {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .button("↗ Open in Discogs")
-                                .on_hover_note("Open your wantlist on discogs.com")
-                                .clicked()
-                            {
-                                open_url(url);
-                            }
-                        });
-                    }
-                });
-                ui.label(egui::RichText::new("Records you want but don't own yet.").weak());
-                ui.separator();
-                ui.add_space(4.0);
-                if let Some(a) = self.vinyl_grid(ui, &wanted) {
-                    action = Some(a);
-                }
             }
             ui.add_space(8.0);
         });

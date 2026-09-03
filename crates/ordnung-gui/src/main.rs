@@ -905,6 +905,11 @@ struct App {
     /// Count of cached vinyl records, for the sidebar label. Kept fresh on reload
     /// so the badge is right even when the grid isn't the active view.
     vinyl_count: u64,
+    /// Which shelf the vinyl view is showing: the collection or the wantlist.
+    /// They're two shelves of the same size, so they're tabs rather than one
+    /// stacked scroll — with a big collection, the wantlist was a long way down.
+    /// Not persisted: the view opens on what you own.
+    vinyl_tab: VinylList,
     /// Free-text filter for the vinyl view's search bar. Narrows both shelves by
     /// artist, title, year and format as you type. Not persisted: a search is
     /// about the record you're looking for right now, not a saved view.
