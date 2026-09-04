@@ -102,6 +102,18 @@ fn file_type(f: Format) -> u16 {
     }
 }
 
+/// Clamp a metadata string for the pdb row. A track row must fit one 4 KB
+/// page beside its ~0x88-byte header and paths; a pathological comment or
+/// title tag (liner notes pasted into a comment field) would otherwise
+/// overflow the page. CDJ browse screens show well under this many chars.
+fn clamp(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        s.chars().take(max_chars).collect()
+    }
+}
+
 /// Replace FAT-hostile characters and trim what FAT dislikes at the edges.
 fn sanitize_fat(name: &str) -> String {
     let cleaned: String = name
@@ -159,12 +171,13 @@ impl Intern {
         let Some(name) = name.map(str::trim).filter(|s| !s.is_empty()) else {
             return 0;
         };
-        if let Some(&id) = self.ids.get(name) {
+        let name = clamp(name, 300);
+        if let Some(&id) = self.ids.get(&name) {
             return id;
         }
         let id = self.rows.len() as u32 + 1;
-        self.ids.insert(name.to_string(), id);
-        self.rows.push((id, name.to_string()));
+        self.ids.insert(name.clone(), id);
+        self.rows.push((id, name));
         id
     }
 }
@@ -291,13 +304,15 @@ pub fn export_usb(
             date_added: date.clone(),
             analyze_path: format!("/PIONEER/USBANLZ/{anlz_dir}/ANLZ0000.DAT"),
             analyze_date: date.clone(),
-            comment: t.tags.comment.clone().unwrap_or_default(),
-            title: t
-                .tags
-                .title
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| stem.clone()),
+            comment: clamp(t.tags.comment.as_deref().unwrap_or(""), 500),
+            title: clamp(
+                t.tags
+                    .title
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(&stem),
+                300,
+            ),
             filename: name.clone(),
             file_path: usb_path.clone(),
         };
@@ -396,7 +411,7 @@ pub fn export_usb(
                 .unwrap_or(0),
             sort_order: id,
             is_folder: p.is_folder,
-            name: p.name.clone(),
+            name: clamp(&p.name, 300),
         });
         if !p.is_folder {
             let mut idx = 1u32;
