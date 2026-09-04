@@ -14,6 +14,10 @@
 //!    the whole onset envelope (linearly interpolated) and the period is fine-
 //!    searched around the coarse estimate. Aligning hundreds of beats over the
 //!    track pins the tempo to well under 0.5 BPM and yields the first downbeat.
+//! 4. **Sample-level grid lock** ([`lock_grid`]) — a kick-weighted onset flux at
+//!    ~1.5 ms resolution over the *full* track refines the period to sub-0.001
+//!    BPM (a static grid extrapolates any residual into audible creep) and
+//!    snaps the anchor onto the transient itself.
 
 use super::dsp::Spectrogram;
 
@@ -340,18 +344,23 @@ fn subtract_moving_average(env: &mut [f32], radius: usize) {
     }
 }
 
-// --- Anchor snapping -------------------------------------------------------
+// --- Grid locking against the samples --------------------------------------
 //
-// The comb lock above is derived from a 4096-sample STFT: it pins the *period*
-// to a fraction of a BPM, but its phase can only ever be as sharp as a hop, and
-// spectral flux peaks while a transient's energy is still climbing into the
-// window — so the anchor lands tens of milliseconds early even after the
-// window-centre correction. That's invisible on the overview and glaring on the
-// zoom lane, where the grid line should sit right on the kick.
+// The comb lock above is derived from a 4096-sample STFT over the analysis
+// window: it pins the *period* to a fraction of a BPM, but its phase can only
+// ever be as sharp as a hop, and spectral flux peaks while a transient's energy
+// is still climbing into the window — so the anchor lands tens of milliseconds
+// early even after the window-centre correction. And the fine period search is
+// a quantized grid (~0.03 BPM steps at club tempo) whose residual error, plus
+// the 0.01 BPM display rounding, extrapolates into visible creep on a static
+// grid: 0.02 BPM off at 124 puts the lines ~50 ms late by the end of a
+// six-minute track. Invisible on the overview, glaring on the zoom lane.
 //
 // So the last step leaves the spectrogram behind: re-derive an onset envelope
-// from the samples at ~1.5 ms resolution, and slide the anchor (period fixed)
-// to wherever the beats collect the most transient energy.
+// from the samples at ~1.5 ms resolution over the *whole* track, fine-search
+// the period against every beat of it (pivoting at the anchor, so a phase
+// error doesn't bias the period), then slide the anchor (period fixed) to
+// wherever the beats collect the most transient energy.
 
 /// Block hop / length of the fine onset envelope, in samples at the track's own
 /// rate. 64/256 at 44.1 kHz is ~1.5 ms resolution over a ~5.8 ms window — short
@@ -375,65 +384,112 @@ const SNAP_STEP_MS: f32 = 0.5;
 /// answer rather than inventing a sharper-looking wrong one.
 const SNAP_MIN_LIFT: f32 = 1.25;
 
+/// Fine period search around the comb's BPM, as a fraction of the period, and
+/// its step count. ±0.05% covers the frame-grid refine's quantization (~0.03 BPM
+/// at club tempo) with margin, while staying far inside the one-beat-slip alias
+/// (±1 beat over the track ≈ ±0.13% on a six-minute track); 120 steps land the
+/// residual under 0.001 BPM — sub-2 ms of creep over six minutes.
+const PERIOD_FRAC: f64 = 0.0005;
+const PERIOD_STEPS: i32 = 120;
+
+/// Like [`SNAP_MIN_LIFT`]: how far the winning period must stand above the
+/// average candidate before the refine is trusted over the comb's answer.
+const PERIOD_MIN_LIFT: f32 = 1.05;
+
+/// The sample-level onset envelope shared by the anchor snap and period refine:
+/// kick-weighted flux at [`SNAP_HOP`] resolution, addressed in milliseconds.
+struct FluxEnv {
+    flux: Vec<f32>,
+    /// Milliseconds per envelope index, and the offset of index 0. A block's
+    /// value is the energy *change* across the step, so it belongs midway
+    /// between the two windows' centres.
+    ms_per: f64,
+    ms_0: f64,
+}
+
+impl FluxEnv {
+    fn new(samples: &[f32], sample_rate: u32) -> Option<FluxEnv> {
+        if sample_rate == 0 || samples.len() < SNAP_WIN * 4 {
+            return None;
+        }
+        let sr = sample_rate as f32;
+        let flux = onset_flux(samples, sr);
+        if flux.len() < 8 {
+            return None;
+        }
+        Some(FluxEnv {
+            flux,
+            ms_per: SNAP_HOP as f64 / sr as f64 * 1000.0,
+            ms_0: (SNAP_WIN as f64 / 2.0 - SNAP_HOP as f64 / 2.0) / sr as f64 * 1000.0,
+        })
+    }
+
+    fn span_ms(&self) -> f64 {
+        self.flux.len() as f64 * self.ms_per + self.ms_0
+    }
+
+    fn at(&self, ms: f64) -> f32 {
+        let x = (ms - self.ms_0) / self.ms_per;
+        if x < 0.0 {
+            return 0.0;
+        }
+        let i = x as usize;
+        if i + 1 >= self.flux.len() {
+            return 0.0;
+        }
+        let f = (x - i as f64) as f32;
+        self.flux[i] * (1.0 - f) + self.flux[i + 1] * f
+    }
+
+    /// Mean flux under a beat comb: taps every `period_ms` from `offset_ms`,
+    /// starting at the first beat at/after zero so a negative candidate still
+    /// scores the same beats as its positive neighbours. Tap times come from
+    /// `k * period` in f64 — accumulating in f32 drifts milliseconds by minute
+    /// six, exactly the error being measured.
+    fn comb(&self, period_ms: f64, offset_ms: f64) -> f32 {
+        let span = self.span_ms();
+        let first = offset_ms - (offset_ms / period_ms).floor() * period_ms;
+        let mut sum = 0.0f32;
+        let mut k = 0u32;
+        loop {
+            let t = first + k as f64 * period_ms;
+            if t >= span {
+                break;
+            }
+            sum += self.at(t);
+            k += 1;
+        }
+        if k == 0 {
+            0.0
+        } else {
+            sum / k as f32
+        }
+    }
+}
+
 /// Slide `coarse_ms` (the comb's anchor) onto the nearest real transient, keeping
 /// `bpm` fixed. Searches ±half a beat, so the grid keeps the beats it locked —
 /// only their alignment moves. Returns `coarse_ms` unchanged when the audio
 /// gives the search nothing to lock onto.
 pub fn snap_anchor(samples: &[f32], sample_rate: u32, bpm: f32, coarse_ms: u64) -> u64 {
-    if bpm <= 0.0 || sample_rate == 0 || samples.len() < SNAP_WIN * 4 {
+    if bpm <= 0.0 {
         return coarse_ms;
     }
-    let sr = sample_rate as f32;
-    let flux = onset_flux(samples, sr);
-    if flux.len() < 8 {
-        return coarse_ms;
+    match FluxEnv::new(samples, sample_rate) {
+        Some(env) => snap_anchor_env(&env, bpm, coarse_ms),
+        None => coarse_ms,
     }
+}
 
-    // Milliseconds per envelope index, and the offset of index 0. A block's value
-    // is the energy *change* across the step, so it belongs midway between the two
-    // windows' centres.
-    let ms_per = SNAP_HOP as f32 / sr * 1000.0;
-    let ms_0 = (SNAP_WIN as f32 / 2.0 - SNAP_HOP as f32 / 2.0) / sr * 1000.0;
-    let at = |ms: f32| -> f32 {
-        let x = (ms - ms_0) / ms_per;
-        if x < 0.0 {
-            return 0.0;
-        }
-        let i = x as usize;
-        if i + 1 >= flux.len() {
-            return 0.0;
-        }
-        let f = x - i as f32;
-        flux[i] * (1.0 - f) + flux[i + 1] * f
-    };
-
-    let period_ms = 60_000.0 / bpm;
-    let span_ms = flux.len() as f32 * ms_per + ms_0;
-    let score = |offset: f32| -> f32 {
-        let mut sum = 0.0;
-        let mut n = 0u32;
-        // Start at the first beat at/after zero so a negative candidate still
-        // scores the same beats as its positive neighbours.
-        let mut t = offset - (offset / period_ms).floor() * period_ms;
-        while t < span_ms {
-            sum += at(t);
-            n += 1;
-            t += period_ms;
-        }
-        if n == 0 {
-            0.0
-        } else {
-            sum / n as f32
-        }
-    };
-
-    let steps = (period_ms / SNAP_STEP_MS).round().max(1.0) as i32;
-    let mut best = coarse_ms as f32;
+fn snap_anchor_env(env: &FluxEnv, bpm: f32, coarse_ms: u64) -> u64 {
+    let period_ms = 60_000.0 / bpm as f64;
+    let steps = (period_ms / SNAP_STEP_MS as f64).round().max(1.0) as i32;
+    let mut best = coarse_ms as f64;
     let mut best_score = f32::MIN;
     let mut total = 0.0f32;
     for k in -steps / 2..=steps / 2 {
-        let cand = coarse_ms as f32 + k as f32 * SNAP_STEP_MS;
-        let s = score(cand);
+        let cand = coarse_ms as f64 + k as f64 * SNAP_STEP_MS as f64;
+        let s = env.comb(period_ms, cand);
         total += s;
         if s > best_score {
             best_score = s;
@@ -450,6 +506,45 @@ pub fn snap_anchor(samples: &[f32], sample_rate: u32, bpm: f32, coarse_ms: u64) 
         ms += period_ms;
     }
     ms.round() as u64
+}
+
+/// Fine-search the period against every beat of the envelope, pivoting at
+/// `anchor_ms` (a phase error shifts all taps together, so it can't bias the
+/// period). Returns the comb's `bpm` unchanged when the score curve is too flat
+/// to trust — transient-free material has no peak, only noise.
+fn refine_period_env(env: &FluxEnv, bpm: f32, anchor_ms: u64) -> f32 {
+    let mut best = bpm as f64;
+    let mut best_score = f32::MIN;
+    let mut total = 0.0f32;
+    for k in -PERIOD_STEPS / 2..=PERIOD_STEPS / 2 {
+        let cand = bpm as f64 * (1.0 + 2.0 * PERIOD_FRAC * k as f64 / PERIOD_STEPS as f64);
+        let s = env.comb(60_000.0 / cand, anchor_ms as f64);
+        total += s;
+        if s > best_score {
+            best_score = s;
+            best = cand;
+        }
+    }
+    let mean = total / (PERIOD_STEPS + 1) as f32;
+    if !(best_score > mean * PERIOD_MIN_LIFT) {
+        return bpm;
+    }
+    best as f32
+}
+
+/// Lock the grid against the full track's samples: refine the comb's `bpm` to
+/// sub-0.001 BPM (see [`refine_period_env`]) and slide `coarse_ms` onto the
+/// nearest transient at the refined period. One flux envelope serves both.
+/// Falls back to the inputs when the audio gives the search nothing.
+pub fn lock_grid(samples: &[f32], sample_rate: u32, bpm: f32, coarse_ms: u64) -> (f32, u64) {
+    if bpm <= 0.0 {
+        return (bpm, coarse_ms);
+    }
+    let Some(env) = FluxEnv::new(samples, sample_rate) else {
+        return (bpm, coarse_ms);
+    };
+    let bpm = refine_period_env(&env, bpm, coarse_ms);
+    (bpm, snap_anchor_env(&env, bpm, coarse_ms))
 }
 
 /// Fine onset envelope for [`snap_anchor`]: positive change in short-block RMS,
@@ -564,6 +659,23 @@ mod tests {
                 "expected ~{target}, got {got}"
             );
         }
+    }
+
+    #[test]
+    fn lock_grid_removes_bpm_quantization_creep() {
+        // A 124.83 BPM click train with the coarse lock off by the frame-grid
+        // refine's quantization (~0.03 BPM). Over four minutes that alone puts
+        // the last beats ~35 ms off; the full-track period refine must recover
+        // the true tempo to a few thousandths of a BPM.
+        let sr = 44_100;
+        let s = click_train(sr, 124.83, 240);
+        let (bpm, anchor) = lock_grid(&s, sr, 124.86, 0);
+        assert!((bpm - 124.83).abs() < 0.005, "expected ~124.83, got {bpm}");
+        // The clicks start at t=0, so the snapped anchor stays at/near zero
+        // (or a whole beat in, if the snap walked past the track start).
+        let period = 60_000.0 / 124.83;
+        let frac = (anchor as f64 % period).min(period - anchor as f64 % period);
+        assert!(frac < 5.0, "anchor {anchor} ms is off-beat by {frac:.1} ms");
     }
 
     #[test]

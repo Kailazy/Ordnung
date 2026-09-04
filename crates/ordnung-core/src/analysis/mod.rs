@@ -86,7 +86,14 @@ use std::path::Path;
 ///     `tempo::snap_anchor` then slides the anchor onto the transient itself at
 ///     ~1.5 ms resolution. Measured 74 ms early → within ~3 ms
 ///     (`tests/grid_phase.rs`); tempo and downbeat phase are unchanged.
-pub const ANALYZER_VERSION: u32 = 20;
+/// v21: full-track period refine — the static grid's BPM is now fine-tuned
+///     against every beat of the whole track at sample resolution
+///     (`tempo::lock_grid`), not just the comb's 150 s frame-grid lock, whose
+///     ~0.03 BPM search quantization (plus 0.01 BPM rounding) extrapolated into
+///     visible creep: lines on the beat at the start of a six-minute track
+///     drifted ~50 ms off by the end. The grid also keeps the refined BPM at
+///     full precision (display still rounds); residual creep is under ~2 ms.
+pub const ANALYZER_VERSION: u32 = 21;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key
@@ -145,29 +152,24 @@ pub fn analyze_file(path: impl AsRef<Path>, params: AnalysisParams) -> Result<An
         0
     };
     let (bpm, beatgrid) = if tempo.bpm > 0.0 {
-        // The comb's anchor is only as sharp as an STFT hop; slide it onto the
-        // actual transient at sample resolution so grid lines sit on the kick.
-        let tempo = tempo::TempoResult {
-            beat_offset_ms: tempo::snap_anchor(
-                key_slice,
-                audio.sample_rate,
-                tempo.bpm,
-                tempo.beat_offset_ms,
-            ),
-            ..tempo
-        };
+        // Lock the grid against the *full* decoded track at sample resolution:
+        // refine the comb's period against every beat (its 150 s frame-grid lock
+        // is ~0.02 BPM coarse, which creeps ~50 ms of misalignment by the end of
+        // a six-minute track), then slide the anchor onto the actual transient
+        // so grid lines sit on the kick.
+        let (bpm, beat_offset_ms) = tempo::lock_grid(
+            &audio.samples,
+            audio.sample_rate,
+            tempo.bpm,
+            tempo.beat_offset_ms,
+        );
         // Which of the four beats starts the bar, so the grid's downbeats ("1")
         // land where rekordbox would put its red bar marker.
-        let phase = downbeat::detect_phase(&spec, tempo.bpm, tempo.beat_offset_ms);
+        let phase = downbeat::detect_phase(&spec, bpm, beat_offset_ms);
         let first_beat_number = ((BAR - phase % BAR) % BAR) + 1; // bar position of beat 0
         (
-            Some(tempo.bpm),
-            build_static_grid(
-                tempo.bpm,
-                tempo.beat_offset_ms,
-                duration_ms,
-                first_beat_number,
-            ),
+            Some(bpm),
+            build_static_grid(bpm, beat_offset_ms, duration_ms, first_beat_number),
         )
     } else {
         (None, Beatgrid::default())
