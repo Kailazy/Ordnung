@@ -2120,6 +2120,12 @@ impl App {
             };
             if !self.usb_loading {
                 ui.label(egui::RichText::new(format!("{} track(s)", self.rows.len())).weak());
+                // The instant pdb-built view is already browsable while the
+                // full file scan still runs behind it; say so quietly rather
+                // than blocking the table behind a spinner.
+                if self.usb_rx.is_some() {
+                    ui.label(egui::RichText::new("reading files…").weak().italics());
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui

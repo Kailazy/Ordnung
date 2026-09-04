@@ -416,7 +416,10 @@ fn thumbnail_png(bytes: &[u8], max_side: u32) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn format_from_ext(path: &Path) -> Format {
+/// Map a file extension to its [`Format`]. Public because the GUI's device
+/// fast path synthesizes rows from a rekordbox export's database (no audio
+/// touched) and still needs each row's format.
+pub fn format_from_ext(path: &Path) -> Format {
     match path
         .extension()
         .and_then(|x| x.to_str())

@@ -41,10 +41,11 @@ pub struct RbPlaylist {
     pub name: String,
 }
 
-/// One track row of the export, limited to what the read side consumes:
-/// identity, location, and the analysis summary the player itself shows
-/// (tempo and key) — so a stick browser can display what rekordbox analyzed
-/// without decoding a single audio file.
+/// One track row of the export — the full read-side slice: identity, location,
+/// the browse metadata a player lists (title/artist/album/genre, duration,
+/// bitrate) and the analysis summary it shows (tempo and key). This is what
+/// lets a stick open the way it does on a CDJ: everything below comes out of
+/// `export.pdb` alone, without decoding a single audio file.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RbTrack {
     /// File path as stored in the export (e.g. `/Contents/Artist/track.mp3`,
@@ -57,6 +58,25 @@ pub struct RbTrack {
     pub key: Option<String>,
     /// Title string from the row; empty when absent.
     pub title: String,
+    /// Artist name resolved through the Artists table.
+    pub artist: Option<String>,
+    /// Album name resolved through the Albums table.
+    pub album: Option<String>,
+    /// Genre name resolved through the Genres table.
+    pub genre: Option<String>,
+    /// Comment string from the row; empty when absent.
+    pub comment: String,
+    /// Cover-art image file resolved through the Artwork table — a small JPEG
+    /// under `/PIONEER/ARTWORK/…`, absolute from the volume root.
+    pub artwork_path: Option<String>,
+    /// Duration in whole seconds, as stored.
+    pub duration_s: u16,
+    /// Bitrate in kbps, as stored. `0` when unknown.
+    pub bitrate_kbps: u32,
+    /// Sample rate in Hz, as stored. `0` when unknown.
+    pub sample_rate_hz: u32,
+    /// Release year, as stored. `0` when unknown.
+    pub year: u16,
     /// The track's ANLZ analysis file (beatgrid, cues, waveforms), as stored —
     /// e.g. `/PIONEER/USBANLZ/P016/0000B5/ANLZ0000.DAT`. Not parsed here yet;
     /// carried so a caller (or the Phase 5 round-trip) can find it.
@@ -87,9 +107,13 @@ pub struct RbExport {
 
 // Table/page type ids (DeviceSQL `PageType`).
 const TYPE_TRACKS: u32 = 0;
+const TYPE_GENRES: u32 = 1;
+const TYPE_ARTISTS: u32 = 2;
+const TYPE_ALBUMS: u32 = 3;
 const TYPE_KEYS: u32 = 5;
 const TYPE_PLAYLIST_TREE: u32 = 7;
 const TYPE_PLAYLIST_ENTRIES: u32 = 8;
+const TYPE_ARTWORK: u32 = 13;
 
 /// Byte size of a page header; the row heap starts right after it.
 const PAGE_HEADER: usize = 0x28;
@@ -125,10 +149,16 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
     let mut out = RbExport::default();
     // playlist id → (entry_index, track_id), sorted after collection.
     let mut raw_entries: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
-    // Key resolution is a post-pass: the Keys table may come after Tracks in
-    // the table list, so rows carry their key *id* until both are read.
+    // Name resolution is a post-pass: the interned-name tables (keys, artists,
+    // albums, genres, artwork) may come after Tracks in the table list, so
+    // rows carry their *ids* until every table is read.
     let mut key_names: HashMap<u32, String> = HashMap::new();
-    let mut track_key_ids: HashMap<u32, u32> = HashMap::new();
+    let mut artist_names: HashMap<u32, String> = HashMap::new();
+    let mut album_names: HashMap<u32, String> = HashMap::new();
+    let mut genre_names: HashMap<u32, String> = HashMap::new();
+    let mut artwork_paths: HashMap<u32, String> = HashMap::new();
+    // track id → (key_id, artist_id, album_id, genre_id, artwork_id).
+    let mut track_refs: HashMap<u32, [u32; 5]> = HashMap::new();
 
     for t in 0..num_tables {
         let base = 0x1C + t * 16;
@@ -137,7 +167,14 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
         };
         if !matches!(
             page_type,
-            TYPE_TRACKS | TYPE_KEYS | TYPE_PLAYLIST_TREE | TYPE_PLAYLIST_ENTRIES
+            TYPE_TRACKS
+                | TYPE_GENRES
+                | TYPE_ARTISTS
+                | TYPE_ALBUMS
+                | TYPE_KEYS
+                | TYPE_PLAYLIST_TREE
+                | TYPE_PLAYLIST_ENTRIES
+                | TYPE_ARTWORK
         ) {
             continue;
         }
@@ -164,23 +201,37 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
                         let Some(file_path) = dsql_string(data, row + rel as usize) else {
                             continue;
                         };
-                        if let Some(key_id) = u32_at(data, row + 0x20).filter(|k| *k != 0) {
-                            track_key_ids.insert(id, key_id);
-                        }
-                        let title = u16_at(data, row + 0x80)
-                            .and_then(|rel| dsql_string(data, row + rel as usize))
-                            .unwrap_or_default();
-                        let analyze_path = u16_at(data, row + 0x7A)
-                            .and_then(|rel| dsql_string(data, row + rel as usize))
-                            .filter(|s| !s.is_empty());
+                        track_refs.insert(
+                            id,
+                            [
+                                u32_at(data, row + 0x20).unwrap_or(0), // key
+                                u32_at(data, row + 0x44).unwrap_or(0), // artist
+                                u32_at(data, row + 0x40).unwrap_or(0), // album
+                                u32_at(data, row + 0x3C).unwrap_or(0), // genre
+                                u32_at(data, row + 0x1C).unwrap_or(0), // artwork
+                            ],
+                        );
+                        let string_at = |idx: usize| {
+                            u16_at(data, row + 0x5E + 2 * idx)
+                                .and_then(|rel| dsql_string(data, row + rel as usize))
+                        };
                         out.tracks.insert(
                             id,
                             RbTrack {
                                 file_path,
                                 tempo_centi_bpm: u32_at(data, row + 0x38).unwrap_or(0),
                                 key: None,
-                                title,
-                                analyze_path,
+                                title: string_at(17).unwrap_or_default(),
+                                artist: None,
+                                album: None,
+                                genre: None,
+                                comment: string_at(16).unwrap_or_default(),
+                                artwork_path: None,
+                                duration_s: u16_at(data, row + 0x54).unwrap_or(0),
+                                bitrate_kbps: u32_at(data, row + 0x30).unwrap_or(0),
+                                sample_rate_hz: u32_at(data, row + 0x08).unwrap_or(0),
+                                year: u16_at(data, row + 0x50).unwrap_or(0),
+                                analyze_path: string_at(14).filter(|s| !s.is_empty()),
                             },
                         );
                     }
@@ -191,6 +242,55 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
                         };
                         if let Some(name) = dsql_string(data, row + 8) {
                             key_names.insert(id, name);
+                        }
+                    }
+                    TYPE_GENRES => {
+                        // Genre row: id u32 @0, name @4.
+                        let Some(id) = u32_at(data, row) else {
+                            continue;
+                        };
+                        if let Some(name) = dsql_string(data, row + 4) {
+                            genre_names.insert(id, name);
+                        }
+                    }
+                    TYPE_ARTISTS => {
+                        // Artist row: subtype u16 @0 (0x60 near / 0x64 far),
+                        // index_shift u16 @2, id u32 @4, unknown u8 @8, name
+                        // offset u8 @9 — or u16 @0xA when subtype is 0x64 and
+                        // the name sits beyond a u8's reach.
+                        let (Some(subtype), Some(id)) = (u16_at(data, row), u32_at(data, row + 4))
+                        else {
+                            continue;
+                        };
+                        let ofs = if subtype == 0x64 {
+                            u16_at(data, row + 0x0A).map(|o| o as usize)
+                        } else {
+                            data.get(row + 9).map(|o| *o as usize)
+                        };
+                        if let Some(name) = ofs.and_then(|o| dsql_string(data, row + o)) {
+                            artist_names.insert(id, name);
+                        }
+                    }
+                    TYPE_ALBUMS => {
+                        // Album row: subtype u16 @0, index_shift u16 @2,
+                        // unknown u32 @4, artist_id u32 @8, id u32 @0xC,
+                        // unknown u32 @0x10, unknown u8 @0x14, name offset
+                        // u8 @0x15.
+                        let (Some(id), Some(ofs)) = (u32_at(data, row + 0x0C), data.get(row + 0x15))
+                        else {
+                            continue;
+                        };
+                        if let Some(name) = dsql_string(data, row + *ofs as usize) {
+                            album_names.insert(id, name);
+                        }
+                    }
+                    TYPE_ARTWORK => {
+                        // Artwork row: id u32 @0, image path @4.
+                        let Some(id) = u32_at(data, row) else {
+                            continue;
+                        };
+                        if let Some(path) = dsql_string(data, row + 4) {
+                            artwork_paths.insert(id, path);
                         }
                     }
                     TYPE_PLAYLIST_TREE => {
@@ -232,12 +332,24 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
         }
     }
 
-    // Resolve key ids into names now that both tables are read. A dangling id
-    // simply leaves `key` empty — same posture as every other bad row.
-    for (track_id, key_id) in track_key_ids {
-        if let (Some(track), Some(name)) = (out.tracks.get_mut(&track_id), key_names.get(&key_id))
-        {
-            track.key = Some(name.clone());
+    // Resolve interned ids into names now that every table is read. A
+    // dangling or zero id simply leaves the field empty — same posture as
+    // every other bad row. Empty interned names count as absent, so a track
+    // with no artist reads as `None` rather than `Some("")`.
+    let lookup = |map: &HashMap<u32, String>, id: u32| {
+        (id != 0)
+            .then(|| map.get(&id))
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .cloned()
+    };
+    for (track_id, [key, artist, album, genre, artwork]) in track_refs {
+        if let Some(track) = out.tracks.get_mut(&track_id) {
+            track.key = lookup(&key_names, key);
+            track.artist = lookup(&artist_names, artist);
+            track.album = lookup(&album_names, album);
+            track.genre = lookup(&genre_names, genre);
+            track.artwork_path = lookup(&artwork_paths, artwork);
         }
     }
 

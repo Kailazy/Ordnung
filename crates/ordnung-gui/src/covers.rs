@@ -21,10 +21,24 @@ impl App {
         if self.cover_cache.contains_key(&id) {
             return;
         }
+        // The embedded-art thumbnail from the file scan when it has run;
+        // otherwise the pre-extracted JPEG the rekordbox export ships under
+        // PIONEER/ARTWORK — the same image a CDJ shows, and how the instant
+        // pdb-built view has covers before any audio file has been read.
+        // (These artwork files are small; the read-and-decode runs once per
+        // visible row, like the embedded path.)
         let tex = usb_track_index(id)
-            .and_then(|i| self.usb_tracks.get(i))
-            .and_then(|t| t.cover_thumb.as_deref())
-            .and_then(|png| decode_thumb(ctx, id, 0, png))
+            .and_then(|i| {
+                let embedded = self
+                    .usb_tracks
+                    .get(i)
+                    .and_then(|t| t.cover_thumb.clone());
+                embedded.or_else(|| {
+                    let path = self.usb_pdb_info.get(&i)?.artwork_path.as_ref()?;
+                    std::fs::read(path).ok()
+                })
+            })
+            .and_then(|bytes| decode_thumb(ctx, id, 0, &bytes))
             .map(|h| self.tex_graveyard.wrap(h));
         self.cover_cache.insert(id, ThumbState::Ready(tex));
     }

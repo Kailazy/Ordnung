@@ -658,20 +658,36 @@ impl App {
                 self.usb_volumes = ordnung_core::usb::detect_volumes();
             }
         }
-        // Adopt a finished scan; results are tagged with their volume so a
+        // Adopt finished scans; results are tagged with their volume so a
         // stale scan (user already switched sticks) can't fill the wrong view.
-        if let Some(rx) = &self.usb_rx {
-            if let Ok(scan) = rx.try_recv() {
-                self.usb_loading = false;
+        // A rekordbox stick sends two: the instant pdb-built view first (the
+        // CDJ path), then the full file scan that replaces it — so the loop
+        // drains everything pending and the channel closes only on `complete`.
+        while let Some(rx) = &self.usb_rx {
+            let Ok(scan) = rx.try_recv() else { break };
+            self.usb_loading = false;
+            if scan.complete {
                 self.usb_rx = None;
-                if self.usb_loaded_for.as_deref() == Some(scan.vol.as_path()) {
-                    self.usb_tracks = scan.tracks;
-                    self.usb_playlists = scan.playlists;
-                    self.usb_playlist_tracks = scan.playlist_tracks;
-                    self.usb_pdb_info = scan.pdb_info;
-                    // Build the table rows for whatever USB view is showing.
-                    self.reload();
-                }
+            }
+            if self.usb_loaded_for.as_deref() == Some(scan.vol.as_path()) {
+                // Indices shift between the pdb view and the file scan (extra
+                // files appear, missing ones drop), so carry the selection
+                // across by path, and drop the synthetic-id texture cache —
+                // the same index may now be a different track.
+                let selected_path = self
+                    .usb_selected
+                    .and_then(|i| self.usb_tracks.get(i))
+                    .map(|t| t.source_path.clone());
+                self.usb_tracks = scan.tracks;
+                self.usb_playlists = scan.playlists;
+                self.usb_playlist_tracks = scan.playlist_tracks;
+                self.usb_pdb_info = scan.pdb_info;
+                self.usb_selected = selected_path.and_then(|p| {
+                    self.usb_tracks.iter().position(|t| t.source_path == p)
+                });
+                self.cover_cache.retain(|id, _| *id < USB_ID_BASE);
+                // Build the table rows for whatever USB view is showing.
+                self.reload();
             }
         }
         // The scan cache lives as long as its volume stays mounted — hopping
@@ -712,6 +728,13 @@ impl App {
         self.usb_rx = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
+            // Stage 1, the CDJ path: rows straight out of export.pdb, in
+            // milliseconds. Stage 2 is the real file scan, which replaces
+            // them with tag-read rows (and finds files the pdb doesn't list).
+            if let Some(quick) = read_usb_pdb(&vol) {
+                let _ = tx.send(quick);
+                ctx.request_repaint();
+            }
             let _ = tx.send(scan_usb_volume(vol));
             ctx.request_repaint();
         });
@@ -799,8 +822,11 @@ impl App {
                     source_path: PathBuf::from(&t.source_path),
                     // The scan already extracted the file's embedded art into
                     // `cover_thumb`; the cover cell decodes it straight from
-                    // there (see `load_usb_thumb`) instead of the catalog.
-                    has_cover: t.cover_thumb.is_some(),
+                    // there (see `load_usb_thumb`) instead of the catalog. On
+                    // the instant pdb-built view the export's pre-extracted
+                    // ARTWORK JPEG stands in until the file scan lands.
+                    has_cover: t.cover_thumb.is_some()
+                        || pdb.is_some_and(|p| p.artwork_path.is_some()),
                     has_external_cover: false,
                     dur_ms: Some(t.properties.duration_ms),
                     bpm_val,
@@ -2701,6 +2727,97 @@ impl eframe::App for App {
 /// pdb path to a scanned track. FAT32 is case-insensitive, so paths match on
 /// the lowercased volume-relative form; entries whose file wasn't found (or
 /// failed to scan) drop out of the playlist rather than showing as dead rows.
+/// The CDJ path: build a browsable device view from `export.pdb` alone, in
+/// milliseconds, without touching a single audio file. This is exactly how a
+/// player opens a stick instantly — every listed field (title, artist, album,
+/// genre, BPM, key, duration, bitrate, playlists, even cover art via the
+/// pre-extracted `PIONEER/ARTWORK` JPEGs) was written into the database at
+/// export time. The full file scan then runs behind it and *replaces* these
+/// rows with real tag reads (see the two-stage send in `poll_usb`'s worker).
+///
+/// `None` when the stick has no rekordbox export — a plain stick has no fast
+/// path and pays the file scan as before.
+pub(crate) fn read_usb_pdb(vol: &Path) -> Option<UsbScan> {
+    let pdb = vol.join("PIONEER").join("rekordbox").join("export.pdb");
+    let export = ordnung_rbdb::pdb::read_export(&pdb).ok()?;
+    if export.tracks.is_empty() {
+        return None;
+    }
+
+    // Synthesize the same shape the file scan produces, so everything
+    // downstream (rows, selection, preview, playlists) works unchanged.
+    let mut ids: Vec<u32> = export.tracks.keys().copied().collect();
+    ids.sort_by(|a, b| export.tracks[a].file_path.cmp(&export.tracks[b].file_path));
+    let mut tracks = Vec::with_capacity(ids.len());
+    let mut pdb_info = HashMap::new();
+    let mut index_by_id: HashMap<u32, usize> = HashMap::new();
+    for id in ids {
+        let t = &export.tracks[&id];
+        let abs = vol.join(t.file_path.trim_start_matches('/'));
+        let mut tags = ordnung_core::model::Tags::default();
+        tags.title = (!t.title.is_empty()).then(|| t.title.clone());
+        tags.artist = t.artist.clone();
+        tags.album = t.album.clone();
+        tags.genre = t.genre.clone();
+        tags.comment = (!t.comment.is_empty()).then(|| t.comment.clone());
+        tags.year = (t.year != 0).then_some(t.year);
+        let i = tracks.len();
+        index_by_id.insert(id, i);
+        pdb_info.insert(
+            i,
+            UsbPdbInfo {
+                bpm: t.bpm(),
+                key: t.key.clone(),
+                artwork_path: t
+                    .artwork_path
+                    .as_ref()
+                    .map(|p| vol.join(p.trim_start_matches('/'))),
+            },
+        );
+        tracks.push(ScannedTrack {
+            source_path: abs.to_string_lossy().into_owned(),
+            format: scan::format_from_ext(&abs),
+            properties: ordnung_core::model::AudioProperties {
+                sample_rate_hz: t.sample_rate_hz,
+                bit_depth: None,
+                channels: 0,
+                duration_ms: u64::from(t.duration_s) * 1000,
+                bitrate_kbps: (t.bitrate_kbps != 0).then_some(t.bitrate_kbps),
+            },
+            tags,
+            cover_thumb: None,
+            fingerprint: None,
+            src_size: None,
+            src_mtime: None,
+        });
+    }
+
+    // Playlists resolve by track id directly — no path matching needed when
+    // both sides come from the same database.
+    let mut playlist_tracks: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (playlist, track_ids) in &export.entries {
+        let indices: Vec<usize> = track_ids
+            .iter()
+            .filter_map(|tid| index_by_id.get(tid).copied())
+            .collect();
+        playlist_tracks.insert(*playlist, indices);
+    }
+    for p in &export.playlists {
+        if !p.is_folder {
+            playlist_tracks.entry(p.id).or_default();
+        }
+    }
+
+    Some(UsbScan {
+        vol: vol.to_path_buf(),
+        tracks,
+        playlists: export.playlists,
+        playlist_tracks,
+        pdb_info,
+        complete: false,
+    })
+}
+
 pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
     let files = scan::discover(&vol);
     // Tag reads are per-file and independent; rayon keeps a big stick from
@@ -2762,8 +2879,12 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
                     let info = UsbPdbInfo {
                         bpm: t.bpm(),
                         key: t.key.clone(),
+                        artwork_path: t
+                            .artwork_path
+                            .as_ref()
+                            .map(|p| vol.join(p.trim_start_matches('/'))),
                     };
-                    if info.bpm.is_some() || info.key.is_some() {
+                    if info.bpm.is_some() || info.key.is_some() || info.artwork_path.is_some() {
                         pdb_info.insert(i, info);
                     }
                 }
@@ -2776,6 +2897,7 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
         playlists,
         playlist_tracks,
         pdb_info,
+        complete: true,
     }
 }
 
@@ -2841,5 +2963,54 @@ mod usb_scan_tests {
             .collect();
         assert_eq!(bpms, vec![Some(124.0), Some(130.11), Some(130.3)]);
         let _ = std::fs::remove_dir_all(&vol);
+    }
+
+    /// The CDJ path: a rekordbox stick opens instantly from its pdb — every
+    /// row listed with title/artist/duration and the player's BPM, playlists
+    /// resolved by track id — before a single audio file has been read. (This
+    /// stick has NO audio files at all, which is the proof.)
+    #[test]
+    fn pdb_fast_path_builds_the_full_view_without_reading_audio() {
+        let vol = std::env::temp_dir().join("ordnung-fake-usb-pdb-test");
+        let _ = std::fs::remove_dir_all(&vol);
+        let rb = vol.join("PIONEER/rekordbox");
+        std::fs::create_dir_all(&rb).unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../ordnung-rbdb/tests/fixtures/num_rows_export.pdb");
+        std::fs::copy(fixture, rb.join("export.pdb")).unwrap();
+
+        let scan = read_usb_pdb(&vol).expect("rekordbox stick has a fast path");
+        assert!(!scan.complete, "the pdb view is stage 1, not the final scan");
+        assert_eq!(scan.tracks.len(), 3886);
+        assert_eq!(scan.playlists.len(), 104);
+        // Full playlist resolution straight from the database — the file scan
+        // could only ever resolve files that exist, but the pdb lists all 65.
+        assert_eq!(scan.playlist_tracks[&11].len(), 65);
+
+        // Spot-check one synthesized row against the fixture's known values.
+        let i = scan
+            .tracks
+            .iter()
+            .position(|t| t.tags.artist.as_deref() == Some("Andreas Gehm"))
+            .expect("fixture row present");
+        let t = &scan.tracks[i];
+        assert_eq!(t.tags.album.as_deref(), Some("The Worst of Gehm"));
+        assert_eq!(t.tags.year, Some(2017));
+        assert_eq!(t.properties.duration_ms, 385_000);
+        assert_eq!(t.properties.bitrate_kbps, Some(320));
+        let info = scan.pdb_info.get(&i).expect("analysis summary");
+        assert_eq!(info.bpm, Some(119.0));
+        assert!(info
+            .artwork_path
+            .as_ref()
+            .is_some_and(|p| p.ends_with("PIONEER/Artwork/00001/a1.jpg")));
+
+        // A plain stick has no fast path.
+        let plain = std::env::temp_dir().join("ordnung-fake-usb-plain-test");
+        let _ = std::fs::remove_dir_all(&plain);
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(read_usb_pdb(&plain).is_none());
+        let _ = std::fs::remove_dir_all(&vol);
+        let _ = std::fs::remove_dir_all(&plain);
     }
 }

@@ -1527,6 +1527,11 @@ struct UsbScan {
     /// Index into `tracks` → what the stick's own `export.pdb` says rekordbox
     /// analyzed for that file. See [`UsbPdbInfo`].
     pdb_info: HashMap<usize, UsbPdbInfo>,
+    /// Whether this is the final result. A rekordbox stick sends two scans:
+    /// an instant one built from `export.pdb` alone (the CDJ path — rows in
+    /// milliseconds, nothing decoded), then the full file scan that enriches
+    /// them with real tags and embedded art. `false` marks the first.
+    complete: bool,
 }
 
 /// The analysis summary a rekordbox export carries per track — what the
@@ -1539,6 +1544,9 @@ struct UsbPdbInfo {
     /// Key name from the pdb Keys table, in whatever notation rekordbox
     /// exported ("Am", "8A", "1d", …).
     key: Option<String>,
+    /// The pre-extracted cover JPEG under `PIONEER/ARTWORK`, absolute on the
+    /// mounted volume — how a CDJ shows art without touching the audio file.
+    artwork_path: Option<PathBuf>,
 }
 
 /// USB tracks aren't catalog rows, but the shared table needs an `Id` per row.

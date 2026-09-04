@@ -104,6 +104,35 @@ fn large_export_matches_rekordcrate() {
             assert!(!k.is_empty() && k.len() <= 8, "implausible key name {k:?}");
         }
     }
+
+    // The browse metadata that lets a stick open CDJ-style — straight out of
+    // the pdb, no audio decoded. Spot values verified against the fixture.
+    let t1 = &ex.tracks[&1];
+    assert_eq!(t1.artist.as_deref(), Some("Andreas Gehm"));
+    assert_eq!(t1.album.as_deref(), Some("The Worst of Gehm"));
+    assert_eq!(t1.genre.as_deref(), Some("#beatdown #acid #house"));
+    assert_eq!(t1.duration_s, 385);
+    assert_eq!(t1.bitrate_kbps, 320);
+    assert_eq!(t1.sample_rate_hz, 44100);
+    assert_eq!(t1.year, 2017);
+    assert_eq!(
+        t1.artwork_path.as_deref(),
+        Some("/PIONEER/Artwork/00001/a1.jpg")
+    );
+    // And at scale: every track has an artist (the far-offset artist-row form
+    // included), most have genre/album, and durations stay plausible.
+    let with_artist = ex.tracks.values().filter(|t| t.artist.is_some()).count();
+    assert_eq!(with_artist, 3886);
+    let with_genre = ex.tracks.values().filter(|t| t.genre.is_some()).count();
+    assert!(with_genre > 3500, "only {with_genre} genres");
+    let with_album = ex.tracks.values().filter(|t| t.album.is_some()).count();
+    assert!(with_album > 2500, "only {with_album} albums");
+    let plausible_dur = ex
+        .tracks
+        .values()
+        .filter(|t| (30..7200).contains(&t.duration_s))
+        .count();
+    assert!(plausible_dur > 3800, "only {plausible_dur} plausible durations");
 }
 
 #[test]
