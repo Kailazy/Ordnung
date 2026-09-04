@@ -10,6 +10,12 @@ as authoritative and validate every byte against a real rekordbox-produced expor
 
 ## Canonical references
 
+- **`docs/rekordbox-export-structure.md`** — our own byte-level dissection of a
+  real rekordbox 7.2.2 export (EYEBAGS stick, 2026-09-04): full field maps,
+  identifications DS leaves unknown (masterContentId/fileType/update-counter
+  fields in track rows, page bookkeeping semantics, free_size formula, PQT2/
+  PWVC/PVB2 sections, exportExt = My Tag, full DLP schema), and a Phase 5
+  writer checklist. Read it FIRST when writing export bytes.
 - **Deep Symmetry djl-analysis** — the authoritative reverse-engineered docs for
   `export.pdb` and ANLZ: https://djl-analysis.deepsymmetry.org/
 - **rekordcrate** (Rust, `binrw` read/write of DeviceSQL/PDB):
