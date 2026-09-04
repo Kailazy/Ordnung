@@ -2139,14 +2139,14 @@ impl App {
         }
         self.show_col_filter_popup(&ctx_clone);
 
-        // Hand the visible rows' missing covers to the worker thread. No per-frame
+        // Hand the visible rows' missing covers to a worker thread. No per-frame
         // cap is needed — only on-screen rows enqueue, and the disk read + decode
         // run off the UI thread, so even flinging the scrollbar stays smooth.
-        // USB rows bypass the worker (it reads the catalog, which they aren't
-        // in): their art was already pulled off the device by the scan.
+        // USB rows go to their own loader (the catalog one can't serve tracks
+        // that aren't in the catalog), but on the same terms: off the UI thread.
         for id in needs_cover_load {
             if is_usb && usb_track_index(id).is_some() {
-                self.load_usb_thumb(&ctx_clone, id);
+                self.request_usb_thumb(id);
             } else {
                 self.request_thumb(id);
             }

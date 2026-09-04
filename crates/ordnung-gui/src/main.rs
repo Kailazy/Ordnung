@@ -657,6 +657,31 @@ enum JobMsg {
 struct CoverLoaded {
     id: Id,
     image: Option<egui::ColorImage>,
+    /// Set only for USB loads: the device listing the request was made against.
+    /// `None` from the catalog loader, whose ids are stable rowids.
+    usb_generation: Option<u64>,
+}
+
+/// Where a USB row's cover art comes from. Resolved on the UI thread (a map
+/// lookup) and handed to the loader, so the worker never reaches into `App`
+/// state that the UI thread is concurrently mutating.
+enum UsbThumbSource {
+    /// The file scan already extracted the embedded art.
+    Embedded(Vec<u8>),
+    /// Nothing scanned yet: the export's pre-extracted ARTWORK JPEG on the
+    /// device stands in. This is the read that has to stay off the UI thread —
+    /// it hits the stick.
+    File(PathBuf),
+}
+
+/// One USB cover to load, with its source already resolved.
+struct UsbThumbReq {
+    id: Id,
+    source: UsbThumbSource,
+    /// Which device listing this was asked for. USB ids are `BASE + index`, so
+    /// index 5 on the next stick reuses index 5's id on this one — without this
+    /// an in-flight decode could land on an unrelated row after a swap.
+    generation: u64,
 }
 
 /// Identity of one vinyl cover: which Discogs list it belongs to and that list's
@@ -946,6 +971,12 @@ struct App {
     /// Sends a track id to the persistent thumbnail worker, asking it to load and
     /// decode that row's small cover off the UI thread.
     thumb_req_tx: Sender<Id>,
+    /// Request channel for USB row covers. Separate from `thumb_req_tx` because
+    /// the source is a device path or scanned bytes, not a catalog id.
+    usb_thumb_req_tx: Sender<UsbThumbReq>,
+    /// Bumped every time `usb_tracks` is replaced; stamped on each USB cover
+    /// request so results from a previous device are dropped on arrival.
+    usb_generation: u64,
     /// Receives finished thumbnail decodes from the worker; drained each frame by
     /// `poll_thumbs`, which uploads the texture (a UI-thread-only op) and caches it.
     thumb_rx: Receiver<CoverLoaded>,

@@ -31,7 +31,15 @@ impl App {
         // thumbnail and the disk read + PNG decode stay off the UI thread.
         let (thumb_req_tx, thumb_req_rx) = mpsc::channel::<Id>();
         let (thumb_tx, thumb_rx) = mpsc::channel();
+        let thumb_tx_usb = thumb_tx.clone();
         spawn_thumb_loader(db_path.clone(), egui_ctx.clone(), thumb_req_rx, thumb_tx);
+        // USB rows can't go through that loader (it reads the catalog, which
+        // device tracks aren't in), but they need the same off-thread treatment:
+        // their art lives on the stick, where a read costs milliseconds. Shares
+        // the `thumb_tx` sink so finished decodes land in `poll_thumbs` with the
+        // catalog path's.
+        let (usb_thumb_req_tx, usb_thumb_req_rx) = mpsc::channel::<UsbThumbReq>();
+        spawn_usb_thumb_loader(egui_ctx.clone(), usb_thumb_req_rx, thumb_tx_usb);
         // A second long-lived loader for vinyl cover art (collection + wantlist),
         // keyed by list and that list's row id.
         let (vinyl_cover_req_tx, vinyl_cover_req_rx) = mpsc::channel::<VinylCoverKey>();
@@ -96,6 +104,8 @@ impl App {
             load_error: None,
             cover_cache: HashMap::new(),
             thumb_req_tx,
+            usb_thumb_req_tx,
+            usb_generation: 0,
             thumb_rx,
             cover_full_cache: HashMap::new(),
             cover_inflight: HashSet::new(),
@@ -678,6 +688,7 @@ impl App {
                     .and_then(|i| self.usb_tracks.get(i))
                     .map(|t| t.source_path.clone());
                 self.usb_tracks = scan.tracks;
+                self.usb_generation = self.usb_generation.wrapping_add(1);
                 self.usb_playlists = scan.playlists;
                 self.usb_playlist_tracks = scan.playlist_tracks;
                 self.usb_pdb_info = scan.pdb_info;
@@ -706,6 +717,8 @@ impl App {
         if let Some(loaded) = self.usb_loaded_for.clone() {
             if !self.usb_volumes.iter().any(|v| v.path == loaded) {
                 self.usb_tracks = Vec::new();
+        self.usb_generation = self.usb_generation.wrapping_add(1);
+                self.usb_generation = self.usb_generation.wrapping_add(1);
                 self.usb_playlists = Vec::new();
                 self.usb_playlist_tracks = HashMap::new();
                 self.usb_pdb_info = HashMap::new();

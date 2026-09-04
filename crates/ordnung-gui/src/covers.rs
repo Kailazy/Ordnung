@@ -13,11 +13,17 @@ impl App {
         let _ = self.thumb_req_tx.send(id);
     }
 
-    /// Cache a USB row's cover straight from the scanned track's in-memory
-    /// thumbnail PNG — device tracks aren't in the catalog, so the worker (a
-    /// catalog reader) can't serve them. The decode is a small downscaled PNG
-    /// and only runs once per visible row, so doing it on the UI thread is fine.
-    pub(crate) fn load_usb_thumb(&mut self, ctx: &egui::Context, id: Id) {
+    /// Queue a USB row's cover for loading. Device tracks aren't in the catalog,
+    /// so the catalog worker can't serve them; they get their own loader
+    /// instead (see [`spawn_usb_thumb_loader`]).
+    ///
+    /// Only the *source* is resolved here — a map lookup — and the read and
+    /// decode happen on the worker. Doing them inline was the cause of the USB
+    /// list's scroll stutter: reading art off a stick costs 2-10 ms per row, so
+    /// a fling that revealed 20-30 rows spent 50-200 ms in a single frame.
+    /// Marks the entry `Loading` like `request_thumb`, so a row that is still
+    /// decoding doesn't re-enqueue on every frame.
+    pub(crate) fn request_usb_thumb(&mut self, id: Id) {
         if self.cover_cache.contains_key(&id) {
             return;
         }
@@ -25,28 +31,45 @@ impl App {
         // otherwise the pre-extracted JPEG the rekordbox export ships under
         // PIONEER/ARTWORK — the same image a CDJ shows, and how the instant
         // pdb-built view has covers before any audio file has been read.
-        // (These artwork files are small; the read-and-decode runs once per
-        // visible row, like the embedded path.)
-        let tex = usb_track_index(id)
-            .and_then(|i| {
-                let embedded = self
-                    .usb_tracks
-                    .get(i)
-                    .and_then(|t| t.cover_thumb.clone());
-                embedded.or_else(|| {
-                    let path = self.usb_pdb_info.get(&i)?.artwork_path.as_ref()?;
-                    std::fs::read(path).ok()
-                })
-            })
-            .and_then(|bytes| decode_thumb(ctx, id, 0, &bytes))
-            .map(|h| self.tex_graveyard.wrap(h));
-        self.cover_cache.insert(id, ThumbState::Ready(tex));
+        let source = usb_track_index(id).and_then(|i| {
+            match self.usb_tracks.get(i).and_then(|t| t.cover_thumb.clone()) {
+                Some(bytes) => Some(UsbThumbSource::Embedded(bytes)),
+                None => self
+                    .usb_pdb_info
+                    .get(&i)
+                    .and_then(|p| p.artwork_path.clone())
+                    .map(UsbThumbSource::File),
+            }
+        });
+        // No art at all: settle it now rather than leaving the row `Loading`
+        // forever and re-resolving it every frame.
+        let Some(source) = source else {
+            self.cover_cache.insert(id, ThumbState::Ready(None));
+            return;
+        };
+        self.cover_cache.insert(id, ThumbState::Loading);
+        let _ = self.usb_thumb_req_tx.send(UsbThumbReq {
+            id,
+            source,
+            generation: self.usb_generation,
+        });
     }
 
     /// Drain finished thumbnail decodes from the worker, uploading each to a GPU
     /// texture (a UI-thread-only op) and caching it. Called once per frame.
     pub(crate) fn poll_thumbs(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.thumb_rx.try_recv() {
+            // A USB result from a previous device listing addresses a row that
+            // no longer exists (ids are `BASE + index`, so they are reused).
+            // Drop it rather than caching art against whatever now sits at that
+            // index.
+            if msg
+                .usb_generation
+                .is_some_and(|g| g != self.usb_generation)
+            {
+                self.cover_cache.remove(&msg.id);
+                continue;
+            }
             let tex = msg.image.map(|img| {
                 self.tex_graveyard.wrap(ctx.load_texture(
                     format!("cover-{}", msg.id),
@@ -109,7 +132,11 @@ impl App {
             let path = source_path.to_string();
             thread::spawn(move || {
                 let image = load_full_cover_image(&db, id, &path);
-                let _ = tx.send(CoverLoaded { id, image });
+                let _ = tx.send(CoverLoaded {
+                    id,
+                    image,
+                    usb_generation: None,
+                });
                 ctx.request_repaint();
             });
         }
@@ -469,12 +496,75 @@ pub(crate) fn spawn_thumb_loader(
         };
         while let Ok(id) = req_rx.recv() {
             let image = load_thumb_image(&catalog, id);
-            if tx.send(CoverLoaded { id, image }).is_err() {
+            let msg = CoverLoaded {
+                id,
+                image,
+                usb_generation: None,
+            };
+            if tx.send(msg).is_err() {
                 break;
             }
             ctx.request_repaint();
         }
     });
+}
+
+/// Persistent loader for USB row covers.
+///
+/// Device tracks aren't in the catalog, so [`spawn_thumb_loader`] (which is a
+/// catalog reader) can't serve them — which is why they used to be read and
+/// decoded inline on the UI thread. On a real stick that read is 2-10 ms *per
+/// row*, so a fast scroll that brought 20-30 new rows into view spent 50-200 ms
+/// in one frame and the list visibly stuttered. The work is identical to the
+/// catalog path's; only the source differs, so it belongs on a thread the same
+/// way.
+///
+/// Takes the already-resolved source (see [`UsbThumbReq`]) rather than an index
+/// into `usb_tracks`: the worker must not reach back into `App` state that the
+/// UI thread is concurrently mutating, and resolving on the UI side is a cheap
+/// map lookup. Results come back on the same [`CoverLoaded`] channel the catalog
+/// loader uses, so `poll_thumbs` handles both without knowing the difference.
+pub(crate) fn spawn_usb_thumb_loader(
+    ctx: egui::Context,
+    req_rx: Receiver<UsbThumbReq>,
+    tx: Sender<CoverLoaded>,
+) {
+    thread::spawn(move || {
+        while let Ok(req) = req_rx.recv() {
+            let bytes = match req.source {
+                UsbThumbSource::Embedded(b) => Some(b),
+                UsbThumbSource::File(path) => std::fs::read(path).ok(),
+            };
+            let image = bytes.and_then(|b| decode_thumb_image(&b));
+            let msg = CoverLoaded {
+                id: req.id,
+                image,
+                usb_generation: Some(req.generation),
+            };
+            if tx.send(msg).is_err() {
+                break;
+            }
+            ctx.request_repaint();
+        }
+    });
+}
+
+/// Decode encoded image bytes into egui pixels, without touching the GPU.
+///
+/// Split out of [`decode_thumb`] so a worker thread can do the decode (the
+/// expensive half) and leave the texture upload — which is UI-thread only — to
+/// `poll_thumbs`.
+pub(crate) fn decode_thumb_image(bytes: &[u8]) -> Option<egui::ColorImage> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let img = image::load_from_memory(bytes).ok()?;
+    let rgba = img.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        &rgba.into_raw(),
+    ))
 }
 
 /// Persistent loader for vinyl cover art: one long-lived catalog connection
