@@ -93,12 +93,16 @@ impl App {
     /// analysis chain. Explicit-only: reachable solely from the USB rows'
     /// "Add to Library" menu and a drag onto the Library tab. Source files on
     /// the stick are never touched.
+    /// `playlist`: when set, the transferred tracks are additionally gathered
+    /// into a new local playlist of that name, in source order — the
+    /// "import a device playlist" gesture.
     pub(crate) fn spawn_usb_transfer(
         &mut self,
         ctx: egui::Context,
         sources: Vec<PathBuf>,
         vol: PathBuf,
         dest: PathBuf,
+        playlist: Option<String>,
     ) {
         let (tx, rx) = mpsc::channel();
         self.job_rx = Some(rx);
@@ -114,7 +118,7 @@ impl App {
         let db = self.db_path.clone();
         let auto_analyze = self.config.auto_analyze;
         thread::spawn(move || {
-            run_usb_transfer(db, sources, vol, dest, cancel, tx, ctx, auto_analyze)
+            run_usb_transfer(db, sources, vol, dest, playlist, cancel, tx, ctx, auto_analyze)
         });
     }
 
@@ -123,14 +127,20 @@ impl App {
     /// via its confirmation modal. Explicit-only: rewrites the destination's
     /// `PIONEER/rekordbox` databases and adds under `/Contents`, never touches
     /// library source files.
-    pub(crate) fn spawn_export(&mut self, ctx: egui::Context, dest: PathBuf) {
+    pub(crate) fn spawn_export(
+        &mut self,
+        ctx: egui::Context,
+        dest: PathBuf,
+        playlist_ids: Vec<Id>,
+        scope: String,
+    ) {
         let (tx, rx) = mpsc::channel();
         self.job_rx = Some(rx);
         let cancel = Arc::new(AtomicBool::new(false));
         self.job_cancel = Some(cancel.clone());
-        self.status = format!("Exporting library to {}…", dest.display());
+        self.status = format!("Exporting {scope} to {}…", dest.display());
         let db = self.db_path.clone();
-        thread::spawn(move || run_export(db, dest, cancel, tx, ctx));
+        thread::spawn(move || run_export(db, dest, playlist_ids, cancel, tx, ctx));
     }
 
     /// Import paths dropped onto the window from Finder (folders are walked,
@@ -621,6 +631,7 @@ pub(crate) fn run_scan(
 pub(crate) fn run_export(
     db: PathBuf,
     dest: PathBuf,
+    playlist_ids: Vec<Id>,
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
@@ -635,19 +646,20 @@ pub(crate) fn run_export(
             return;
         }
     };
-    let (mut tracks, playlists) = match (catalog.list_tracks(None, 0), catalog.list_playlists())
-    {
-        (Ok(t), Ok(p)) => (t, p),
-        (Err(e), _) | (_, Err(e)) => {
+    // Whole library (empty ids) or the chosen playlist/folder subtree, with
+    // analyses attached — see Catalog::export_selection.
+    let (tracks, playlists) = match catalog.export_selection(&playlist_ids) {
+        Ok(v) => v,
+        Err(e) => {
             let _ = tx.send(JobMsg::Failed(format!("reading catalog: {e}")));
             ctx.request_repaint();
             return;
         }
     };
-    // Listings skip the analysis join; the export writes beatgrids, keys and
-    // waveforms from it, so attach the full analyses in one query.
-    if let Err(e) = catalog.attach_analyses(&mut tracks) {
-        let _ = tx.send(JobMsg::Failed(format!("reading analyses: {e}")));
+    if tracks.is_empty() {
+        let _ = tx.send(JobMsg::Failed(
+            "nothing to export — the selection has no tracks".into(),
+        ));
         ctx.request_repaint();
         return;
     }
@@ -744,6 +756,7 @@ pub(crate) fn run_usb_transfer(
     sources: Vec<PathBuf>,
     vol: PathBuf,
     dest: PathBuf,
+    playlist: Option<String>,
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
@@ -823,6 +836,54 @@ pub(crate) fn run_usb_transfer(
         }
     )));
     let outcome = import_files(&catalog, &to_import, &cancel, &tx, &ctx);
+    // Recreate the device playlist locally, in transfer order. Unchanged files
+    // (already in the library) resolve through the same path lookup, so the
+    // playlist is complete even when nothing needed copying. Runs before the
+    // analysis chain so the playlist exists the moment the import lands.
+    if let Some(name) = playlist {
+        if !outcome.cancelled {
+            let ids: Vec<Id> = to_import
+                .iter()
+                .filter_map(|p| {
+                    catalog
+                        .track_id_by_path(&p.to_string_lossy())
+                        .ok()
+                        .flatten()
+                })
+                .collect();
+            if !ids.is_empty() {
+                // A same-named playlist may already exist; number the copy the
+                // way file copies are numbered rather than merging into it.
+                let existing: Vec<String> = catalog
+                    .list_playlists()
+                    .map(|all| all.iter().map(|p| p.name.clone()).collect())
+                    .unwrap_or_default();
+                let mut final_name = name.clone();
+                let mut n = 2;
+                while existing.contains(&final_name) {
+                    final_name = format!("{name} ({n})");
+                    n += 1;
+                }
+                match catalog
+                    .create_playlist(&final_name, None, false)
+                    .and_then(|pid| catalog.add_tracks(pid, &ids))
+                {
+                    Ok(_) => {
+                        let _ = tx.send(JobMsg::Status(format!(
+                            "Created playlist \u{201C}{final_name}\u{201D} with {} track(s).",
+                            ids.len()
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(JobMsg::Failures {
+                            title: "Import playlist".into(),
+                            items: vec![(name.clone(), e.to_string())],
+                        });
+                    }
+                }
+            }
+        }
+    }
     finish_import(&catalog, outcome, auto_analyze, &cancel, &tx, &ctx);
 }
 
@@ -2704,6 +2765,7 @@ mod usb_transfer_tests {
             vec![a, b, c],
             vol,
             dest.clone(),
+            None,
             Arc::new(AtomicBool::new(false)),
             tx,
             egui::Context::default(),

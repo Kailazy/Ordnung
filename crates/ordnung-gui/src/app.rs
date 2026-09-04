@@ -941,18 +941,211 @@ impl App {
         if sources.is_empty() {
             return;
         }
-        let dest = match self.config.library_root.clone() {
-            Some(d) => d,
+        let Some(dest) = self.resolve_library_root() else {
+            return;
+        };
+        self.spawn_usb_transfer(ctx, sources, vol, dest, None);
+    }
+
+    /// The configured library folder, asking for one (and persisting it) the
+    /// first time a copy-to-library needs it. `None` = user canceled the pick.
+    fn resolve_library_root(&mut self) -> Option<PathBuf> {
+        match self.config.library_root.clone() {
+            Some(d) => Some(d),
             None => {
-                let Some(d) = rfd::FileDialog::new().pick_folder() else {
-                    return;
-                };
+                let d = rfd::FileDialog::new().pick_folder()?;
                 self.config.library_root = Some(d.clone());
                 let _ = self.config.save();
-                d
+                Some(d)
+            }
+        }
+    }
+
+    /// Copy one device playlist into the library and recreate it locally:
+    /// the tracks (in playlist order) go through the normal transfer/import
+    /// path, then a same-named local playlist is created holding them.
+    pub(crate) fn import_usb_playlist(&mut self, ctx: egui::Context, pid: u32) {
+        if self.is_busy() {
+            self.status = "Another job is running — try again when it finishes.".into();
+            return;
+        }
+        let LibraryView::Usb(vol, _) = self.view.clone() else {
+            return;
+        };
+        let Some(name) = self
+            .usb_playlists
+            .iter()
+            .find(|p| p.id == pid)
+            .map(|p| p.name.clone())
+        else {
+            return;
+        };
+        let sources: Vec<PathBuf> = self
+            .usb_playlist_tracks
+            .get(&pid)
+            .into_iter()
+            .flatten()
+            .filter_map(|i| self.usb_tracks.get(*i))
+            .map(|t| PathBuf::from(&t.source_path))
+            .collect();
+        if sources.is_empty() {
+            self.status = "That playlist has no tracks on the device.".into();
+            return;
+        }
+        let Some(dest) = self.resolve_library_root() else {
+            return;
+        };
+        self.spawn_usb_transfer(ctx, sources, vol, dest, Some(name));
+    }
+
+    /// Everything exporting playlist `id` would put on a stick, computed from
+    /// the loaded sidebar tree: (ids to pass to the exporter, human label,
+    /// unique track count, playlist-node count). Folders count descendants.
+    pub(crate) fn playlist_export_scope(&self, id: Id) -> (Vec<Id>, String, usize, usize) {
+        let mut nodes = vec![id];
+        let mut i = 0;
+        while i < nodes.len() {
+            let cur = nodes[i];
+            i += 1;
+            nodes.extend(
+                self.playlists
+                    .iter()
+                    .filter(|p| p.parent == Some(cur))
+                    .map(|p| p.id),
+            );
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut n_tracks = 0usize;
+        for p in self.playlists.iter().filter(|p| nodes.contains(&p.id)) {
+            if p.is_folder {
+                continue;
+            }
+            for t in &p.track_ids {
+                if seen.insert(*t) {
+                    n_tracks += 1;
+                }
+            }
+        }
+        let node = self.playlists.iter().find(|p| p.id == id);
+        let name = node.map(|p| p.name.clone()).unwrap_or_default();
+        let label = if node.is_some_and(|p| p.is_folder) {
+            format!("folder \u{201C}{name}\u{201D}")
+        } else {
+            format!("playlist \u{201C}{name}\u{201D}")
+        };
+        (vec![id], label, n_tracks, nodes.len())
+    }
+
+    /// Save a local playlist's tracks as a text file (save-dialog gated).
+    pub(crate) fn save_playlist_text(&mut self, id: Id) {
+        let Some(pl) = self.playlists.iter().find(|p| p.id == id).cloned() else {
+            return;
+        };
+        let entries: Vec<util::TrackListEntry> = match Catalog::open(&self.db_path)
+            .and_then(|cat| {
+                let mut tracks = cat.list_playlist_tracks(id, None)?;
+                cat.attach_analyses(&mut tracks)?;
+                Ok(tracks)
+            }) {
+            Ok(tracks) => tracks
+                .iter()
+                .map(|t| {
+                    let file = Path::new(&t.source_path)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    util::TrackListEntry {
+                        artist: t.tags.artist.clone().unwrap_or_default(),
+                        title: t.tags.title.clone().unwrap_or(file),
+                        album: t.tags.album.clone().unwrap_or_default(),
+                        bpm: t
+                            .analysis
+                            .as_ref()
+                            .and_then(|a| a.bpm)
+                            .map(|b| format!("{b:.1}"))
+                            .unwrap_or_default(),
+                        key: t
+                            .analysis
+                            .as_ref()
+                            .and_then(|a| a.key)
+                            .map(|k| k.camelot().label())
+                            .unwrap_or_default(),
+                        duration: t
+                            .properties
+                            .as_ref()
+                            .map(|p| crate::player::fmt_duration(p.duration_ms))
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect(),
+            Err(e) => {
+                self.status = format!("error: {e}");
+                return;
             }
         };
-        self.spawn_usb_transfer(ctx, sources, vol, dest);
+        self.write_track_list(&pl.name, entries);
+    }
+
+    /// Save a device playlist's tracks as a text file (save-dialog gated).
+    pub(crate) fn save_usb_playlist_text(&mut self, pid: u32) {
+        let Some(name) = self
+            .usb_playlists
+            .iter()
+            .find(|p| p.id == pid)
+            .map(|p| p.name.clone())
+        else {
+            return;
+        };
+        let entries: Vec<util::TrackListEntry> = self
+            .usb_playlist_tracks
+            .get(&pid)
+            .into_iter()
+            .flatten()
+            .filter_map(|i| self.usb_tracks.get(*i).map(|t| (*i, t)))
+            .map(|(i, t)| {
+                let info = self.usb_pdb_info.get(&i);
+                let file = Path::new(&t.source_path)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                util::TrackListEntry {
+                    artist: t.tags.artist.clone().unwrap_or_default(),
+                    title: t.tags.title.clone().unwrap_or(file),
+                    album: t.tags.album.clone().unwrap_or_default(),
+                    bpm: info
+                        .and_then(|p| p.bpm)
+                        .map(|b| format!("{b:.1}"))
+                        .unwrap_or_default(),
+                    key: info.and_then(|p| p.key.clone()).unwrap_or_default(),
+                    duration: crate::player::fmt_duration(t.properties.duration_ms),
+                }
+            })
+            .collect();
+        self.write_track_list(&name, entries);
+    }
+
+    /// Shared tail of the two track-list savers: pick a destination, write.
+    fn write_track_list(&mut self, name: &str, entries: Vec<util::TrackListEntry>) {
+        if entries.is_empty() {
+            self.status = "That playlist has no tracks to list.".into();
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{name}.txt"))
+            .save_file()
+        else {
+            return;
+        };
+        match std::fs::write(&path, util::track_list_text(name, &entries)) {
+            Ok(()) => {
+                self.status = format!(
+                    "Saved {} track(s) to {}.",
+                    entries.len(),
+                    path.display()
+                )
+            }
+            Err(e) => self.status = format!("error writing track list: {e}"),
+        }
     }
 
     /// Build table rows for the active USB view straight from the scanned
@@ -2482,15 +2675,18 @@ impl eframe::App for App {
                                             0,
                                             &vol,
                                             &mut self.view,
+                                            &mut sidebar_action,
                                         );
                                     }
                                 } else {
                                     let all = self.playlists.clone();
+                                    let volumes = self.usb_volumes.clone();
                                     draw_playlist_nodes(
                                         ui,
                                         density,
                                         &all,
                                         None,
+                                        &volumes,
                                         &mut self.view,
                                         &mut self.renaming,
                                         &mut sidebar_action,
@@ -2502,6 +2698,26 @@ impl eframe::App for App {
         match sidebar_action {
             Some(SidebarAction::ImportUsbTracks(ids)) => {
                 self.usb_add_to_library(ctx.clone(), ids);
+            }
+            Some(SidebarAction::ExportPlaylist(id, dest)) => {
+                let (playlist_ids, scope, n_tracks, n_playlists) =
+                    self.playlist_export_scope(id);
+                self.export_confirm = Some(ExportConfirm {
+                    dest,
+                    playlist_ids,
+                    scope,
+                    n_tracks,
+                    n_playlists,
+                });
+            }
+            Some(SidebarAction::SavePlaylistText(id)) => {
+                self.save_playlist_text(id);
+            }
+            Some(SidebarAction::ImportUsbPlaylist(pid)) => {
+                self.import_usb_playlist(ctx.clone(), pid);
+            }
+            Some(SidebarAction::SaveUsbPlaylistText(pid)) => {
+                self.save_usb_playlist_text(pid);
             }
             Some(SidebarAction::NewPlaylist(parent)) => {
                 if let Ok(cat) = Catalog::open(&self.db_path) {

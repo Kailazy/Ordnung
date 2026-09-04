@@ -98,8 +98,14 @@ export.pdb incl. static menu tables + one-shot page signatures), `anlz`
 re-copy, ANLZ per track, exportExt.pdb skeleton), and `dlp::write_library`
 (full 22-table SQLCipher exportLibrary.db) — playlists land in *both*
 databases so CDJ-2000→XDJ-AZ generations all see them. Cues export as empty
-lists (Phase 6). Surfaced as CLI `export DEST [--playlist ID]…` and the USB
-view's confirm-gated "⇪ Export library" button (background job + Abort).
+lists (Phase 6). Surfaced as CLI `export DEST [--playlist ID]…` and, in the GUI: the USB
+view's confirm-gated "⇪ Export entire library" button, per-playlist/folder
+right-click "Export to <device>…" (rekordbox-style scoped export via
+`Catalog::export_selection`; the confirm modal states the stick will list
+exactly the selection — no merge with a previous export yet), device-playlist
+right-click "Import to library…" (copies tracks + recreates the playlist
+locally in order), and "Save track list…" (TSV .txt) on both local and device
+playlists. All jobs run in the background with Abort.
 Verified: 13 unit + 3 round-trip tests (export → `pdb::read_export`/
 `read_stick`/`dlp::read_playlists`), byte-dissection of generated output with
 the golden-reference tooling (page accounting matches rekordbox exactly), and

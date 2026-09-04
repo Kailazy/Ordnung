@@ -1288,10 +1288,9 @@ struct App {
     discogs_auth_rx: Option<Receiver<DiscogsAuth>>,
     /// Whether the "clear the whole catalog?" confirmation popup is showing.
     confirm_clear_db: bool,
-    /// USB export pending confirmation: destination volume root plus the
-    /// track / playlist-node counts to show (counted once when the button was
-    /// clicked). The modal either spawns the export job or clears this.
-    export_confirm: Option<(PathBuf, usize, usize)>,
+    /// USB export pending confirmation. The modal either spawns the export
+    /// job or clears this.
+    export_confirm: Option<ExportConfirm>,
     /// Title of the failure report (which job produced it).
     failure_report_title: String,
     /// Per-item failures `(item name, reason)` from the last job that had any.
@@ -1653,6 +1652,30 @@ enum SidebarAction {
     /// Device rows dropped on the Library source tab: copy their files into
     /// the library and import them.
     ImportUsbTracks(Vec<Id>),
+    /// Right-click on a local playlist/folder: export it (and, for a folder,
+    /// its descendants) to the given mounted volume as a rekordbox stick.
+    ExportPlaylist(Id, PathBuf),
+    /// Right-click on a local playlist: save its track list as a text file.
+    SavePlaylistText(Id),
+    /// Right-click on a device playlist: copy its tracks into the library and
+    /// recreate it as a local playlist (same name, same order).
+    ImportUsbPlaylist(u32),
+    /// Right-click on a device playlist: save its track list as a text file.
+    SaveUsbPlaylistText(u32),
+}
+
+/// A pending USB export awaiting the user's confirmation. `playlist_ids`
+/// empty = the whole library; otherwise the selected playlist/folder.
+/// Counts are computed once when the menu item / button is clicked.
+#[derive(Clone)]
+struct ExportConfirm {
+    dest: PathBuf,
+    playlist_ids: Vec<Id>,
+    /// What the modal calls the selection ("your entire library",
+    /// "playlist “warmup”", …).
+    scope: String,
+    n_tracks: usize,
+    n_playlists: usize,
 }
 
 /// A request raised by a track row's right-click context menu. Collected inside

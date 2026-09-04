@@ -1,6 +1,40 @@
 //! Split out of `main.rs`; part of the GUI `App`.
 use super::*;
 
+/// One line of an exported track-list text file.
+pub(crate) struct TrackListEntry {
+    pub artist: String,
+    pub title: String,
+    pub album: String,
+    pub bpm: String,
+    pub key: String,
+    pub duration: String,
+}
+
+/// Render a playlist as a tab-separated text file (the shape rekordbox's own
+/// "export playlist to file" produces): a header line, then one numbered row
+/// per track.
+pub(crate) fn track_list_text(name: &str, entries: &[TrackListEntry]) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    let _ = writeln!(s, "#\tArtist\tTrack Title\tAlbum\tBPM\tKey\tTime");
+    for (i, e) in entries.iter().enumerate() {
+        let _ = writeln!(
+            s,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            i + 1,
+            e.artist,
+            e.title,
+            e.album,
+            e.bpm,
+            e.key,
+            e.duration
+        );
+    }
+    let _ = writeln!(s, "\n{name} — {} track(s)", entries.len());
+    s
+}
+
 pub(crate) fn non_empty(s: &str) -> Option<String> {
     let t = s.trim();
     if t.is_empty() {
@@ -295,5 +329,33 @@ mod tests {
     fn percent_encode_escapes_reserved_chars() {
         assert_eq!(percent_encode("a b&c"), "a%20b%26c");
         assert_eq!(percent_encode("A-Z_0.9~"), "A-Z_0.9~");
+    }
+
+    #[test]
+    fn track_list_text_is_numbered_tsv() {
+        let entries = vec![
+            TrackListEntry {
+                artist: "A".into(),
+                title: "T".into(),
+                album: "L".into(),
+                bpm: "128.0".into(),
+                key: "8A".into(),
+                duration: "5:00".into(),
+            },
+            TrackListEntry {
+                artist: "B".into(),
+                title: "U".into(),
+                album: String::new(),
+                bpm: String::new(),
+                key: String::new(),
+                duration: "3:21".into(),
+            },
+        ];
+        let text = track_list_text("warmup", &entries);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "#\tArtist\tTrack Title\tAlbum\tBPM\tKey\tTime");
+        assert_eq!(lines[1], "1\tA\tT\tL\t128.0\t8A\t5:00");
+        assert_eq!(lines[2], "2\tB\tU\t\t\t\t3:21");
+        assert!(text.ends_with("warmup — 2 track(s)\n"));
     }
 }

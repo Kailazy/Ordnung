@@ -848,69 +848,19 @@ pub fn export(db: &Path, dest: &Path, playlist_ids: &[u64]) -> Result<()> {
     use ordnung_rbdb::export::{export_usb, ExportStage};
 
     let catalog = Catalog::open(db).context("opening catalog")?;
+    // Strict id validation up front — export_selection ignores unknown ids.
     let all_playlists = catalog.list_playlists()?;
-
-    // Resolve what goes on the stick: whole catalog by default, or the chosen
-    // playlists (folders expand recursively) plus every track they contain.
-    let (tracks, playlists) = if playlist_ids.is_empty() {
-        (catalog.list_tracks(None, 0)?, all_playlists)
-    } else {
-        let mut wanted: Vec<u64> = Vec::new();
-        let mut queue: Vec<u64> = playlist_ids.to_vec();
-        while let Some(id) = queue.pop() {
-            if all_playlists.iter().all(|p| p.id != id) {
-                bail!("no playlist with id {id} (see `playlist ls`)");
-            }
-            if !wanted.contains(&id) {
-                wanted.push(id);
-                queue.extend(
-                    all_playlists
-                        .iter()
-                        .filter(|p| p.parent == Some(id))
-                        .map(|p| p.id),
-                );
-            }
+    for id in playlist_ids {
+        if all_playlists.iter().all(|p| p.id != *id) {
+            bail!("no playlist with id {id} (see `playlist ls`)");
         }
-        // Keep ancestor folders so the tree renders intact on the player.
-        let mut keep = wanted.clone();
-        for id in &wanted {
-            let mut cur = all_playlists.iter().find(|p| p.id == *id).and_then(|p| p.parent);
-            while let Some(pid) = cur {
-                if !keep.contains(&pid) {
-                    keep.push(pid);
-                }
-                cur = all_playlists
-                    .iter()
-                    .find(|p| p.id == pid)
-                    .and_then(|p| p.parent);
-            }
-        }
-        let playlists: Vec<_> = all_playlists
-            .iter()
-            .filter(|p| keep.contains(&p.id))
-            .cloned()
-            .collect();
-        let mut tracks = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for p in &playlists {
-            if p.is_folder {
-                continue;
-            }
-            for t in catalog.list_playlist_tracks(p.id, None)? {
-                if seen.insert(t.id) {
-                    tracks.push(t);
-                }
-            }
-        }
-        (tracks, playlists)
-    };
+    }
+    // Whole catalog by default, or the chosen playlists (folders expand
+    // recursively) plus every track they contain, analyses attached.
+    let (tracks, playlists) = catalog.export_selection(playlist_ids)?;
     if tracks.is_empty() {
         bail!("nothing to export — no tracks matched");
     }
-    // Listings skip the analysis join; the export serializes beatgrids, keys
-    // and waveforms from it, so attach the full analyses in one query.
-    let mut tracks = tracks;
-    catalog.attach_analyses(&mut tracks)?;
 
     println!(
         "Exporting {} track(s), {} playlist node(s) → {}",

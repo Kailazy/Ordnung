@@ -1811,16 +1811,22 @@ impl App {
     /// the destination's `PIONEER/rekordbox` databases (a rekordbox-made
     /// export there is replaced by Ordnung's), so it never runs un-confirmed.
     pub(crate) fn draw_export_confirm(&mut self, ctx: &egui::Context) {
-        let Some((dest, n_tracks, n_playlists)) = self.export_confirm.clone() else {
+        let Some(confirm) = self.export_confirm.clone() else {
             return;
         };
-        let name = dest
+        let name = confirm
+            .dest
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| dest.display().to_string());
-        let has_export = dest.join("PIONEER").join("rekordbox").join("export.pdb").is_file();
+            .unwrap_or_else(|| confirm.dest.display().to_string());
+        let has_export = confirm
+            .dest
+            .join("PIONEER")
+            .join("rekordbox")
+            .join("export.pdb")
+            .is_file();
         let mut open = true;
-        egui::Window::new(format!("Export library to {name}?"))
+        egui::Window::new(format!("Export to {name}?"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1829,8 +1835,9 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_max_width(440.0);
                 ui.label(format!(
-                    "Writes a native rekordbox/CDJ export: {n_tracks} track(s) and \
-{n_playlists} playlist node(s), with beatgrids, keys and waveforms."
+                    "Writes {} as a native rekordbox/CDJ export: {} track(s), {} playlist \
+node(s), with beatgrids, keys and waveforms.",
+                    confirm.scope, confirm.n_tracks, confirm.n_playlists
                 ));
                 ui.add_space(6.0);
                 ui.label(
@@ -1840,14 +1847,23 @@ Library files on this Mac are only read.",
                     )
                     .weak(),
                 );
+                ui.add_space(6.0);
                 if has_export {
-                    ui.add_space(6.0);
                     ui.label(
                         egui::RichText::new(format!(
-                            "⚠ {name} already carries a rekordbox export — its database \
-(playlists, cues, grids made in rekordbox) will be replaced by Ordnung's.",
+                            "⚠ {name} already carries a rekordbox export — its database is \
+replaced: afterwards the stick lists exactly this selection, and playlists/cues/grids made \
+in rekordbox are gone from it.",
                         ))
                         .color(ui.visuals().warn_fg_color),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new(
+                            "The stick's browse database will list exactly this selection; \
+a later export replaces it (audio files under /Contents are kept either way).",
+                        )
+                        .weak(),
                     );
                 }
                 ui.add_space(12.0);
@@ -1858,7 +1874,12 @@ Library files on this Mac are only read.",
                         .clicked()
                     {
                         self.export_confirm = None;
-                        self.spawn_export(ctx.clone(), dest.clone());
+                        self.spawn_export(
+                            ctx.clone(),
+                            confirm.dest.clone(),
+                            confirm.playlist_ids.clone(),
+                            confirm.scope.clone(),
+                        );
                     }
                     if busy {
                         ui.label(egui::RichText::new("another job is running").weak());

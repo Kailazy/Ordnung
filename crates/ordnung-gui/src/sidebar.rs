@@ -238,6 +238,7 @@ pub(crate) fn draw_playlist_nodes(
     density: NavDensity,
     all: &[Playlist],
     parent: Option<Id>,
+    volumes: &[ordnung_core::usb::UsbVolume],
     view: &mut LibraryView,
     renaming: &mut Option<Renaming>,
     action: &mut Option<SidebarAction>,
@@ -254,7 +255,16 @@ pub(crate) fn draw_playlist_nodes(
                 // the rail has room for neither. Folders flatten to their
                 // playlists here: the rail lists the things you actually
                 // navigate to, and the hierarchy comes back at the wider tiers.
-                draw_playlist_nodes(ui, density, all, Some(p.id), view, renaming, action);
+                draw_playlist_nodes(
+                    ui,
+                    density,
+                    all,
+                    Some(p.id),
+                    volumes,
+                    view,
+                    renaming,
+                    action,
+                );
                 continue;
             }
             egui::CollapsingHeader::new(
@@ -263,13 +273,46 @@ pub(crate) fn draw_playlist_nodes(
             .id_salt(("pl-folder", p.id))
             .default_open(true)
             .show(ui, |ui| {
-                draw_playlist_nodes(ui, density, all, Some(p.id), view, renaming, action);
+                draw_playlist_nodes(
+                    ui,
+                    density,
+                    all,
+                    Some(p.id),
+                    volumes,
+                    view,
+                    renaming,
+                    action,
+                );
             })
             .header_response
-            .context_menu(|ui| folder_context_menu(ui, p, renaming, action));
+            .context_menu(|ui| folder_context_menu(ui, p, volumes, renaming, action));
             playlist_row_gap(ui, density);
         } else {
-            draw_playlist_leaf(ui, density, p, view, renaming, action);
+            draw_playlist_leaf(ui, density, p, volumes, view, renaming, action);
+        }
+    }
+}
+
+/// Shared "Export to <device>…" items: one per mounted volume, or a disabled
+/// hint when nothing is plugged in. Used by both playlist and folder menus.
+fn export_menu_items(
+    ui: &mut egui::Ui,
+    id: Id,
+    volumes: &[ordnung_core::usb::UsbVolume],
+    action: &mut Option<SidebarAction>,
+) {
+    if volumes.is_empty() {
+        ui.add_enabled(false, egui::Button::new("Export to device (none mounted)"));
+        return;
+    }
+    for v in volumes {
+        if ui
+            .button(format!("⇪ Export to {}…", v.name))
+            .on_hover_note("Write this selection to the stick as a native rekordbox export")
+            .clicked()
+        {
+            *action = Some(SidebarAction::ExportPlaylist(id, v.path.clone()));
+            ui.close_menu();
         }
     }
 }
@@ -433,6 +476,7 @@ pub(crate) fn draw_playlist_leaf(
     ui: &mut egui::Ui,
     density: NavDensity,
     p: &Playlist,
+    volumes: &[ordnung_core::usb::UsbVolume],
     view: &mut LibraryView,
     renaming: &mut Option<Renaming>,
     action: &mut Option<SidebarAction>,
@@ -464,6 +508,16 @@ pub(crate) fn draw_playlist_leaf(
         *view = LibraryView::Playlist(p.id);
     }
     resp.clone().context_menu(|ui| {
+        export_menu_items(ui, p.id, volumes, action);
+        if ui
+            .button("Save track list…")
+            .on_hover_note("Write this playlist's tracks to a text file")
+            .clicked()
+        {
+            *action = Some(SidebarAction::SavePlaylistText(p.id));
+            ui.close_menu();
+        }
+        ui.separator();
         if ui.button("Rename").clicked() {
             *renaming = Some(Renaming {
                 id: p.id,
@@ -485,6 +539,7 @@ pub(crate) fn draw_playlist_leaf(
 /// recursing into folders. Read-only navigation: clicking a playlist filters
 /// the device view to that playlist's tracks (in export order). `parent` is
 /// the pdb node id whose children are drawn (`0` = top level).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_usb_playlist_nodes(
     ui: &mut egui::Ui,
     density: NavDensity,
@@ -493,12 +548,22 @@ pub(crate) fn draw_usb_playlist_nodes(
     parent: u32,
     vol: &Path,
     view: &mut LibraryView,
+    action: &mut Option<SidebarAction>,
 ) {
     for p in all.iter().filter(|p| p.parent_id == parent) {
         if p.is_folder {
             if density.icons_only() {
                 // Flattened in the rail, as with catalog folders above.
-                draw_usb_playlist_nodes(ui, density, all, tracks_by_playlist, p.id, vol, view);
+                draw_usb_playlist_nodes(
+                    ui,
+                    density,
+                    all,
+                    tracks_by_playlist,
+                    p.id,
+                    vol,
+                    view,
+                    action,
+                );
                 continue;
             }
             // Same header style as the catalog's folders; only the open
@@ -510,7 +575,16 @@ pub(crate) fn draw_usb_playlist_nodes(
             .id_salt(("usb-pl-folder", vol, p.id))
             .default_open(false)
             .show(ui, |ui| {
-                draw_usb_playlist_nodes(ui, density, all, tracks_by_playlist, p.id, vol, view);
+                draw_usb_playlist_nodes(
+                    ui,
+                    density,
+                    all,
+                    tracks_by_playlist,
+                    p.id,
+                    vol,
+                    view,
+                    action,
+                );
             });
             playlist_row_gap(ui, density);
         } else {
@@ -526,6 +600,26 @@ pub(crate) fn draw_usb_playlist_nodes(
             if resp.clicked() {
                 *view = LibraryView::Usb(vol.to_path_buf(), Some(p.id));
             }
+            resp.context_menu(|ui| {
+                if ui
+                    .button("⤵ Import to library…")
+                    .on_hover_note(
+                        "Copy this playlist's tracks into the library and recreate the playlist",
+                    )
+                    .clicked()
+                {
+                    *action = Some(SidebarAction::ImportUsbPlaylist(p.id));
+                    ui.close_menu();
+                }
+                if ui
+                    .button("Save track list…")
+                    .on_hover_note("Write this playlist's tracks to a text file")
+                    .clicked()
+                {
+                    *action = Some(SidebarAction::SaveUsbPlaylistText(p.id));
+                    ui.close_menu();
+                }
+            });
             playlist_row_gap(ui, density);
         }
     }
@@ -689,6 +783,7 @@ pub(crate) struct SourceTabsResponse {
 pub(crate) fn folder_context_menu(
     ui: &mut egui::Ui,
     p: &Playlist,
+    volumes: &[ordnung_core::usb::UsbVolume],
     renaming: &mut Option<Renaming>,
     action: &mut Option<SidebarAction>,
 ) {
@@ -696,6 +791,8 @@ pub(crate) fn folder_context_menu(
         *action = Some(SidebarAction::NewPlaylist(Some(p.id)));
         ui.close_menu();
     }
+    ui.separator();
+    export_menu_items(ui, p.id, volumes, action);
     ui.separator();
     if ui.button("Rename").clicked() {
         *renaming = Some(Renaming {

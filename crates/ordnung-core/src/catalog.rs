@@ -2318,6 +2318,75 @@ impl Catalog {
             .map_err(Into::into)
     }
 
+    /// Resolve what a USB export should contain.
+    ///
+    /// Empty `playlist_ids` = the whole catalog and every playlist node.
+    /// Otherwise: the named playlists (folders expand to their descendants),
+    /// their ancestor folders (so the tree renders intact on the player), and
+    /// the union of their tracks in playlist order, deduplicated. Unknown ids
+    /// are ignored — callers wanting strict validation check first. Analyses
+    /// are attached, since the export serializes beatgrids/keys/waveforms.
+    pub fn export_selection(
+        &self,
+        playlist_ids: &[Id],
+    ) -> Result<(Vec<Track>, Vec<Playlist>)> {
+        let all = self.list_playlists()?;
+        let (mut tracks, playlists) = if playlist_ids.is_empty() {
+            (self.list_tracks(None, 0)?, all)
+        } else {
+            let mut wanted: Vec<Id> = Vec::new();
+            let mut queue: Vec<Id> = playlist_ids.to_vec();
+            while let Some(id) = queue.pop() {
+                if all.iter().all(|p| p.id != id) || wanted.contains(&id) {
+                    continue;
+                }
+                wanted.push(id);
+                queue.extend(all.iter().filter(|p| p.parent == Some(id)).map(|p| p.id));
+            }
+            // Ancestor folders keep the exported tree shape intact.
+            let mut keep = wanted.clone();
+            for id in &wanted {
+                let mut cur = all.iter().find(|p| p.id == *id).and_then(|p| p.parent);
+                while let Some(pid) = cur {
+                    if !keep.contains(&pid) {
+                        keep.push(pid);
+                    }
+                    cur = all.iter().find(|p| p.id == pid).and_then(|p| p.parent);
+                }
+            }
+            let playlists: Vec<Playlist> =
+                all.iter().filter(|p| keep.contains(&p.id)).cloned().collect();
+            let mut tracks = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for p in &playlists {
+                if p.is_folder {
+                    continue;
+                }
+                for t in self.list_playlist_tracks(p.id, None)? {
+                    if seen.insert(t.id) {
+                        tracks.push(t);
+                    }
+                }
+            }
+            (tracks, playlists)
+        };
+        self.attach_analyses(&mut tracks)?;
+        Ok((tracks, playlists))
+    }
+
+    /// Look up a track id by its exact source path. `None` when not cataloged.
+    pub fn track_id_by_path(&self, path: &str) -> Result<Option<Id>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM tracks WHERE source_path=?1",
+                params![path],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(|v| v as Id))
+    }
+
     /// Fill `analysis` on already-loaded tracks in one query.
     ///
     /// Track listings (`list_tracks`, `list_playlist_tracks`) deliberately skip
