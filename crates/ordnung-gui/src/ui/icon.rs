@@ -95,10 +95,7 @@ pub fn import(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
     let s = egui::Stroke::new(MARK, col);
     // Shaft + head.
     p.line_segment(
-        [
-            egui::pos2(c.x, c.y - r),
-            egui::pos2(c.x, c.y + r * 0.15),
-        ],
+        [egui::pos2(c.x, c.y - r), egui::pos2(c.x, c.y + r * 0.15)],
         s,
     );
     p.line_segment(
@@ -124,10 +121,7 @@ pub fn import(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
         s,
     );
     p.line_segment(
-        [
-            egui::pos2(c.x - r, c.y + r),
-            egui::pos2(c.x + r, c.y + r),
-        ],
+        [egui::pos2(c.x - r, c.y + r), egui::pos2(c.x + r, c.y + r)],
         s,
     );
     p.line_segment(
@@ -203,7 +197,10 @@ pub fn library(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
     }
     // The box front, drawn over the clipped card bottoms.
     p.rect_stroke(
-        egui::Rect::from_min_max(egui::pos2(c.x - r, lip), egui::pos2(c.x + r, c.y + r * 0.86)),
+        egui::Rect::from_min_max(
+            egui::pos2(c.x - r, lip),
+            egui::pos2(c.x + r, c.y + r * 0.86),
+        ),
         egui::Rounding::same(1.5),
         s,
     );
@@ -298,8 +295,17 @@ pub fn sync(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
         p.add(egui::Shape::line(pts, s));
         // Arrow head at the arc's end, pointing along the travel direction.
         let a = r * 0.38;
-        p.line_segment([end, egui::pos2(end.x + flip * a * 0.1, end.y - flip * a)], s);
-        p.line_segment([end, egui::pos2(end.x - flip * a * 0.85, end.y - flip * a * 0.5)], s);
+        p.line_segment(
+            [end, egui::pos2(end.x + flip * a * 0.1, end.y - flip * a)],
+            s,
+        );
+        p.line_segment(
+            [
+                end,
+                egui::pos2(end.x - flip * a * 0.85, end.y - flip * a * 0.5),
+            ],
+            s,
+        );
     }
 }
 

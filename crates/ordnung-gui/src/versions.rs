@@ -24,6 +24,12 @@ const MAX_VERSIONS: usize = 100;
 /// those turns a scannable list into a wall.
 const PANEL_W: f32 = 560.0;
 
+/// Side of a row's sleeve thumbnail. Sized to the two text lines beside it, so
+/// the covers read as a scannable column rather than dominating the row — you
+/// pick a pressing by its stamp and catalog number, with the sleeve confirming
+/// it's the right record.
+const THUMB: f32 = 48.0;
+
 /// The open versions panel — the record it was opened from, and the pressings
 /// found for it.
 pub(crate) struct VersionsPanel {
@@ -69,6 +75,11 @@ enum Act {
 /// mutate.
 struct Row {
     release_id: u64,
+    /// This pressing's sleeve, once its thumbnail has downloaded. `None` while
+    /// it's still in flight, or when Discogs lists no image for the pressing —
+    /// both draw the same placeholder, since a sleeve arriving a moment later
+    /// shouldn't make the row jump.
+    cover: Option<Tex>,
     title: String,
     format: String,
     label: String,
@@ -157,13 +168,16 @@ impl App {
         let error = panel.error.clone();
         let key = panel.key;
         // Snapshot the rows the window draws, so its closure doesn't borrow the
-        // panel while the click handlers below need `self`.
-        let rows: Vec<Row> = panel
+        // panel while the click handlers below need `self`. Built in two passes
+        // because the sleeves come from `dig_cover`, which takes `&mut self` to
+        // start a download on a miss and so can't run while `panel` is borrowed.
+        let mut rows: Vec<Row> = panel
             .versions
             .iter()
             .take(MAX_VERSIONS)
             .map(|v| Row {
                 release_id: v.release_id,
+                cover: None,
                 title: v.title.clone(),
                 format: v.format.clone(),
                 label: v.label.clone(),
@@ -176,6 +190,21 @@ impl App {
                 wanted: self.vinyl_wanted.contains(&v.release_id),
             })
             .collect();
+        // Thumbnails, keyed by URL in the same cache the dig strip uses — a
+        // pressing already seen there (or listed twice) costs no second
+        // download. Only the rows actually on screen are fetched; the panel caps
+        // at `MAX_VERSIONS`, so this is a bounded set either way.
+        let thumbs: Vec<Option<String>> = panel
+            .versions
+            .iter()
+            .take(MAX_VERSIONS)
+            .map(|v| Some(v.thumb_url.clone()).filter(|u| !u.trim().is_empty()))
+            .collect();
+        for (row, url) in rows.iter_mut().zip(thumbs) {
+            if let Some(u) = url {
+                row.cover = self.dig_cover(&u).cloned();
+            }
+        }
         // A swap writes the user's Discogs account through the one job channel,
         // so it waits out any running job rather than queueing behind it.
         let busy = self.is_busy();
@@ -225,8 +254,34 @@ impl App {
                         for r in &rows {
                             let is_current = r.release_id == current;
                             ui.horizontal(|ui| {
+                                // Sleeve first, so the eye can run down the
+                                // column of covers and stop at the one it
+                                // recognises before reading a word.
+                                let (trect, _) = ui.allocate_exact_size(
+                                    egui::vec2(THUMB, THUMB),
+                                    egui::Sense::hover(),
+                                );
+                                match &r.cover {
+                                    Some(t) => {
+                                        egui::Image::new(t)
+                                            .fit_to_exact_size(egui::vec2(THUMB, THUMB))
+                                            .rounding(egui::Rounding::same(4.0))
+                                            .paint_at(ui, trect);
+                                    }
+                                    // Still downloading, or Discogs has no image
+                                    // for this pressing. A quiet plate keeps the
+                                    // rows aligned either way.
+                                    None => {
+                                        ui.painter().rect_filled(
+                                            trect,
+                                            egui::Rounding::same(4.0),
+                                            egui::Color32::from_gray(34),
+                                        );
+                                    }
+                                }
+                                ui.add_space(8.0);
                                 ui.vertical(|ui| {
-                                    ui.set_width(PANEL_W - 160.0);
+                                    ui.set_width(PANEL_W - 160.0 - THUMB - 8.0);
                                     // The format is what tells two pressings
                                     // apart, so it leads. The title only earns a
                                     // line when it differs from the record's own
@@ -296,14 +351,9 @@ impl App {
                                                 "Trade your copy for this pressing on Discogs"
                                             };
                                             if ui
-                                                .add_enabled(
-                                                    can_swap,
-                                                    egui::Button::new("Swap in"),
-                                                )
+                                                .add_enabled(can_swap, egui::Button::new("Swap in"))
                                                 .on_hover_note(tip)
-                                                .on_disabled_hover_text(crate::ui::hover::note(
-                                                    tip,
-                                                ))
+                                                .on_disabled_hover_text(crate::ui::hover::note(tip))
                                                 .clicked()
                                             {
                                                 act = Some(Act::Swap(r.release_id));
@@ -337,13 +387,25 @@ impl App {
         match act {
             Some(Act::Web(id)) => open_url(&format!("https://www.discogs.com/release/{id}")),
             Some(Act::Open(id)) => {
-                let (v_title, sub) = self
+                // Hand the sheet this pressing's own sleeve. It isn't in either
+                // list, so it has no cached cover to key on — without the URL
+                // the sheet falls back to a blank plate, and the pressing you
+                // just picked out by its cover opens with no cover at all. The
+                // panel has already downloaded this thumbnail, and the sheet
+                // reads the same URL-keyed cache, so it paints immediately.
+                let (v_title, sub, cover) = self
                     .versions
                     .as_ref()
                     .and_then(|p| p.versions.iter().find(|v| v.release_id == id))
-                    .map(|v| (v.title.clone(), version_sub(v)))
-                    .unwrap_or_else(|| (title.clone(), String::new()));
-                self.open_release_sheet(id, artist.clone(), v_title, sub, None, ctx);
+                    .map(|v| {
+                        (
+                            v.title.clone(),
+                            version_sub(v),
+                            Some(v.thumb_url.clone()).filter(|u| !u.trim().is_empty()),
+                        )
+                    })
+                    .unwrap_or_else(|| (title.clone(), String::new(), None));
+                self.open_release_sheet(id, artist.clone(), v_title, sub, cover, ctx);
             }
             Some(Act::Swap(id)) => {
                 if let Some(k) = key {
@@ -430,9 +492,11 @@ fn versions_for(
         .and_then(|cat| cat.cached_release(&id).ok().flatten())
         .and_then(|d| d.master_id);
     if cached_master.is_none() && token.trim().is_empty() {
-        return Err("No Discogs token set. Add one in Settings to look up other \
+        return Err(
+            "No Discogs token set. Add one in Settings to look up other \
                     pressings."
-            .to_string());
+                .to_string(),
+        );
     }
     let client = discogs::Client::new(
         token.to_string(),
@@ -440,10 +504,12 @@ fn versions_for(
     );
     let master_id = match cached_master {
         Some(m) => Some(m),
-        None => client
-            .fetch_release(&id)
-            .map_err(|e| format!("Couldn't reach Discogs: {e}"))?
-            .master_id,
+        None => {
+            client
+                .fetch_release(&id)
+                .map_err(|e| format!("Couldn't reach Discogs: {e}"))?
+                .master_id
+        }
     };
     // No master means Discogs files this release on its own — a one-off with no
     // siblings to list. That's a fact about the record, not a failure.

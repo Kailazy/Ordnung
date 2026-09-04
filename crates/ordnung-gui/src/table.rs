@@ -857,9 +857,24 @@ impl App {
         // user resize is captured and persisted (see below). Cover is fixed-size
         // and excluded.
         let mut observed_widths: Vec<(TableColumn, f32)> = Vec::new();
+        // The right-edge cap applied to each column this frame (see the builder
+        // below). Kept so the reconciliation can tell a genuine user resize from a
+        // width the cap merely clamped — a narrow window must not overwrite the
+        // wider size the user actually chose.
+        let mut column_caps: HashMap<TableColumn, f32> = HashMap::new();
         // One-shot "Reset to default" signal: clears egui_extras' live widths so
         // the cleared defaults apply this frame (see the builder below).
         let reset_widths = std::mem::take(&mut self.reset_column_widths);
+
+        // Visible width of the table area, measured before the horizontal scroll
+        // area is opened (inside it, `available_width` is the unbounded scroll
+        // content width, not the viewport). Used to cap how far right a column
+        // may be dragged — see `col_max` below.
+        let viewport_w = ui.available_width();
+        // Spacing and scrollbar metrics for that cap, read here because inside the
+        // table builder `ui` is mutably borrowed.
+        let col_spacing_x = ui.spacing().item_spacing.x;
+        let scrollbar_w = ui.spacing().scroll.bar_width;
 
         // Wrap the table in a horizontal scroll area so a wide column layout
         // (or a narrow window) can be scrolled left/right. The trailing
@@ -895,9 +910,26 @@ impl App {
                 }
                 // One column per visible entry, in the user's chosen order, then a
                 // trailing remainder spacer so the striped rows span the full width.
+                //
+                // Each column is capped so its right edge — and with it the resize
+                // handle the user is holding — can't be dragged past the visible
+                // table area. The cap is the space left between the column's own
+                // left edge (the gutter plus every column before it, at its current
+                // width) and the viewport's right edge, so widening one column
+                // stops exactly where it would otherwise scroll itself out of
+                // sight. `spec` floors the cap at the column's minimum, so a window
+                // too narrow to fit the layout still allows a normal drag.
+                //
+                // The right margin is the scrollbar plus a little breathing room,
+                // so the dragged edge stays clear of the viewport border.
+                let right_pad = scrollbar_w + 8.0;
+                let mut x = index_w + col_spacing_x;
                 for &col in &order {
-                    builder =
-                        builder.column(col.spec(COVER_PX, self.column_widths.get(&col).copied()));
+                    let w = self.column_widths.get(&col).copied();
+                    let max = (viewport_w - right_pad - x).max(0.0);
+                    column_caps.insert(col, max.max(col.min_width(COVER_PX)));
+                    builder = builder.column(col.spec(COVER_PX, w, Some(max)));
+                    x += w.unwrap_or_else(|| col.default_width(COVER_PX)) + col_spacing_x;
                 }
                 builder = builder.column(Column::remainder());
                 // After "Reset to default", drop egui_extras' own stored widths so
@@ -931,10 +963,6 @@ impl App {
                                 // resize can be captured and persisted globally.
                                 if col != TableColumn::Cover {
                                     observed_widths.push((col, ui.max_rect().width()));
-                                }
-                                // TEMP DEBUG
-                                if std::env::var_os("ORDNUNG_CURSOR_DEBUG").is_some() {
-                                    eprintln!("hdrcell {} {:?}", col.label(), ui.max_rect());
                                 }
                                 let resp = if col == TableColumn::Waveform {
                                     // The Waveform header *is* the energy/frequency
@@ -1846,6 +1874,16 @@ impl App {
         // is deferred until the drag ends (pointer up) so one resize writes the
         // TOML once, not every frame.
         for (col, w) in observed_widths {
+            // A column sitting at its cap is being held there by the window's right
+            // edge, not by the user. Keep the wider saved width so narrowing the
+            // window (or opening a panel) doesn't permanently shrink the layout —
+            // it comes back at full width once there's room again.
+            let at_cap = column_caps.get(&col).is_some_and(|cap| {
+                w >= cap - 0.5 && self.column_widths.get(&col).is_some_and(|prev| *prev > w)
+            });
+            if at_cap {
+                continue;
+            }
             let changed = self
                 .column_widths
                 .get(&col)

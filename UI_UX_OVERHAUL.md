@@ -10,7 +10,44 @@ Tracking doc for a staged UI/UX pass on the Ordnung egui GUI. Each task is done 
 
 > I'm working through a staged UI/UX overhaul of **Ordnung**, my Rust/egui DJ catalog app. The full plan + live status lives in `UI_UX_OVERHAUL.md` at the repo root — read it first. The GUI crate is `crates/ordnung-gui` (toolbar + sidebar in `src/app.rs`, sidebar widgets in `src/sidebar.rs`, the Duplicates view in `src/views.rs`, import/scan jobs in `src/jobs.rs`, the transcode/quality badge system in `src/table.rs` + `crates/ordnung-core/src/model/mod.rs`).
 >
-> Rules: respect the architecture skill (`ordnung-architecture`) — GUI wraps `ordnung-core`, keep reusable logic in core, never let core depend upward, and source files are sacred (never moved/modified on import). Work **one task at a time**, and **ask me before starting each one**. After finishing a task, update its row in the status table in `UI_UX_OVERHAUL.md` to ✅ and note what changed. Pick up the next ⬜ task in order.
+> Rules: respect the architecture skill (`ordnung-architecture`) — GUI wraps `ordnung-core`, keep reusable logic in core, never let core depend upward, and source files are sacred (never moved/modified on import). Work **one task at a time**, and **ask me before starting each one**. After finishing a task, update its row in the status table in `UI_UX_OVERHAUL.md` to ✅ and note what changed. Pick up the next ⬜ task in order. Also honor the **Design rules** section below — those are standing constraints on every UI change, not backlog items.
+
+---
+
+## Design rules (standing — apply to all future UI work)
+
+These are not backlog items. They hold for every change from here on; a new
+dialog or view that breaks one should be fixed rather than shipped.
+
+### R1 — A stepped dialog never changes size between steps
+
+Any multi-page surface (wizard, tour, setup flow, paged settings sheet) is laid
+out inside **one fixed body box** for the whole flow. The window must not resize
+as the user pages through it, and the footer's navigation buttons must land on
+the same pixel on every page.
+
+**Why:** if the frame grows or shrinks per page, Next/Back move under the
+pointer, and every click becomes a fresh hunt for the button. A four-step flow
+turns into four separate re-aims. Constant geometry means the user can click
+through at speed without looking.
+
+**How:** use `ui::sheet::stepped` (`crates/ordnung-gui/src/ui/sheet.rs`) with a
+`SheetSize`. It hard-pins the body — content shorter than the box leaves empty
+space rather than collapsing it, content taller scrolls inside rather than
+growing the window — and draws the separator + footer at a constant offset.
+Size the box for the **tallest** page in the flow, stated once in `SheetSize`;
+individual pages never negotiate their own size. Footer controls that don't
+apply on a given step are drawn **disabled, not hidden** (`add_enabled`), so the
+button row keeps a constant shape and its neighbours don't shift sideways.
+
+Reference implementation: the welcome tour (`src/onboarding.rs`).
+
+### R2 — Reach for a token, not a literal
+
+Colours, radii, spacing and type sizes come from `ui::tokens`
+(`space::S*`, `radius::*`, `color::*`, `font::*`), so the app re-skins from one
+place. Inline pixel gaps and hex colours in new code are a defect, not a style
+preference.
 
 ---
 

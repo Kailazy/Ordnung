@@ -368,7 +368,11 @@ impl App {
                     );
                     ui.add_space(4.0);
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(&heading).font(crate::ui::tokens::font::strong(crate::ui::tokens::font::headline().size)));
+                        ui.label(egui::RichText::new(&heading).font(
+                            crate::ui::tokens::font::strong(
+                                crate::ui::tokens::font::headline().size,
+                            ),
+                        ));
                         ui.label(egui::RichText::new(&body).small().weak());
                     });
                 });
@@ -564,6 +568,9 @@ impl App {
         }
         let mut window_open = true;
         let mut save = false;
+        // Deferred: the General tab's tour button can't call `open_tour`
+        // from inside the window closure, which already borrows `self`.
+        let mut open_tour = false;
         // Resizable, with a drag grip in the bottom-right corner. The default
         // is deliberately shorter than the old fixed 620px viewport; anyone who
         // wants more can drag it, and egui persists the size across sessions.
@@ -735,6 +742,30 @@ impl App {
                                                 self.status =
                                                     format!("Couldn't save settings: {e}");
                                             }
+                                        }
+                                        ui.add_space(14.0);
+                                        ui.separator();
+                                        ui.add_space(10.0);
+                                        ui.label(
+                                            egui::RichText::new("Getting started").strong(),
+                                        );
+                                        ui.label(
+                    egui::RichText::new(
+                        "The tour shown on first launch: what Ordnung does, what Discogs                          adds, and how tag writeback works.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                                        ui.add_space(4.0);
+                                        if ui
+                                            .button("Show welcome tour")
+                                            .on_hover_note("Replay the first-run tour")
+                                            .clicked()
+                                        {
+                                            // Close Settings too, so the tour
+                                            // isn't opening behind the window
+                                            // that launched it.
+                                            open_tour = true;
                                         }
                                     }
                                     SettingsTab::Analysis => {
@@ -1606,6 +1637,10 @@ impl App {
                 }
                 Err(e) => self.status = format!("Couldn't save settings: {e}"),
             }
+        }
+        if open_tour {
+            self.open_tour();
+            window_open = false;
         }
         // The window's [x] toggled `window_open`; mirror it back to our flag.
         if !window_open {

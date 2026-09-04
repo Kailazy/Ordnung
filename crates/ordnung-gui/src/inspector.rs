@@ -1080,7 +1080,9 @@ fn row_impl(ui: &mut egui::Ui, label: &str, value: &str, value_color: Option<egu
         // The value is the row's content, so it takes the primary label colour
         // while the field name stays tertiary. Previously both were weak, which
         // gave a name and its value the same visual weight.
-        let mut txt = egui::RichText::new(value).font(font::callout()).color(color::LABEL);
+        let mut txt = egui::RichText::new(value)
+            .font(font::callout())
+            .color(color::LABEL);
         if let Some(c) = value_color {
             txt = txt.color(c);
         }

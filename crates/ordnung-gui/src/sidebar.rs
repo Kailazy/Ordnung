@@ -586,11 +586,7 @@ impl NavDensity {
         let all = [NavDensity::Icon, NavDensity::Narrow];
         // The next tier out, and the next tier in, from where we are now.
         let wider = all.iter().copied().find(|t| t.width() > self.width());
-        let narrower = all
-            .iter()
-            .copied()
-            .rev()
-            .find(|t| t.width() < self.width());
+        let narrower = all.iter().copied().rev().find(|t| t.width() < self.width());
         if let Some(t) = wider {
             let gap = t.width() - self.width();
             if w > self.width() + gap * REACH_GROW {
@@ -688,13 +684,7 @@ pub(crate) fn nav_button_truncated(
     // the reserved lane.
     let budget = (w - 12.0 - 18.0 - reserve).max(24.0);
     let font = egui::FontId::proportional(text_size);
-    let text_w = |s: &str| {
-        ui.fonts(|f| {
-            s.chars()
-                .map(|c| f.glyph_width(&font, c))
-                .sum::<f32>()
-        })
-    };
+    let text_w = |s: &str| ui.fonts(|f| s.chars().map(|c| f.glyph_width(&font, c)).sum::<f32>());
     let shown = if text_w(label) <= budget {
         label.to_string()
     } else {
@@ -705,7 +695,14 @@ pub(crate) fn nav_button_truncated(
         }
         format!("{}…", cut.trim_end())
     };
-    nav_button_sized(ui, &format!("{icon}  {shown}"), selected, w, height, text_size)
+    nav_button_sized(
+        ui,
+        &format!("{icon}  {shown}"),
+        selected,
+        w,
+        height,
+        text_size,
+    )
 }
 
 /// A nav tile whose leading mark is *painted* rather than set as a font glyph
@@ -749,12 +746,7 @@ pub(crate) fn nav_button_painted(
     } else {
         egui::Color32::from_gray(190)
     };
-    draw(
-        ui.painter(),
-        egui::pos2(cx, resp.rect.center().y),
-        col,
-        r,
-    );
+    draw(ui.painter(), egui::pos2(cx, resp.rect.center().y), col, r);
     resp
 }
 

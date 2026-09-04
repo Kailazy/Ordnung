@@ -7,6 +7,7 @@
 pub mod hover;
 pub mod icon;
 pub mod knob;
+pub mod sheet;
 pub mod theme;
 // Tokens are an intentionally ahead-of-use palette: Pass 1 wires only a subset
 // into the global style; the rest are consumed as call sites migrate off inline

@@ -1180,250 +1180,256 @@ impl App {
         ui.scope(|ui| {
             ui.multiply_opacity(open_t);
             egui::Frame::none()
-            .fill(egui::Color32::from_gray(26))
-            .rounding(egui::Rounding::same(8.0))
-            .inner_margin(egui::Margin {
-                left: 12.0,
-                right: 12.0,
-                top: 10.0 - rise * 0.5,
-                bottom: 10.0 - rise * 0.5,
-            })
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("🔍  Digging").strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if crate::ui::icon::close_button(ui, "Stop digging and clear this path") {
-                            end = true;
-                        }
-                        // Forward only re-walks a path already dug — a new
-                        // branch is taken with the buttons below instead.
-                        if ui
-                            .add_enabled(at + 1 < cards.len(), egui::Button::new("→"))
-                            .on_hover_note("Forward to the next record you dug")
-                            .clicked()
-                        {
-                            goto = Some(at + 1);
-                        }
-                        if ui
-                            .add_enabled(at > 0, egui::Button::new("←"))
-                            .on_hover_note("Back one record, to choose the other thread")
-                            .clicked()
-                        {
-                            goto = Some(at - 1);
-                        }
+                .fill(egui::Color32::from_gray(26))
+                .rounding(egui::Rounding::same(8.0))
+                .inner_margin(egui::Margin {
+                    left: 12.0,
+                    right: 12.0,
+                    top: 10.0 - rise * 0.5,
+                    bottom: 10.0 - rise * 0.5,
+                })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("🔍  Digging").strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if crate::ui::icon::close_button(ui, "Stop digging and clear this path")
+                            {
+                                end = true;
+                            }
+                            // Forward only re-walks a path already dug — a new
+                            // branch is taken with the buttons below instead.
+                            if ui
+                                .add_enabled(at + 1 < cards.len(), egui::Button::new("→"))
+                                .on_hover_note("Forward to the next record you dug")
+                                .clicked()
+                            {
+                                goto = Some(at + 1);
+                            }
+                            if ui
+                                .add_enabled(at > 0, egui::Button::new("←"))
+                                .on_hover_note("Back one record, to choose the other thread")
+                                .clicked()
+                            {
+                                goto = Some(at - 1);
+                            }
+                        });
                     });
-                });
-                ui.add_space(6.0);
+                    ui.add_space(6.0);
 
-                // The path itself. Scrolls horizontally once a dig runs past the
-                // window width; each card is clickable to jump back to that point.
-                egui::ScrollArea::horizontal()
-                    .max_height(COVER + 74.0)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            for (i, card) in cards.iter().enumerate() {
-                                // How far into its arrival this card is. Every
-                                // card but a just-dug one is settled at 1.0, so
-                                // the path as a whole stays still while the new
-                                // find is the only thing moving.
-                                let enter = card_enter_t(card.since_landed);
-                                if enter < 1.0 {
-                                    ui.ctx().request_repaint();
-                                }
-                                if let Some((thread, matched)) = &card.via {
-                                    // The connector names what was followed, so
-                                    // a finished path explains itself. It draws
-                                    // itself in ahead of the record it points
-                                    // at, so the arrow reads as the thread being
-                                    // pulled and the card as what came up on it.
-                                    ui.vertical(|ui| {
-                                        ui.add_space(COVER * 0.5 - 8.0);
-                                        let arrow = (enter * 1.6).min(1.0);
-                                        ui.label(
-                                            egui::RichText::new("→").size(16.0).color(
-                                                egui::Color32::from_gray(120)
-                                                    .gamma_multiply(arrow),
-                                            ),
-                                        )
-                                        .on_hover_note(
-                                            format!("Same {}: {matched}", thread.label()),
-                                        );
-                                    });
-                                }
-                                let current = i == at;
-                                // A landing card slides in from the right of
-                                // its slot and fades up, like a sleeve being
-                                // pushed into the row. Only the contents move:
-                                // the slot below is allocated at full size
-                                // either way, so the rest of the path holds
-                                // still while the new find settles.
-                                let card_size = egui::vec2(COVER, COVER + 60.0);
-                                let slot = egui::Rect::from_min_size(ui.cursor().min, card_size);
-                                let shifted = slot
-                                    .translate(egui::vec2(CARD_SLIDE * (1.0 - enter), 0.0));
-                                ui.allocate_rect(slot, egui::Sense::hover());
-                                let mut card_ui = ui.new_child(
-                                    egui::UiBuilder::new()
-                                        .max_rect(shifted)
-                                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                                );
-                                card_ui.multiply_opacity(enter);
-                                {
-                                    let ui = &mut card_ui;
+                    // The path itself. Scrolls horizontally once a dig runs past the
+                    // window width; each card is clickable to jump back to that point.
+                    egui::ScrollArea::horizontal()
+                        .max_height(COVER + 74.0)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                for (i, card) in cards.iter().enumerate() {
+                                    // How far into its arrival this card is. Every
+                                    // card but a just-dug one is settled at 1.0, so
+                                    // the path as a whole stays still while the new
+                                    // find is the only thing moving.
+                                    let enter = card_enter_t(card.since_landed);
+                                    if enter < 1.0 {
+                                        ui.ctx().request_repaint();
+                                    }
+                                    if let Some((thread, matched)) = &card.via {
+                                        // The connector names what was followed, so
+                                        // a finished path explains itself. It draws
+                                        // itself in ahead of the record it points
+                                        // at, so the arrow reads as the thread being
+                                        // pulled and the card as what came up on it.
+                                        ui.vertical(|ui| {
+                                            ui.add_space(COVER * 0.5 - 8.0);
+                                            let arrow = (enter * 1.6).min(1.0);
+                                            ui.label(egui::RichText::new("→").size(16.0).color(
+                                                egui::Color32::from_gray(120).gamma_multiply(arrow),
+                                            ))
+                                            .on_hover_note(format!(
+                                                "Same {}: {matched}",
+                                                thread.label()
+                                            ));
+                                        });
+                                    }
+                                    let current = i == at;
+                                    // A landing card slides in from the right of
+                                    // its slot and fades up, like a sleeve being
+                                    // pushed into the row. Only the contents move:
+                                    // the slot below is allocated at full size
+                                    // either way, so the rest of the path holds
+                                    // still while the new find settles.
+                                    let card_size = egui::vec2(COVER, COVER + 60.0);
+                                    let slot =
+                                        egui::Rect::from_min_size(ui.cursor().min, card_size);
+                                    let shifted =
+                                        slot.translate(egui::vec2(CARD_SLIDE * (1.0 - enter), 0.0));
+                                    ui.allocate_rect(slot, egui::Sense::hover());
+                                    let mut card_ui = ui.new_child(
+                                        egui::UiBuilder::new()
+                                            .max_rect(shifted)
+                                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                                    );
+                                    card_ui.multiply_opacity(enter);
                                     {
-                                        let (rect, resp) = ui.allocate_exact_size(
-                                            egui::vec2(COVER, COVER),
-                                            egui::Sense::click(),
-                                        );
-                                        // The sleeve itself grows the last of
-                                        // the way into its square. Shrinking
-                                        // `rect` here scales the whole tile at
-                                        // once — art, the dim wash, the current
-                                        // ring and the "yours" chip all read off
-                                        // it — so the cover can't drift out of
-                                        // its own border mid-entrance.
-                                        let rect = rect.shrink(
-                                            COVER * (1.0 - CARD_MIN_SCALE) * 0.5 * (1.0 - enter),
-                                        );
-                                        // Keep the record on screen in view as
-                                        // the path outgrows the window —
-                                        // otherwise a dig past the right edge
-                                        // animates a card the user can't see.
-                                        // Only while it's still arriving, so a
-                                        // deliberate scroll back down the path
-                                        // isn't yanked forward again.
-                                        if current && enter < 1.0 {
-                                            resp.scroll_to_me(Some(egui::Align::Center));
-                                        }
-                                        let resp =
-                                            resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                                        // The starting record's cover is in the
-                                        // local cache; dug records come off the
-                                        // Discogs CDN by URL.
-                                        let tex: Option<Tex> = if card.owned {
-                                            self.dig_start_keys
-                                                .get(&card.release_id)
-                                                .and_then(|k| self.vinyl_covers.get(k))
-                                                .and_then(|t| match t {
-                                                    ThumbState::Ready(t) => t.clone(),
-                                                    _ => None,
-                                                })
-                                        } else {
-                                            card.thumb_url
-                                                .as_deref()
-                                                .and_then(|u| self.dig_cover(u))
-                                                .cloned()
-                                        };
-                                        match &tex {
-                                            Some(t) => {
-                                                egui::Image::new(t)
-                                                    .fit_to_exact_size(egui::vec2(COVER, COVER))
-                                                    .rounding(egui::Rounding::same(5.0))
-                                                    .paint_at(ui, rect);
+                                        let ui = &mut card_ui;
+                                        {
+                                            let (rect, resp) = ui.allocate_exact_size(
+                                                egui::vec2(COVER, COVER),
+                                                egui::Sense::click(),
+                                            );
+                                            // The sleeve itself grows the last of
+                                            // the way into its square. Shrinking
+                                            // `rect` here scales the whole tile at
+                                            // once — art, the dim wash, the current
+                                            // ring and the "yours" chip all read off
+                                            // it — so the cover can't drift out of
+                                            // its own border mid-entrance.
+                                            let rect = rect.shrink(
+                                                COVER
+                                                    * (1.0 - CARD_MIN_SCALE)
+                                                    * 0.5
+                                                    * (1.0 - enter),
+                                            );
+                                            // Keep the record on screen in view as
+                                            // the path outgrows the window —
+                                            // otherwise a dig past the right edge
+                                            // animates a card the user can't see.
+                                            // Only while it's still arriving, so a
+                                            // deliberate scroll back down the path
+                                            // isn't yanked forward again.
+                                            if current && enter < 1.0 {
+                                                resp.scroll_to_me(Some(egui::Align::Center));
                                             }
-                                            None => {
+                                            let resp = resp
+                                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                            // The starting record's cover is in the
+                                            // local cache; dug records come off the
+                                            // Discogs CDN by URL.
+                                            let tex: Option<Tex> = if card.owned {
+                                                self.dig_start_keys
+                                                    .get(&card.release_id)
+                                                    .and_then(|k| self.vinyl_covers.get(k))
+                                                    .and_then(|t| match t {
+                                                        ThumbState::Ready(t) => t.clone(),
+                                                        _ => None,
+                                                    })
+                                            } else {
+                                                card.thumb_url
+                                                    .as_deref()
+                                                    .and_then(|u| self.dig_cover(u))
+                                                    .cloned()
+                                            };
+                                            match &tex {
+                                                Some(t) => {
+                                                    egui::Image::new(t)
+                                                        .fit_to_exact_size(egui::vec2(COVER, COVER))
+                                                        .rounding(egui::Rounding::same(5.0))
+                                                        .paint_at(ui, rect);
+                                                }
+                                                None => {
+                                                    ui.painter().rect_filled(
+                                                        rect,
+                                                        egui::Rounding::same(5.0),
+                                                        egui::Color32::from_gray(38),
+                                                    );
+                                                    ui.painter().text(
+                                                        rect.center(),
+                                                        egui::Align2::CENTER_CENTER,
+                                                        "💿",
+                                                        egui::FontId::proportional(26.0),
+                                                        egui::Color32::from_gray(90),
+                                                    );
+                                                }
+                                            }
+                                            // Steps behind and ahead of the cursor
+                                            // are dimmed, so where you are on the
+                                            // path is readable at a glance.
+                                            if !current {
                                                 ui.painter().rect_filled(
                                                     rect,
                                                     egui::Rounding::same(5.0),
-                                                    egui::Color32::from_gray(38),
+                                                    egui::Color32::from_black_alpha(120),
+                                                );
+                                            } else {
+                                                ui.painter().rect_stroke(
+                                                    rect,
+                                                    egui::Rounding::same(5.0),
+                                                    egui::Stroke::new(
+                                                        2.0,
+                                                        egui::Color32::from_rgb(90, 200, 120),
+                                                    ),
+                                                );
+                                            }
+                                            // The record you started from is marked,
+                                            // so the one record on the path you
+                                            // already own doesn't look like a find.
+                                            if card.owned {
+                                                let chip = egui::Rect::from_min_size(
+                                                    rect.min + egui::vec2(4.0, 4.0),
+                                                    egui::vec2(44.0, 15.0),
+                                                );
+                                                ui.painter().rect_filled(
+                                                    chip,
+                                                    egui::Rounding::same(4.0),
+                                                    egui::Color32::from_black_alpha(200),
                                                 );
                                                 ui.painter().text(
-                                                    rect.center(),
+                                                    chip.center(),
                                                     egui::Align2::CENTER_CENTER,
-                                                    "💿",
-                                                    egui::FontId::proportional(26.0),
-                                                    egui::Color32::from_gray(90),
+                                                    "owned",
+                                                    egui::FontId::proportional(9.5),
+                                                    egui::Color32::from_gray(210),
                                                 );
                                             }
-                                        }
-                                        // Steps behind and ahead of the cursor
-                                        // are dimmed, so where you are on the
-                                        // path is readable at a glance.
-                                        if !current {
-                                            ui.painter().rect_filled(
-                                                rect,
-                                                egui::Rounding::same(5.0),
-                                                egui::Color32::from_black_alpha(120),
-                                            );
-                                        } else {
-                                            ui.painter().rect_stroke(
-                                                rect,
-                                                egui::Rounding::same(5.0),
-                                                egui::Stroke::new(
-                                                    2.0,
-                                                    egui::Color32::from_rgb(90, 200, 120),
-                                                ),
-                                            );
-                                        }
-                                        // The record you started from is marked,
-                                        // so the one record on the path you
-                                        // already own doesn't look like a find.
-                                        if card.owned {
-                                            let chip = egui::Rect::from_min_size(
-                                                rect.min + egui::vec2(4.0, 4.0),
-                                                egui::vec2(44.0, 15.0),
-                                            );
-                                            ui.painter().rect_filled(
-                                                chip,
-                                                egui::Rounding::same(4.0),
-                                                egui::Color32::from_black_alpha(200),
-                                            );
-                                            ui.painter().text(
-                                                chip.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                "owned",
-                                                egui::FontId::proportional(9.5),
-                                                egui::Color32::from_gray(210),
-                                            );
-                                        }
-                                        let tip = if current {
-                                            format!(
-                                                "{}\n{}\n\nOpen the tracklist and listen",
-                                                card.artist, card.title
-                                            )
-                                        } else {
-                                            format!(
-                                                "{}\n{}\n\nGo back to this record",
-                                                card.artist, card.title
-                                            )
-                                        };
-                                        if resp.on_hover_note(tip).clicked() {
-                                            if current {
-                                                open = Some(DigOpen {
-                                                    release_id: card.release_id,
-                                                    artist: card.artist.clone(),
-                                                    title: card.title.clone(),
-                                                    sub: card.sub.clone(),
-                                                    cover_url: card.thumb_url.clone(),
-                                                });
+                                            let tip = if current {
+                                                format!(
+                                                    "{}\n{}\n\nOpen the tracklist and listen",
+                                                    card.artist, card.title
+                                                )
                                             } else {
-                                                goto = Some(i);
+                                                format!(
+                                                    "{}\n{}\n\nGo back to this record",
+                                                    card.artist, card.title
+                                                )
+                                            };
+                                            if resp.on_hover_note(tip).clicked() {
+                                                if current {
+                                                    open = Some(DigOpen {
+                                                        release_id: card.release_id,
+                                                        artist: card.artist.clone(),
+                                                        title: card.title.clone(),
+                                                        sub: card.sub.clone(),
+                                                        cover_url: card.thumb_url.clone(),
+                                                    });
+                                                } else {
+                                                    goto = Some(i);
+                                                }
                                             }
-                                        }
-                                        ui.set_max_width(COVER);
-                                        ui.add_space(3.0);
-                                        let t = egui::RichText::new(&card.title).font(crate::ui::tokens::font::footnote());
-                                        ui.add(
-                                            egui::Label::new(if current {
-                                                t.strong()
-                                            } else {
-                                                t.weak()
-                                            })
-                                            .truncate(),
-                                        );
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(&card.artist).font(crate::ui::tokens::font::footnote()).weak(),
-                                            )
-                                            .truncate(),
-                                        );
-                                        // The imprint, third line and dimmest:
-                                        // a sleeve rarely says which label put
-                                        // the record out, and on a dig that's
-                                        // half of what you're reading for.
-                                        if let Some(label) = &card.label {
+                                            ui.set_max_width(COVER);
+                                            ui.add_space(3.0);
+                                            let t = egui::RichText::new(&card.title)
+                                                .font(crate::ui::tokens::font::footnote());
                                             ui.add(
+                                                egui::Label::new(if current {
+                                                    t.strong()
+                                                } else {
+                                                    t.weak()
+                                                })
+                                                .truncate(),
+                                            );
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(&card.artist)
+                                                        .font(crate::ui::tokens::font::footnote())
+                                                        .weak(),
+                                                )
+                                                .truncate(),
+                                            );
+                                            // The imprint, third line and dimmest:
+                                            // a sleeve rarely says which label put
+                                            // the record out, and on a dig that's
+                                            // half of what you're reading for.
+                                            if let Some(label) = &card.label {
+                                                ui.add(
                                                 egui::Label::new(
                                                     egui::RichText::new(label)
                                                         .font(crate::ui::tokens::font::caption())
@@ -1431,101 +1437,103 @@ impl App {
                                                 )
                                                 .truncate(),
                                             );
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            // The step being fetched, as a placeholder tile at
-                            // the end of the path — so a dig in flight looks
-                            // like it's going somewhere.
-                            if pending.is_some() {
-                                ui.vertical(|ui| {
-                                    ui.add_space(COVER * 0.5 - 8.0);
-                                    ui.label(
-                                        egui::RichText::new("→")
-                                            .size(16.0)
-                                            .color(egui::Color32::from_gray(120)),
+                                // The step being fetched, as a placeholder tile at
+                                // the end of the path — so a dig in flight looks
+                                // like it's going somewhere.
+                                if pending.is_some() {
+                                    ui.vertical(|ui| {
+                                        ui.add_space(COVER * 0.5 - 8.0);
+                                        ui.label(
+                                            egui::RichText::new("→")
+                                                .size(16.0)
+                                                .color(egui::Color32::from_gray(120)),
+                                        );
+                                    });
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(COVER, COVER + 60.0),
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            let (rect, _) = ui.allocate_exact_size(
+                                                egui::vec2(COVER, COVER),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter().rect_filled(
+                                                rect,
+                                                egui::Rounding::same(5.0),
+                                                egui::Color32::from_gray(34),
+                                            );
+                                            ui.put(rect, egui::Spinner::new());
+                                        },
                                     );
-                                });
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(COVER, COVER + 60.0),
-                                    egui::Layout::top_down(egui::Align::Min),
-                                    |ui| {
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(COVER, COVER),
-                                            egui::Sense::hover(),
-                                        );
-                                        ui.painter().rect_filled(
-                                            rect,
-                                            egui::Rounding::same(5.0),
-                                            egui::Color32::from_gray(34),
-                                        );
-                                        ui.put(rect, egui::Spinner::new());
-                                    },
-                                );
-                            }
+                                }
+                            });
                         });
-                    });
 
-                ui.add_space(8.0);
-                if let Some(e) = &error {
-                    ui.label(
-                        egui::RichText::new(e)
-                            .small()
-                            .color(egui::Color32::from_rgb(220, 160, 120)),
-                    );
-                    ui.add_space(6.0);
-                }
-                // The choice. Both threads are always shown — a disabled branch
-                // with a reason teaches the shape of the record, where a hidden
-                // one just looks broken.
-                ui.horizontal(|ui| {
-                    let busy = pending.is_some();
-                    // Gated on the *id*, not the name: until the release
-                    // detail resolves there's nothing to browse by.
-                    let can_artist = has_artist_id;
-                    let artist_tip = if can_artist {
-                        format!("Find another vinyl release by {head_artist} that you don't own")
-                    } else if head_artist.trim().is_empty() {
-                        "Discogs lists no artist for this record".to_string()
-                    } else {
-                        format!("Looking up {head_artist} on Discogs…")
-                    };
-                    if ui
-                        .add_enabled(
-                            can_artist && !busy,
-                            egui::Button::new("  ♪  Dig the artist  "),
-                        )
-                        .on_hover_note(artist_tip.clone())
-                        .on_disabled_hover_text(crate::ui::hover::note(artist_tip))
-                        .clicked()
-                    {
-                        step = Some(DigThread::Artist);
+                    ui.add_space(8.0);
+                    if let Some(e) = &error {
+                        ui.label(
+                            egui::RichText::new(e)
+                                .small()
+                                .color(egui::Color32::from_rgb(220, 160, 120)),
+                        );
+                        ui.add_space(6.0);
                     }
-                    let can_label = has_label_id;
-                    let label_tip = match &head_label {
-                        Some(l) if can_label => {
-                            format!("Find another vinyl release on {l} that you don't own")
+                    // The choice. Both threads are always shown — a disabled branch
+                    // with a reason teaches the shape of the record, where a hidden
+                    // one just looks broken.
+                    ui.horizontal(|ui| {
+                        let busy = pending.is_some();
+                        // Gated on the *id*, not the name: until the release
+                        // detail resolves there's nothing to browse by.
+                        let can_artist = has_artist_id;
+                        let artist_tip = if can_artist {
+                            format!(
+                                "Find another vinyl release by {head_artist} that you don't own"
+                            )
+                        } else if head_artist.trim().is_empty() {
+                            "Discogs lists no artist for this record".to_string()
+                        } else {
+                            format!("Looking up {head_artist} on Discogs…")
+                        };
+                        if ui
+                            .add_enabled(
+                                can_artist && !busy,
+                                egui::Button::new("  ♪  Dig the artist  "),
+                            )
+                            .on_hover_note(artist_tip.clone())
+                            .on_disabled_hover_text(crate::ui::hover::note(artist_tip))
+                            .clicked()
+                        {
+                            step = Some(DigThread::Artist);
                         }
-                        Some(l) => format!("Looking up {l} on Discogs…"),
-                        None => "Discogs lists no label for this record".to_string(),
-                    };
-                    if ui
-                        .add_enabled(
-                            can_label && !busy,
-                            egui::Button::new("  ⌂  Dig the label  "),
-                        )
-                        .on_hover_note(label_tip.clone())
-                        .on_disabled_hover_text(crate::ui::hover::note(label_tip))
-                        .clicked()
-                    {
-                        step = Some(DigThread::Label);
-                    }
-                    if busy {
-                        ui.label(egui::RichText::new("Searching Discogs…").weak());
-                    }
+                        let can_label = has_label_id;
+                        let label_tip = match &head_label {
+                            Some(l) if can_label => {
+                                format!("Find another vinyl release on {l} that you don't own")
+                            }
+                            Some(l) => format!("Looking up {l} on Discogs…"),
+                            None => "Discogs lists no label for this record".to_string(),
+                        };
+                        if ui
+                            .add_enabled(
+                                can_label && !busy,
+                                egui::Button::new("  ⌂  Dig the label  "),
+                            )
+                            .on_hover_note(label_tip.clone())
+                            .on_disabled_hover_text(crate::ui::hover::note(label_tip))
+                            .clicked()
+                        {
+                            step = Some(DigThread::Label);
+                        }
+                        if busy {
+                            ui.label(egui::RichText::new("Searching Discogs…").weak());
+                        }
+                    });
                 });
-            });
         });
 
         // Vary the roll between clicks (see `dig_roll`).

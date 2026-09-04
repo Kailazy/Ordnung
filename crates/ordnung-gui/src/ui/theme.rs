@@ -76,9 +76,10 @@ fn install_fonts(ctx: &egui::Context) {
     // (those fallbacks are regular-weight — better an unbolded glyph than none).
     let mut strong_chain = vec!["InterSemiBold".to_owned(), "DejaVuSans".to_owned()];
     strong_chain.extend(fallbacks.iter().cloned());
-    fonts
-        .families
-        .insert(FontFamily::Name(super::tokens::font::STRONG_FAMILY.into()), strong_chain);
+    fonts.families.insert(
+        FontFamily::Name(super::tokens::font::STRONG_FAMILY.into()),
+        strong_chain,
+    );
     ctx.set_fonts(fonts);
 }
 

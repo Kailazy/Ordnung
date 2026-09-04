@@ -30,8 +30,8 @@
 //! presentation only.
 
 use super::*;
-use crate::ui::tokens::{color, radius, space};
 use crate::search_box::clipped_line;
+use crate::ui::tokens::{color, radius, space};
 use ordnung_core::discogs::{self, RecordHit};
 use std::thread;
 
@@ -180,9 +180,8 @@ impl App {
         }
         let token = self.discogs_token();
         if token.trim().is_empty() {
-            self.record_search = RecordSearch::Failed(
-                "Add a Discogs token in Settings to look up records.".into(),
-            );
+            self.record_search =
+                RecordSearch::Failed("Add a Discogs token in Settings to look up records.".into());
             return;
         }
         self.record_generation += 1;
@@ -219,8 +218,7 @@ impl App {
                     if self.record_cache.len() >= RECORD_CACHE_MAX {
                         self.record_cache.clear();
                     }
-                    self.record_cache
-                        .insert(msg.query, (hits.clone(), items));
+                    self.record_cache.insert(msg.query, (hits.clone(), items));
                     self.record_search = RecordSearch::Done { hits, items };
                 }
                 Err(e) => self.record_search = RecordSearch::Failed(e),
@@ -343,13 +341,7 @@ impl App {
     /// needs the *cached* row, since a collection copy is addressed by folder and
     /// instance id rather than release id; anything actually in a list has one,
     /// because that's where membership is read from.
-    fn toggle_record_list(
-        &mut self,
-        list: VinylList,
-        hit: &RecordHit,
-        owned: bool,
-        wanted: bool,
-    ) {
+    fn toggle_record_list(&mut self, list: VinylList, hit: &RecordHit, owned: bool, wanted: bool) {
         // One background job at a time — the shared worker channel is
         // single-slot, and a second edit would silently displace the first.
         if self.is_busy() {
@@ -459,10 +451,7 @@ impl App {
     /// one switch with a position instead of two buttons that light up.
     pub(crate) fn draw_scope_toggle(&mut self, ui: &mut egui::Ui) {
         let h = 26.0;
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(SCOPE_TOGGLE_W, h),
-            egui::Sense::hover(),
-        );
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(SCOPE_TOGGLE_W, h), egui::Sense::hover());
         let painter = ui.painter();
         painter.rect_filled(rect, egui::Rounding::same(radius::SM), color::FIELD);
 
@@ -501,11 +490,7 @@ impl App {
                 egui::pos2(rect.left() + half * i as f32, rect.top()),
                 egui::vec2(half, h),
             );
-            let resp = ui.interact(
-                seg,
-                ui.id().with(("search_scope", i)),
-                egui::Sense::click(),
-            );
+            let resp = ui.interact(seg, ui.id().with(("search_scope", i)), egui::Sense::click());
             if resp.clicked() {
                 clicked = Some(scope);
             }
@@ -544,13 +529,11 @@ impl App {
 /// in-app: past the first handful the user is browsing, and the browser is
 /// better at that than a popup under a search field.
 fn footer(ui: &mut egui::Ui, items: u32) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 30.0),
-        egui::Sense::click(),
-    );
-    let hot = ui
-        .ctx()
-        .animate_bool_with_time(resp.id.with("hot"), resp.hovered(), ROW_HIGHLIGHT_ANIM);
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::click());
+    let hot =
+        ui.ctx()
+            .animate_bool_with_time(resp.id.with("hot"), resp.hovered(), ROW_HIGHLIGHT_ANIM);
     if hot > 0.0 {
         ui.painter().rect_filled(
             rect,
@@ -582,7 +565,11 @@ fn footer(ui: &mut egui::Ui, items: u32) -> egui::Response {
         egui::Align2::RIGHT_CENTER,
         "View all  →",
         style,
-        if hot > 0.0 { color::LABEL } else { color::LABEL_3 },
+        if hot > 0.0 {
+            color::LABEL
+        } else {
+            color::LABEL_3
+        },
     );
     resp
 }
@@ -671,9 +658,9 @@ fn record_row(
     let rounding = egui::Rounding::same(radius::XS);
     // Covers arrive whenever the CDN answers; cross-fade so a late texture
     // doesn't punch a hole in a settled list.
-    let art_t = ui
-        .ctx()
-        .animate_bool_with_time(resp.id.with("art"), tex.is_some(), COVER_FADE_ANIM);
+    let art_t =
+        ui.ctx()
+            .animate_bool_with_time(resp.id.with("art"), tex.is_some(), COVER_FADE_ANIM);
     if art_t < 1.0 {
         ui.painter().rect_filled(art, rounding, color::SURFACE_HI);
     }
@@ -1049,7 +1036,10 @@ mod tests {
     /// The eyebrow reduces a long format string to just the carrier.
     #[test]
     fn eyebrow_reduces_format_to_the_carrier() {
-        assert_eq!(format_eyebrow("Vinyl, 12\", 33 ⅓ RPM, Album"), spaced("VINYL"));
+        assert_eq!(
+            format_eyebrow("Vinyl, 12\", 33 ⅓ RPM, Album"),
+            spaced("VINYL")
+        );
         assert_eq!(format_eyebrow("LP, Album, Reissue"), spaced("VINYL"));
         assert_eq!(format_eyebrow("CD, Compilation"), spaced("CD"));
         assert_eq!(format_eyebrow("Cassette, Album"), spaced("CASSETTE"));

@@ -38,6 +38,7 @@ use covers::*;
 use dig::DigPath;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
+use onboarding::Tour;
 use ordnung_core::analysis::{self, AnalysisParams, ANALYZER_VERSION, WAVEFORM_FULLTRACK_VERSION};
 use ordnung_core::convert::{self, ConvertSpec};
 use ordnung_core::discogs;
@@ -45,7 +46,6 @@ use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
     Analysis, Format, Id, Playlist, Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
 };
-use onboarding::Tour;
 use ordnung_core::search::{ScoredHit, SearchHit};
 use ordnung_core::{
     best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind, ScannedTrack,
@@ -379,32 +379,88 @@ impl TableColumn {
         })
     }
 
+    /// The narrowest this column may be dragged. Also the floor for the
+    /// right-edge cap in `spec`: a column can always reach its minimum even in a
+    /// window too narrow to hold it.
+    fn min_width(self, cover_px: f32) -> f32 {
+        match self {
+            TableColumn::Cover => cover_px + 6.0,
+            TableColumn::Waveform => 60.0,
+            TableColumn::Artist => 80.0,
+            TableColumn::Title => 80.0,
+            TableColumn::Album => 60.0,
+            TableColumn::Genre => 60.0,
+            TableColumn::Duration => 40.0,
+            TableColumn::Bpm => 46.0,
+            TableColumn::Key => 40.0,
+            TableColumn::Format => 50.0,
+            TableColumn::Bitrate => 50.0,
+            TableColumn::Quality => 48.0,
+            TableColumn::Notes => 80.0,
+            TableColumn::Added => 60.0,
+        }
+    }
+
+    /// This column's default width, used before the user has resized it (and by
+    /// the table to lay out the right-edge drag cap on the first frame, when no
+    /// measured width exists yet).
+    fn default_width(self, cover_px: f32) -> f32 {
+        match self {
+            TableColumn::Cover => cover_px + 6.0,
+            TableColumn::Waveform => 140.0,
+            TableColumn::Artist => 180.0,
+            TableColumn::Title => 260.0,
+            TableColumn::Album => 180.0,
+            TableColumn::Genre => 110.0,
+            TableColumn::Duration => 60.0,
+            TableColumn::Bpm => 62.0,
+            TableColumn::Key => 55.0,
+            TableColumn::Format => 60.0,
+            TableColumn::Bitrate => 70.0,
+            TableColumn::Quality => 66.0,
+            TableColumn::Notes => 200.0,
+            TableColumn::Added => 90.0,
+        }
+    }
+
     /// This column's egui_extras width spec (the same sizes the table used when
     /// columns were hard-coded). `cover_px` is the thumbnail edge length.
     /// `width` overrides the initial width with the user's saved value (see
-    /// `App::column_widths`); `None` uses the per-column default. The Cover column
-    /// is a fixed size and ignores the override.
-    fn spec(self, cover_px: f32, width: Option<f32>) -> Column {
-        let w = |default: f32| width.unwrap_or(default);
-        match self {
-            TableColumn::Cover => Column::exact(cover_px + 6.0),
-            // Unclipped: when Waveform leads the row its paint stretches left
-            // across the blank order gutter (see the flush-left rect in
-            // table.rs), which a cell clip would cut off.
-            TableColumn::Waveform => Column::initial(w(140.0)).at_least(60.0),
-            TableColumn::Artist => Column::initial(w(180.0)).at_least(80.0).clip(true),
-            TableColumn::Title => Column::initial(w(260.0)).at_least(80.0).clip(true),
-            TableColumn::Album => Column::initial(w(180.0)).at_least(60.0).clip(true),
-            TableColumn::Genre => Column::initial(w(110.0)).at_least(60.0).clip(true),
-            TableColumn::Duration => Column::initial(w(60.0)).at_least(40.0),
-            TableColumn::Bpm => Column::initial(w(62.0)).at_least(46.0),
-            TableColumn::Key => Column::initial(w(55.0)).at_least(40.0),
-            TableColumn::Format => Column::initial(w(60.0)).at_least(50.0),
-            TableColumn::Bitrate => Column::initial(w(70.0)).at_least(50.0),
-            TableColumn::Quality => Column::initial(w(66.0)).at_least(48.0),
-            TableColumn::Notes => Column::initial(w(200.0)).at_least(80.0).clip(true),
-            TableColumn::Added => Column::initial(w(90.0)).at_least(60.0),
+    /// `App::column_widths`); `None` uses the per-column default. `max` caps how
+    /// wide it may be dragged — the caller passes the space left before the
+    /// table's right edge, so a resize can never push the column's own edge (and
+    /// its drag handle) off screen. The Cover column is a fixed size and ignores
+    /// both.
+    fn spec(self, cover_px: f32, width: Option<f32>, max: Option<f32>) -> Column {
+        if self == TableColumn::Cover {
+            return Column::exact(cover_px + 6.0);
         }
+        let min = self.min_width(cover_px);
+        let col = Column::initial(width.unwrap_or_else(|| self.default_width(cover_px)))
+            .at_least(min)
+            .clip(self.clips());
+        // Never cap below the minimum: a very narrow window must still leave the
+        // column draggable within its own legal range.
+        match max {
+            Some(m) => col.at_most(m.max(min)),
+            None => col,
+        }
+    }
+
+    /// Whether this column clips its content rather than forcing itself wider.
+    /// The free-text columns clip; the short numeric ones don't. Waveform stays
+    /// unclipped because when it leads the row its paint stretches left across the
+    /// blank order gutter (see the flush-left rect in table.rs), which a cell clip
+    /// would cut off.
+    fn clips(self) -> bool {
+        matches!(
+            self,
+            TableColumn::Artist
+                | TableColumn::Title
+                | TableColumn::Album
+                | TableColumn::Genre
+                | TableColumn::Notes
+        )
     }
 }
 

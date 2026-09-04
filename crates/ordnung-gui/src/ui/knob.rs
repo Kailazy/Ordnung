@@ -54,10 +54,8 @@ fn arc(p: &egui::Painter, c: egui::Pos2, r: f32, from: f32, to: f32, stroke: egu
 /// to return to unity. The percentage rides in the hover note rather than a
 /// permanent label, so the control keeps a fixed width in the toolbar.
 pub fn volume(ui: &mut egui::Ui, value: f32) -> Option<f32> {
-    let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(SIZE, SIZE),
-        egui::Sense::click_and_drag(),
-    );
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::click_and_drag());
     let value = value.clamp(0.0, 1.0);
     let mut changed = None;
 

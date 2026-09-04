@@ -2019,8 +2019,8 @@ impl eframe::App for App {
                         h,
                         size,
                     )
-                        .on_hover_note("Your Discogs vinyl collection")
-                        .clicked()
+                    .on_hover_note("Your Discogs vinyl collection")
+                    .clicked()
                     {
                         *view = LibraryView::Vinyl;
                     }
@@ -2342,10 +2342,12 @@ impl eframe::App for App {
         // reads it as already at its minimum and offers a one-way "resize east"
         // cursor — implying the sidebar can only be widened. It snaps both ways,
         // so say so, on hover as well as mid-drag.
-        if self.nav_drag.is_some() || ctx.is_pointer_over_area() && {
-            let r = ctx.read_response(drag_id);
-            r.map(|r| r.hovered()).unwrap_or(false)
-        } {
+        if self.nav_drag.is_some()
+            || ctx.is_pointer_over_area() && {
+                let r = ctx.read_response(drag_id);
+                r.map(|r| r.hovered()).unwrap_or(false)
+            }
+        {
             ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
         if let Some(drag) = self.nav_drag {

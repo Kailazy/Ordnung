@@ -687,6 +687,7 @@ impl App {
             error,
             playing_video,
             video_open,
+            has_video,
         ) = {
             let s = self.vinyl_sheet.as_ref().unwrap();
             (
@@ -700,6 +701,12 @@ impl App {
                 s.error.clone(),
                 s.playing_video,
                 webview::is_open(),
+                // Can anything on this record play through the mini-player? Only
+                // then does the transport's slot need holding open.
+                s.rows
+                    .iter()
+                    .any(|r| matches!(r.source, SheetSource::Video(_)) || r.also_video.is_some())
+                    || !s.extra_videos.is_empty(),
             )
         };
         // Cover from the local cache when it has one, falling back to the URL.
@@ -721,6 +728,15 @@ impl App {
                 .cloned(),
         };
         let now_playing_id = self.audio.as_ref().and_then(|a| a.current());
+        // The track that is actually *sounding*, as against the one merely
+        // loaded in the player. `current()` survives a pause and a stop, so a
+        // row keyed on it alone keeps showing its pause icon long after the
+        // music ended — and a second row lighting up next to it made the sheet
+        // claim two tracks were playing at once.
+        let sounding_id = self.audio.as_ref().and_then(|a| {
+            a.current()
+                .filter(|id| a.state_for(*id) == PlayState::Playing)
+        });
         // Is *this record* sounding right now, and through which engine? One
         // button covers both, so it has to know which one to talk to.
         let record_play = {
@@ -871,8 +887,14 @@ impl App {
                     }
                     ui.add_space(14.0);
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(&artist).font(crate::ui::tokens::font::strong(crate::ui::tokens::font::headline().size)));
-                        ui.label(egui::RichText::new(&title).font(crate::ui::tokens::font::headline()));
+                        ui.label(egui::RichText::new(&artist).font(
+                            crate::ui::tokens::font::strong(
+                                crate::ui::tokens::font::headline().size,
+                            ),
+                        ));
+                        ui.label(
+                            egui::RichText::new(&title).font(crate::ui::tokens::font::headline()),
+                        );
                         if !sub.is_empty() {
                             ui.label(egui::RichText::new(&sub).weak());
                         }
@@ -964,15 +986,11 @@ impl App {
                             // whole pixels before padding it; the raw text
                             // height lands a fraction of a pixel short of the
                             // real buttons (26.94 against their 27).
-                            let btn_h = (ui
-                                .text_style_height(&egui::TextStyle::Button)
-                                .round()
+                            let btn_h = (ui.text_style_height(&egui::TextStyle::Button).round()
                                 + 2.0 * ui.spacing().button_padding.y)
                                 .max(ui.spacing().interact_size.y);
-                            let (rect, resp) = ui.allocate_exact_size(
-                                egui::vec2(44.0, btn_h),
-                                egui::Sense::click(),
-                            );
+                            let (rect, resp) = ui
+                                .allocate_exact_size(egui::vec2(44.0, btn_h), egui::Sense::click());
                             let resp = resp.on_hover_note(play_tip);
                             // Same chrome the text buttons beside it wear, so
                             // the row reads as one set of controls.
@@ -1157,14 +1175,40 @@ impl App {
                 // The transport for whatever the mini-player is playing. Sits
                 // above the tracklist so it's in reach of the rows that feed it,
                 // and only while there's a panel to drive.
+                //
+                // Its slot is held open whether or not it's there. The window
+                // auto-sizes to its content, so a bar that appears on play and
+                // vanishes on close would grow and shrink the whole sheet under
+                // the pointer — and the rows the user is aiming at would jump by
+                // the bar's height at the exact moment they started something
+                // playing. Reserving the space costs a strip of empty sheet and
+                // keeps the tracklist still.
+                //
+                // The height is measured from the real bar rather than written
+                // down as a constant, so it can't drift out of step if the bar's
+                // contents change. Until it has been measured once, the slot is
+                // simply absent — one frame, on the first play of a session.
+                let bar_h_id = egui::Id::new("vinyl-sheet-transport-h");
                 if video_open {
                     ui.add_space(8.0);
+                    let before = ui.cursor().top();
                     let mut scrub = self.vinyl_sheet.as_ref().and_then(|s| s.video_scrub);
                     video_act = video_transport_ui(ui, &mut scrub);
                     if let Some(s) = self.vinyl_sheet.as_mut() {
                         s.video_scrub = scrub;
                     }
+                    let measured = ui.cursor().top() - before;
+                    if measured > 0.0 {
+                        ui.ctx().data_mut(|d| d.insert_temp(bar_h_id, measured));
+                    }
                     ui.add_space(4.0);
+                } else if has_video {
+                    // Only on a record that *can* play a video. A record with no
+                    // video never shows the bar, so reserving its slot there
+                    // would be dead space at the top of every such sheet.
+                    if let Some(h) = ui.ctx().data(|d| d.get_temp::<f32>(bar_h_id)) {
+                        ui.add_space(8.0 + h + 4.0);
+                    }
                 }
 
                 if loading {
@@ -1203,7 +1247,7 @@ impl App {
                                 SheetSource::Local(l) => sheet
                                     .local
                                     .get(l)
-                                    .is_some_and(|t| Some(t.id) == now_playing_id),
+                                    .is_some_and(|t| Some(t.id) == sounding_id),
                                 SheetSource::Video(v) => playing_video == Some(v),
                                 SheetSource::None => false,
                             };
@@ -1563,7 +1607,7 @@ fn video_transport_ui(ui: &mut egui::Ui, scrub: &mut Option<f32>) -> Option<Vide
                 // button and elapsed clock behind it.
                 const TRAILING: f32 = space::S4 + CLOCK_W // gap, total clock
                     + space::S4 + 24.0                    // gap, video toggle
-                    + space::S3 + 24.0;                   // gap, close
+                    + space::S3 + 24.0; // gap, close
                 let track_w = (ui.available_width() - TRAILING).max(60.0);
                 let (rect, resp) = ui
                     .allocate_exact_size(egui::vec2(track_w, 26.0), egui::Sense::click_and_drag());
@@ -1720,7 +1764,11 @@ fn sheet_row_ui(
                             .halign(egui::Align::LEFT),
                     );
                 };
-                cell(ui, MARKER_W, egui::RichText::new(glyph).size(11.0).color(colour));
+                cell(
+                    ui,
+                    MARKER_W,
+                    egui::RichText::new(glyph).size(11.0).color(colour),
+                );
                 // Position.
                 cell(
                     ui,
@@ -1799,8 +1847,8 @@ fn sheet_row_ui(
                         // a bare label is as wide as its text, so "10:57" and
                         // "9:59" started at different x and the durations read
                         // as a ragged column down the sheet.
-                        let (rect, _) = ui
-                            .allocate_exact_size(egui::vec2(DUR_W, 20.0), egui::Sense::hover());
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(DUR_W, 20.0), egui::Sense::hover());
                         ui.put(
                             rect,
                             egui::Label::new(
