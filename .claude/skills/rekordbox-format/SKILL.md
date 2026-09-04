@@ -73,7 +73,16 @@ internally — see `audio-analysis` for the Camelot↔OpenKey table).
 4. Beatgrid first downbeat aligns with the analysis beatgrid anchor.
 5. Playlists in `PlaylistTree` reference valid track ids in entry order.
 6. USB is FAT32/MBR and paths use the exact casing CDJs expect.
-7. **Never let SQLite write in place on the mounted stick.** macOS's msdos
+7. **Table-first pages are INDEX pages with a mandatory body.** Every table's
+   first page (flags 0x64) must carry the full empty-index form — magics
+   0x03ec and 0x03ffffff, num_entries/first_empty, and the entry array filled
+   with 0x1FFFFFF8 (last 20 bytes zero) — plus zeroed empty-candidate pages
+   terminating each chain. A zero-body sentinel reads as "Device library is
+   corrupted" on players (and fails rekordcrate). `pdbw::sentinel_page`
+   writes the canonical form; validate any pdb-writer change with
+   `rekordcrate dump-pdb` (build with `rustup run stable`, cli feature)
+   before it touches a stick.
+8. **Never let SQLite write in place on the mounted stick.** macOS's msdos
    (FAT32) driver breaks SQLite mid-write ("attempt to write a readonly
    database" after the first commit), leaving a truncated exportLibrary.db
    that players reject as "Device library is corrupted". Build/edit the DLP
