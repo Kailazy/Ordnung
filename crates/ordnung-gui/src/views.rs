@@ -1290,7 +1290,9 @@ impl App {
         if self.dig.is_some() {
             ui.add_space(8.0);
         }
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
             ui.add_space(4.0);
             if cells.is_empty() {
                 // The other tab's count decides the wording: with a search on,
@@ -1459,11 +1461,18 @@ impl App {
     /// for by clicking a cell's badge or picking from its right-click menu, for
     /// the caller to apply after the frame's borrows are released.
     fn vinyl_grid(&self, ui: &mut egui::Ui, cells: &[VinylCell]) -> Option<VinylGridAction> {
-        /// Side length of each cover icon in points — deliberately large so the
-        /// grid reads as a record wall rather than a list.
-        const COVER: f32 = 150.0;
         /// Gap between cells (and the width budget for the caption under each).
         const GAP: f32 = 14.0;
+        /// Covers size to whatever fills the row exactly: fit as many columns
+        /// as the width allows at this minimum, then stretch them so the wall
+        /// runs edge to edge with no dead margin on the right.
+        const MIN_COVER: f32 = 132.0;
+        const MAX_COVER: f32 = 170.0;
+        let avail = ui.available_width();
+        let cols = ((avail + GAP) / (MIN_COVER + GAP)).floor().max(1.0);
+        let cover_side = ((avail - GAP * (cols - 1.0)) / cols)
+            .floor()
+            .clamp(MIN_COVER.min(avail.max(1.0)), MAX_COVER);
 
         // The record whose video is playing in the mini-player, so its cover
         // keeps a visible pause disc while the wall scrolls.
@@ -1490,13 +1499,13 @@ impl App {
                 // cover width so long titles don't break the grid alignment.
                 let release_url = format!("https://www.discogs.com/release/{}", c.release_id);
                 ui.allocate_ui_with_layout(
-                    egui::vec2(COVER, COVER + 42.0),
+                    egui::vec2(cover_side, cover_side + 42.0),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         // The cover is a link to the release page on Discogs —
                         // click-sensing, with a hand cursor on hover.
                         let (rect, resp) =
-                            ui.allocate_exact_size(egui::vec2(COVER, COVER), egui::Sense::click());
+                            ui.allocate_exact_size(egui::vec2(cover_side, cover_side), egui::Sense::click());
                         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                         // Both corner discs claim their hit areas here, before
                         // anything is painted, so every element below can read
@@ -1551,7 +1560,7 @@ impl App {
                         match &tex {
                             Some(h) => {
                                 egui::Image::new(h)
-                                    .fit_to_exact_size(egui::vec2(COVER, COVER))
+                                    .fit_to_exact_size(egui::vec2(cover_side, cover_side))
                                     .rounding(egui::Rounding::same(6.0))
                                     .paint_at(ui, rect);
                             }
@@ -1824,7 +1833,7 @@ impl App {
                                 ui.close_menu();
                             }
                         });
-                        ui.set_max_width(COVER);
+                        ui.set_max_width(cover_side);
                         ui.add_space(4.0);
                         // Title doubles as the textual link to the release page.
                         let title = ui.add(
