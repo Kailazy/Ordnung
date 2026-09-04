@@ -390,3 +390,21 @@ pub fn folder_button(ui: &mut egui::Ui, tip: &str) -> bool {
     }
     resp.clicked()
 }
+
+/// A bare check, centred on `c` with half-extent `r`.
+///
+/// Takes its own `stroke` width rather than the shared [`MARK`]: this one is
+/// drawn at badge sizes as well as at text size, and a 1.6px stroke on a 4px
+/// tick is a blob. The proportions are the usual short-arm/long-arm tick, sized
+/// so it still reads as a check when it's only a few pixels across.
+pub fn check(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32, stroke: f32) {
+    let s = egui::Stroke::new(stroke, col);
+    p.add(egui::Shape::line(
+        vec![
+            egui::pos2(c.x - r, c.y + r * 0.06),
+            egui::pos2(c.x - r * 0.24, c.y + r * 0.72),
+            egui::pos2(c.x + r, c.y - r * 0.7),
+        ],
+        s,
+    ));
+}

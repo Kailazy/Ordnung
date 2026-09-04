@@ -799,13 +799,18 @@ impl App {
             .collect();
         const ROW_H: f32 = 28.0;
         const COVER_PX: f32 = 24.0;
-        /// Radius of the Discogs-match dot painted in the cover's corner, and
-        /// how far its centre sits in from the artwork's bottom-right. Sized to
-        /// read as a mark rather than a badge on a 24px thumbnail: big enough to
-        /// catch the eye while scanning a column of covers, small enough that it
-        /// never reads as part of the sleeve.
-        const DISCOGS_DOT_R: f32 = 2.5;
-        const DISCOGS_DOT_INSET: f32 = 3.5;
+        /// Half-extent of the Discogs-match check painted in the cover's corner,
+        /// and how far its centre sits in from the artwork's bottom-right. Sized
+        /// to read as a mark rather than a badge on a 24px thumbnail: big enough
+        /// to be recognisably a tick while scanning a column of covers, small
+        /// enough that it never reads as part of the sleeve.
+        const DISCOGS_TICK_R: f32 = 2.6;
+        const DISCOGS_TICK_INSET: f32 = 5.0;
+        /// Padding between the tick and the edge of the disc behind it. Kept
+        /// here with the two above because together they decide whether the
+        /// badge fits inside the artwork: `INSET >= R + PAD`, or the disc bleeds
+        /// over the cover's corner.
+        const DISCOGS_TICK_PAD: f32 = 1.5;
         // Color mode for the inline Waveform column, read once per frame (Copy, so
         // capturing it in the row closures doesn't borrow `self`).
         let waveform_color_mode =
@@ -1239,28 +1244,48 @@ impl App {
                                                 },
                                             )
                                             .inner;
-                                        // Discogs match mark: a small dot in the cover's
+                                        // Discogs match mark: a small check in the cover's
                                         // bottom-right corner when this track has a fetched
                                         // Discogs release. The artwork *is* the release, so the
-                                        // match belongs on it — and a dot in the corner costs no
-                                        // column width and leaves every other cell's layout
-                                        // untouched. Drawn with a dark ring so it survives a
-                                        // light-coloured sleeve.
-                                        if let Some(rid) = track_releases.get(&r.id).copied() {
+                                        // match belongs on it — and a corner mark costs no column
+                                        // width and leaves every other cell's layout untouched.
+                                        //
+                                        // A check rather than a dot: a filled dot is the shape
+                                        // interfaces use for *unfinished* things (unsaved work, an
+                                        // unread item, a build still running), so it read as
+                                        // something demanding attention rather than a state
+                                        // already settled. A tick says "done" and nothing else.
+                                        // It sits on a dark disc because a bare stroke is
+                                        // illegible over a pale or busy sleeve.
+                                        // Suppressed while the play overlay is up: on a 24px
+                                        // cover the centred disc and a corner badge can't both
+                                        // fit, and the transport is what the pointer came for.
+                                        // The state is unchanged either way, so nothing is lost
+                                        // by yielding the space for as long as the disc is there.
+                                        let play_overlay = audio_enabled
+                                            && (ui.rect_contains_pointer(resp.rect)
+                                                || matches!(
+                                                    preview_state(r.id),
+                                                    PlayState::Loading | PlayState::Playing
+                                                ));
+                                        let matched = track_releases.get(&r.id).copied();
+                                        if let (Some(rid), false) = (matched, play_overlay) {
                                             let c = resp.rect.right_bottom()
                                                 + egui::vec2(
-                                                    -DISCOGS_DOT_INSET,
-                                                    -DISCOGS_DOT_INSET,
+                                                    -DISCOGS_TICK_INSET,
+                                                    -DISCOGS_TICK_INSET,
                                                 );
                                             ui.painter().circle_filled(
                                                 c,
-                                                DISCOGS_DOT_R + 1.0,
-                                                egui::Color32::from_black_alpha(160),
+                                                DISCOGS_TICK_R + DISCOGS_TICK_PAD,
+                                                egui::Color32::from_black_alpha(190),
                                             );
-                                            ui.painter().circle_filled(
+                                            crate::ui::icon::check(
+                                                ui.painter(),
                                                 c,
-                                                DISCOGS_DOT_R,
-                                                crate::ui::tokens::color::ACCENT,
+                                                crate::ui::tokens::color::GREEN,
+                                                DISCOGS_TICK_R,
+                                                1.3,
                                             );
                                             // Hover note scoped to the dot rather than the whole
                                             // cover: the cover is a click/drag/preview target and
@@ -1274,7 +1299,7 @@ impl App {
                                             );
                                             ui.interact(
                                                 hit,
-                                                egui::Id::new(("discogs-dot", r.id)),
+                                                egui::Id::new(("discogs-tick", r.id)),
                                                 egui::Sense::hover(),
                                             )
                                             .on_hover_note(format!(
