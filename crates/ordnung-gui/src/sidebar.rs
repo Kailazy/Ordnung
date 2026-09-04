@@ -556,40 +556,55 @@ impl NavDensity {
     /// column — the property that makes a rail scannable at all.
     pub(crate) const RAIL_TILE: f32 = 40.0;
 
-    /// The tier whose width is closest to `w`.
-    pub(crate) fn nearest(w: f32) -> Self {
-        [NavDensity::Icon, NavDensity::Narrow]
-            .into_iter()
-            .min_by(|a, b| (a.width() - w).abs().total_cmp(&(b.width() - w).abs()))
-            .unwrap()
-    }
-
     /// The tier a drag to width `w` should select, given the tier currently in
     /// force. The panel is pinned to a tier width at every instant, so the
     /// pointer sits *away* from the panel edge for most of a drag and a plain
     /// nearest-match would strobe between two layouts whenever it hovered near
     /// a boundary. `self` therefore holds until the pointer is decisively into
-    /// a neighbour: the switch happens a third of the way past the midpoint,
-    /// which is far enough that the layout only changes when the user means it.
+    /// a neighbour.
+    ///
+    /// How far "decisively" is depends on which way you're going, because the
+    /// two directions aren't equally costly to get wrong. Widening is the
+    /// cheap, common intent — you want the labels back — and an accidental
+    /// widen is obvious and instantly undone. Collapsing to the rail throws
+    /// away every caption, so it stays deliberate. An equal split also *reads*
+    /// unequal from the rail: a symmetric 33% meant pulling 130pt off a 56pt
+    /// panel, more than twice the panel's own width, before anything happened.
+    /// So widening commits just past the panel's own edge, while collapsing
+    /// keeps the full hold.
     pub(crate) fn dragged_to(self, w: f32) -> Self {
-        const STICK: f32 = 0.33;
-        let near = Self::nearest(w);
-        if near == self {
-            return self;
+        /// Fraction of the gap past the midpoint needed to collapse toward the
+        /// rail — the destructive direction, held deliberately far.
+        const STICK_SHRINK: f32 = 0.33;
+        /// Widening instead commits *before* the midpoint: a quarter of the way
+        /// out from the current edge, so a short confident pull is enough.
+        const REACH_GROW: f32 = 0.25;
+        // Deliberately *not* keyed off `nearest`: the whole point of an
+        // asymmetric widen is to fire while the pointer is still nearer the
+        // rail than the wide tier, which an early `near == self` return would
+        // swallow. Each direction is tested against its own threshold instead.
+        let all = [NavDensity::Icon, NavDensity::Narrow];
+        // The next tier out, and the next tier in, from where we are now.
+        let wider = all.iter().copied().find(|t| t.width() > self.width());
+        let narrower = all
+            .iter()
+            .copied()
+            .rev()
+            .find(|t| t.width() < self.width());
+        if let Some(t) = wider {
+            let gap = t.width() - self.width();
+            if w > self.width() + gap * REACH_GROW {
+                return t;
+            }
         }
-        let midpoint = (self.width() + near.width()) / 2.0;
-        // How far past the midpoint, toward `near`, the pointer must travel.
-        let slack = (near.width() - self.width()).abs() * STICK;
-        let committed = if near.width() > self.width() {
-            w > midpoint + slack
-        } else {
-            w < midpoint - slack
-        };
-        if committed {
-            near
-        } else {
-            self
+        if let Some(t) = narrower {
+            let gap = self.width() - t.width();
+            let midpoint = (self.width() + t.width()) / 2.0;
+            if w < midpoint - gap * STICK_SHRINK {
+                return t;
+            }
         }
+        self
     }
 
     /// Icon tier hides every text label except playlist names.
