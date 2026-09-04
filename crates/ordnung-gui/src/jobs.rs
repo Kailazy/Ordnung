@@ -1125,43 +1125,7 @@ fn analyze_tracks(
     let params = AnalysisParams::default();
     let done = AtomicUsize::new(0);
     let pool = analysis_pool();
-    let run = || -> Vec<(u64, u64, i64, Option<Result<Analysis, String>>)> {
-        pending
-            .par_iter()
-            .map_init(
-                || tx.clone(),
-                |tx_local, (id, path, size, mtime)| {
-                    // Abort can't interrupt a decode already in flight, but it
-                    // stops every track rayon hasn't started yet — with a queue
-                    // of thousands that's the difference between seconds and
-                    // hours. `None` marks a skipped track: it's neither saved
-                    // nor counted as a failure.
-                    if cancel.load(Ordering::Relaxed) {
-                        // Still tick progress: the bar drains quickly to its
-                        // total instead of freezing where the user clicked.
-                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                        let _ = tx_local.send(JobMsg::Progress { done: n, total });
-                        ctx.request_repaint();
-                        return (*id, *size, *mtime, None);
-                    }
-                    let r = analysis::analyze_file(path, params).map_err(|e| e.to_string());
-                    let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                    let _ = tx_local.send(JobMsg::Progress { done: n, total });
-                    ctx.request_repaint();
-                    (*id, *size, *mtime, Some(r))
-                },
-            )
-            .collect()
-    };
-    // `install` runs the fan-out on the sized pool; without a pool we're on
-    // rayon's global one, which is the pre-clamp behavior.
-    let results = match &pool {
-        Some(p) => p.install(run),
-        None => run(),
-    };
 
-    let (mut ok, mut failed) = (0u64, 0u64);
-    let mut fails: Vec<(String, String)> = Vec::new();
     // Map id -> source path so a failure can be reported by file name.
     let name_for = |id: u64| -> String {
         pending
@@ -1175,26 +1139,85 @@ fn analyze_tracks(
             })
             .unwrap_or_else(|| format!("track {id}"))
     };
-    let mut skipped = 0u64;
-    for (id, size, mtime, result) in results {
-        let Some(result) = result else {
-            skipped += 1;
-            continue;
-        };
-        match result {
-            Ok(a) => match catalog.save_analysis(id, &a, size, mtime) {
-                Ok(()) => ok += 1,
+
+    // Results stream back to *this* thread and are saved as they land, rather
+    // than being collected and written after the whole fan-out finishes. The
+    // catalog connection isn't shareable across rayon workers, so it stays here
+    // and the workers only send.
+    //
+    // Why it matters: a full-library sweep runs for hours. Collecting first
+    // meant a crash, a force-quit, or a power loss at hour three threw away
+    // every track analysed in that run — `needs_analysis` would re-derive the
+    // whole pending set on the next launch. Saving per track makes the run
+    // resumable at whatever point it stopped, and the SQLite write is trivial
+    // next to the decode+FFT that produced it.
+    let (res_tx, res_rx) = mpsc::channel::<(u64, u64, i64, Option<Result<Analysis, String>>)>();
+    let (mut ok, mut failed, mut skipped) = (0u64, 0u64, 0u64);
+    let mut fails: Vec<(String, String)> = Vec::new();
+
+    // The fan-out borrows `pending`/`cancel`/`ctx`; the drain borrows `catalog`.
+    // A scoped thread lets both run concurrently without moving either.
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let run = || {
+                pending.par_iter().for_each_init(
+                    || (tx.clone(), res_tx.clone()),
+                    |(tx_local, res_local), (id, path, size, mtime)| {
+                        // Abort can't interrupt a decode already in flight, but
+                        // it stops every track rayon hasn't started yet — with a
+                        // queue of thousands that's the difference between
+                        // seconds and hours. `None` marks a skipped track: it's
+                        // neither saved nor counted as a failure.
+                        if cancel.load(Ordering::Relaxed) {
+                            // Still tick progress: the bar drains quickly to its
+                            // total instead of freezing where the user clicked.
+                            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                            let _ = tx_local.send(JobMsg::Progress { done: n, total });
+                            ctx.request_repaint();
+                            let _ = res_local.send((*id, *size, *mtime, None));
+                            return;
+                        }
+                        let r = analysis::analyze_file(path, params).map_err(|e| e.to_string());
+                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                        let _ = tx_local.send(JobMsg::Progress { done: n, total });
+                        ctx.request_repaint();
+                        let _ = res_local.send((*id, *size, *mtime, Some(r)));
+                    },
+                );
+            };
+            // `install` runs the fan-out on the sized pool; without a pool we're
+            // on rayon's global one, which is the pre-clamp behavior.
+            match &pool {
+                Some(p) => p.install(run),
+                None => run(),
+            }
+            // Drop this thread's handle so the drain below sees the channel
+            // close once every worker clone is gone.
+            drop(res_tx);
+        });
+
+        // Drain and persist as each track finishes. Ends when the fan-out
+        // thread and all its worker clones have dropped their senders.
+        for (id, size, mtime, result) in res_rx {
+            let Some(result) = result else {
+                skipped += 1;
+                continue;
+            };
+            match result {
+                Ok(a) => match catalog.save_analysis(id, &a, size, mtime) {
+                    Ok(()) => ok += 1,
+                    Err(e) => {
+                        failed += 1;
+                        fails.push((name_for(id), format!("couldn't save analysis: {e}")));
+                    }
+                },
                 Err(e) => {
                     failed += 1;
-                    fails.push((name_for(id), format!("couldn't save analysis: {e}")));
+                    fails.push((name_for(id), format!("analysis failed: {e}")));
                 }
-            },
-            Err(e) => {
-                failed += 1;
-                fails.push((name_for(id), format!("analysis failed: {e}")));
             }
         }
-    }
+    });
     if !fails.is_empty() {
         let _ = tx.send(JobMsg::Failures {
             title: "Analyze".into(),
@@ -1893,15 +1916,22 @@ pub(crate) fn run_fetch_tracks(
     };
     let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
     let total = ids.len();
+    // Every Discogs search is paced to ~1.1 s (and a track can cost up to four
+    // of them), so a multi-track fetch runs for minutes. Report determinate
+    // progress like every other long job here does, rather than leaving the
+    // user on an indeterminate spinner with no idea how far along it is.
+    let _ = tx.send(JobMsg::Progress { done: 0, total });
+    ctx.request_repaint();
     let (mut queued, mut none, mut skipped, mut errored) = (0u64, 0u64, 0u64, 0u64);
     // Tracks whose only releases were hidden by the medium filter — reported
     // apart from a true no-match, since the fix is a setting, not more tagging.
     let mut filtered = 0u64;
     let mut fails: Vec<(String, String)> = Vec::new();
-    for track_id in ids {
+    for (i, track_id) in ids.into_iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
+        let _ = tx.send(JobMsg::Progress { done: i, total });
         let track = match catalog.get_track(track_id) {
             Ok(t) => t,
             Err(e) => {
@@ -1940,6 +1970,13 @@ pub(crate) fn run_fetch_tracks(
             },
             title.as_deref().unwrap_or("Untitled"),
         );
+        // Name the track in flight: at ~1.1 s per search the bar alone moves
+        // too slowly to read as progress.
+        let _ = tx.send(JobMsg::Status(format!(
+            "Searching Discogs ({}/{total}) {label}",
+            i + 1
+        )));
+        ctx.request_repaint();
         if artist.is_empty() && title.is_none() && album.is_none() {
             skipped += 1;
             fails.push((
@@ -2020,6 +2057,7 @@ pub(crate) fn run_fetch_tracks(
         }
         ctx.request_repaint();
     }
+    let _ = tx.send(JobMsg::Progress { done: total, total });
     if !fails.is_empty() {
         let _ = tx.send(JobMsg::Failures {
             title: "Discogs fetch".into(),

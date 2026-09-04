@@ -625,11 +625,25 @@ impl Client {
         *last = Some(Instant::now());
     }
 
-    /// Run an API request, throttling before each attempt and retrying on HTTP
-    /// 429. `build` is called fresh per attempt (a `ureq::Request` is consumed
-    /// by `.call()`, so it can't be reused). On a 429 we wait out the server's
-    /// `Retry-After` when present, else a widening backoff, then retry up to
-    /// [`MAX_RETRIES`] times before surfacing the error.
+    /// Run an API request, throttling before each attempt and retrying the
+    /// failures that are worth retrying. `build` is called fresh per attempt (a
+    /// `ureq::Request` is consumed by `.call()`, so it can't be reused).
+    ///
+    /// Three retryable classes, all sharing one widening backoff and the same
+    /// [`MAX_RETRIES`] budget:
+    ///
+    /// * **429** — rate limited. Wait out the server's `Retry-After` when it
+    ///   sends one, else back off.
+    /// * **5xx** — Discogs having a bad moment (502/503 during a deploy is the
+    ///   common one). The request was well-formed, so the same request a few
+    ///   seconds later usually succeeds.
+    /// * **transport** — a dropped connection or a read timeout.
+    ///
+    /// Retrying these matters most in a long library-wide sweep: without it a
+    /// single blip permanently drops that track from the run, and the user has
+    /// no way to tell a real no-match from a transient failure. A 4xx other
+    /// than 429 is *not* retried — a malformed query or a bad token fails the
+    /// same way however many times we ask.
     fn call_with_retry<F>(&self, build: F) -> Result<ureq::Response>
     where
         F: Fn() -> ureq::Request,
@@ -637,12 +651,26 @@ impl Client {
         let mut attempt = 0;
         loop {
             self.throttle();
+            let backoff = || Duration::from_secs(2 * (attempt as u64 + 1));
             match build().call() {
                 Ok(resp) => return Ok(resp),
                 Err(ureq::Error::Status(429, resp)) if attempt < MAX_RETRIES => {
-                    let wait = retry_after(&resp)
-                        .unwrap_or_else(|| Duration::from_secs(2 * (attempt as u64 + 1)));
+                    let wait = retry_after(&resp).unwrap_or_else(backoff);
                     std::thread::sleep(wait);
+                    attempt += 1;
+                }
+                // 5xx: server-side and usually momentary. Honour `Retry-After`
+                // here too — 503 is the other status Discogs sends it with.
+                Err(ureq::Error::Status(code, resp))
+                    if (500..600).contains(&code) && attempt < MAX_RETRIES =>
+                {
+                    let wait = retry_after(&resp).unwrap_or_else(backoff);
+                    std::thread::sleep(wait);
+                    attempt += 1;
+                }
+                // Connection dropped / timed out before any status came back.
+                Err(ureq::Error::Transport(_)) if attempt < MAX_RETRIES => {
+                    std::thread::sleep(backoff());
                     attempt += 1;
                 }
                 Err(e) => return Err(map_ureq_err(e)),
@@ -2025,9 +2053,9 @@ fn none_if_empty(s: String) -> Option<String> {
     }
 }
 
-/// Parse the `Retry-After` header Discogs sends on a 429 (delta-seconds form)
-/// into a wait duration. `None` if the header is absent or unparseable, leaving
-/// the caller to fall back to its own backoff.
+/// Parse the `Retry-After` header Discogs sends on a 429 or a 503
+/// (delta-seconds form) into a wait duration. `None` if the header is absent or
+/// unparseable, leaving the caller to fall back to its own backoff.
 fn retry_after(resp: &ureq::Response) -> Option<Duration> {
     resp.header("Retry-After")?
         .trim()
