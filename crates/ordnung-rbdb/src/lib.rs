@@ -9,6 +9,7 @@
 
 pub mod anlz;
 pub mod dlp;
+pub mod edit;
 pub mod export;
 pub mod pdb;
 mod pdbw;

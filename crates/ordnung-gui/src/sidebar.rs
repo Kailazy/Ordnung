@@ -334,7 +334,7 @@ pub(crate) fn draw_inline_rename(
     renaming: &mut Option<Renaming>,
     action: &mut Option<SidebarAction>,
 ) -> bool {
-    let Some(state) = renaming.as_mut().filter(|s| s.id == p.id) else {
+    let Some(state) = renaming.as_mut().filter(|s| !s.usb && s.id == p.id) else {
         return false;
     };
     let hint = if p.is_folder {
@@ -342,6 +342,59 @@ pub(crate) fn draw_inline_rename(
     } else {
         "New playlist"
     };
+    let Some(outcome) = inline_rename_editor(ui, state, hint) else {
+        return true;
+    };
+    let is_new = state.is_new;
+    match outcome {
+        Some(name) => *action = Some(SidebarAction::Rename(p.id, name)),
+        // Cancel: discard a just-created row, keep an existing one untouched.
+        None if is_new => *action = Some(SidebarAction::Delete(p.id)),
+        None => {}
+    }
+    *renaming = None;
+    true
+}
+
+/// The device-tree twin of [`draw_inline_rename`]: same editor, same resolve
+/// rules, but the ids belong to the stick's rekordbox tree and the resulting
+/// actions write to the device.
+fn draw_usb_inline_rename(
+    ui: &mut egui::Ui,
+    p: &ordnung_rbdb::pdb::RbPlaylist,
+    renaming: &mut Option<Renaming>,
+    action: &mut Option<SidebarAction>,
+) -> bool {
+    let Some(state) = renaming.as_mut().filter(|s| s.usb && s.id == p.id as Id) else {
+        return false;
+    };
+    let hint = if p.is_folder {
+        "New folder"
+    } else {
+        "New playlist"
+    };
+    let Some(outcome) = inline_rename_editor(ui, state, hint) else {
+        return true;
+    };
+    let is_new = state.is_new;
+    match outcome {
+        Some(name) => *action = Some(SidebarAction::RenameUsbPlaylist(p.id, name)),
+        None if is_new => *action = Some(SidebarAction::DeleteUsbPlaylist(p.id)),
+        None => {}
+    }
+    *renaming = None;
+    true
+}
+
+/// The shared rename text box. Returns `None` while the edit is still open,
+/// `Some(Some(name))` when a non-empty name was committed, and `Some(None)`
+/// when the edit was cancelled (Escape) or left blank — the caller decides
+/// what cancellation means for its tree.
+fn inline_rename_editor(
+    ui: &mut egui::Ui,
+    state: &mut Renaming,
+    hint: &str,
+) -> Option<Option<String>> {
     // Inset the editor a few px on each side so its rounded focus ring sits inside
     // the panel's clip boundary — at full width the blue outline lands on the edge
     // and gets clipped, leaving the "cut off" look. The inner margin gives the text
@@ -364,22 +417,16 @@ pub(crate) fn draw_inline_rename(
         resp.request_focus();
         state.needs_focus = false;
     }
-    if resp.lost_focus() {
-        let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
-        let name = state.buf.trim().to_string();
-        if escaped {
-            // Cancel: discard a just-created row, keep an existing one untouched.
-            if state.is_new {
-                *action = Some(SidebarAction::Delete(p.id));
-            }
-        } else if !name.is_empty() {
-            *action = Some(SidebarAction::Rename(p.id, name));
-        } else if state.is_new {
-            *action = Some(SidebarAction::Delete(p.id));
-        }
-        *renaming = None;
+    if !resp.lost_focus() {
+        return None;
     }
-    true
+    let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let name = state.buf.trim().to_string();
+    if escaped || name.is_empty() {
+        Some(None)
+    } else {
+        Some(Some(name))
+    }
 }
 
 // ── Shared playlist-row metrics ───────────────────────────────────────────────
@@ -521,6 +568,7 @@ pub(crate) fn draw_playlist_leaf(
         if ui.button("Rename").clicked() {
             *renaming = Some(Renaming {
                 id: p.id,
+                usb: false,
                 buf: p.name.clone(),
                 is_new: false,
                 needs_focus: true,
@@ -536,9 +584,12 @@ pub(crate) fn draw_playlist_leaf(
 }
 
 /// Render one level of a USB device's rekordbox playlist tree in the sidebar,
-/// recursing into folders. Read-only navigation: clicking a playlist filters
-/// the device view to that playlist's tracks (in export order). `parent` is
-/// the pdb node id whose children are drawn (`0` = top level).
+/// recursing into folders. Clicking a playlist filters the device view to
+/// that playlist's tracks (in export order); the tree is also editable in
+/// place — rename/delete from the context menu, device tracks dropped onto a
+/// playlist append to it — and every edit is written straight back to the
+/// stick's export databases. `parent` is the pdb node id whose children are
+/// drawn (`0` = top level).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_usb_playlist_nodes(
     ui: &mut egui::Ui,
@@ -548,9 +599,13 @@ pub(crate) fn draw_usb_playlist_nodes(
     parent: u32,
     vol: &Path,
     view: &mut LibraryView,
+    renaming: &mut Option<Renaming>,
     action: &mut Option<SidebarAction>,
 ) {
     for p in all.iter().filter(|p| p.parent_id == parent) {
+        if draw_usb_inline_rename(ui, p, renaming, action) {
+            continue;
+        }
         if p.is_folder {
             if density.icons_only() {
                 // Flattened in the rail, as with catalog folders above.
@@ -562,13 +617,14 @@ pub(crate) fn draw_usb_playlist_nodes(
                     p.id,
                     vol,
                     view,
+                    renaming,
                     action,
                 );
                 continue;
             }
             // Same header style as the catalog's folders; only the open
-            // default differs — a device tree is read-only reference, so its
-            // folders start collapsed.
+            // default differs — a device tree is a big imported hierarchy, so
+            // its folders start collapsed.
             egui::CollapsingHeader::new(
                 egui::RichText::new(p.name.as_str()).font(crate::ui::tokens::font::body()),
             )
@@ -583,8 +639,35 @@ pub(crate) fn draw_usb_playlist_nodes(
                     p.id,
                     vol,
                     view,
+                    renaming,
                     action,
                 );
+            })
+            .header_response
+            .context_menu(|ui| {
+                if ui.button("New playlist here").clicked() {
+                    *action = Some(SidebarAction::NewUsbPlaylist(p.id));
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Rename").clicked() {
+                    *renaming = Some(Renaming {
+                        id: p.id as Id,
+                        usb: true,
+                        buf: p.name.clone(),
+                        is_new: false,
+                        needs_focus: true,
+                    });
+                    ui.close_menu();
+                }
+                if ui
+                    .button("Delete folder")
+                    .on_hover_note("Removes this folder and everything in it from the device")
+                    .clicked()
+                {
+                    *action = Some(SidebarAction::DeleteUsbPlaylist(p.id));
+                    ui.close_menu();
+                }
             });
             playlist_row_gap(ui, density);
         } else {
@@ -595,8 +678,22 @@ pub(crate) fn draw_usb_playlist_nodes(
                 &p.name,
                 selected,
                 tracks_by_playlist.get(&p.id).map(Vec::len).unwrap_or(0),
-                "Playlist from this device's rekordbox export",
+                "Click to view. Drag device tracks here to add them",
             );
+            // Device tracks dragged over the row: same landing-zone outline as
+            // the catalog tree, and the drop appends them on the stick.
+            if resp.dnd_hover_payload::<crate::DraggedUsbTracks>().is_some() {
+                ui.painter().rect_stroke(
+                    resp.rect.shrink(1.0),
+                    egui::Rounding::same(6.0),
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 150, 220)),
+                );
+            }
+            if let Some(payload) = resp.dnd_release_payload::<crate::DraggedUsbTracks>() {
+                if !payload.0.is_empty() {
+                    *action = Some(SidebarAction::AddUsbTracksToPlaylist(p.id, payload.0.clone()));
+                }
+            }
             if resp.clicked() {
                 *view = LibraryView::Usb(vol.to_path_buf(), Some(p.id));
             }
@@ -619,10 +716,64 @@ pub(crate) fn draw_usb_playlist_nodes(
                     *action = Some(SidebarAction::SaveUsbPlaylistText(p.id));
                     ui.close_menu();
                 }
+                ui.separator();
+                if ui.button("Rename").clicked() {
+                    *renaming = Some(Renaming {
+                        id: p.id as Id,
+                        usb: true,
+                        buf: p.name.clone(),
+                        is_new: false,
+                        needs_focus: true,
+                    });
+                    ui.close_menu();
+                }
+                if ui
+                    .button("Delete")
+                    .on_hover_note("Removes this playlist from the device. Files stay")
+                    .clicked()
+                {
+                    *action = Some(SidebarAction::DeleteUsbPlaylist(p.id));
+                    ui.close_menu();
+                }
             });
             playlist_row_gap(ui, density);
         }
     }
+}
+
+/// The "PLAYLISTS" caption row with its right-aligned "+" button, shared by
+/// the catalog group and the device group so both sources carry the same
+/// affordance. Returns `true` when "+" was clicked; `tip` is its hover note.
+pub(crate) fn playlists_header(ui: &mut egui::Ui, tip: &str) -> bool {
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("PLAYLISTS")
+                .font(crate::ui::tokens::font::footnote())
+                .color(egui::Color32::from_gray(140))
+                .strong(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Hold the button off the panel's right clip edge so its hover
+            // outline isn't cut off.
+            ui.add_space(3.0);
+            // Compact square button — without an explicit min_size the "+"
+            // reads as a stretched pill.
+            if ui
+                .add(
+                    egui::Button::new("+")
+                        .min_size(egui::vec2(22.0, 22.0))
+                        .rounding(egui::Rounding::same(6.0)),
+                )
+                .on_hover_note(tip)
+                .clicked()
+            {
+                clicked = true;
+            }
+        });
+    });
+    ui.add_space(4.0);
+    clicked
 }
 
 /// The sidebar's source tabs: the local catalog ("Library") and each mounted
@@ -797,6 +948,7 @@ pub(crate) fn folder_context_menu(
     if ui.button("Rename").clicked() {
         *renaming = Some(Renaming {
             id: p.id,
+            usb: false,
             buf: p.name.clone(),
             is_new: false,
             needs_focus: true,

@@ -1627,6 +1627,10 @@ fn usb_track_index(id: Id) -> Option<usize> {
 struct Renaming {
     /// The playlist (or folder) being edited.
     id: Id,
+    /// True when `id` names a node of the mounted device's rekordbox tree
+    /// rather than a catalog playlist — the two id spaces are unrelated, so
+    /// the editor must know which tree it belongs to.
+    usb: bool,
     /// Live edit buffer bound to the `TextEdit`.
     buf: String,
     /// True when the row was just created, so an empty/cancelled edit removes it
@@ -1657,6 +1661,16 @@ enum SidebarAction {
     ExportPlaylist(Id, PathBuf),
     /// Right-click on a local playlist: save its track list as a text file.
     SavePlaylistText(Id),
+    /// Create a playlist on the mounted device, under the given rekordbox
+    /// folder id (`0` = top level). Written straight to the stick's export.
+    NewUsbPlaylist(u32),
+    /// Rename a playlist/folder on the mounted device.
+    RenameUsbPlaylist(u32, String),
+    /// Delete a playlist (or folder and its subtree) on the mounted device.
+    DeleteUsbPlaylist(u32),
+    /// Device tracks dropped onto one of the device's own playlists: append
+    /// them to it on the stick (playlist id, dragged synthetic track ids).
+    AddUsbTracksToPlaylist(u32, Vec<Id>),
     /// Right-click on a device playlist: copy its tracks into the library and
     /// recreate it as a local playlist (same name, same order).
     ImportUsbPlaylist(u32),

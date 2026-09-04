@@ -1,6 +1,7 @@
 //! Split out of `main.rs`; part of the GUI `App`.
 use super::*;
 use crate::ui::tokens::space;
+use ordnung_rbdb::edit;
 
 /// How long the search box waits for typing to stop before rebuilding the rows
 /// (see `App::filter_apply_at`). Short enough to feel immediate — comfortably
@@ -906,6 +907,104 @@ impl App {
                 None => run(),
             }
         });
+    }
+
+    /// Apply one playlist edit to the stick backing the current USB view,
+    /// writing it straight to the device's export databases, and mirror the
+    /// result into the sidebar state. Returns the created id for a `Create`.
+    /// Synchronous by design: the write touches only the (small) playlist
+    /// tables plus the DLP database, so it lands well inside a frame budget
+    /// worth of disk time, and doing it inline means the tree the user sees
+    /// is never ahead of what the stick actually holds.
+    pub(crate) fn usb_playlist_edit(&mut self, op: edit::PlaylistOp) -> Option<u32> {
+        let LibraryView::Usb(vol, _) = self.view.clone() else {
+            return None;
+        };
+        match edit::edit_stick_playlists(&vol, &op) {
+            Ok(out) => {
+                self.apply_usb_export(&vol, &out.export);
+                self.status = "Device playlists updated.".into();
+                out.new_id
+            }
+            Err(e) => {
+                self.status = format!("Device playlist edit failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Device tracks dropped on one of the device's own playlists: resolve
+    /// the synthetic ids to paths relative to the volume root and append them
+    /// on the stick.
+    pub(crate) fn usb_playlist_add_tracks(&mut self, pid: u32, ids: Vec<Id>) {
+        let LibraryView::Usb(vol, _) = self.view.clone() else {
+            return;
+        };
+        let rel_paths: Vec<String> = ids
+            .iter()
+            .filter_map(|id| usb_track_index(*id))
+            .filter_map(|i| self.usb_tracks.get(i))
+            .filter_map(|t| {
+                Path::new(&t.source_path)
+                    .strip_prefix(&vol)
+                    .ok()
+                    .map(|r| r.to_string_lossy().into_owned())
+            })
+            .collect();
+        if rel_paths.is_empty() {
+            return;
+        }
+        self.usb_playlist_edit(edit::PlaylistOp::AddTracks {
+            id: pid,
+            rel_paths,
+        });
+    }
+
+    /// Mirror a freshly written device export into the sidebar state:
+    /// playlist nodes, plus each playlist's members resolved back to
+    /// `usb_tracks` indices by relative path (case-insensitively; the volume
+    /// is FAT32) — the same join the device scan itself uses.
+    fn apply_usb_export(&mut self, vol: &Path, export: &ordnung_rbdb::pdb::RbExport) {
+        let by_rel: HashMap<String, usize> = self
+            .usb_tracks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| {
+                let rel = Path::new(&t.source_path)
+                    .strip_prefix(vol)
+                    .ok()?
+                    .to_string_lossy()
+                    .to_lowercase();
+                Some((rel, i))
+            })
+            .collect();
+        self.usb_playlists = export.playlists.clone();
+        self.usb_playlist_tracks = export
+            .entries
+            .iter()
+            .map(|(pid, tids)| {
+                let indices: Vec<usize> = tids
+                    .iter()
+                    .filter_map(|tid| {
+                        let rel = export
+                            .tracks
+                            .get(tid)?
+                            .file_path
+                            .trim_start_matches('/')
+                            .to_lowercase();
+                        by_rel.get(&rel).copied()
+                    })
+                    .collect();
+                (*pid, indices)
+            })
+            .collect();
+        for p in &export.playlists {
+            if !p.is_folder {
+                self.usb_playlist_tracks.entry(p.id).or_default();
+            }
+        }
+        // The visible table may be showing the playlist that just changed.
+        self.reload();
     }
 
     /// Transfer device rows into the local library: resolve the (synthetic)
@@ -2420,33 +2519,8 @@ impl eframe::App for App {
                                 *sidebar_action = Some(SidebarAction::NewPlaylist(None));
                             }
                             ui.add_space(6.0);
-                        } else {
-                            ui.horizontal(|ui| {
-                                section_caption(ui, "PLAYLISTS");
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        // Hold the button off the panel's right clip
-                                        // edge so its hover outline isn't cut off.
-                                        ui.add_space(3.0);
-                                        // Compact square button — without an explicit
-                                        // min_size the "+" reads as a stretched pill.
-                                        if ui
-                                            .add(
-                                                egui::Button::new("+")
-                                                    .min_size(egui::vec2(22.0, 22.0))
-                                                    .rounding(egui::Rounding::same(6.0)),
-                                            )
-                                            .on_hover_note("New playlist")
-                                            .clicked()
-                                        {
-                                            *sidebar_action =
-                                                Some(SidebarAction::NewPlaylist(None));
-                                        }
-                                    },
-                                );
-                            });
-                            ui.add_space(4.0);
+                        } else if crate::sidebar::playlists_header(ui, "New playlist") {
+                            *sidebar_action = Some(SidebarAction::NewPlaylist(None));
                         }
                     };
 
@@ -2524,14 +2598,30 @@ impl eframe::App for App {
                                 }
                                 ui.add_space(10.0);
                                 // Header for the stick's rekordbox tree (drawn
-                                // in the scrolling middle panel). No "+": these
-                                // playlists live on the device and Ordnung
-                                // doesn't write to it.
+                                // in the scrolling middle panel). On a
+                                // rekordbox export the "+" creates a playlist
+                                // directly on the device — shown even before
+                                // the first playlist exists, since that's
+                                // exactly when you'd want one; a plain volume
+                                // has no export database to write to, so it
+                                // gets no header at all unless a tree was
+                                // somehow read.
                                 if usb_loaded_for.as_deref() == Some(v.path.as_path())
-                                    && usb_has_playlists
+                                    && (usb_has_playlists || v.is_rekordbox_export)
+                                    && !density.icons_only()
                                 {
-                                    section_caption(ui, "PLAYLISTS");
-                                    ui.add_space(4.0);
+                                    if v.is_rekordbox_export {
+                                        if crate::sidebar::playlists_header(
+                                            ui,
+                                            "New playlist, written to this device",
+                                        ) {
+                                            *sidebar_action =
+                                                Some(SidebarAction::NewUsbPlaylist(0));
+                                        }
+                                    } else {
+                                        section_caption(ui, "PLAYLISTS");
+                                        ui.add_space(4.0);
+                                    }
                                 }
                             }
                             None => draw_digital_group(ui, view, sidebar_action),
@@ -2667,14 +2757,16 @@ impl eframe::App for App {
                                     // (the pdb is read by its scan); until the
                                     // scan lands the tree is simply empty.
                                     if self.usb_loaded_for.as_deref() == Some(vol.as_path()) {
+                                        let tracks = self.usb_playlist_tracks.clone();
                                         draw_usb_playlist_nodes(
                                             ui,
                                             density,
                                             &self.usb_playlists.clone(),
-                                            &self.usb_playlist_tracks,
+                                            &tracks,
                                             0,
                                             &vol,
                                             &mut self.view,
+                                            &mut self.renaming,
                                             &mut sidebar_action,
                                         );
                                     }
@@ -2721,6 +2813,43 @@ impl eframe::App for App {
             Some(SidebarAction::SaveUsbPlaylistText(pid)) => {
                 self.save_usb_playlist_text(pid);
             }
+            Some(SidebarAction::NewUsbPlaylist(parent)) => {
+                // Mirror the catalog flow: create under a placeholder name,
+                // then hand the row straight to the inline editor. The stick
+                // is written twice (create, then rename on commit) — cheap,
+                // and it means the entry exists even if the app dies mid-type.
+                if let Some(id) = self.usb_playlist_edit(edit::PlaylistOp::Create {
+                    name: "New playlist".into(),
+                    parent_id: parent,
+                }) {
+                    if let LibraryView::Usb(vol, _) = self.view.clone() {
+                        self.view = LibraryView::Usb(vol, Some(id));
+                    }
+                    self.renaming = Some(Renaming {
+                        id: id as Id,
+                        usb: true,
+                        buf: String::new(),
+                        is_new: true,
+                        needs_focus: true,
+                    });
+                }
+            }
+            Some(SidebarAction::RenameUsbPlaylist(id, name)) => {
+                self.usb_playlist_edit(edit::PlaylistOp::Rename { id, name });
+            }
+            Some(SidebarAction::DeleteUsbPlaylist(id)) => {
+                self.usb_playlist_edit(edit::PlaylistOp::Delete { id });
+                // If the deleted playlist (or a descendant of the deleted
+                // folder) was open, fall back to the whole-device view.
+                if let LibraryView::Usb(vol, Some(sel)) = self.view.clone() {
+                    if !self.usb_playlists.iter().any(|p| p.id == sel) {
+                        self.view = LibraryView::Usb(vol, None);
+                    }
+                }
+            }
+            Some(SidebarAction::AddUsbTracksToPlaylist(pid, ids)) => {
+                self.usb_playlist_add_tracks(pid, ids);
+            }
             Some(SidebarAction::NewPlaylist(parent)) => {
                 if let Ok(cat) = Catalog::open(&self.db_path) {
                     if let Ok(id) = cat.create_playlist("New playlist", parent, false) {
@@ -2730,6 +2859,7 @@ impl eframe::App for App {
                         // an empty name on blur means "discard this entry".
                         self.renaming = Some(Renaming {
                             id,
+                            usb: false,
                             buf: String::new(),
                             is_new: true,
                             needs_focus: true,

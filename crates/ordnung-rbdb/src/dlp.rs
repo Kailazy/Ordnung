@@ -25,7 +25,8 @@ use crate::pdb::{RbPlaylist, ReadError};
 
 /// The static Device Library Plus key (64 ASCII bytes, passed as a SQLCipher
 /// passphrase with v4 compatibility). Distinct from the `master.db` key.
-const DLP_KEY: &str = "r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74vez64i5o8fnrqryqls";
+pub(crate) const DLP_KEY: &str =
+    "r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74vez64i5o8fnrqryqls";
 
 /// The playlists of one `exportLibrary.db`, in terms the pdb side can join
 /// on: tree nodes plus each playlist's member *file paths* in play order

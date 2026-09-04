@@ -273,7 +273,7 @@ fn artwork_row(id: u32, path: &str) -> Vec<u8> {
     r
 }
 
-fn playlist_tree_row(p: &PlaylistRow) -> Vec<u8> {
+pub(crate) fn playlist_tree_row(p: &PlaylistRow) -> Vec<u8> {
     let mut r = p.parent_id.to_le_bytes().to_vec();
     r.extend_from_slice(&0u32.to_le_bytes());
     r.extend_from_slice(&p.sort_order.to_le_bytes());
@@ -283,7 +283,7 @@ fn playlist_tree_row(p: &PlaylistRow) -> Vec<u8> {
     r
 }
 
-fn playlist_entry_row(entry_index: u32, track_id: u32, playlist_id: u32) -> Vec<u8> {
+pub(crate) fn playlist_entry_row(entry_index: u32, track_id: u32, playlist_id: u32) -> Vec<u8> {
     let mut r = entry_index.to_le_bytes().to_vec();
     r.extend_from_slice(&track_id.to_le_bytes());
     r.extend_from_slice(&playlist_id.to_le_bytes());
@@ -397,7 +397,7 @@ const MENU_SORTS: &[&[u8]] = &[
 // Page assembly
 // ---------------------------------------------------------------------------
 
-fn pad4(mut row: Vec<u8>) -> Vec<u8> {
+pub(crate) fn pad4(mut row: Vec<u8>) -> Vec<u8> {
     while row.len() % 4 != 0 {
         row.push(0);
     }
@@ -405,7 +405,7 @@ fn pad4(mut row: Vec<u8>) -> Vec<u8> {
 }
 
 /// Split rows into page-sized chunks (each row already padded).
-fn paginate(rows: &[Vec<u8>]) -> Vec<Vec<Vec<u8>>> {
+pub(crate) fn paginate(rows: &[Vec<u8>]) -> Vec<Vec<Vec<u8>>> {
     let mut chunks: Vec<Vec<Vec<u8>>> = Vec::new();
     let mut cur: Vec<Vec<u8>> = Vec::new();
     let mut used = 0usize;
@@ -426,7 +426,7 @@ fn paginate(rows: &[Vec<u8>]) -> Vec<Vec<Vec<u8>>> {
 }
 
 /// Emit one data page with the one-shot bookkeeping signature.
-fn data_page(page_index: u32, ty: u32, next_page: u32, rows: &[Vec<u8>]) -> Vec<u8> {
+pub(crate) fn data_page(page_index: u32, ty: u32, next_page: u32, rows: &[Vec<u8>]) -> Vec<u8> {
     let mut p = vec![0u8; PAGE];
     let used: usize = rows.iter().map(|r| r.len()).sum();
     let free = PAGE - PAGE_HEADER - used - index_bytes(rows.len());
