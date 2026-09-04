@@ -191,14 +191,18 @@ impl App {
             .as_ref()
             .map_or(false, |n| !n.hires_requested && n.hires_bands.is_none())
         {
-            if let Some((samples, ch, sr)) = self.audio.as_ref().and_then(|a| a.pcm()) {
+            if let Some((pcm, ch, sr)) = self.audio.as_ref().and_then(|a| a.pcm()) {
                 self.now_playing.as_mut().unwrap().hires_requested = true;
                 let tx = self.hires_tx.clone();
                 let ctx = ctx.clone();
                 let low_hz = self.config.waveform_low_hz;
                 let mid_hz = self.config.waveform_mid_hz;
                 thread::spawn(move || {
-                    let hires = compute_hires_bands(&samples, ch, sr, low_hz, mid_hz);
+                    // `pcm()` only hands out a finished buffer, so the read
+                    // guard held for this (long) computation blocks no writer.
+                    let hires = pcm.with(|samples| {
+                        compute_hires_bands(samples, ch, sr, low_hz, mid_hz)
+                    });
                     let _ = tx.send((np_id, hires));
                     ctx.request_repaint();
                 });

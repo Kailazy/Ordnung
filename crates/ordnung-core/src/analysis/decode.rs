@@ -38,6 +38,56 @@ pub fn decode_mono(path: impl AsRef<Path>) -> Result<DecodedAudio> {
 /// channel count, with no downmix — the high-quality path used for playback.
 pub fn decode_interleaved(path: impl AsRef<Path>) -> Result<DecodedInterleaved> {
     let path = path.as_ref();
+    let mut samples: Vec<f32> = Vec::new();
+    let mut sample_rate = 44_100;
+    let mut channels: u16 = 1;
+    decode_interleaved_chunks(
+        path,
+        |start| {
+            sample_rate = start.sample_rate;
+            channels = start.channels;
+        },
+        |chunk| {
+            samples.extend_from_slice(chunk);
+            true
+        },
+    )?;
+    if samples.is_empty() {
+        return Err(Error::Decode {
+            path: path.to_path_buf(),
+            msg: "decoded zero samples".into(),
+        });
+    }
+    Ok(DecodedInterleaved {
+        samples,
+        sample_rate,
+        channels,
+    })
+}
+
+/// Format facts reported once at the head of a streaming decode, as soon as
+/// the first decoded frame reveals the real channel count.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamStart {
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// Total frames per the container/codec header, when it says. A player
+    /// can show the duration before the decode finishes.
+    pub total_frames: Option<u64>,
+}
+
+/// Streaming variant of [`decode_interleaved`]: `on_start` fires once with the
+/// stream's format, then `on_chunk` receives each decoded packet's interleaved
+/// samples in order. This is what lets playback begin after the first second
+/// of audio instead of after the whole file. Returning `false` from `on_chunk`
+/// cancels the decode (the function then returns `Ok`); a file yielding no
+/// audio at all simply never fires either callback.
+pub fn decode_interleaved_chunks(
+    path: impl AsRef<Path>,
+    on_start: impl FnOnce(StreamStart),
+    mut on_chunk: impl FnMut(&[f32]) -> bool,
+) -> Result<()> {
+    let path = path.as_ref();
     let file = std::fs::File::open(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
@@ -69,14 +119,14 @@ pub fn decode_interleaved(path: impl AsRef<Path>) -> Result<DecodedInterleaved> 
         })?;
     let track_id = track.id;
     let sample_rate = track.codec_params.sample_rate.unwrap_or(44_100);
+    let total_frames = track.codec_params.n_frames;
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| decode_err(path, e))?;
 
-    let mut samples: Vec<f32> = Vec::new();
-    // Locked once the first decoded frame tells us the real channel count.
-    let mut channels: u16 = 0;
+    let mut on_start = Some(on_start);
+    let mut chunk: Vec<f32> = Vec::new();
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
@@ -93,27 +143,24 @@ pub fn decode_interleaved(path: impl AsRef<Path>) -> Result<DecodedInterleaved> 
         }
         match decoder.decode(&packet) {
             Ok(buf) => {
-                if channels == 0 {
-                    channels = buf.spec().channels.count().max(1) as u16;
+                if let Some(start) = on_start.take() {
+                    start(StreamStart {
+                        sample_rate,
+                        channels: buf.spec().channels.count().max(1) as u16,
+                        total_frames,
+                    });
                 }
-                append_interleaved(&buf, &mut samples);
+                chunk.clear();
+                append_interleaved(&buf, &mut chunk);
+                if !on_chunk(&chunk) {
+                    return Ok(());
+                }
             }
             Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
             Err(e) => return Err(decode_err(path, e)),
         }
     }
-
-    if samples.is_empty() {
-        return Err(Error::Decode {
-            path: path.to_path_buf(),
-            msg: "decoded zero samples".into(),
-        });
-    }
-    Ok(DecodedInterleaved {
-        samples,
-        sample_rate,
-        channels: channels.max(1),
-    })
+    Ok(())
 }
 
 /// Decode to mono f32, stopping early once `max_samples` are collected.

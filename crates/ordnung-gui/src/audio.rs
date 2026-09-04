@@ -1,22 +1,22 @@
 //! Now-playing player for the catalog.
 //!
-//! Clicking a track's play control decodes the whole file to mono f32 PCM (via
-//! `ordnung-core`'s `decode_mono`) on a background thread and streams it through a
-//! cpal output. The bottom-bar player then shows artwork, title/artist, a
-//! play/pause button, and a draggable scrubber — the engine exposes the current
-//! position, duration, and a `seek` so the scrubber can drive playback like
-//! Spotify's.
+//! Clicking a track's play control starts a *streaming* decode on a background
+//! thread: audio begins after about a second of PCM is buffered, while the
+//! rest of the file keeps decoding behind the read cursor — so a long file on
+//! a slow USB stick starts in about a second instead of after a full-file
+//! decode. The bottom-bar player then shows artwork, title/artist, a
+//! play/pause button, and a draggable scrubber — the engine exposes the
+//! current position, duration, and a `seek` so the scrubber can drive playback
+//! like Spotify's (seeks clamp to what's decoded so far until decode ends).
 //!
-//! Decode runs off the UI thread so the app never blocks; the engine polls a
-//! channel each frame and starts playback when the samples arrive. To make seeking
-//! and resume-after-pause cheap, the decoded buffer lives behind an `Arc` and is
-//! played through a small custom `Source` that just holds a cursor into it — so a
-//! seek rebuilds the cursor, never re-clones the audio.
+//! The buffer lives behind an `Arc` and is played through a small custom
+//! `Source` that holds a cursor into it — a seek or resume rebuilds the
+//! cursor, never re-copies the audio.
 //!
-//! This is playback-only: it never touches the catalog or the source file beyond
-//! reading it to decode.
+//! This is playback-only: it never touches the catalog or the source file
+//! beyond reading it to decode.
 
-use ordnung_core::analysis::decode::decode_interleaved;
+use ordnung_core::analysis::decode::decode_interleaved_chunks;
 use ordnung_core::model::Id;
 use rodio::source::Source;
 use rodio::{OutputStream, OutputStreamHandle, Sink};
@@ -25,8 +25,9 @@ use souvlaki::{
     SeekDirection,
 };
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -42,35 +43,129 @@ pub enum PlayState {
 }
 
 enum DecodeMsg {
-    Ready {
+    /// Enough audio is buffered to start playing; decode continues behind it.
+    Started {
         id: Id,
         sample_rate: u32,
         channels: u16,
-        samples: Vec<f32>,
+        /// Total frames per the file's header, when it says — the duration
+        /// shown until the decode finishes and the exact count is known.
+        total_frames: Option<u64>,
+        pcm: Arc<StreamingPcm>,
     },
+    /// The decode ran to the end (possibly truncated by a mid-file error);
+    /// the buffer is complete and the exact duration is knowable.
+    Finished { id: Id },
     Failed {
         id: Id,
         error: String,
     },
 }
 
-/// A rodio source that streams interleaved f32 samples straight out of a shared
-/// buffer, keeping only a read cursor. Seeking makes a fresh cursor at the target
-/// sample; the (potentially large) decoded audio is never copied. `samples` are
-/// interleaved frames (L,R,… per frame) so the native channel layout is preserved.
+/// Playback PCM that fills in behind the read cursor while the decoder is
+/// still working. Writers append under the lock and then publish the new
+/// length; readers trust only the published length, so a reader never sees
+/// a partially-written tail.
+#[derive(Default)]
+pub struct StreamingPcm {
+    data: RwLock<Vec<f32>>,
+    /// Number of interleaved samples currently readable.
+    len: AtomicUsize,
+    /// Set once the decoder has exited (successfully or not) — after this the
+    /// buffer will never grow again.
+    done: AtomicBool,
+}
+
+impl StreamingPcm {
+    fn append(&self, chunk: &[f32]) {
+        let mut data = self.data.write().unwrap();
+        data.extend_from_slice(chunk);
+        self.len.store(data.len(), Ordering::Release);
+    }
+
+    fn finish(&self) {
+        self.done.store(true, Ordering::Release);
+    }
+
+    pub fn published_len(&self) -> usize {
+        self.len.load(Ordering::Acquire)
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    /// Run `f` over the samples decoded so far. Callers that need the whole
+    /// track (waveform rendering) gate on [`is_done`] first.
+    pub fn with<R>(&self, f: impl FnOnce(&[f32]) -> R) -> R {
+        let data = self.data.read().unwrap();
+        f(&data[..self.published_len().min(data.len())])
+    }
+}
+
+/// A rodio source that streams interleaved f32 samples out of a
+/// [`StreamingPcm`], keeping only a read cursor. Samples are copied out in
+/// chunks so the audio thread takes the lock a few times a second, not per
+/// sample. Reaching the frontier of a still-running decode plays silence
+/// *without advancing*, so no audio is ever skipped; hitting the end of a
+/// finished buffer ends the source. Seeking makes a fresh cursor at the
+/// target sample; the (potentially large) audio is never copied wholesale.
+/// `pcm` holds interleaved frames (L,R,… per frame) so the native channel
+/// layout is preserved.
 struct BufferSource {
-    samples: Arc<Vec<f32>>,
+    pcm: Arc<StreamingPcm>,
     pos: usize,
+    /// Locally cached run of samples starting at `chunk_start`.
+    chunk: Vec<f32>,
+    chunk_start: usize,
     sample_rate: u32,
     channels: u16,
+}
+
+/// How many samples `BufferSource` copies out per lock. ~0.09 s of 48 kHz
+/// stereo: small enough to stay responsive, large enough that locking is noise.
+const REFILL_SAMPLES: usize = 16_384;
+
+impl BufferSource {
+    fn new(pcm: Arc<StreamingPcm>, pos: usize, sample_rate: u32, channels: u16) -> Self {
+        Self {
+            pcm,
+            pos,
+            chunk: Vec::new(),
+            chunk_start: pos,
+            sample_rate,
+            channels,
+        }
+    }
 }
 
 impl Iterator for BufferSource {
     type Item = f32;
     fn next(&mut self) -> Option<f32> {
-        let s = self.samples.get(self.pos).copied();
-        self.pos += 1;
-        s
+        loop {
+            let chunk_end = self.chunk_start + self.chunk.len();
+            if self.pos >= self.chunk_start && self.pos < chunk_end {
+                let s = self.chunk[self.pos - self.chunk_start];
+                self.pos += 1;
+                return Some(s);
+            }
+            let len = self.pcm.published_len();
+            if self.pos < len {
+                let data = self.pcm.data.read().unwrap();
+                let end = len.min(self.pos + REFILL_SAMPLES).min(data.len());
+                self.chunk_start = self.pos;
+                self.chunk.clear();
+                self.chunk.extend_from_slice(&data[self.pos..end]);
+                continue;
+            }
+            if self.pcm.is_done() {
+                return None;
+            }
+            // Starved mid-decode: hold position and emit silence until the
+            // decoder catches up. Content is never skipped; the wall-clock
+            // position can drift ahead by the (rare, brief) gap.
+            return Some(0.0);
+        }
     }
 }
 
@@ -85,7 +180,10 @@ impl Source for BufferSource {
         self.sample_rate
     }
     fn total_duration(&self) -> Option<Duration> {
-        let frames = self.samples.len() as f32 / self.channels.max(1) as f32;
+        if !self.pcm.is_done() {
+            return None;
+        }
+        let frames = self.pcm.published_len() as f32 / self.channels.max(1) as f32;
         Some(Duration::from_secs_f32(
             frames / self.sample_rate.max(1) as f32,
         ))
@@ -110,11 +208,17 @@ pub struct AudioEngine {
     sink: Option<Sink>,
     /// The decoded track currently loaded (playing or paused). `None` when idle.
     current: Option<Id>,
-    /// Track being decoded in the background, if any.
+    /// Track being decoded in the background, if any (playback hasn't begun).
     loading: Option<Id>,
-    /// The current track's samples, shared with the playing `BufferSource` so a
-    /// seek can spin up a new cursor without re-decoding or copying.
-    samples: Option<Arc<Vec<f32>>>,
+    /// The current track's PCM, shared with the playing `BufferSource` (and
+    /// still growing while `decode_done` is false) — a seek spins up a new
+    /// cursor without re-decoding or copying.
+    pcm_buf: Option<Arc<StreamingPcm>>,
+    /// The current track's decode has run to completion; `pcm_buf` is final.
+    decode_done: bool,
+    /// Cancels the in-flight decode thread when the track is superseded, so a
+    /// skipped-past long file doesn't keep a core busy for minutes.
+    load_cancel: Option<Arc<AtomicBool>>,
     sample_rate: u32,
     /// Channel count of the loaded track (interleaved in `samples`).
     channels: u16,
@@ -168,7 +272,9 @@ impl AudioEngine {
             sink: None,
             current: None,
             loading: None,
-            samples: None,
+            pcm_buf: None,
+            decode_done: false,
+            load_cancel: None,
             sample_rate: 0,
             channels: 1,
             duration: 0.0,
@@ -232,12 +338,17 @@ impl AudioEngine {
         self.duration
     }
 
-    /// The loaded track's decoded PCM for high-resolution rendering: interleaved
-    /// `f32` samples, channel count, and sample rate. `None` while idle or still
-    /// decoding. The samples are shared (`Arc`), so cloning the handle is cheap and
-    /// never copies the audio.
-    pub fn pcm(&self) -> Option<(Arc<Vec<f32>>, u16, u32)> {
-        Some((self.samples.clone()?, self.channels, self.sample_rate))
+    /// The loaded track's decoded PCM for high-resolution rendering:
+    /// interleaved `f32` samples (read via [`StreamingPcm::with`]), channel
+    /// count, and sample rate. `None` while idle or still decoding — same
+    /// timing the consumers always had, since the buffer used to exist only
+    /// once decode finished. The buffer is shared (`Arc`), so cloning the
+    /// handle never copies the audio.
+    pub fn pcm(&self) -> Option<(Arc<StreamingPcm>, u16, u32)> {
+        if !self.decode_done {
+            return None;
+        }
+        Some((self.pcm_buf.clone()?, self.channels, self.sample_rate))
     }
 
     /// Play control click for a row: start `id` from the top, or — if it's already
@@ -256,20 +367,79 @@ impl AudioEngine {
         self.loading = Some(id);
         self.last_error = None;
         let tx = self.tx.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.load_cancel = Some(cancel.clone());
         thread::spawn(move || {
-            let msg = match decode_interleaved(&path) {
-                Ok(audio) => DecodeMsg::Ready {
-                    id,
-                    sample_rate: audio.sample_rate,
-                    channels: audio.channels,
-                    samples: audio.samples,
-                },
-                Err(e) => DecodeMsg::Failed {
-                    id,
-                    error: e.to_string(),
-                },
+            // Streaming decode: buffer ~1 s of audio, announce `Started` so
+            // playback begins, and keep appending until the file ends. The
+            // sink reads through the same shared buffer the whole time.
+            let pcm = Arc::new(StreamingPcm::default());
+            // Cells rather than plain locals: the format is written by the
+            // decoder's `on_start` and read by `on_chunk`, and two closures
+            // can't share a `&mut`.
+            let format = std::cell::Cell::new(None::<(u32, u16, Option<u64>)>);
+            let started = std::cell::Cell::new(false);
+            let announce = || {
+                if let Some((sample_rate, channels, total_frames)) = format.get() {
+                    started.set(true);
+                    let _ = tx.send(DecodeMsg::Started {
+                        id,
+                        sample_rate,
+                        channels,
+                        total_frames,
+                        pcm: pcm.clone(),
+                    });
+                }
             };
-            let _ = tx.send(msg);
+            let result = decode_interleaved_chunks(
+                &path,
+                |start| format.set(Some((start.sample_rate, start.channels, start.total_frames))),
+                |chunk| {
+                    if cancel.load(Ordering::Relaxed) {
+                        return false;
+                    }
+                    pcm.append(chunk);
+                    if !started.get() {
+                        if let Some((sr, ch, _)) = format.get() {
+                            // One second of prebuffer before the sink starts,
+                            // so playback never begins starved.
+                            if pcm.published_len() >= sr as usize * ch.max(1) as usize {
+                                announce();
+                            }
+                        }
+                    }
+                    true
+                },
+            );
+            pcm.finish();
+            match result {
+                Ok(()) => {
+                    // A short track can end before the prebuffer threshold.
+                    if !started.get() && pcm.published_len() > 0 {
+                        announce();
+                    }
+                    if started.get() {
+                        let _ = tx.send(DecodeMsg::Finished { id });
+                    } else {
+                        let _ = tx.send(DecodeMsg::Failed {
+                            id,
+                            error: "track has no audio to play".into(),
+                        });
+                    }
+                }
+                Err(e) => {
+                    if started.get() {
+                        // Mid-file failure after playback began: keep playing
+                        // the (truncated) audio we have rather than yanking it.
+                        let _ = tx.send(DecodeMsg::Finished { id });
+                    } else {
+                        let _ = tx.send(DecodeMsg::Failed {
+                            id,
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            }
         });
     }
 
@@ -297,13 +467,23 @@ impl AudioEngine {
         self.status_dirty = true;
     }
 
-    /// Jump to `secs` and keep the current play/pause state.
+    /// Jump to `secs` and keep the current play/pause state. While the decode
+    /// is still running, the target clamps to what's decoded so far — a jump
+    /// into the undecoded tail would otherwise sit in silence waiting for the
+    /// decoder to reach it.
     pub fn seek(&mut self, secs: f32) {
         if self.current.is_none() {
             return;
         }
+        let mut max = self.duration;
+        if !self.decode_done {
+            if let Some(pcm) = &self.pcm_buf {
+                let per_sec = (self.sample_rate.max(1) as usize) * self.channels.max(1) as usize;
+                max = max.min(pcm.published_len() as f32 / per_sec as f32);
+            }
+        }
         let was_playing = self.is_playing();
-        self.start_sink_at(secs.clamp(0.0, self.duration));
+        self.start_sink_at(secs.clamp(0.0, max));
         if !was_playing {
             if let Some(s) = &self.sink {
                 s.pause();
@@ -315,7 +495,7 @@ impl AudioEngine {
     /// (Re)build the sink so playback resumes from `secs`. Leaves it playing; the
     /// caller pauses afterward if the player was paused.
     fn start_sink_at(&mut self, secs: f32) {
-        let Some(samples) = self.samples.clone() else {
+        let Some(pcm) = self.pcm_buf.clone() else {
             return;
         };
         if let Some(s) = self.sink.take() {
@@ -327,13 +507,13 @@ impl AudioEngine {
                 // Convert seconds → sample index, snapped to a frame boundary so
                 // interleaved channels stay aligned (an odd offset would swap L/R).
                 let frame = (secs * self.sample_rate as f32) as usize;
-                let pos = (frame * ch).min(samples.len());
-                sink.append(BufferSource {
-                    samples,
+                let pos = (frame * ch).min(pcm.published_len());
+                sink.append(BufferSource::new(
+                    pcm,
                     pos,
-                    sample_rate: self.sample_rate,
-                    channels: self.channels.max(1),
-                });
+                    self.sample_rate,
+                    self.channels.max(1),
+                ));
                 sink.set_volume(self.volume);
                 sink.play();
                 self.sink = Some(sink);
@@ -355,14 +535,19 @@ impl AudioEngine {
         }
     }
 
-    /// Stop playback and clear all player state.
+    /// Stop playback and clear all player state. Also cancels any in-flight
+    /// decode so a superseded long file stops burning a core.
     pub fn stop(&mut self) {
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
+        if let Some(cancel) = self.load_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
         self.current = None;
         self.loading = None;
-        self.samples = None;
+        self.pcm_buf = None;
+        self.decode_done = false;
         self.started_at = None;
         self.base_secs = 0.0;
         self.duration = 0.0;
@@ -475,31 +660,46 @@ impl AudioEngine {
         }
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                DecodeMsg::Ready {
+                DecodeMsg::Started {
                     id,
                     sample_rate,
                     channels,
-                    samples,
+                    total_frames,
+                    pcm,
                 } => {
                     // A newer click may have superseded this decode; ignore stale ones.
                     if self.loading != Some(id) {
                         continue;
                     }
                     self.loading = None;
-                    if samples.is_empty() {
-                        self.last_error = Some("track has no audio to play".into());
-                        continue;
-                    }
                     self.sample_rate = sample_rate.max(1);
                     self.channels = channels.max(1);
-                    let frames = samples.len() as f32 / self.channels as f32;
-                    self.duration = frames / self.sample_rate as f32;
-                    self.samples = Some(Arc::new(samples));
+                    // The header's frame count stands in for the duration
+                    // until the decode finishes (below); a headerless stream
+                    // shows the decoded-so-far length, growing as it loads.
+                    self.duration = total_frames
+                        .map(|tf| tf as f32 / self.sample_rate as f32)
+                        .unwrap_or(0.0);
+                    self.pcm_buf = Some(pcm);
+                    self.decode_done = false;
                     self.current = Some(id);
                     self.base_secs = 0.0;
                     self.start_sink_at(0.0);
-                    // Duration is known now — refresh the OS panel so its scrubber
-                    // shows the real track length.
+                    // A provisional duration is known now — refresh the OS
+                    // panel so its scrubber shows the track length.
+                    self.push_metadata();
+                }
+                DecodeMsg::Finished { id } => {
+                    if self.current != Some(id) {
+                        continue;
+                    }
+                    self.decode_done = true;
+                    // Exact duration from what actually decoded (headers lie
+                    // by a frame or two; a truncated decode by much more).
+                    if let Some(pcm) = &self.pcm_buf {
+                        let frames = pcm.published_len() as f32 / self.channels.max(1) as f32;
+                        self.duration = frames / self.sample_rate.max(1) as f32;
+                    }
                     self.push_metadata();
                 }
                 DecodeMsg::Failed { id, error } => {
@@ -508,6 +708,15 @@ impl AudioEngine {
                         self.last_error = Some(format!("couldn't decode track: {error}"));
                     }
                 }
+            }
+        }
+        // While decoding, the duration only ever grows toward the decoded
+        // frontier — a header-supplied length already exceeds it (no-op), and
+        // a headerless stream's scrubber tracks what actually exists.
+        if !self.decode_done {
+            if let Some(pcm) = &self.pcm_buf {
+                let frames = pcm.published_len() as f32 / self.channels.max(1) as f32;
+                self.duration = self.duration.max(frames / self.sample_rate.max(1) as f32);
             }
         }
         // Track ran to its end on its own — freeze the scrubber at the end and
@@ -584,27 +793,49 @@ mod tests {
         assert_eq!(fmt_time(f32::NAN), "0:00");
     }
 
+    fn finished_pcm(samples: Vec<f32>) -> Arc<StreamingPcm> {
+        let pcm = Arc::new(StreamingPcm::default());
+        pcm.append(&samples);
+        pcm.finish();
+        pcm
+    }
+
     #[test]
     fn buffer_source_reports_duration_and_drains() {
-        let src = BufferSource {
-            samples: Arc::new(vec![0.0; 100]),
-            pos: 0,
-            sample_rate: 50,
-            channels: 1,
-        };
+        let src = BufferSource::new(finished_pcm(vec![0.0; 100]), 0, 50, 1);
         assert_eq!(src.sample_rate(), 50);
         assert_eq!(src.channels(), 1);
         assert_eq!(src.total_duration(), Some(Duration::from_secs_f32(2.0)));
         assert_eq!(src.count(), 100);
 
         // Stereo: 100 interleaved samples = 50 frames at 50 Hz = 1 s.
-        let stereo = BufferSource {
-            samples: Arc::new(vec![0.0; 100]),
-            pos: 0,
-            sample_rate: 50,
-            channels: 2,
-        };
+        let stereo = BufferSource::new(finished_pcm(vec![0.0; 100]), 0, 50, 2);
         assert_eq!(stereo.channels(), 2);
         assert_eq!(stereo.total_duration(), Some(Duration::from_secs_f32(1.0)));
+    }
+
+    /// The streaming contract: a source that reaches the frontier of an
+    /// unfinished decode holds its place and plays silence — never skipping
+    /// content — then resumes with the real samples once they land, and only
+    /// ends when the finished buffer is truly drained.
+    #[test]
+    fn buffer_source_starves_with_silence_and_resumes_without_skipping() {
+        let pcm = Arc::new(StreamingPcm::default());
+        pcm.append(&[1.0, 2.0]);
+        let mut src = BufferSource::new(pcm.clone(), 0, 50, 1);
+        assert_eq!(src.next(), Some(1.0));
+        assert_eq!(src.next(), Some(2.0));
+        // Starved: silence, but the cursor must not advance…
+        assert_eq!(src.next(), Some(0.0));
+        assert_eq!(src.next(), Some(0.0));
+        assert_eq!(src.total_duration(), None, "length unknown mid-decode");
+        // …so when the decoder catches up, nothing was skipped.
+        pcm.append(&[3.0, 4.0]);
+        assert_eq!(src.next(), Some(3.0));
+        assert_eq!(src.next(), Some(4.0));
+        assert_eq!(src.next(), Some(0.0));
+        pcm.finish();
+        assert_eq!(src.next(), None);
+        assert_eq!(pcm.with(|s| s.to_vec()), vec![1.0, 2.0, 3.0, 4.0]);
     }
 }
