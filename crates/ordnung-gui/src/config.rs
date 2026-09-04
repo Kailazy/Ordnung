@@ -66,7 +66,7 @@ pub struct Config {
     #[serde(default)]
     pub vinyl_sort_ascending: bool,
     /// Which library sits at the top of the left navigation sidebar:
-    /// `"digital"` (All songs / New / playlists first, the default) or
+    /// `"digital"` (Library / New / playlists first, the default) or
     /// `"vinyl"` (the Discogs vinyl collection first). A vinyl-led collector
     /// gets their shelf up top and the digital library pinned below. Unknown
     /// values fall back to `"digital"`. See `NavPrimary`.
@@ -78,7 +78,7 @@ pub struct Config {
     /// not a pixel width. Unknown values fall back to `"wide"`. See `NavDensity`.
     #[serde(default = "default_nav_density")]
     pub nav_density: String,
-    /// Which section the app opens on: `"library"` (All songs, the default),
+    /// Which section the app opens on: `"library"` (Library, the default),
     /// `"vinyl"` (the vinyl collection), or `"recent"` (new imports). Unknown
     /// values fall back to `"library"`. See `StartupView`.
     #[serde(default = "default_startup_view")]
@@ -321,7 +321,7 @@ pub(crate) fn default_waveform_energy_colors() -> [[u8; 3]; 5] {
 /// `Config::nav_primary`; presentation policy, so it lives in the GUI boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavPrimary {
-    /// All songs / New / playlists on top, vinyl pinned below (the default).
+    /// Library / New / playlists on top, vinyl pinned below (the default).
     Digital,
     /// The vinyl collection on top, the digital library pinned below.
     Vinyl,
@@ -451,7 +451,7 @@ impl ReleaseMedium {
 /// presentation policy, so it lives in the GUI boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupView {
-    /// The whole catalog ("All songs") — the default.
+    /// The whole catalog ("Library") — the default.
     Library,
     /// The Discogs vinyl collection grid.
     Vinyl,
@@ -481,7 +481,7 @@ impl StartupView {
     /// Label shown in the settings picker.
     pub fn label(self) -> &'static str {
         match self {
-            StartupView::Library => "All songs",
+            StartupView::Library => "Library",
             StartupView::Vinyl => "Vinyl collection",
             StartupView::Recent => "New imports",
         }

@@ -121,7 +121,7 @@ pub(crate) fn nav_button(
 }
 
 /// Like [`nav_button`] but with an explicit tile `width` instead of filling the
-/// available space — used when two tiles share a row (e.g. the big "All songs"
+/// available space — used when two tiles share a row (e.g. the big "Library"
 /// tile alongside the smaller "Recent" tile).
 pub(crate) fn nav_button_sized(
     ui: &mut egui::Ui,
@@ -172,7 +172,7 @@ pub(crate) fn nav_button_sized(
 
 /// A count badge tucked inside the right edge of a nav tile, drawn as its own
 /// clickable button on top of the tile that `host` describes. Used for the
-/// "New" pill inside "All songs": fresh imports are a subset of the catalog,
+/// "New" pill inside "Library": fresh imports are a subset of the catalog,
 /// not a sibling of it, so the affordance lives *in* the tile rather than
 /// stealing a second one. Returns the badge's own `Response` — hit-tested
 /// before the tile underneath, so a click on the pill selects the recent view
@@ -527,9 +527,9 @@ pub(crate) fn folder_context_menu(
 //
 //   Narrow (212pt) — the default, and the only captioned layout. One
 //     full-width tile per row, single-line. A third, wider tier used to sit
-//     above this one; it earned its width only by putting the "All songs" /
+//     above this one; it earned its width only by putting the "Library" /
 //     "New" pair on a shared row, and once "New" became a badge inside the
-//     "All songs" tile there was nothing left for the extra 76pt to do but
+//     "Library" tile there was nothing left for the extra 76pt to do but
 //     stretch the same rows. The width here is set by the one string that
 //     actually varies — a playlist name — leaving a useful prefix beside its
 //     glyph and track count before the ellipsis.
@@ -708,6 +708,56 @@ pub(crate) fn nav_button_truncated(
     nav_button_sized(ui, &format!("{icon}  {shown}"), selected, w, height, text_size)
 }
 
+/// A nav tile whose leading mark is *painted* rather than set as a font glyph
+/// (see [`crate::ui::icon`]), for the entries that deserve a real icon instead
+/// of whatever the font stack supplies for an emoji. The label is indented past
+/// the mark so the two don't overlap; at the rail tier there is no label and the
+/// mark is simply centred in the square.
+///
+/// `draw` is handed the mark's centre and radius, matching the signature every
+/// icon in `ui::icon` already has.
+pub(crate) fn nav_button_painted(
+    ui: &mut egui::Ui,
+    density: NavDensity,
+    draw: impl Fn(&egui::Painter, egui::Pos2, egui::Color32, f32),
+    label: &str,
+    selected: bool,
+    height: f32,
+    text_size: f32,
+) -> egui::Response {
+    // Radius of the painted mark. The rail gets the larger one for the same
+    // reason its lead glyphs are larger: it is the only ranking left once the
+    // captions are gone.
+    let r = if density.icons_only() { 9.0 } else { 7.5 };
+    let resp = if density.icons_only() {
+        rail_tile(ui, "", selected)
+    } else {
+        // Indent the label with spaces to clear the mark, which is painted over
+        // the tile afterwards. Crude, but it keeps every nav tile going through
+        // the one `nav_button` path rather than forking the layout.
+        nav_button(ui, &format!("       {label}"), selected, height, text_size)
+    };
+    let cx = if density.icons_only() {
+        resp.rect.center().x
+    } else {
+        resp.rect.left() + 12.0 + r
+    };
+    // The mark follows the label's colour: white on the accent fill when this
+    // tile is the current view, dimmer otherwise.
+    let col = if selected {
+        egui::Color32::WHITE
+    } else {
+        egui::Color32::from_gray(190)
+    };
+    draw(
+        ui.painter(),
+        egui::pos2(cx, resp.rect.center().y),
+        col,
+        r,
+    );
+    resp
+}
+
 /// One square target in the rail tier: a glyph centred in a fixed
 /// [`NavDensity::RAIL_TILE`] box, itself centred in the rail's width. Every
 /// rail tile is this exact size, whatever it stands for, so the rail is a
@@ -719,7 +769,7 @@ pub(crate) fn rail_tile(ui: &mut egui::Ui, icon: &str, selected: bool) -> egui::
 /// Glyph point size for an ordinary rail tile (a playlist, a USB volume).
 pub(crate) const RAIL_GLYPH: f32 = 17.0;
 
-/// Glyph point size for the rail's primary destinations — "All songs" and the
+/// Glyph point size for the rail's primary destinations — "Library" and the
 /// vinyl shelf. At the icon tier every tile is the same square with no caption
 /// to rank it, so size is the only thing left to say which entries are the
 /// top-level libraries and which are the list of playlists under them.

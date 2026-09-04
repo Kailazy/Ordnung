@@ -1744,7 +1744,7 @@ impl eframe::App for App {
             None => {}
         }
 
-        // Left sidebar: "All songs" (the whole catalog) plus the playlist/folder
+        // Left sidebar: "Library" (the whole catalog) plus the playlist/folder
         // tree. Plain-field state (`view`, `renaming`) is edited in place; catalog
         // mutations are raised as a `SidebarAction` and applied after the panel so
         // nothing borrows `self` while the tree renders. A view change triggers a
@@ -1839,11 +1839,11 @@ impl eframe::App for App {
                 // pinned rows included. Guards the empty-inbox eviction below.
                 let rows_empty = self.rows.is_empty();
                 // Library health only earns sidebar space when something is
-                // actually wrong; the tab under "All songs" appears with the
+                // actually wrong; the tab under "Library" appears with the
                 // first missing file and vanishes once the catalog is clean.
                 let missing_count = self.missing_count;
 
-                // The digital-library group: the "All songs" / "New" tile pair
+                // The digital-library group: the "Library" / "New" tile pair
                 // and the PLAYLISTS header (the tree itself scrolls in the middle
                 // panel below). Drawn wherever `nav_primary` puts it, so the same
                 // code serves both the top slot and the vinyl-first layout.
@@ -1851,7 +1851,7 @@ impl eframe::App for App {
                     |ui: &mut egui::Ui,
                      view: &mut LibraryView,
                      sidebar_action: &mut Option<SidebarAction>| {
-                        // "All songs" is the home base — the big tile — and
+                        // "Library" is the home base — the big tile — and
                         // fresh imports live *inside* it: a small "New" pill on
                         // the tile's right edge, present only while something is
                         // actually waiting on analysis or a Discogs fetch. They
@@ -1877,11 +1877,11 @@ impl eframe::App for App {
                         // One size at every remaining tier: the taller 46pt
                         // variant existed for the retired wide layout, where the
                         // tile shared its row with "New".
-                        let tile = nav_button_dense(
+                        let tile = nav_button_painted(
                             ui,
                             density,
-                            "♫",
-                            "All songs",
+                            crate::ui::icon::library,
+                            "Library",
                             *view == LibraryView::Library,
                             44.0,
                             16.5,
@@ -2056,7 +2056,7 @@ impl eframe::App for App {
                 // External sources — mounted USB devices and the Discogs vinyl
                 // collection — separated from the playlist tree by spacing and a
                 // rule rather than a text header. Library health isn't here: it
-                // only surfaces as a small tab under "All songs", and only when
+                // only surfaces as a small tab under "Library", and only when
                 // the catalog actually has something wrong with it.
                 egui::TopBottomPanel::bottom("nav_collections")
                     .frame(egui::Frame::none())
@@ -2297,7 +2297,7 @@ impl eframe::App for App {
                             } else if in_playlist {
                                 ui.heading("Empty playlist");
                                 ui.add_space(6.0);
-                                ui.label("Drag tracks here from “All songs” to add them.");
+                                ui.label("Drag tracks here from “Library” to add them.");
                                 ui.label(
                                     "Hold ⌥ Option while dragging to drop straight into rekordbox.",
                                 );
