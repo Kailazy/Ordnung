@@ -397,7 +397,7 @@ impl TableColumn {
             TableColumn::Album => Column::initial(w(180.0)).at_least(60.0).clip(true),
             TableColumn::Genre => Column::initial(w(110.0)).at_least(60.0).clip(true),
             TableColumn::Duration => Column::initial(w(60.0)).at_least(40.0),
-            TableColumn::Bpm => Column::initial(w(55.0)).at_least(40.0),
+            TableColumn::Bpm => Column::initial(w(62.0)).at_least(46.0),
             TableColumn::Key => Column::initial(w(55.0)).at_least(40.0),
             TableColumn::Format => Column::initial(w(60.0)).at_least(50.0),
             TableColumn::Bitrate => Column::initial(w(70.0)).at_least(50.0),

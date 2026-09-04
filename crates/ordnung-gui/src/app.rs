@@ -754,7 +754,7 @@ impl App {
                     genre,
                     duration: fmt_duration(t.properties.duration_ms),
                     bpm: bpm_val
-                        .map(|b| format!("{b:.0}"))
+                        .map(|b| format!("{b:.1}"))
                         .unwrap_or_else(|| "—".into()),
                     key,
                     format: t.format,
@@ -1813,6 +1813,9 @@ impl eframe::App for App {
                 // Copied out so the section closures below don't borrow `self`
                 // while the panel is drawing (`view` is threaded in explicitly).
                 let recent_count = self.recent_count;
+                // Whether the Recent tab currently has anything on screen —
+                // pinned rows included. Guards the empty-inbox eviction below.
+                let rows_empty = self.rows.is_empty();
                 let vinyl_count = self.vinyl_count;
                 // Library health only earns sidebar space when something is
                 // actually wrong; the tab under "All songs" appears with the
@@ -1827,62 +1830,41 @@ impl eframe::App for App {
                     |ui: &mut egui::Ui,
                      view: &mut LibraryView,
                      sidebar_action: &mut Option<SidebarAction>| {
-                        // "All songs" is the home base — the big tile — paired on the
-                        // same row with a smaller "Recent" tile: the self-clearing
-                        // inbox of fresh imports still awaiting analysis + a Discogs
-                        // fetch. Recent gets a fixed, narrower width; All songs flexes
-                        // to fill the rest so the pair always spans the sidebar.
-                        // Named, not just a glyph: on its own the ✦ tile gave no
-                        // clue it holds freshly imported songs.
-                        let recent_label = if recent_count > 0 {
-                            format!("New  {recent_count}")
-                        } else {
-                            "New".to_string()
-                        };
+                        // "All songs" is the home base — the big tile — and
+                        // fresh imports live *inside* it: a small "New" pill on
+                        // the tile's right edge, present only while something is
+                        // actually waiting on analysis or a Discogs fetch. They
+                        // are a subset of the catalog rather than a sibling
+                        // library, so an empty inbox leaves no tile behind and
+                        // the sidebar's top row stays a single clear target.
                         const RECENT_NOTE: &str = "New imports awaiting analysis or a \
                                                    Discogs fetch. They drop off once both \
                                                    are done.";
-                        if density == NavDensity::Wide {
-                            // Only the widest tier fits the pair side by side.
-                            // "New" takes a fixed slice and "All songs" flexes
-                            // to fill the rest, so the row always spans the panel.
-                            ui.horizontal(|ui| {
-                                const RECENT_W: f32 = 100.0;
-                                let gap = ui.spacing().item_spacing.x;
-                                let all_w = (ui.available_width() - RECENT_W - gap).max(60.0);
-                                if nav_button_sized(
-                                    ui,
-                                    "♪  All songs",
-                                    *view == LibraryView::Library,
-                                    all_w,
-                                    46.0,
-                                    17.0,
-                                )
-                                .on_hover_note("Every track in the catalog")
-                                .clicked()
-                                {
-                                    *view = LibraryView::Library;
-                                }
-                                if nav_button_sized(
-                                    ui,
-                                    &format!("✦ {recent_label}"),
-                                    *view == LibraryView::RecentlyAdded,
-                                    RECENT_W,
-                                    46.0,
-                                    14.0,
-                                )
-                                .on_hover_note(RECENT_NOTE)
-                                .clicked()
-                                {
-                                    *view = LibraryView::RecentlyAdded;
-                                }
-                            });
+                        // Icon tier has no room for a pill beside the glyph, so
+                        // the inbox keeps its own stacked tile there.
+                        let inline_badge = recent_count > 0 && density != NavDensity::Icon;
+                        // The inbox has no permanent tile any more, so an empty
+                        // one must not leave the user parked on a view they
+                        // can't navigate back to. Only an inbox that is empty
+                        // *on screen* ejects, though: while tracks finish under
+                        // the pin, `recent_count` is already zero and the rows
+                        // are deliberately still there (see `recent_pinned`),
+                        // so eviction waits until nothing is left to look at.
+                        if recent_count == 0 && *view == LibraryView::RecentlyAdded && rows_empty {
+                            *view = LibraryView::Library;
+                        }
+                        let tile = if density == NavDensity::Wide {
+                            nav_button_dense(
+                                ui,
+                                density,
+                                "♪",
+                                "All songs",
+                                *view == LibraryView::Library,
+                                46.0,
+                                17.0,
+                            )
                         } else {
-                            // Narrow and icon tiers stack the pair instead of
-                            // squeezing it: two full-width rows, each still wide
-                            // enough for its whole label (or, at the icon tier,
-                            // its glyph alone).
-                            if nav_button_dense(
+                            nav_button_dense(
                                 ui,
                                 density,
                                 "♪",
@@ -1891,17 +1873,37 @@ impl eframe::App for App {
                                 40.0,
                                 16.0,
                             )
-                            .on_hover_note("Every track in the catalog")
-                            .clicked()
-                            {
-                                *view = LibraryView::Library;
+                        };
+                        let mut tile_clicked = tile.clicked();
+                        if inline_badge {
+                            let badge = crate::sidebar::nav_tile_badge(
+                                ui,
+                                tile.rect,
+                                &format!("✦ {recent_count}"),
+                                *view == LibraryView::RecentlyAdded,
+                            )
+                            .on_hover_note(RECENT_NOTE);
+                            if badge.clicked() {
+                                *view = LibraryView::RecentlyAdded;
+                                // The tile underneath reports the same click, so
+                                // swallow it or the catalog would win the race.
+                                tile_clicked = false;
                             }
+                        } else {
+                            tile.on_hover_note("Every track in the catalog");
+                        }
+                        if tile_clicked {
+                            *view = LibraryView::Library;
+                        }
+                        // At the icon tier the pill has nowhere to go, so the
+                        // inbox falls back to its own glyph tile below.
+                        if recent_count > 0 && density == NavDensity::Icon {
                             ui.add_space(4.0);
                             if nav_button_dense(
                                 ui,
                                 density,
                                 "✦",
-                                &recent_label,
+                                &format!("New  {recent_count}"),
                                 *view == LibraryView::RecentlyAdded,
                                 36.0,
                                 14.0,

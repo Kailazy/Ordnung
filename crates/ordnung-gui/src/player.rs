@@ -24,7 +24,9 @@ impl App {
                 // library row is built from, so read them straight back — one
                 // row by primary key, like the analysis read just below. A
                 // synthetic USB id isn't in the catalog and falls through.
-                let t = Catalog::open(&self.db_path).and_then(|c| c.get_track(id)).ok()?;
+                let t = Catalog::open(&self.db_path)
+                    .and_then(|c| c.get_track(id))
+                    .ok()?;
                 Some((
                     t.tags.artist.unwrap_or_default(),
                     t.tags.title.unwrap_or_default(),
@@ -370,13 +372,13 @@ impl App {
                     // only reports `clicked()` when the press ended without a
                     // drag, so a filter click and a drag-out never both fire.
                     let link = |ui: &mut egui::Ui,
-                                    pos: egui::Pos2,
-                                    size: egui::Vec2,
-                                    salt: &str,
-                                    color: egui::Color32,
-                                    note: &str,
-                                    hit: &mut bool,
-                                    native_drag: &mut bool| {
+                                pos: egui::Pos2,
+                                size: egui::Vec2,
+                                salt: &str,
+                                color: egui::Color32,
+                                note: &str,
+                                hit: &mut bool,
+                                native_drag: &mut bool| {
                         let rect = egui::Rect::from_min_size(pos, size);
                         let resp = ui
                             .interact(rect, ui.id().with(salt), egui::Sense::click_and_drag())
@@ -915,7 +917,7 @@ impl App {
     fn set_row_bpm(&mut self, id: Id, bpm: f32) {
         if let Some(r) = self.rows.iter_mut().find(|r| r.id == id) {
             r.bpm_val = Some(bpm);
-            r.bpm = format!("{bpm:.0}");
+            r.bpm = format!("{bpm:.1}");
         }
     }
 

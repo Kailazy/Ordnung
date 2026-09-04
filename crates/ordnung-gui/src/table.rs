@@ -321,7 +321,11 @@ impl App {
                 // reads as one card): title left, frameless close button right,
                 // then a one-line hint.
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Columns").font(crate::ui::tokens::font::strong(crate::ui::tokens::font::headline().size)));
+                    ui.label(
+                        egui::RichText::new("Columns").font(crate::ui::tokens::font::strong(
+                            crate::ui::tokens::font::headline().size,
+                        )),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if crate::ui::icon::close_button(ui, "Close") {
                             open = false;
@@ -2372,7 +2376,7 @@ pub(crate) fn load_rows(
         let (bpm, key) = match analysis.as_ref() {
             Some(a) => (
                 a.bpm
-                    .map(|b| format!("{b:.0}"))
+                    .map(|b| format!("{b:.1}"))
                     .unwrap_or_else(|| "—".into()),
                 a.key
                     .map(|k| k.camelot().label())
