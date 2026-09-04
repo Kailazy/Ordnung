@@ -751,6 +751,19 @@ impl SettingsTab {
     }
 }
 
+/// A sidebar resize in progress. The panel stays locked to `NavDensity` while
+/// the edge is held; this is only what the ghost line draws and what the drop
+/// will commit.
+#[derive(Clone, Copy)]
+struct NavDrag {
+    /// Live pointer x, in screen space — where the ghost line is painted.
+    x: f32,
+    /// The tier this drag would land on, run through the same hysteresis the
+    /// commit uses so the ghost previews the real outcome rather than a plain
+    /// nearest-match the drop would then disagree with.
+    target: NavDensity,
+}
+
 struct App {
     db_path: PathBuf,
     rows: Vec<TrackRow>,
@@ -1336,6 +1349,12 @@ struct App {
     /// pixel width — is the resize state, and it persists via
     /// `Config::nav_density`.
     nav_density: NavDensity,
+    /// Where the resize pointer is while the sidebar edge is held, and the tier
+    /// it would land on. `Some` only during a drag. The panel itself does *not*
+    /// follow this — committing a tier mid-drag is what made labels wrap and
+    /// unwrap under the pointer — so the live position is drawn as a ghost line
+    /// instead and the tier is applied once, on release.
+    nav_drag: Option<NavDrag>,
     /// Which track set the table shows — the whole library or one playlist.
     view: LibraryView,
     /// Inline rename in progress for a sidebar entry, or `None` when no row is

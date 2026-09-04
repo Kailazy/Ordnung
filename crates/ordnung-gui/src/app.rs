@@ -222,7 +222,7 @@ impl App {
             usb_selected: None,
             usb_edit: UsbEdit::default(),
             usb_edit_saved: UsbEdit::default(),
-            nav_density: NavDensity::Wide,
+            nav_density: NavDensity::Narrow,
             nav_drag: None,
             view: LibraryView::Library,
             renaming: None,
@@ -1874,27 +1874,18 @@ impl eframe::App for App {
                         if recent_count == 0 && *view == LibraryView::RecentlyAdded && rows_empty {
                             *view = LibraryView::Library;
                         }
-                        let tile = if density == NavDensity::Wide {
-                            nav_button_dense(
-                                ui,
-                                density,
-                                "♫",
-                                "All songs",
-                                *view == LibraryView::Library,
-                                46.0,
-                                17.0,
-                            )
-                        } else {
-                            nav_button_dense(
-                                ui,
-                                density,
-                                "♫",
-                                "All songs",
-                                *view == LibraryView::Library,
-                                40.0,
-                                16.0,
-                            )
-                        };
+                        // One size at every remaining tier: the taller 46pt
+                        // variant existed for the retired wide layout, where the
+                        // tile shared its row with "New".
+                        let tile = nav_button_dense(
+                            ui,
+                            density,
+                            "♫",
+                            "All songs",
+                            *view == LibraryView::Library,
+                            44.0,
+                            16.5,
+                        );
                         let mut tile_clicked = tile.clicked();
                         if inline_badge {
                             let badge = crate::sidebar::nav_tile_badge(
@@ -2083,15 +2074,11 @@ impl eframe::App for App {
                             section_caption(ui, "DEVICES");
                             ui.add_space(4.0);
                             for v in self.usb_volumes.clone() {
-                                // The "(rekordbox)" suffix is the first thing
-                                // to go when width is short; the volume's own
-                                // name is what identifies it.
-                                let label = if v.is_rekordbox_export && density == NavDensity::Wide
-                                {
-                                    format!("{}  (rekordbox)", v.name)
-                                } else {
-                                    v.name.clone()
-                                };
+                                // The "(rekordbox)" suffix only ever fit the
+                                // retired wide tier; the volume's own name is
+                                // what identifies it, and the hover note still
+                                // says whether it holds a rekordbox export.
+                                let label = v.name.clone();
                                 if nav_button_dense(
                                     ui,
                                     density,

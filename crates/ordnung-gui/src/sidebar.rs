@@ -600,9 +600,10 @@ impl NavDensity {
     /// Parse the persisted `Config::nav_density` key; anything unrecognised
     /// falls back to the designed default.
     pub(crate) fn from_key(key: &str) -> Self {
+        // Anything else — including the retired "wide" key still sitting in
+        // existing configs — lands on the default.
         match key {
             "icon" => NavDensity::Icon,
-            "narrow" => NavDensity::Narrow,
             _ => NavDensity::Narrow,
         }
     }
