@@ -1627,6 +1627,9 @@ struct UsbPdbInfo {
     /// `[low, mid, high, loud]` quads at 20 bins/sec from the ANLZ color
     /// waveform; empty when the stick carries no `.EXT`.
     waveform_bands: Vec<u8>,
+    /// The track's `ANLZ0000.DAT`, absolute on the mounted volume — read
+    /// lazily for the pieces only playback needs (the beatgrid lane).
+    anlz_path: Option<PathBuf>,
 }
 
 /// One device file's BPM/key as analyzed by Ordnung's own engine — the

@@ -67,6 +67,37 @@ fn find_section<'a>(data: &'a [u8], want: &[u8; 4]) -> Option<&'a [u8]> {
     None
 }
 
+/// Read a track's beatgrid back from its `ANLZ0000.DAT`'s `PQTZ` section:
+/// per beat `u16 bar position (1–4), u16 BPM×100, u32 time ms`, big-endian.
+/// Empty when the file is missing or carries no grid.
+pub fn read_beatgrid(dat_path: &std::path::Path) -> Vec<Beat> {
+    let Ok(dat) = std::fs::read(dat_path) else {
+        return Vec::new();
+    };
+    let Some(body) = find_section(&dat, b"PQTZ") else {
+        return Vec::new();
+    };
+    // Body: u32 0, u32 0x00080000, u32 count, then 8-byte beat entries.
+    let Some(n) = body
+        .get(8..12)
+        .and_then(|b| b.try_into().ok())
+        .map(u32::from_be_bytes)
+    else {
+        return Vec::new();
+    };
+    let Some(entries) = body.get(12..12 + n as usize * 8) else {
+        return Vec::new();
+    };
+    entries
+        .chunks_exact(8)
+        .map(|e| Beat {
+            number: u32::from(u16::from_be_bytes([e[0], e[1]])),
+            bpm: f32::from(u16::from_be_bytes([e[2], e[3]])) / 100.0,
+            position_ms: u64::from(u32::from_be_bytes([e[4], e[5], e[6], e[7]])),
+        })
+        .collect()
+}
+
 /// Read a track's waveforms from its `ANLZ0000.DAT` (the `.EXT` sibling is
 /// derived by extension swap, as players do). `None` when the file is
 /// missing, unreadable, or carries no `PWAV`.
@@ -480,6 +511,16 @@ mod tests {
         assert_eq!(got.bands.len() % 4, 0);
         assert!(!got.bands.is_empty());
         assert!(got.bands.iter().any(|&v| v > 0));
+
+        // The beatgrid reads back beat-for-beat.
+        let grid = read_beatgrid(&dat);
+        assert_eq!(grid.len(), b.len());
+        assert_eq!(grid.first().map(|x| x.number), b.first().map(|x| x.number));
+        assert_eq!(
+            grid.first().map(|x| x.position_ms),
+            b.first().map(|x| x.position_ms)
+        );
+        assert!((grid[0].bpm - b[0].bpm).abs() < 0.01);
 
         // A DAT with no EXT still yields the preview alone.
         std::fs::remove_file(dir.join("ANLZ0000.EXT")).unwrap();

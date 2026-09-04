@@ -70,7 +70,7 @@ impl App {
                 .and_then(|c| c.get_analysis(id))
                 .ok()
                 .flatten();
-            let (waveform, waveform_bands) = analysis
+            let (mut waveform, mut waveform_bands) = analysis
                 .as_ref()
                 .map(|a| {
                     // Only the v11+ 4-byte stride is what the renderer expects.
@@ -82,9 +82,22 @@ impl App {
                     (a.waveform_preview.clone(), bands)
                 })
                 .unwrap_or_default();
+            // A device track has no catalog row, but its table row already
+            // carries the stick's ANLZ waveform (or the background analyzer's)
+            // — so the bar draws the same as for a library track.
+            if waveform.is_empty() {
+                if let Some(r) = self.rows.iter().find(|r| r.id == id) {
+                    waveform = r.waveform.clone();
+                    waveform_bands = r.waveform_bands.clone();
+                }
+            }
             let (waveform, waveform_bands) = (Arc::new(waveform), Arc::new(waveform_bands));
-            // Beatgrid for the moving lane.
-            let grid = analysis.as_ref().and_then(player_grid);
+            // Beatgrid for the moving lane; device tracks read theirs back
+            // from the stick's ANLZ beatgrid.
+            let grid = analysis
+                .as_ref()
+                .and_then(player_grid)
+                .or_else(|| self.usb_anlz_grid(id));
             self.now_playing = Some(NowPlaying {
                 id,
                 artist,
@@ -1170,6 +1183,26 @@ fn draw_beatgrid(
 /// phase (from the anchor beat's bar number). `get_analysis` returns the grid as
 /// one anchor beat, so the phase is `1 - number` (mod 4). `None` for a track with
 /// no tempo — there's nothing to draw or adjust.
+impl App {
+    /// The playing device track's grid, straight off the stick's ANLZ
+    /// beatgrid — `None` for library rows (their grid comes from the
+    /// catalog) and for sticks that were never analyzed.
+    fn usb_anlz_grid(&self, id: Id) -> Option<PlayerGrid> {
+        if id < USB_ID_BASE {
+            return None;
+        }
+        let i = (id - USB_ID_BASE) as usize;
+        let dat = self.usb_pdb_info.get(&i)?.anlz_path.as_ref()?;
+        let beats = ordnung_rbdb::anlz::read_beatgrid(dat);
+        let b0 = beats.first()?;
+        Some(PlayerGrid {
+            bpm: b0.bpm,
+            first_beat_ms: b0.position_ms as f64,
+            downbeat_phase: (1 - b0.number as i64).rem_euclid(4) as u32,
+        })
+    }
+}
+
 fn player_grid(a: &Analysis) -> Option<PlayerGrid> {
     let bpm = a.bpm?;
     let b0 = a.beatgrid.beats.first()?;

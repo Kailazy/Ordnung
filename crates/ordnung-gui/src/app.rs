@@ -3389,6 +3389,10 @@ pub(crate) fn read_usb_pdb(vol: &Path) -> Option<UsbScan> {
                     .map(|p| vol.join(p.trim_start_matches('/'))),
                 waveform,
                 waveform_bands,
+                anlz_path: t
+                    .analyze_path
+                    .as_ref()
+                    .map(|p| vol.join(p.trim_start_matches('/'))),
             },
         );
         tracks.push(ScannedTrack {
@@ -3503,11 +3507,16 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
                             .map(|p| vol.join(p.trim_start_matches('/'))),
                         waveform,
                         waveform_bands,
+                        anlz_path: t
+                            .analyze_path
+                            .as_ref()
+                            .map(|p| vol.join(p.trim_start_matches('/'))),
                     };
                     if info.bpm.is_some()
                         || info.key.is_some()
                         || info.artwork_path.is_some()
                         || !info.waveform.is_empty()
+                        || info.anlz_path.is_some()
                     {
                         pdb_info.insert(i, info);
                     }
