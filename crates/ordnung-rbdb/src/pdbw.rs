@@ -472,17 +472,40 @@ pub(crate) fn data_page(page_index: u32, ty: u32, next_page: u32, rows: &[Vec<u8
     p
 }
 
-/// Emit a sentinel ("strange") page — the first page of every table.
-fn sentinel_page(page_index: u32, ty: u32, next_page: u32) -> Vec<u8> {
+/// Emit a sentinel page — the first page of every table. These are *index
+/// pages* (flags 0x64) and firmware parses their body, so the empty-index
+/// form must be written out in full, exactly as rekordbox does for a fresh
+/// table: header magics 0x03ec / 0x03ffffff, zero entries, and the whole
+/// entry array filled with the empty-slot marker 0x1FFFFFF8 (leaving the
+/// final 20 bytes of the page zero). A blank body reads as corruption on
+/// CDJs and in rekordcrate alike.
+///
+/// `first_data` is the first page holding rows, or `None` for an empty
+/// table (the body's redundant next-pointer is 0x03ffffff then).
+fn sentinel_page(page_index: u32, ty: u32, next_page: u32, first_data: Option<u32>) -> Vec<u8> {
     let mut p = vec![0u8; PAGE];
     p[0x04..0x08].copy_from_slice(&page_index.to_le_bytes());
     p[0x08..0x0C].copy_from_slice(&ty.to_le_bytes());
     p[0x0C..0x10].copy_from_slice(&next_page.to_le_bytes());
     p[0x10..0x14].copy_from_slice(&1u32.to_le_bytes());
     p[0x1B] = 0x64;
-    p[0x20..0x22].copy_from_slice(&0x1FFFu16.to_le_bytes());
-    p[0x22..0x24].copy_from_slice(&0x1FFFu16.to_le_bytes());
-    p[0x24..0x26].copy_from_slice(&1004u16.to_le_bytes());
+    // Index body (offsets relative to the page start).
+    p[0x20..0x22].copy_from_slice(&0x1FFFu16.to_le_bytes()); // unknown_a
+    p[0x22..0x24].copy_from_slice(&0x1FFFu16.to_le_bytes()); // unknown_b
+    p[0x24..0x26].copy_from_slice(&0x03ECu16.to_le_bytes()); // magic
+    p[0x26..0x28].copy_from_slice(&0u16.to_le_bytes()); // next entry offset
+    p[0x28..0x2C].copy_from_slice(&page_index.to_le_bytes()); // redundant self
+    let body_next = first_data.unwrap_or(0x03FF_FFFF);
+    p[0x2C..0x30].copy_from_slice(&body_next.to_le_bytes());
+    p[0x30..0x38].copy_from_slice(&0x0000_0000_03FF_FFFFu64.to_le_bytes());
+    p[0x38..0x3A].copy_from_slice(&0u16.to_le_bytes()); // num_entries
+    p[0x3A..0x3C].copy_from_slice(&0x1FFFu16.to_le_bytes()); // first_empty
+    // Empty index entries fill the page, except the last 20 bytes.
+    let mut o = 0x3C;
+    while o + 4 <= PAGE - 20 {
+        p[o..o + 4].copy_from_slice(&0x1FFF_FFF8u32.to_le_bytes());
+        o += 4;
+    }
     p
 }
 
@@ -493,8 +516,12 @@ fn build_dsql(tables: &[Vec<Vec<u8>>]) -> Vec<u8> {
     // Chunked rows per table.
     let chunked: Vec<Vec<Vec<Vec<u8>>>> = tables.iter().map(|t| paginate(t)).collect();
 
-    // Assign page indices: sentinel 2t+1, first data page 2t+2 (blank when the
-    // table is empty), overflow appended after 2n+1 in table order.
+    // Assign page indices: sentinel 2t+1, first data page 2t+2 (left zeroed
+    // when the table is empty — rekordbox's "empty candidate"), overflow
+    // appended after 2n+1 in table order, then one zeroed terminator page per
+    // non-empty table. Every chain must end at an allocated all-zero page
+    // (the directory's empty candidate); rekordbox writes sticks this way and
+    // players treat the layout as canonical.
     let mut next_free = (2 * n + 1) as u32;
     let mut overflow: HashMap<usize, Vec<u32>> = HashMap::new();
     for (t, chunks) in chunked.iter().enumerate() {
@@ -502,6 +529,13 @@ fn build_dsql(tables: &[Vec<Vec<u8>>]) -> Vec<u8> {
         let ids: Vec<u32> = (0..extra).map(|i| next_free + i as u32).collect();
         next_free += extra as u32;
         overflow.insert(t, ids);
+    }
+    let mut terminator: HashMap<usize, u32> = HashMap::new();
+    for (t, chunks) in chunked.iter().enumerate() {
+        if !chunks.is_empty() {
+            terminator.insert(t, next_free);
+            next_free += 1;
+        }
     }
     let total_pages = next_free;
 
@@ -532,10 +566,12 @@ fn build_dsql(tables: &[Vec<Vec<u8>>]) -> Vec<u8> {
         } else {
             ov[chunks.len() - 2]
         };
+        // The all-zero page this table's chain ends at: the untouched data
+        // page for an empty table, the allocated terminator otherwise.
         let empty_candidate = if chunks.is_empty() {
             first_data
         } else {
-            total_pages
+            terminator[&t]
         };
         // Directory entry.
         {
@@ -546,24 +582,26 @@ fn build_dsql(tables: &[Vec<Vec<u8>>]) -> Vec<u8> {
             h[8..12].copy_from_slice(&sentinel.to_le_bytes());
             h[12..16].copy_from_slice(&last.to_le_bytes());
         }
-        put(&mut out, sentinel, sentinel_page(sentinel, t as u32, first_data));
-        if chunks.is_empty() {
-            // Blank, unlinked data page — mirrors rekordbox's empty tables.
-            put(&mut out, first_data, data_page(first_data, t as u32, total_pages, &[]));
-        } else {
-            for (i, chunk) in chunks.iter().enumerate() {
-                let idx = if i == 0 { first_data } else { ov[i - 1] };
-                let next = if i + 1 < chunks.len() {
-                    if i == 0 {
-                        ov[0]
-                    } else {
-                        ov[i]
-                    }
+        let body_next = (!chunks.is_empty()).then_some(first_data);
+        put(
+            &mut out,
+            sentinel,
+            sentinel_page(sentinel, t as u32, first_data, body_next),
+        );
+        // An empty table's candidate page stays all-zero (the file is
+        // pre-zeroed, so nothing to write), exactly as rekordbox leaves it.
+        for (i, chunk) in chunks.iter().enumerate() {
+            let idx = if i == 0 { first_data } else { ov[i - 1] };
+            let next = if i + 1 < chunks.len() {
+                if i == 0 {
+                    ov[0]
                 } else {
-                    total_pages
-                };
-                put(&mut out, idx, data_page(idx, t as u32, next, chunk));
-            }
+                    ov[i]
+                }
+            } else {
+                empty_candidate
+            };
+            put(&mut out, idx, data_page(idx, t as u32, next, chunk));
         }
     }
     out

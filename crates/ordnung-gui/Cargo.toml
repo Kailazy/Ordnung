@@ -13,6 +13,12 @@ description = "Ordnung desktop GUI — browse catalog, convert tracks via double
 name = "Ordnung"
 path = "src/main.rs"
 
+[features]
+# The native rekordbox USB export, still being reverse engineered. Off by
+# default so the release DMG ships without the device surface; local dev
+# builds (`make run` / `make app`) enable it. See `crate::USB_EXPORT`.
+usb-export = []
+
 [dependencies]
 anyhow = "1.0.102"
 # `persistence` lets eframe auto-save egui's memory (and window geometry) to the

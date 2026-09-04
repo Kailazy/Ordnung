@@ -52,7 +52,7 @@ jobs:
           echo "Building version $ver"
 
       - name: Build universal DMG
-        run: bash tools/build-app.sh --no-install --no-launch --universal --dmg --version=${{ steps.ver.outputs.version }}
+        run: bash tools/build-app.sh --no-install --no-launch --universal --dmg --dist --version=${{ steps.ver.outputs.version }}
 
       - name: Name the artifact
         run: mv Ordnung.dmg "Ordnung-${{ steps.ver.outputs.version }}-macos-universal.dmg"

@@ -223,7 +223,7 @@ impl App {
             missing_list: Vec::new(),
             health_tab: LibraryView::Duplicates,
             missing_pending_remove: None,
-            usb_volumes: ordnung_core::usb::detect_volumes(),
+            usb_volumes: crate::detect_usb_volumes(),
             usb_last_poll: 0.0,
             usb_tracks: Vec::new(),
             usb_pdb_info: HashMap::new(),
@@ -654,7 +654,7 @@ impl App {
         let now = ctx.input(|i| i.time);
         if now - self.usb_last_poll >= 2.0 || self.usb_last_poll == 0.0 {
             self.usb_last_poll = now;
-            self.usb_volumes = ordnung_core::usb::detect_volumes();
+            self.usb_volumes = crate::detect_usb_volumes();
         }
         // Keep a frame scheduled ~2s out even when the app is idle, so a
         // plugged-in stick appears without the user having to wiggle the mouse
@@ -669,7 +669,7 @@ impl App {
             if let Ok(msg) = rx.try_recv() {
                 self.status = msg;
                 self.usb_eject_rx = None;
-                self.usb_volumes = ordnung_core::usb::detect_volumes();
+                self.usb_volumes = crate::detect_usb_volumes();
             }
         }
         // Adopt finished scans; results are tagged with their volume so a

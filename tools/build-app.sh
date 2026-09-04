@@ -8,7 +8,8 @@
 #   tools/build-app.sh --universal    # build a fat arm64+x86_64 binary (runs on any Mac)
 #   tools/build-app.sh --dmg          # also package Ordnung.dmg (drag-to-Applications)
 #   tools/build-app.sh --version=X.Y.Z  # stamp this version into Info.plist / DMG name
-#   # The release CI uses: --no-install --no-launch --universal --dmg --version=<tag>
+#   tools/build-app.sh --dist         # distribution build: leave dev-only features out
+#   # The release CI uses: --no-install --no-launch --universal --dmg --dist --version=<tag>
 #
 # What it does:
 #   1. cargo build --release -p ordnung-gui (both arches + lipo, when --universal)
@@ -26,6 +27,7 @@ install=1
 launch=1
 universal=0
 make_dmg=0
+dist=0
 version=""
 for arg in "$@"; do
   case "$arg" in
@@ -33,10 +35,20 @@ for arg in "$@"; do
     --no-launch)  launch=0 ;;
     --universal)  universal=1 ;;
     --dmg)        make_dmg=1 ;;
+    --dist)       dist=1 ;;
     --version=*)  version="${arg#--version=}" ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
+
+# Local builds carry the dev-only features (the in-progress rekordbox USB
+# export); --dist (used by release CI) leaves them out so the shipped DMG
+# hides that surface until the format work is done. A plain string (expanded
+# unquoted below) because macOS bash 3.2 chokes on empty arrays under `set -u`.
+features="--features usb-export"
+if [[ "$dist" -eq 1 ]]; then
+  features=""
+fi
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
 src_icon="$here/tools/icon.svg"
@@ -64,8 +76,9 @@ rsvg-convert -w 512 -h 512 "$src_icon" -o "$here/crates/ordnung-gui/assets/icon.
 if [[ "$universal" -eq 1 ]]; then
   echo "==> Building universal release binary (arm64 + x86_64)"
   rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null 2>&1 || true
-  cargo build --release -p ordnung-gui --target aarch64-apple-darwin
-  cargo build --release -p ordnung-gui --target x86_64-apple-darwin
+  # shellcheck disable=SC2086  # $features is deliberately word-split
+  cargo build --release -p ordnung-gui $features --target aarch64-apple-darwin
+  cargo build --release -p ordnung-gui $features --target x86_64-apple-darwin
   bin="$here/target/release/Ordnung-universal"
   lipo -create -output "$bin" \
     "$here/target/aarch64-apple-darwin/release/Ordnung" \
@@ -73,7 +86,8 @@ if [[ "$universal" -eq 1 ]]; then
   echo "    arches: $(lipo -archs "$bin")"
 else
   echo "==> Building release binary"
-  cargo build --release -p ordnung-gui
+  # shellcheck disable=SC2086  # $features is deliberately word-split
+  cargo build --release -p ordnung-gui $features
   bin="$here/target/release/Ordnung"
 fi
 

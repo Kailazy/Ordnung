@@ -27,7 +27,10 @@ use super::*;
 /// they don't have a root either, and the tour is the right place to ask.
 ///
 /// v3 added the digital/vinyl question and the inline Discogs token field.
-pub(crate) const TOUR_VERSION: u32 = 3;
+///
+/// v4 added the rekordbox hand-off step: with the direct USB export not yet
+/// in shipped builds, the tour has to say how finished tracks reach the decks.
+pub(crate) const TOUR_VERSION: u32 = 4;
 
 /// One step of the tour. Ordered as the questions actually arrive: what is this,
 /// how does my music get in, what does Discogs add, and only then — now that
@@ -46,19 +49,23 @@ pub(crate) enum TourStep {
     Crate,
     /// Connecting Discogs and what it fills in.
     Discogs,
+    /// How finished tracks reach the players: drop them into rekordbox as
+    /// usual — the metadata Ordnung wrote into the files travels with them.
+    Rekordbox,
     /// The writeback fork: automatic or manual.
     Writeback,
 }
 
 impl TourStep {
     /// Every step, in tour order.
-    pub(crate) const ALL: [TourStep; 7] = [
+    pub(crate) const ALL: [TourStep; 8] = [
         TourStep::Welcome,
         TourStep::Medium,
         TourStep::Library,
         TourStep::LibraryRoot,
         TourStep::Crate,
         TourStep::Discogs,
+        TourStep::Rekordbox,
         TourStep::Writeback,
     ];
 
@@ -633,6 +640,43 @@ impl App {
                                     .color(crate::ui::tokens::color::LABEL_3),
                                 );
                             }
+                            TourStep::Rekordbox => {
+                                // The direct USB export is still being built,
+                                // so this step keeps the promise honest: the
+                                // hand-off to the decks is rekordbox itself,
+                                // and it works because the metadata lives in
+                                // the files. Sequenced right before the
+                                // writeback fork — this is why that choice
+                                // matters.
+                                step_heading(
+                                    ui,
+                                    "Off to the decks",
+                                    "Ordnung gets your tracks ready. Rekordbox stays how \
+                                     they reach the players.",
+                                );
+                                feature_row(
+                                    ui,
+                                    crate::ui::icon::tag,
+                                    "Metadata lives in your files",
+                                    "BPM, key, artwork and release data end up in the \
+                                     files' own tags.",
+                                );
+                                feature_row(
+                                    ui,
+                                    crate::ui::icon::deck,
+                                    "Drop into rekordbox",
+                                    "Once tracks are filled in, add them to rekordbox as \
+                                     you always have. Everything travels with the files.",
+                                );
+                                ui.label(
+                                    egui::RichText::new(
+                                        "A direct USB export straight from Ordnung is in \
+                                         the works.",
+                                    )
+                                    .font(crate::ui::tokens::font::body())
+                                    .color(crate::ui::tokens::color::LABEL_3),
+                                );
+                            }
                             TourStep::Writeback => {
                                 step_heading(
                                     ui,
@@ -895,6 +939,23 @@ mod tests {
         };
         assert!(v1.onboarding_completed_version < TOUR_VERSION);
         assert!(TourStep::ALL.contains(&TourStep::LibraryRoot));
+    }
+
+    /// v4 added the rekordbox hand-off step. It must sit right before the
+    /// writeback fork: "your metadata travels in the files" is the argument
+    /// for caring about how files get written, so the order carries the pitch.
+    #[test]
+    fn the_rekordbox_handoff_leads_into_the_writeback_fork() {
+        assert!(TOUR_VERSION >= 4);
+        let rekordbox = TourStep::ALL
+            .iter()
+            .position(|s| *s == TourStep::Rekordbox)
+            .unwrap();
+        let writeback = TourStep::ALL
+            .iter()
+            .position(|s| *s == TourStep::Writeback)
+            .unwrap();
+        assert_eq!(rekordbox + 1, writeback);
     }
 
     /// v3 added the digital/vinyl question and the inline token field. The

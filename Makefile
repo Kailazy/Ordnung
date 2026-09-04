@@ -14,5 +14,5 @@ app: ## Build, sign, install to /Applications, pin to Dock, relaunch
 app-only: ## Build + sign the local Ordnung.app, don't touch /Applications
 	@bash tools/build-app.sh --no-install
 
-run: ## Run the GUI from source (debug, no bundle)
-	@cargo run -p ordnung-gui
+run: ## Run the GUI from source (debug, no bundle, dev features)
+	@cargo run -p ordnung-gui --features usb-export

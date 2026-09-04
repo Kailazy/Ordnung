@@ -301,6 +301,11 @@ fn export_menu_items(
     volumes: &[ordnung_core::usb::UsbVolume],
     action: &mut Option<SidebarAction>,
 ) {
+    // Builds without the USB export don't even show the disabled hint: the
+    // export isn't "unavailable right now", it doesn't exist in this build.
+    if !crate::USB_EXPORT {
+        return;
+    }
     if volumes.is_empty() {
         ui.add_enabled(false, egui::Button::new("Export to device (none mounted)"));
         return;

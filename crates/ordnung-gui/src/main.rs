@@ -67,6 +67,26 @@ use ui::hover::HoverNoteExt;
 use util::*;
 use vinyl_sheet::{SheetFetched, VinylSheet};
 
+/// Compile-time switch for the native rekordbox USB export. The format is
+/// still being reverse engineered, so release DMGs build without the
+/// `usb-export` feature and hide the whole device surface; local dev builds
+/// (`make run` / `make app`) turn it on. Users get music to the players the
+/// classic way meanwhile: drop tagged files into rekordbox (see the tour's
+/// rekordbox step).
+pub(crate) const USB_EXPORT: bool = cfg!(feature = "usb-export");
+
+/// [`ordnung_core::usb::detect_volumes`], but always empty when the USB
+/// export is compiled out. Every device entry point keys off the mounted
+/// volume list, so "no volumes, ever" erases the Devices section, the device
+/// view, and the export menus in one place.
+pub(crate) fn detect_usb_volumes() -> Vec<ordnung_core::usb::UsbVolume> {
+    if USB_EXPORT {
+        ordnung_core::usb::detect_volumes()
+    } else {
+        Vec::new()
+    }
+}
+
 fn main() -> eframe::Result<()> {
     // Pull a repo-root `.env` into the process environment before anything reads
     // it, so a local `DISCOGS_TOKEN=…` line works for `cargo run`/`make run`
