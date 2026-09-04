@@ -1351,6 +1351,11 @@ struct App {
     /// completion handler drop cover textures, since that job may have embedded
     /// fetched art and the per-id texture cache would otherwise show stale covers.
     write_edits_running: bool,
+    /// Set to the destination volume while a USB export job runs. When the job
+    /// finishes, its completion handler forces a re-scan of that stick (by
+    /// clearing `usb_loaded_for`) so the freshly written playlists appear in
+    /// the device view without the user having to rescan or restart the app.
+    export_running_to: Option<PathBuf>,
     /// Backstop for auto-write (`config.auto_write_tags`): the pending-edit count
     /// left over after an automatic write finished. Tracks whose files can't be
     /// written (read-only, missing, unsupported container) keep their

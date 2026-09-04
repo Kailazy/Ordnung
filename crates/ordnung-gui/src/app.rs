@@ -208,6 +208,7 @@ impl App {
             confirm_bulk_write: false,
             confirm_delete: None,
             write_edits_running: false,
+            export_running_to: None,
             auto_write_stalled_at: None,
             auto_write_job: false,
             auto_write_pending_latch: false,

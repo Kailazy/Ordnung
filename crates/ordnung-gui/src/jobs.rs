@@ -71,6 +71,16 @@ impl App {
                 self.cover_full_cache.clear();
                 self.cover_inflight.clear();
             }
+            // A finished USB export changed the stick's playlists/tracks on
+            // disk. If the device view is showing that same stick, drop
+            // `usb_loaded_for` so `poll_usb` re-scans it next frame and the new
+            // playlists appear — otherwise the view keeps the pre-export tree
+            // until a manual rescan or app restart.
+            if let Some(dest) = self.export_running_to.take() {
+                if self.usb_loaded_for.as_deref() == Some(dest.as_path()) {
+                    self.usb_loaded_for = None;
+                }
+            }
         }
         reload
     }
@@ -141,6 +151,9 @@ impl App {
         self.job_cancel = Some(cancel.clone());
         let verb = if replace { "Exporting" } else { "Adding" };
         self.status = format!("{verb} {scope} to {}…", dest.display());
+        // Remember where we're exporting so the completion handler can refresh
+        // the device view (the stick's on-disk playlists just changed).
+        self.export_running_to = Some(dest.clone());
         let db = self.db_path.clone();
         thread::spawn(move || run_export(db, dest, playlist_ids, replace, cancel, tx, ctx));
     }
