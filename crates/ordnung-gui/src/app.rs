@@ -1867,7 +1867,7 @@ impl eframe::App for App {
                             nav_button_dense(
                                 ui,
                                 density,
-                                "♪",
+                                "♫",
                                 "All songs",
                                 *view == LibraryView::Library,
                                 46.0,
@@ -1877,7 +1877,7 @@ impl eframe::App for App {
                             nav_button_dense(
                                 ui,
                                 density,
-                                "♪",
+                                "♫",
                                 "All songs",
                                 *view == LibraryView::Library,
                                 40.0,
@@ -2004,7 +2004,15 @@ impl eframe::App for App {
                         (_, 0) => "Vinyl".to_string(),
                         (_, n) => format!("Vinyl ({n})"),
                     };
-                    let (h, size) = if lead { (46.0, 17.0) } else { (34.0, 14.0) };
+                    // The vinyl shelf is a top-level library whether or not it
+                    // leads the sidebar, so at the icon tier it keeps the taller
+                    // tile that earns the bigger glyph; only the captioned tiers
+                    // shrink it when it sits below the digital group.
+                    let (h, size) = match (lead, density) {
+                        (true, _) => (46.0, 17.0),
+                        (false, NavDensity::Icon) => (40.0, 14.0),
+                        (false, _) => (34.0, 14.0),
+                    };
                     if nav_button_dense(
                         ui,
                         density,

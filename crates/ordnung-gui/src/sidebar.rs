@@ -637,7 +637,15 @@ pub(crate) fn nav_button_dense(
     text_size: f32,
 ) -> egui::Response {
     if density.icons_only() {
-        rail_tile(ui, icon, selected)
+        // The wide tiers rank tiles by height and text size; the rail has only
+        // one square, so carry that ranking over as glyph size instead. The
+        // tall tiles (the top-level libraries) are the ones worth enlarging.
+        let glyph = if height >= 40.0 {
+            RAIL_GLYPH_LEAD
+        } else {
+            RAIL_GLYPH
+        };
+        rail_tile_sized(ui, icon, selected, glyph)
     } else {
         nav_button(ui, &format!("{icon}  {label}"), selected, height, text_size)
     }
@@ -692,13 +700,32 @@ pub(crate) fn nav_button_truncated(
 /// rail tile is this exact size, whatever it stands for, so the rail is a
 /// predictable column your eye can run down.
 pub(crate) fn rail_tile(ui: &mut egui::Ui, icon: &str, selected: bool) -> egui::Response {
+    rail_tile_sized(ui, icon, selected, RAIL_GLYPH)
+}
+
+/// Glyph point size for an ordinary rail tile (a playlist, a USB volume).
+pub(crate) const RAIL_GLYPH: f32 = 17.0;
+
+/// Glyph point size for the rail's primary destinations — "All songs" and the
+/// vinyl shelf. At the icon tier every tile is the same square with no caption
+/// to rank it, so size is the only thing left to say which entries are the
+/// top-level libraries and which are the list of playlists under them.
+pub(crate) const RAIL_GLYPH_LEAD: f32 = 24.0;
+
+/// [`rail_tile`] with an explicit glyph size, so the rail can rank its entries.
+pub(crate) fn rail_tile_sized(
+    ui: &mut egui::Ui,
+    icon: &str,
+    selected: bool,
+    glyph: f32,
+) -> egui::Response {
     let side = NavDensity::RAIL_TILE;
     // Centre the square in the rail rather than letting it sit flush left: the
     // gutter is what stops the tiles reading as a clipped-off wider sidebar.
     let indent = ((ui.available_width() - side) / 2.0).max(0.0);
     ui.horizontal(|ui| {
         ui.add_space(indent);
-        nav_button_sized(ui, icon, selected, side, side, 17.0)
+        nav_button_sized(ui, icon, selected, side, side, glyph)
     })
     .inner
 }
