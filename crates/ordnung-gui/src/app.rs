@@ -1773,7 +1773,17 @@ impl eframe::App for App {
                 }
             }
         }
-        let density = self.nav_density;
+        // Naming a playlist needs a text field, and the rail has no room for
+        // one — a new playlist created there would open an editor you cannot
+        // read or type into. So a rename temporarily promotes the sidebar out
+        // of the rail; it drops back the moment the edit resolves. The stored
+        // tier is untouched, so this borrows the width rather than changing the
+        // user's choice.
+        let density = if self.renaming.is_some() && self.nav_density.icons_only() {
+            NavDensity::Narrow
+        } else {
+            self.nav_density
+        };
         let target = density.width();
         // Ease between tiers so the change of layout reads as a deliberate
         // lock-into-place rather than a hard cut. `animate_value` repaints until
@@ -1937,31 +1947,48 @@ impl eframe::App for App {
                             }
                         }
                         ui.add_space(10.0);
-                        ui.horizontal(|ui| {
-                            section_caption(ui, "PLAYLISTS");
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    // Hold the button off the panel's right clip
-                                    // edge so its hover outline isn't cut off.
-                                    ui.add_space(3.0);
-                                    // Compact square button — without an explicit
-                                    // min_size the "+" reads as a stretched pill.
-                                    if ui
-                                        .add(
-                                            egui::Button::new("+")
-                                                .min_size(egui::vec2(22.0, 22.0))
-                                                .rounding(egui::Rounding::same(6.0)),
-                                        )
-                                        .on_hover_note("New playlist")
-                                        .clicked()
-                                    {
-                                        *sidebar_action = Some(SidebarAction::NewPlaylist(None));
-                                    }
-                                },
-                            );
-                        });
-                        ui.add_space(4.0);
+                        if density.icons_only() {
+                            // In the rail the caption is gone, so right-aligning
+                            // the "+" left it floating in an empty row with
+                            // nothing to align against. It becomes a rail tile
+                            // like every other target instead — same square, same
+                            // column, so it reads as "add to this list" rather
+                            // than as a stray button.
+                            if rail_tile(ui, "+", false)
+                                .on_hover_text("New playlist")
+                                .clicked()
+                            {
+                                *sidebar_action = Some(SidebarAction::NewPlaylist(None));
+                            }
+                            ui.add_space(6.0);
+                        } else {
+                            ui.horizontal(|ui| {
+                                section_caption(ui, "PLAYLISTS");
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        // Hold the button off the panel's right clip
+                                        // edge so its hover outline isn't cut off.
+                                        ui.add_space(3.0);
+                                        // Compact square button — without an explicit
+                                        // min_size the "+" reads as a stretched pill.
+                                        if ui
+                                            .add(
+                                                egui::Button::new("+")
+                                                    .min_size(egui::vec2(22.0, 22.0))
+                                                    .rounding(egui::Rounding::same(6.0)),
+                                            )
+                                            .on_hover_note("New playlist")
+                                            .clicked()
+                                        {
+                                            *sidebar_action =
+                                                Some(SidebarAction::NewPlaylist(None));
+                                        }
+                                    },
+                                );
+                            });
+                            ui.add_space(4.0);
+                        }
                     };
 
                 // The vinyl tile. Like the digital group, it's drawn from one

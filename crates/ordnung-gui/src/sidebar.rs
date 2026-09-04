@@ -170,6 +170,64 @@ pub(crate) fn nav_button_sized(
     resp
 }
 
+/// A count badge tucked inside the right edge of a nav tile, drawn as its own
+/// clickable button on top of the tile that `host` describes. Used for the
+/// "New" pill inside "All songs": fresh imports are a subset of the catalog,
+/// not a sibling of it, so the affordance lives *in* the tile rather than
+/// stealing a second one. Returns the badge's own `Response` — hit-tested
+/// before the tile underneath, so a click on the pill selects the recent view
+/// and never falls through to the whole catalog.
+pub(crate) fn nav_tile_badge(
+    ui: &mut egui::Ui,
+    host: egui::Rect,
+    label: &str,
+    selected: bool,
+) -> egui::Response {
+    // Sized off the tile so the pill stays visually inset at every tier: a
+    // right gutter matching the tile's left one, and a height that leaves the
+    // tile's fill visible above and below.
+    const GUTTER: f32 = 8.0;
+    let height = (host.height() - 16.0).clamp(18.0, 24.0);
+    let font = egui::FontId::proportional(12.0);
+    let text_w = ui
+        .fonts(|f| f.layout_no_wrap(label.to_string(), font.clone(), egui::Color32::WHITE))
+        .size()
+        .x;
+    let width = text_w + 16.0;
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(
+            host.right() - GUTTER - width,
+            host.center().y - height / 2.0,
+        ),
+        egui::vec2(width, height),
+    );
+    // Claimed with `Sense::click` at this exact rect so it sits above the tile
+    // in the interaction stack; the tile was added first, so the badge wins.
+    let resp = ui.interact(rect, ui.id().with("nav-tile-badge"), egui::Sense::click());
+    // Selected: solid accent. Otherwise a muted chip that lifts on hover, so it
+    // reads as a control rather than a static count.
+    let fill = if selected {
+        NAV_ACCENT
+    } else if resp.hovered() {
+        egui::Color32::from_gray(96)
+    } else {
+        egui::Color32::from_gray(76)
+    };
+    ui.painter()
+        .rect_filled(rect, egui::Rounding::same(height / 2.0), fill);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font,
+        egui::Color32::WHITE,
+    );
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
 /// Render the children of `parent` in the sidebar tree, recursing into folders.
 /// Folders are collapsible; playlists are selectable rows that double as
 /// drag-and-drop targets for table rows. Plain-field state (`view`, `renaming`)
@@ -191,6 +249,14 @@ pub(crate) fn draw_playlist_nodes(
             continue;
         }
         if p.is_folder {
+            if density.icons_only() {
+                // A collapsing header is a disclosure triangle plus a name, and
+                // the rail has room for neither. Folders flatten to their
+                // playlists here: the rail lists the things you actually
+                // navigate to, and the hierarchy comes back at the wider tiers.
+                draw_playlist_nodes(ui, density, all, Some(p.id), view, renaming, action);
+                continue;
+            }
             egui::CollapsingHeader::new(
                 egui::RichText::new(p.name.as_str()).font(crate::ui::tokens::font::body()),
             )
@@ -284,16 +350,23 @@ pub(crate) fn draw_playlist_leaf(
     action: &mut Option<SidebarAction>,
 ) {
     let selected = *view == LibraryView::Playlist(p.id);
-    // Playlist names survive every tier — a playlist is only identifiable by
-    // its name, so the icon tier keeps the text and drops the ♪ glyph and the
-    // track count instead, which is the opposite trade from every other tile.
-    let label = if density.icons_only() {
-        p.name.clone()
+    // The rail shows a playlist as a glyph like everything else. Keeping the
+    // name here was tried and it is what broke the tier: 56pt cannot hold
+    // "Traumprinz", so names wrapped to three lines and no two tiles were the
+    // same height. The name goes in the tooltip instead — the rail is for
+    // "which one of these did I have open", the wider tiers are for reading.
+    let resp = if density.icons_only() {
+        rail_tile(ui, "♪", selected).on_hover_text(&p.name)
     } else {
-        format!("♪  {}", p.name)
+        // The track count is painted over the tile's right end, so the name is
+        // truncated to leave that lane clear — otherwise a long name runs
+        // straight under the number. `nav_button` reserves the space; the
+        // ellipsis tells the user the name is longer than shown, and the
+        // tooltip carries it in full.
+        nav_button_truncated(ui, "♪", &p.name, selected, 34.0, 13.5, COUNT_LANE)
+            .on_hover_text(&p.name)
+            .on_hover_note("Click to view. Drag tracks here to add them")
     };
-    let resp = nav_button(ui, &label, selected, 30.0, 13.5)
-        .on_hover_note("Click to view. Drag tracks here to add them");
     // Small right-aligned track count inside the tile. Muted so the name stays
     // the focus; brighter on the accent fill so it's still readable when selected.
     let count_color = if selected {
@@ -327,7 +400,7 @@ pub(crate) fn draw_playlist_leaf(
     if resp.clicked() {
         *view = LibraryView::Playlist(p.id);
     }
-    resp.context_menu(|ui| {
+    resp.clone().context_menu(|ui| {
         if ui.button("Rename").clicked() {
             *renaming = Some(Renaming {
                 id: p.id,
@@ -342,7 +415,9 @@ pub(crate) fn draw_playlist_leaf(
             ui.close_menu();
         }
     });
-    ui.add_space(3.0);
+    // The rail's rows sit tighter than the wide tiers': square targets in a
+    // column need less separation to read as distinct than full-width bars do.
+    ui.add_space(if density.icons_only() { 4.0 } else { 3.0 });
 }
 
 /// Render one level of a USB device's rekordbox playlist tree in the sidebar,
@@ -360,6 +435,11 @@ pub(crate) fn draw_usb_playlist_nodes(
 ) {
     for p in all.iter().filter(|p| p.parent_id == parent) {
         if p.is_folder {
+            if density.icons_only() {
+                // Flattened in the rail, as with catalog folders above.
+                draw_usb_playlist_nodes(ui, density, all, tracks_by_playlist, p.id, vol, view);
+                continue;
+            }
             egui::CollapsingHeader::new(
                 egui::RichText::new(p.name.as_str()).font(crate::ui::tokens::font::callout()),
             )
@@ -371,13 +451,13 @@ pub(crate) fn draw_usb_playlist_nodes(
             ui.add_space(2.0);
         } else {
             let selected = *view == LibraryView::Usb(vol.to_path_buf(), Some(p.id));
-            let label = if density.icons_only() {
-                p.name.clone()
+            let resp = if density.icons_only() {
+                rail_tile(ui, "♪", selected).on_hover_text(&p.name)
             } else {
-                format!("♪  {}", p.name)
+                nav_button_truncated(ui, "♪", &p.name, selected, 30.0, 12.5, COUNT_LANE)
+                    .on_hover_text(&p.name)
+                    .on_hover_note("Playlist from this device's rekordbox export")
             };
-            let resp = nav_button(ui, &label, selected, 26.0, 12.5)
-                .on_hover_note("Playlist from this device's rekordbox export");
             // Right-aligned track count, mirroring the catalog playlist rows.
             let count_color = if selected {
                 egui::Color32::from_white_alpha(170)
@@ -433,15 +513,26 @@ pub(crate) fn folder_context_menu(
 
 // ── Sidebar width tiers ───────────────────────────────────────────────────────
 // The sidebar isn't a free splitter. Dragging it anywhere in between only ever
-// produced half-truncated labels ("Vinyl Collection (130)" wrapping mid-word,
-// then clipping), so the panel instead locks into three designed layouts and
-// the drag snaps to whichever is nearest. Each tier is a real layout, not the
-// same layout at a different size:
+// produced half-truncated labels, so the panel locks into three designed
+// layouts. Each tier is a real layout, not the same layout at a different size,
+// and each is sized from the content it has to hold:
 //
-//   Icon    — glyphs only, no captions; playlist names still shown (that's the
-//             one label you can't infer from an icon) with the count dropped.
-//   Narrow  — one tile per row: "All songs" and "New" stack instead of sharing.
-//   Wide    — the designed default: the tile pair sits on one row.
+//   Rail (56pt) — a navigation rail, not a squeezed sidebar. Uniform centred
+//     square targets, one glyph each, no text at all: names live in the
+//     tooltip. Text was tried here and it is what made the tier unusable —
+//     56pt cannot hold "Traumprinz", so names wrapped into two- and three-line
+//     blocks and every tile became a different height. A rail's whole value is
+//     a predictable column of identical targets, so the rule is absolute:
+//     nothing in this tier renders a string.
+//
+//   Narrow (184pt) — one full-width tile per row, single-line. Sized so the
+//     longest label that must survive ("Vinyl Collection" is shortened here to
+//     "Vinyl", so the real worst case is a playlist name) has room beside its
+//     glyph and its track count.
+//
+//   Wide (260pt) — the designed default. Wide enough for the "All songs" /
+//     "New" tile pair on one row, and for "Vinyl Collection (130)" unabbreviated,
+//     which is the longest string the sidebar ever shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum NavDensity {
     Icon,
@@ -453,11 +544,19 @@ impl NavDensity {
     /// Snapped panel width for this tier, in points.
     pub(crate) fn width(self) -> f32 {
         match self {
-            NavDensity::Icon => 64.0,
-            NavDensity::Narrow => 176.0,
-            NavDensity::Wide => 248.0,
+            // 56 = 40pt target + 8pt gutter each side. Narrower than the old
+            // 64 and deliberately so: it reads as a rail rather than as a
+            // sidebar that lost an argument with the drag handle.
+            NavDensity::Icon => 56.0,
+            NavDensity::Narrow => 184.0,
+            NavDensity::Wide => 260.0,
         }
     }
+
+    /// Side length of the square target in the rail tier, and the row height
+    /// every rail tile shares. One constant so the rail is a single uniform
+    /// column — the property that makes a rail scannable at all.
+    pub(crate) const RAIL_TILE: f32 = 40.0;
 
     /// The tier whose width is closest to `w`.
     pub(crate) fn nearest(w: f32) -> Self {
@@ -520,10 +619,14 @@ impl NavDensity {
     }
 }
 
-/// A nav tile that collapses to its glyph at the icon tier. `icon` is the
-/// leading glyph, `label` the text that follows it at the wider tiers; the
-/// hover note carries the name when the text is gone, so an icon-only sidebar
-/// is still navigable.
+/// A nav tile that collapses to its glyph at the rail tier. `icon` is the
+/// leading glyph, `label` the text that follows it at the wider tiers.
+///
+/// At the rail tier the label is dropped entirely and the glyph is centred in
+/// a uniform square (see [`NavDensity::RAIL_TILE`]) — the caller's `height` and
+/// `text_size` are deliberately ignored there, because a rail whose rows are
+/// different heights is exactly the failure this tier exists to avoid. The name
+/// moves to the tooltip, which is the only place it fits.
 pub(crate) fn nav_button_dense(
     ui: &mut egui::Ui,
     density: NavDensity,
@@ -534,8 +637,68 @@ pub(crate) fn nav_button_dense(
     text_size: f32,
 ) -> egui::Response {
     if density.icons_only() {
-        nav_button(ui, icon, selected, height, text_size)
+        rail_tile(ui, icon, selected)
     } else {
         nav_button(ui, &format!("{icon}  {label}"), selected, height, text_size)
     }
+}
+
+/// Width reserved at the right end of a playlist tile for its track count, so
+/// the name is laid out in what's left rather than running under the number.
+/// Fits a four-digit count plus the 12pt inset the count is painted at.
+pub(crate) const COUNT_LANE: f32 = 44.0;
+
+/// A nav tile whose label is truncated with an ellipsis to fit the tile width
+/// minus `reserve` — the lane kept clear for something painted over the tile's
+/// right end (a track count). Without this the label is laid out at its natural
+/// width and simply collides with whatever is painted there.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn nav_button_truncated(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    selected: bool,
+    height: f32,
+    text_size: f32,
+    reserve: f32,
+) -> egui::Response {
+    let w = ui.available_width();
+    // Budget for the text itself: the tile minus its left gutter, the glyph and
+    // the reserved lane.
+    let budget = (w - 12.0 - 18.0 - reserve).max(24.0);
+    let font = egui::FontId::proportional(text_size);
+    let text_w = |s: &str| {
+        ui.fonts(|f| {
+            s.chars()
+                .map(|c| f.glyph_width(&font, c))
+                .sum::<f32>()
+        })
+    };
+    let shown = if text_w(label) <= budget {
+        label.to_string()
+    } else {
+        // Trim from the end until the name plus its ellipsis fits.
+        let mut cut = label.to_string();
+        while !cut.is_empty() && text_w(&format!("{cut}…")) > budget {
+            cut.pop();
+        }
+        format!("{}…", cut.trim_end())
+    };
+    nav_button_sized(ui, &format!("{icon}  {shown}"), selected, w, height, text_size)
+}
+
+/// One square target in the rail tier: a glyph centred in a fixed
+/// [`NavDensity::RAIL_TILE`] box, itself centred in the rail's width. Every
+/// rail tile is this exact size, whatever it stands for, so the rail is a
+/// predictable column your eye can run down.
+pub(crate) fn rail_tile(ui: &mut egui::Ui, icon: &str, selected: bool) -> egui::Response {
+    let side = NavDensity::RAIL_TILE;
+    // Centre the square in the rail rather than letting it sit flush left: the
+    // gutter is what stops the tiles reading as a clipped-off wider sidebar.
+    let indent = ((ui.available_width() - side) / 2.0).max(0.0);
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        nav_button_sized(ui, icon, selected, side, side, 17.0)
+    })
+    .inner
 }
