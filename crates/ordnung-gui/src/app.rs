@@ -862,7 +862,12 @@ impl App {
                     .and_then(|p| p.key.as_deref())
                     .or(t.tags.initial_key_tag.as_deref())
                     .is_some();
-                (!has_bpm || !has_key) && !self.usb_analysis.contains_key(&t.source_path)
+                // Waveforms come free off a rekordbox stick's ANLZ files;
+                // anything else earns them from our own analyzer, like
+                // library rows do.
+                let has_wave = pdb.is_some_and(|p| !p.waveform.is_empty());
+                (!has_bpm || !has_key || !has_wave)
+                    && !self.usb_analysis.contains_key(&t.source_path)
             })
             .map(|(_, t)| t.source_path.clone())
             .collect();
@@ -888,16 +893,19 @@ impl App {
                         if cancel.load(Ordering::Relaxed) {
                             return;
                         }
-                        let (bpm, key) = match analysis::analyze_file(path, params) {
-                            Ok(a) => (a.bpm, a.key),
-                            // A failed decode still reports (empty), so
-                            // progress reaches the total.
-                            Err(_) => (None, None),
-                        };
+                        let (bpm, key, waveform, waveform_bands) =
+                            match analysis::analyze_file(path, params) {
+                                Ok(a) => (a.bpm, a.key, a.waveform_preview, a.waveform_bands),
+                                // A failed decode still reports (empty), so
+                                // progress reaches the total.
+                                Err(_) => (None, None, Vec::new(), Vec::new()),
+                            };
                         let _ = tx.send(UsbAnalyzed {
                             path: path.clone(),
                             bpm,
                             key,
+                            waveform,
+                            waveform_bands,
                         });
                         ctx.request_repaint();
                     },
@@ -1332,8 +1340,19 @@ impl App {
                     notes: t.tags.comment.clone().unwrap_or_default(),
                     added: "—".into(),
                     added_at: 0,
-                    waveform: Vec::new(),
-                    waveform_bands: Vec::new(),
+                    // The stick's own ANLZ waveform first (free, matches what
+                    // the player draws); our analyzer's when the export never
+                    // had one.
+                    waveform: pdb
+                        .filter(|p| !p.waveform.is_empty())
+                        .map(|p| p.waveform.clone())
+                        .or_else(|| analyzed.map(|a| a.waveform.clone()))
+                        .unwrap_or_default(),
+                    waveform_bands: pdb
+                        .filter(|p| !p.waveform.is_empty())
+                        .map(|p| p.waveform_bands.clone())
+                        .or_else(|| analyzed.map(|a| a.waveform_bands.clone()))
+                        .unwrap_or_default(),
                     source_path: PathBuf::from(&t.source_path),
                     // The scan already extracted the file's embedded art into
                     // `cover_thumb`; the cover cell decodes it straight from
@@ -3317,6 +3336,20 @@ impl eframe::App for App {
 /// export time. The full file scan then runs behind it and *replaces* these
 /// rows with real tag reads (see the two-stage send in `poll_usb`'s worker).
 ///
+/// Waveforms off the stick's own ANLZ pair for one pdb track — the same
+/// preview the player draws, converted to catalog shapes so device rows
+/// render like library rows without decoding any audio. Empty when the
+/// export was never analyzed (the background analyzer fills those in).
+fn usb_anlz_waveforms(vol: &Path, t: &ordnung_rbdb::pdb::RbTrack) -> (Vec<u8>, Vec<u8>) {
+    t.analyze_path
+        .as_deref()
+        .and_then(|ap| {
+            ordnung_rbdb::anlz::read_waveforms(&vol.join(ap.trim_start_matches('/')))
+        })
+        .map(|w| (w.preview, w.bands))
+        .unwrap_or_default()
+}
+
 /// `None` when the stick has no rekordbox export — a plain stick has no fast
 /// path and pays the file scan as before.
 pub(crate) fn read_usb_pdb(vol: &Path) -> Option<UsbScan> {
@@ -3344,6 +3377,7 @@ pub(crate) fn read_usb_pdb(vol: &Path) -> Option<UsbScan> {
         tags.year = (t.year != 0).then_some(t.year);
         let i = tracks.len();
         index_by_id.insert(id, i);
+        let (waveform, waveform_bands) = usb_anlz_waveforms(vol, t);
         pdb_info.insert(
             i,
             UsbPdbInfo {
@@ -3353,6 +3387,8 @@ pub(crate) fn read_usb_pdb(vol: &Path) -> Option<UsbScan> {
                     .artwork_path
                     .as_ref()
                     .map(|p| vol.join(p.trim_start_matches('/'))),
+                waveform,
+                waveform_bands,
             },
         );
         tracks.push(ScannedTrack {
@@ -3457,6 +3493,7 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
             for t in export.tracks.values() {
                 let rel = t.file_path.trim_start_matches('/').to_lowercase();
                 if let Some(&i) = by_rel_path.get(&rel) {
+                    let (waveform, waveform_bands) = usb_anlz_waveforms(&vol, t);
                     let info = UsbPdbInfo {
                         bpm: t.bpm(),
                         key: t.key.clone(),
@@ -3464,8 +3501,14 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
                             .artwork_path
                             .as_ref()
                             .map(|p| vol.join(p.trim_start_matches('/'))),
+                        waveform,
+                        waveform_bands,
                     };
-                    if info.bpm.is_some() || info.key.is_some() || info.artwork_path.is_some() {
+                    if info.bpm.is_some()
+                        || info.key.is_some()
+                        || info.artwork_path.is_some()
+                        || !info.waveform.is_empty()
+                    {
                         pdb_info.insert(i, info);
                     }
                 }

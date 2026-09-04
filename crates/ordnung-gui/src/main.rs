@@ -1621,6 +1621,12 @@ struct UsbPdbInfo {
     /// The pre-extracted cover JPEG under `PIONEER/ARTWORK`, absolute on the
     /// mounted volume — how a CDJ shows art without touching the audio file.
     artwork_path: Option<PathBuf>,
+    /// 400-bin amplitude preview read from the stick's own ANLZ files —
+    /// the same waveform the player draws, shown without decoding audio.
+    waveform: Vec<u8>,
+    /// `[low, mid, high, loud]` quads at 20 bins/sec from the ANLZ color
+    /// waveform; empty when the stick carries no `.EXT`.
+    waveform_bands: Vec<u8>,
 }
 
 /// One device file's BPM/key as analyzed by Ordnung's own engine — the
@@ -1632,6 +1638,10 @@ struct UsbAnalyzed {
     path: String,
     bpm: Option<f32>,
     key: Option<ordnung_core::model::key::Key>,
+    /// Analyzer waveforms for sticks whose ANLZ files carry none — so device
+    /// rows draw like library rows either way.
+    waveform: Vec<u8>,
+    waveform_bands: Vec<u8>,
 }
 
 /// USB tracks aren't catalog rows, but the shared table needs an `Id` per row.

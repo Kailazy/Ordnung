@@ -29,6 +29,86 @@ const BANDS_PER_SEC: f64 = 20.0;
 /// Detailed-waveform rate rekordbox uses everywhere (0x96 = 150 columns/sec).
 const SCROLL_PER_SEC: u32 = 150;
 
+// ---------------------------------------------------------------------------
+// Read side — waveforms back OUT of a stick's ANLZ pair
+// ---------------------------------------------------------------------------
+
+/// A track's waveforms read back from its ANLZ files, converted to the same
+/// shapes the catalog analyzer produces (`Analysis::waveform_preview` /
+/// `waveform_bands`), so device rows can render exactly like library rows
+/// without decoding any audio.
+#[derive(Debug, Clone, Default)]
+pub struct AnlzWaveforms {
+    /// 400-bin amplitude preview, 0–255 per bin (from `PWAV`).
+    pub preview: Vec<u8>,
+    /// `[low, mid, high, loudness]` quads at 20 bins/sec (from the `.EXT`'s
+    /// `PWV5` color waveform). Empty when the stick has no `.EXT` — the
+    /// preview alone still draws a monochrome waveform.
+    pub bands: Vec<u8>,
+}
+
+/// Locate one tagged section's body (past its 12-byte prelude) in an ANLZ
+/// file. Defensive: any malformed length ends the walk.
+fn find_section<'a>(data: &'a [u8], want: &[u8; 4]) -> Option<&'a [u8]> {
+    if data.len() < 0x1C || &data[0..4] != b"PMAI" {
+        return None;
+    }
+    let mut off = 0x1C;
+    while off + 12 <= data.len() {
+        let len_tag = u32::from_be_bytes(data[off + 8..off + 12].try_into().ok()?) as usize;
+        if len_tag < 12 || off + len_tag > data.len() {
+            return None;
+        }
+        if &data[off..off + 4] == want {
+            return Some(&data[off + 12..off + len_tag]);
+        }
+        off += len_tag;
+    }
+    None
+}
+
+/// Read a track's waveforms from its `ANLZ0000.DAT` (the `.EXT` sibling is
+/// derived by extension swap, as players do). `None` when the file is
+/// missing, unreadable, or carries no `PWAV`.
+pub fn read_waveforms(dat_path: &std::path::Path) -> Option<AnlzWaveforms> {
+    let dat = std::fs::read(dat_path).ok()?;
+    // PWAV body: u32 len, u32 0x00010000, then len bytes of
+    // 5-bit height | 3-bit whiteness columns.
+    let body = find_section(&dat, b"PWAV")?;
+    let n = u32::from_be_bytes(body.get(0..4)?.try_into().ok()?) as usize;
+    let cols = body.get(8..8 + n)?;
+    let preview: Vec<u8> = cols.iter().map(|b| (b & 0x1F) << 3).collect();
+    if preview.iter().all(|&b| b == 0) {
+        return None; // an un-analyzed export; let the caller fall back
+    }
+
+    // PWV5 body: u32 2, u32 num, u32 0x00960305, then u16be columns at
+    // 150/sec — bits 15–13 low, 12–10 mid, 9–7 high, 6–2 height.
+    let bands = std::fs::read(dat_path.with_extension("EXT"))
+        .ok()
+        .and_then(|ext| {
+            let body = find_section(&ext, b"PWV5")?;
+            let n = u32::from_be_bytes(body.get(4..8)?.try_into().ok()?) as usize;
+            let cols = body.get(12..12 + n * 2)?;
+            // Resample 150 cols/sec down to the GUI's 20 bins/sec.
+            let bins = n * BANDS_PER_SEC as usize / SCROLL_PER_SEC as usize;
+            let mut out = Vec::with_capacity(bins * 4);
+            for j in 0..bins {
+                let i = (j * SCROLL_PER_SEC as usize / BANDS_PER_SEC as usize).min(n - 1);
+                let v = u16::from_be_bytes([cols[i * 2], cols[i * 2 + 1]]);
+                let scale3 = |c: u16| ((c & 7) * 255 / 7) as u8;
+                out.push(scale3(v >> 13));
+                out.push(scale3(v >> 10));
+                out.push(scale3(v >> 7));
+                out.push((((v >> 2) & 0x1F) << 3) as u8);
+            }
+            Some(out)
+        })
+        .unwrap_or_default();
+
+    Some(AnlzWaveforms { preview, bands })
+}
+
 fn be16(v: u16) -> [u8; 2] {
     v.to_be_bytes()
 }
@@ -367,6 +447,47 @@ mod tests {
         let bpm0 = u16::from_be_bytes(dat[off + 0x1A..off + 0x1C].try_into().unwrap());
         let t0 = u32::from_be_bytes(dat[off + 0x1C..off + 0x20].try_into().unwrap());
         assert_eq!((n0, bpm0, t0), (1, 12000, 100));
+    }
+
+    #[test]
+    fn waveforms_round_trip_through_anlz_files() {
+        let b = beats();
+        let preview: Vec<u8> = (0..400).map(|i| (i % 256) as u8).collect();
+        let bands: Vec<u8> = (0..4 * 82).map(|i| (i % 200) as u8).collect();
+        let inp = AnlzInput {
+            usb_path: "/Contents/x.mp3",
+            beats: &b,
+            duration_ms: 4_100,
+            preview: &preview,
+            bands: &bands,
+        };
+        let dir = std::env::temp_dir().join(format!("ordnung-anlzr-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dat = dir.join("ANLZ0000.DAT");
+        std::fs::write(&dat, build_dat(&inp)).unwrap();
+        std::fs::write(dir.join("ANLZ0000.EXT"), build_ext(&inp)).unwrap();
+
+        let got = read_waveforms(&dat).expect("waveforms read back");
+        assert_eq!(got.preview.len(), 400);
+        // PWAV keeps the top 5 bits of each amplitude (quantization error ≤7),
+        // and the writer's float resampling can land one source column over
+        // (±1 on this ramp) — so values agree to within 8.
+        for (a, b) in preview.iter().zip(&got.preview) {
+            assert!(a.abs_diff(*b) <= 8, "preview {a} vs {b}");
+        }
+        // Bands come back at the same 20 bins/sec rate the analyzer uses.
+        assert_eq!(got.bands.len() % 4, 0);
+        assert!(!got.bands.is_empty());
+        assert!(got.bands.iter().any(|&v| v > 0));
+
+        // A DAT with no EXT still yields the preview alone.
+        std::fs::remove_file(dir.join("ANLZ0000.EXT")).unwrap();
+        let solo = read_waveforms(&dat).expect("preview without EXT");
+        assert!(solo.bands.is_empty());
+        assert_eq!(solo.preview, got.preview);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
