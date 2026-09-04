@@ -704,6 +704,7 @@ pub(crate) fn run_export(
         &mut |p| {
             let stage = match p.stage {
                 ExportStage::CopyingAudio => "Copying",
+                ExportStage::WritingArtwork => "Writing",
                 ExportStage::WritingAnalysis => "Writing analysis for",
                 ExportStage::WritingDatabase => "Writing databases",
             };

@@ -317,6 +317,68 @@ fn export_refuses_empty_and_missing_dest() {
     let _ = std::fs::remove_dir_all(&usb);
 }
 
+/// A minimal valid mono 16-bit PCM WAV — a real container lofty can tag, so
+/// a cover can be embedded the way user files carry theirs.
+fn wav_file(dir: &Path, name: &str) -> PathBuf {
+    let samples = vec![0u8; 800];
+    let mut v = Vec::new();
+    v.extend_from_slice(b"RIFF");
+    v.extend_from_slice(&(36 + samples.len() as u32).to_le_bytes());
+    v.extend_from_slice(b"WAVEfmt ");
+    v.extend_from_slice(&16u32.to_le_bytes());
+    v.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    v.extend_from_slice(&1u16.to_le_bytes()); // mono
+    v.extend_from_slice(&8_000u32.to_le_bytes());
+    v.extend_from_slice(&16_000u32.to_le_bytes());
+    v.extend_from_slice(&2u16.to_le_bytes());
+    v.extend_from_slice(&16u16.to_le_bytes());
+    v.extend_from_slice(b"data");
+    v.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    v.extend_from_slice(&samples);
+    let p = dir.join(name);
+    std::fs::write(&p, v).unwrap();
+    p
+}
+
+#[test]
+fn embedded_cover_becomes_stick_artwork() {
+    let src = temp_root("art-src");
+    let usb = temp_root("art-usb");
+
+    // Two files sharing one cover, one file without: ids intern to a single
+    // artwork and the coverless track keeps artwork_id 0.
+    let cover = ordnung_core::tag::CoverArt::from_png(
+        include_bytes!("fixtures/cover.png").to_vec(),
+    );
+    let with_a = wav_file(&src, "with_a.wav");
+    let with_b = wav_file(&src, "with_b.wav");
+    let without = wav_file(&src, "without.wav");
+    for p in [&with_a, &with_b] {
+        ordnung_core::tag::embed_full(p, &Tags::default(), Some(&cover)).unwrap();
+    }
+
+    let tracks = vec![
+        track(1, &with_a, Format::Wav, "With A", "Artist"),
+        track(2, &with_b, Format::Wav, "With B", "Artist"),
+        track(3, &without, Format::Wav, "Without", "Artist"),
+    ];
+    let cancel = AtomicBool::new(false);
+    export_usb(&usb, &tracks, &[], ExportMode::Replace, &mut |_| {}, &cancel).unwrap();
+
+    // One artwork id, four files, correct sizes on disk.
+    let art = usb.join("PIONEER/Artwork/00001");
+    for name in ["a1.jpg", "a1_m.jpg", "b1.jpg", "b1_m.jpg"] {
+        assert!(art.join(name).is_file(), "{name} missing");
+    }
+    assert!(
+        !art.join("a2.jpg").exists(),
+        "shared cover must intern to one artwork id"
+    );
+
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&usb);
+}
+
 #[test]
 fn cancel_aborts_before_completion() {
     let src = temp_root("cancel-src");

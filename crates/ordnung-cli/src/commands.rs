@@ -895,6 +895,7 @@ pub fn export(db: &Path, dest: &Path, playlist_ids: &[u64], replace: bool) -> Re
         bar.set_position(p.done as u64);
         bar.set_message(match p.stage {
             ExportStage::CopyingAudio => format!("copying {}", p.detail),
+            ExportStage::WritingArtwork => format!("artwork {}", p.detail),
             ExportStage::WritingAnalysis => format!("analysis {}", p.detail),
             ExportStage::WritingDatabase => "writing databases".to_string(),
         });

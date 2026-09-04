@@ -9,6 +9,7 @@
 //! /PIONEER/rekordbox/exportExt.pdb        My Tag skeleton      (pdbw)
 //! /PIONEER/rekordbox/exportLibrary.db     Device Library Plus  (dlp)
 //! /PIONEER/USBANLZ/Pnnn/<8-hex>/ANLZ0000.{DAT,EXT}             (anlz)
+//! /PIONEER/Artwork/nnnnn/{a,b}N[_m].jpg   cover art 80/240 px  (artwork)
 //! ```
 //!
 //! Playlists go into *both* databases: export.pdb's tree for CDJ-2000/nxs2
@@ -54,6 +55,7 @@ fn io_err(path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> ExportErro
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportStage {
     CopyingAudio,
+    WritingArtwork,
     WritingAnalysis,
     WritingDatabase,
 }
@@ -351,6 +353,7 @@ pub fn export_usb(
     let mut genres = Intern::default();
     let mut labels = Intern::default();
     let mut keys = Intern::default();
+    let mut covers = crate::artwork::ArtworkStore::default();
 
     // Filenames already taken (existing rows + rows we assign this pass).
     let mut taken: HashSet<String> = existing_tracks
@@ -428,13 +431,21 @@ pub fn export_usb(
                 .as_deref(),
         );
 
+        // The cover travels from the file's own tags onto the stick as
+        // rekordbox artwork; identical covers across an album intern once.
+        let artwork_id = ordnung_core::tag::read_front_cover_raw(&source)
+            .ok()
+            .flatten()
+            .map(|c| covers.intern(c.bytes()))
+            .unwrap_or(0);
+
         let anlz_dir = format!("P{:03}/{:08X}", (id - 1) / 256, id);
         let row = TrackRow {
             id,
             sample_rate_hz: props.map(|p| p.sample_rate_hz).unwrap_or(0),
             file_size,
             master_content_id: master_content_id(id),
-            artwork_id: 0,
+            artwork_id,
             key_id,
             label_id: labels.get(t.tags.label.as_deref()),
             bitrate_kbps: props.and_then(|p| p.bitrate_kbps).unwrap_or(0),
@@ -524,6 +535,19 @@ pub fn export_usb(
             let n = std::fs::copy(&tr.source, &dest).map_err(io_err(dest))?;
             report.bytes_copied += n;
         }
+    }
+
+    // ---- artwork ----------------------------------------------------------
+    for (i, art) in covers.files.iter().enumerate() {
+        check(cancel)?;
+        progress(ExportProgress {
+            stage: ExportStage::WritingArtwork,
+            done: i,
+            total: covers.files.len(),
+            detail: format!("artwork {}", art.id),
+        });
+        crate::artwork::write_files(dest_root, art)
+            .map_err(io_err(dest_root.join("PIONEER").join("Artwork")))?;
     }
 
     // ---- ANLZ files -------------------------------------------------------
@@ -664,7 +688,11 @@ pub fn export_usb(
         albums: albums.rows,
         labels: labels.rows,
         keys: keys.rows,
-        artwork: Vec::new(),
+        artwork: covers
+            .files
+            .iter()
+            .map(|a| (a.id, crate::artwork::pdb_path(a.id)))
+            .collect(),
         playlists: playlist_rows,
         playlist_entries: entries,
         created_date: date,

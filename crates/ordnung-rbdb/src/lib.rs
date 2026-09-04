@@ -8,6 +8,7 @@
 //! Phase 0: module skeleton only.
 
 pub mod anlz;
+pub(crate) mod artwork;
 pub mod dlp;
 pub mod edit;
 pub mod export;

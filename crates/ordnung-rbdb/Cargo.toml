@@ -16,5 +16,8 @@ thiserror = "2.0.18"
 # sqlcipher feature upgrades the whole workspace's bundled SQLite to SQLCipher,
 # which reads/writes unkeyed databases (the catalog) exactly like stock SQLite.
 rusqlite = { version = "0.39.0", features = ["bundled-sqlcipher-vendored-openssl"] }
+# Cover art → rekordbox's fixed artwork JPEGs (80×80 + 240×240). Decode
+# whatever the tags embed, encode JPEG. Same version/features as ordnung-core.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
 # Phase 5 (write side): rekordcrate (binrw read/write of DeviceSQL). See the
 # rekordbox-format skill. The read side is a self-contained parser in `pdb`.

@@ -293,6 +293,15 @@ fn build_library(
             )
             .map_err(err)?;
         }
+        // Artwork mirrors: same ids as the pdb artwork table, but the DLP
+        // references the b-named copies of the same JPEGs.
+        for (id, _a_path) in &t.artwork {
+            conn.execute(
+                "INSERT INTO image VALUES (?1, ?2)",
+                rusqlite::params![*id as i64, crate::artwork::dlp_path(*id)],
+            )
+            .map_err(err)?;
+        }
         for (id, kind, name) in MENU_ITEMS {
             conn.execute(
                 "INSERT INTO menuItem VALUES (?1, ?2, ?3)",
@@ -317,7 +326,7 @@ fn build_library(
         let mut content = conn
             .prepare(
                 "INSERT INTO content VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, \
-                 ?8, 0, 0, 0, 0, ?9, ?10, ?11, ?12, 0, NULL, \
+                 ?8, 0, 0, 0, 0, ?9, ?10, ?11, ?12, 0, ?28, \
                  ?13, ?14, ?15, NULL, ?16, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
                  0, 1, 1, NULL, ?25, ?26, ?27, 41, 788224, 0, NULL, 1, 1)",
             )
@@ -352,6 +361,7 @@ fn build_library(
                     MASTER_DB_ID,
                     tr.master_content_id as i64,
                     tr.analyze_path,
+                    zero_null(tr.artwork_id),
                 ])
                 .map_err(err)?;
         }
@@ -429,6 +439,7 @@ mod tests {
                 title: "One".into(),
                 filename: "one.mp3".into(),
                 file_path: "/Contents/one.mp3".into(),
+                artwork_id: 1,
                 ..Default::default()
             }],
             genres: vec![(1, "House".into())],
@@ -436,7 +447,7 @@ mod tests {
             albums: vec![(1, "B".into())],
             labels: vec![],
             keys: vec![(1, "8A".into())],
-            artwork: vec![],
+            artwork: vec![(1, "/PIONEER/Artwork/00001/a1.jpg".into())],
             playlists: vec![crate::pdbw::PlaylistRow {
                 id: 1,
                 parent_id: 0,
@@ -474,12 +485,23 @@ mod tests {
             ("category", 22),
             ("sort", 17),
             ("property", 1),
+            ("image", 1),
         ] {
             let n: i64 = conn
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
                 .unwrap();
             assert_eq!(n, want, "{table} row count");
         }
+        // Artwork lands as the b-named copy, and the track references it.
+        let (img_path, content_img): (String, i64) = conn
+            .query_row(
+                "SELECT i.path, c.image_id FROM content c JOIN image i ON i.image_id = c.image_id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(img_path, "/PIONEER/Artwork/00001/b1.jpg");
+        assert_eq!(content_img, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

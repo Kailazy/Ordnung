@@ -2854,6 +2854,7 @@ dependencies = [
 name = "ordnung-rbdb"
 version = "0.63.1"
 dependencies = [
+ "image",
  "ordnung-core",
  "rusqlite",
  "thiserror 2.0.18",

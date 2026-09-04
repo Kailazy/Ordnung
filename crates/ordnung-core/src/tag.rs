@@ -43,6 +43,12 @@ impl CoverArt {
     pub fn from_png(data: Vec<u8>) -> Self {
         CoverArt { mime: MimeType::Png, data }
     }
+
+    /// The raw image bytes, for consumers that need to decode the picture
+    /// (e.g. the USB export scaling covers to rekordbox's artwork sizes).
+    pub fn bytes(&self) -> &[u8] {
+        &self.data
+    }
 }
 
 /// Write CDJ/rekordbox-friendly options: force ID3v2.3 on ID3-based containers.

@@ -87,8 +87,13 @@ tests (new-file, in-place repoint, overwrite-guard, confirm-abort) pass.
 with beatgrids, cues, waveforms, playlists. (See `rekordbox-format`.)
 **DoD:** exported USB re-parses cleanly (round-trip) and loads on rekordbox/CDJ with
 tracks, waveforms, beatgrids, cues, and playlists intact.
-**Status (2026-09-04):** the writer is built and software-verified; hardware
-(CDJ/XDJ) validation is the remaining DoD item. Self-contained writers in
+**Status (2026-09-04):** **hardware-validated** — after two real-device fixes
+(v0.62.3: never let SQLite write in place on FAT32; v0.63.0: full index-page
+bodies in the pdbs — see rekordbox-format invariants 7/8) a player accepts
+the stick and browses the playlist. Cover art ships too (v0.64.0):
+`artwork` writes `/PIONEER/Artwork` a/b JPEG pairs (80×80 + 240×240,
+deduped by cover bytes) referenced from the pdb artwork table and the DLP
+image table. Self-contained writers in
 `ordnung-rbdb` (no rekordcrate — its toolchain problems made our own byte-level
 writers, validated against the EYEBAGS golden dissection in
 `docs/rekordbox-export-structure.md`, the safer path): `pdbw` (full 20-table
