@@ -9,5 +9,12 @@ description = "rekordbox/CDJ export: export.pdb (DeviceSQL) + ANLZ writers."
 [dependencies]
 ordnung-core = { path = "../ordnung-core" }
 thiserror = "2.0.18"
+# Device Library Plus (`exportLibrary.db`): a SQLCipher-encrypted SQLite
+# database. rekordbox 6/7 exports write playlists there and leave export.pdb's
+# playlist tables empty, so reading a modern stick's playlists needs it.
+# Version pinned to ordnung-core's rusqlite so libsqlite3-sys unifies; the
+# sqlcipher feature upgrades the whole workspace's bundled SQLite to SQLCipher,
+# which reads/writes unkeyed databases (the catalog) exactly like stock SQLite.
+rusqlite = { version = "0.39.0", features = ["bundled-sqlcipher-vendored-openssl"] }
 # Phase 5 (write side): rekordcrate (binrw read/write of DeviceSQL). See the
 # rekordbox-format skill. The read side is a self-contained parser in `pdb`.

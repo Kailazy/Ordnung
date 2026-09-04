@@ -2078,13 +2078,16 @@ impl eframe::App for App {
                         };
                         match active {
                             Some(v) => {
-                                // The stick's own tile: the whole device, the
-                                // way "Library" is the whole catalog.
-                                if nav_button_dense(
+                                // The same "Library" tile the catalog side
+                                // has, meaning the whole device — the tab
+                                // strip already names the stick, so naming it
+                                // again here would just be a second button
+                                // for the same thing.
+                                if nav_button_painted(
                                     ui,
                                     density,
-                                    "⏏",
-                                    &v.name,
+                                    crate::ui::icon::library,
+                                    "Library",
                                     *view == LibraryView::Usb(v.path.clone(), None),
                                     44.0,
                                     16.5,
@@ -2738,8 +2741,7 @@ impl eframe::App for App {
 /// `None` when the stick has no rekordbox export — a plain stick has no fast
 /// path and pays the file scan as before.
 pub(crate) fn read_usb_pdb(vol: &Path) -> Option<UsbScan> {
-    let pdb = vol.join("PIONEER").join("rekordbox").join("export.pdb");
-    let export = ordnung_rbdb::pdb::read_export(&pdb).ok()?;
+    let export = ordnung_rbdb::pdb::read_stick(vol).ok()?;
     if export.tracks.is_empty() {
         return None;
     }
@@ -2833,7 +2835,7 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
     let mut pdb_info: HashMap<usize, UsbPdbInfo> = HashMap::new();
     let pdb = vol.join("PIONEER").join("rekordbox").join("export.pdb");
     if pdb.is_file() {
-        if let Ok(export) = ordnung_rbdb::pdb::read_export(&pdb) {
+        if let Ok(export) = ordnung_rbdb::pdb::read_stick(&vol) {
             let by_rel_path: HashMap<String, usize> = tracks
                 .iter()
                 .enumerate()

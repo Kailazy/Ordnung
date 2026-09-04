@@ -27,6 +27,8 @@ pub enum ReadError {
     },
     #[error("not a DeviceSQL export.pdb: {0}")]
     Format(&'static str),
+    #[error("device library plus: {0}")]
+    Dlp(String),
 }
 
 /// One node of the export's playlist tree — a playlist or a folder.
@@ -120,6 +122,48 @@ const PAGE_HEADER: usize = 0x28;
 /// Byte size of one row group in the page footer: 16 u16 row offsets, a u16
 /// presence bitmask, and a u16 of padding.
 const ROW_GROUP: usize = 36;
+
+/// Read everything the app needs from a mounted rekordbox stick, given the
+/// volume root: the `export.pdb` tables, and — when the export is a modern
+/// (rekordbox 6/7) one whose pdb playlist tables are empty — the playlists
+/// out of the encrypted `exportLibrary.db` beside it (see [`crate::dlp`]),
+/// joined back onto pdb track ids by file path (case-insensitively; the
+/// volume is FAT32). Prefer this over [`read_export`] for anything
+/// user-facing, or a modern stick shows a library with no playlists.
+pub fn read_stick(volume_root: &Path) -> Result<RbExport, ReadError> {
+    let dir = volume_root.join("PIONEER").join("rekordbox");
+    let mut export = read_export(&dir.join("export.pdb"))?;
+    if !export.playlists.is_empty() {
+        return Ok(export);
+    }
+    let dlp_db = dir.join("exportLibrary.db");
+    if !dlp_db.is_file() {
+        return Ok(export);
+    }
+    // A failure here (foreign key, future schema change) degrades to the
+    // pdb-only view rather than failing the whole stick.
+    let Ok(dlp) = crate::dlp::read_playlists(&dlp_db) else {
+        return Ok(export);
+    };
+    let by_path: HashMap<String, u32> = export
+        .tracks
+        .iter()
+        .map(|(id, t)| (t.file_path.to_lowercase(), *id))
+        .collect();
+    export.entries = dlp
+        .entries_by_path
+        .into_iter()
+        .map(|(playlist, paths)| {
+            let ids: Vec<u32> = paths
+                .iter()
+                .filter_map(|p| by_path.get(&p.to_lowercase()).copied())
+                .collect();
+            (playlist, ids)
+        })
+        .collect();
+    export.playlists = dlp.playlists;
+    Ok(export)
+}
 
 /// Parse the export database at `pdb_path` (the `PIONEER/rekordbox/export.pdb`
 /// file on a stick).
