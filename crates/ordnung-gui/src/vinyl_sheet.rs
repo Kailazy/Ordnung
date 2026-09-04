@@ -72,6 +72,11 @@ pub(crate) struct VinylSheet {
     /// This is what the sheet falls back to in both cases, so don't drop it on
     /// the assumption that a key makes it redundant.
     pub cover_url: Option<String>,
+    /// A local track this sheet was opened from (id + source path), when it
+    /// was. Its own cover — the one the inspector shows — is the final art
+    /// fallback, so a match recorded without a cover URL (or a URL that won't
+    /// load) still opens with the artwork the user can already see.
+    pub local_cover: Option<(Id, String)>,
     pub release_id: u64,
     pub title: String,
     pub artist: String,
@@ -217,6 +222,7 @@ impl App {
             // it's the fallback for when the record leaves its list. See the
             // field's docs.
             cover_url: record.thumb_url.clone(),
+            local_cover: None,
             release_id: record.release_id,
             title: record.title.clone(),
             artist: record.artist.clone(),
@@ -269,6 +275,7 @@ impl App {
         self.vinyl_sheet = Some(VinylSheet {
             key: None,
             cover_url,
+            local_cover: None,
             release_id,
             title,
             artist,
@@ -351,18 +358,35 @@ impl App {
             })
             .unwrap_or_default();
         let cover_url = cat.as_ref().and_then(|c| c.external_cover_url(id).ok()).flatten();
+        let source_path = track.as_ref().map(|t| t.source_path.clone());
         self.open_release_sheet(release_id, artist, title, sub, cover_url, ctx);
+        // Remember which local track opened this, so the sheet can fall back
+        // to its cover when the release has no loadable URL of its own.
+        if let (Some(s), Some(path)) = (self.vinyl_sheet.as_mut(), source_path) {
+            if s.release_id == release_id {
+                s.local_cover = Some((id, path));
+            }
+        }
     }
 
     /// The catalog tracks linked to `release_id`, with the analysis figures the
     /// sheet shows. One small read per linked track — a record is a handful of
     /// tracks, so this stays on the UI thread like the other inline reads.
     fn sheet_local_tracks(&self, release_id: u64) -> Vec<SheetLocal> {
-        let ids = self
+        let mut ids = self
             .vinyl_links
             .get(&release_id)
             .cloned()
             .unwrap_or_default();
+        // Tracks matched to this release individually (a Discogs fetch on a
+        // library track) rather than through a collection sync — without this
+        // union, a sheet opened *from* such a track claimed no tracks from
+        // the record were in the library.
+        for (track, release) in &self.track_releases {
+            if *release == release_id && !ids.contains(track) {
+                ids.push(*track);
+            }
+        }
         let Ok(cat) = Catalog::open(&self.db_path) else {
             return Vec::new();
         };
@@ -783,12 +807,23 @@ impl App {
             Some(ThumbState::Ready(Some(t))) => Some(t.clone()),
             _ => None,
         });
+        let local_cover = self
+            .vinyl_sheet
+            .as_ref()
+            .and_then(|s| s.local_cover.clone());
         let cover = match cached {
             Some(t) => Some(t),
             None => cover_url
                 .as_deref()
                 .and_then(|u| self.dig_cover(u))
-                .cloned(),
+                .cloned()
+                // A sheet opened from a library track falls back to that
+                // track's own cover — the same texture the inspector shows —
+                // so a match with no (loadable) release URL still has art.
+                .or_else(|| {
+                    let (id, path) = local_cover?;
+                    self.cover_full_texture(ctx, id, &path)
+                }),
         };
         let now_playing_id = self.audio.as_ref().and_then(|a| a.current());
         // The track that is actually *sounding*, as against the one merely
