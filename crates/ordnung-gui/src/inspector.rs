@@ -23,6 +23,42 @@ impl App {
             }
         };
 
+        // A device row has no catalog side: the file on the stick IS the
+        // record. Fold the edited fields onto the scanned tags, write them
+        // into the file, and re-read that one file so the row shows exactly
+        // what landed. (Same fields as the catalog path below.)
+        if id >= USB_ID_BASE {
+            let Some(i) = usb_track_index(id).filter(|i| *i < self.usb_tracks.len()) else {
+                return;
+            };
+            let mut tags = self.usb_tracks[i].tags.clone();
+            tags.title = non_empty(&self.tag_edit.title);
+            tags.artist = non_empty(&self.tag_edit.artist);
+            tags.album_artist = non_empty(&self.tag_edit.album_artist);
+            tags.album = non_empty(&self.tag_edit.album);
+            tags.genre = non_empty(&self.tag_edit.genre);
+            tags.label = non_empty(&self.tag_edit.label);
+            tags.year = year;
+            tags.comment = non_empty(&self.tag_edit.comment);
+            let path = PathBuf::from(&self.usb_tracks[i].source_path);
+            match tag::write_to_file(&path, &tags, None) {
+                Ok(()) => {
+                    match scan::scan_file(&path) {
+                        Ok(fresh) => self.usb_tracks[i] = fresh,
+                        Err(_) => self.usb_tracks[i].tags = tags,
+                    }
+                    self.status = format!("Wrote tags into {}", path.display());
+                }
+                Err(e) => {
+                    self.status = format!("Couldn't write the file: {e}");
+                    return;
+                }
+            }
+            self.reload();
+            self.refresh_selected();
+            return;
+        }
+
         let catalog = match Catalog::open(&self.db_path) {
             Ok(c) => c,
             Err(e) => {

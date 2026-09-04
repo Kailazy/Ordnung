@@ -6,6 +6,24 @@ impl App {
     /// change that may have touched its row (rename / convert / rescan).
     pub(crate) fn refresh_selected(&mut self) {
         let (track, has_art) = match self.selected {
+            // A device row isn't in the catalog — synthesize the inspector's
+            // Track straight from the scan, so the same right-hand panel
+            // (details, tag edit, embedded cover via the file itself) serves
+            // a stick exactly like the library. No analysis: the file was
+            // never analyzed by Ordnung.
+            Some(id) if id >= USB_ID_BASE => (
+                usb_track_index(id)
+                    .and_then(|i| self.usb_tracks.get(i))
+                    .map(|t| ordnung_core::model::Track {
+                        id,
+                        source_path: t.source_path.clone(),
+                        format: t.format,
+                        properties: Some(t.properties.clone()),
+                        tags: t.tags.clone(),
+                        analysis: None,
+                    }),
+                false,
+            ),
             Some(id) => match Catalog::open(&self.db_path) {
                 Ok(c) => (
                     c.get_track(id).ok(),

@@ -2096,10 +2096,6 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| vol.display().to_string());
-        let is_rekordbox = self
-            .usb_volumes
-            .iter()
-            .any(|v| v.path == vol && v.is_rekordbox_export);
         // When a playlist from the export is selected, name it in the header.
         let playlist_name = match &self.view {
             LibraryView::Usb(_, Some(pid)) => self
@@ -2151,29 +2147,6 @@ impl App {
                 }
             });
         });
-        if is_rekordbox {
-            // The desync warning. Player-facing metadata on a rekordbox stick
-            // lives in derived files, so direct edits are invisible to CDJs.
-            egui::Frame::none()
-                .fill(egui::Color32::from_rgb(60, 50, 25))
-                .rounding(egui::Rounding::same(6.0))
-                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(
-                            "rekordbox export detected. CDJs read track titles, BPM, \
-                             beatgrids and waveforms from PIONEER/rekordbox/export.pdb \
-                             and the ANLZ analysis files, not from the audio files' own \
-                             tags. Tags edited here won't show on players, and replacing \
-                             audio desyncs waveforms and file sizes, until the USB is \
-                             re-exported.",
-                        )
-                        .color(egui::Color32::from_rgb(230, 200, 120)),
-                    );
-                });
-            ui.add_space(4.0);
-        }
-
         if eject {
             // Hand the unmount to diskutil on a worker (it can take seconds)
             // and report its actual outcome — an eject refused because a file
@@ -2246,111 +2219,6 @@ impl App {
                 });
             });
             return None;
-        }
-
-        // The direct tag editor follows the table's (single) selection: the
-        // synthetic row id decodes back to an index into `usb_tracks`.
-        let table_sel = self
-            .selected
-            .and_then(usb_track_index)
-            .filter(|i| *i < self.usb_tracks.len());
-        if table_sel != self.usb_selected {
-            self.usb_selected = table_sel;
-            if let Some(i) = table_sel {
-                self.usb_edit = UsbEdit::from_tags(&self.usb_tracks[i].tags);
-                self.usb_edit_saved = self.usb_edit.clone();
-            }
-        }
-
-        // ── Bottom edit panel (pinned, so the table scroll can fill the rest) ──
-        if let Some(i) = self.usb_selected.filter(|i| *i < self.usb_tracks.len()) {
-            let file = PathBuf::from(&self.usb_tracks[i].source_path);
-            let fname = file
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let dirty = self.usb_edit != self.usb_edit_saved;
-            let mut save = false;
-            egui::TopBottomPanel::bottom("usb_edit_panel")
-                .frame(egui::Frame::none())
-                .show_separator_line(false)
-                .show_inside(ui, |ui| {
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&fname).strong());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if crate::ui::icon::close_button(ui, "Close the editor") {
-                                // Also drop the table selection, or the
-                                // panel would re-open from it next frame.
-                                self.usb_selected = None;
-                                self.selected = None;
-                                self.selection.clear();
-                            }
-                            if ui
-                                .add_enabled(
-                                    dirty,
-                                    egui::Button::new(
-                                        egui::RichText::new("Save to file")
-                                            .color(egui::Color32::WHITE),
-                                    )
-                                    .fill(crate::sidebar::NAV_ACCENT),
-                                )
-                                .on_hover_note("Write these tags into the file on the device")
-                                .clicked()
-                            {
-                                save = true;
-                            }
-                            if ui
-                                .button("Reveal")
-                                .on_hover_note("Show this file in Finder")
-                                .clicked()
-                            {
-                                reveal_in_finder(&file);
-                            }
-                        });
-                    });
-                    ui.add_space(4.0);
-                    egui::Grid::new("usb_tag_grid")
-                        .num_columns(4)
-                        .spacing([8.0, 6.0])
-                        .show(ui, |ui| {
-                            let field = |ui: &mut egui::Ui, label: &str, buf: &mut String| {
-                                ui.label(egui::RichText::new(label).weak());
-                                ui.add(egui::TextEdit::singleline(buf).desired_width(220.0));
-                            };
-                            field(ui, "Title", &mut self.usb_edit.title);
-                            field(ui, "Artist", &mut self.usb_edit.artist);
-                            ui.end_row();
-                            field(ui, "Album", &mut self.usb_edit.album);
-                            field(ui, "Genre", &mut self.usb_edit.genre);
-                            ui.end_row();
-                            field(ui, "Comment", &mut self.usb_edit.comment);
-                            ui.end_row();
-                        });
-                    ui.add_space(6.0);
-                });
-            if save {
-                let mut tags = self.usb_tracks[i].tags.clone();
-                self.usb_edit.apply_to(&mut tags);
-                match tag::write_to_file(&file, &tags, None) {
-                    Ok(()) => {
-                        // Re-read the file so the row reflects exactly what
-                        // landed on the device (and pick up any tag rewrite).
-                        if let Ok(fresh) = scan::scan_file(&file) {
-                            self.usb_tracks[i] = fresh;
-                        } else {
-                            self.usb_tracks[i].tags = tags;
-                        }
-                        self.usb_edit_saved = self.usb_edit.clone();
-                        self.status = format!("Saved tags to {fname}.");
-                        // Rebuild the table rows so they show the saved tags.
-                        self.reload();
-                    }
-                    Err(e) => self.status = format!("Couldn't write {fname}: {e}"),
-                }
-            }
         }
 
         // ── Track table ──────────────────────────────────────────────────

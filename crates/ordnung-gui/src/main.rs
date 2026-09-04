@@ -1403,12 +1403,6 @@ struct App {
     /// in the status bar (ejecting can fail, e.g. Finder holding a file open,
     /// and a silent failure looks like a broken button). `None` when idle.
     usb_eject_rx: Option<std::sync::mpsc::Receiver<String>>,
-    /// Index into `usb_tracks` of the row selected for direct tag editing.
-    usb_selected: Option<usize>,
-    /// Live edit buffers for the selected USB track's core tags, and the
-    /// snapshot as loaded — differing means unsaved edits (enables Save).
-    usb_edit: UsbEdit,
-    usb_edit_saved: UsbEdit,
     /// Which of the sidebar's three width tiers is in force. The panel snaps
     /// between designed layouts instead of resizing freely, so this — not a
     /// pixel width — is the resize state, and it persists via
@@ -1561,43 +1555,6 @@ fn usb_track_id(index: usize) -> Id {
 /// Inverse of [`usb_track_id`]: the `usb_tracks` index behind a synthetic id.
 fn usb_track_index(id: Id) -> Option<usize> {
     id.checked_sub(USB_ID_BASE).map(|i| i as usize)
-}
-
-/// Edit buffers for a USB track's core tags — written straight to the file on
-/// the device (never into the catalog). Empty string means "no value".
-#[derive(Clone, Default, PartialEq)]
-struct UsbEdit {
-    title: String,
-    artist: String,
-    album: String,
-    genre: String,
-    comment: String,
-}
-
-impl UsbEdit {
-    fn from_tags(t: &Tags) -> Self {
-        let s = |v: &Option<String>| v.clone().unwrap_or_default();
-        Self {
-            title: s(&t.title),
-            artist: s(&t.artist),
-            album: s(&t.album),
-            genre: s(&t.genre),
-            comment: s(&t.comment),
-        }
-    }
-
-    /// Fold the buffers back into `tags` (trimmed; blank clears the field).
-    fn apply_to(&self, tags: &mut Tags) {
-        let v = |s: &str| {
-            let s = s.trim();
-            (!s.is_empty()).then(|| s.to_string())
-        };
-        tags.title = v(&self.title);
-        tags.artist = v(&self.artist);
-        tags.album = v(&self.album);
-        tags.genre = v(&self.genre);
-        tags.comment = v(&self.comment);
-    }
 }
 
 /// State for the inline text box that names a sidebar playlist.

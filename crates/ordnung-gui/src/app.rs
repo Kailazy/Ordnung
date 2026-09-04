@@ -220,9 +220,6 @@ impl App {
             usb_loading: false,
             usb_rx: None,
             usb_eject_rx: None,
-            usb_selected: None,
-            usb_edit: UsbEdit::default(),
-            usb_edit_saved: UsbEdit::default(),
             nav_density: NavDensity::Narrow,
             nav_drag: None,
             view: LibraryView::Library,
@@ -671,20 +668,31 @@ impl App {
             }
             if self.usb_loaded_for.as_deref() == Some(scan.vol.as_path()) {
                 // Indices shift between the pdb view and the file scan (extra
-                // files appear, missing ones drop), so carry the selection
-                // across by path, and drop the synthetic-id texture cache —
-                // the same index may now be a different track.
+                // files appear, missing ones drop), so carry the (index-coded)
+                // selection across by path, and drop the synthetic-id texture
+                // cache — the same index may now be a different track.
                 let selected_path = self
-                    .usb_selected
+                    .selected
+                    .filter(|id| *id >= USB_ID_BASE)
+                    .and_then(usb_track_index)
                     .and_then(|i| self.usb_tracks.get(i))
                     .map(|t| t.source_path.clone());
                 self.usb_tracks = scan.tracks;
                 self.usb_playlists = scan.playlists;
                 self.usb_playlist_tracks = scan.playlist_tracks;
                 self.usb_pdb_info = scan.pdb_info;
-                self.usb_selected = selected_path.and_then(|p| {
-                    self.usb_tracks.iter().position(|t| t.source_path == p)
-                });
+                if let Some(p) = selected_path {
+                    self.selected = self
+                        .usb_tracks
+                        .iter()
+                        .position(|t| t.source_path == p)
+                        .map(usb_track_id);
+                    self.selection.clear();
+                    if let Some(id) = self.selected {
+                        self.selection.insert(id);
+                    }
+                    self.refresh_selected();
+                }
                 self.cover_cache.retain(|id, _| *id < USB_ID_BASE);
                 // Build the table rows for whatever USB view is showing.
                 self.reload();
@@ -702,7 +710,6 @@ impl App {
                 self.usb_playlist_tracks = HashMap::new();
                 self.usb_pdb_info = HashMap::new();
                 self.usb_loaded_for = None;
-                self.usb_selected = None;
             }
         }
         let LibraryView::Usb(vol, _) = &self.view else {
@@ -722,7 +729,6 @@ impl App {
         self.usb_playlists = Vec::new();
         self.usb_playlist_tracks = HashMap::new();
         self.usb_pdb_info = HashMap::new();
-        self.usb_selected = None;
         self.usb_loading = true;
         let (tx, rx) = std::sync::mpsc::channel();
         self.usb_rx = Some(rx);
