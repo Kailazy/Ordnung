@@ -459,16 +459,40 @@ impl NavDensity {
         }
     }
 
-    /// The tier whose width is closest to `w` — what a drag release lands on.
+    /// The tier whose width is closest to `w`.
     pub(crate) fn nearest(w: f32) -> Self {
         [NavDensity::Icon, NavDensity::Narrow, NavDensity::Wide]
             .into_iter()
-            .min_by(|a, b| {
-                (a.width() - w)
-                    .abs()
-                    .total_cmp(&(b.width() - w).abs())
-            })
+            .min_by(|a, b| (a.width() - w).abs().total_cmp(&(b.width() - w).abs()))
             .unwrap()
+    }
+
+    /// The tier a drag to width `w` should select, given the tier currently in
+    /// force. The panel is pinned to a tier width at every instant, so the
+    /// pointer sits *away* from the panel edge for most of a drag and a plain
+    /// nearest-match would strobe between two layouts whenever it hovered near
+    /// a boundary. `self` therefore holds until the pointer is decisively into
+    /// a neighbour: the switch happens a third of the way past the midpoint,
+    /// which is far enough that the layout only changes when the user means it.
+    pub(crate) fn dragged_to(self, w: f32) -> Self {
+        const STICK: f32 = 0.33;
+        let near = Self::nearest(w);
+        if near == self {
+            return self;
+        }
+        let midpoint = (self.width() + near.width()) / 2.0;
+        // How far past the midpoint, toward `near`, the pointer must travel.
+        let slack = (near.width() - self.width()).abs() * STICK;
+        let committed = if near.width() > self.width() {
+            w > midpoint + slack
+        } else {
+            w < midpoint - slack
+        };
+        if committed {
+            near
+        } else {
+            self
+        }
     }
 
     /// Icon tier hides every text label except playlist names.

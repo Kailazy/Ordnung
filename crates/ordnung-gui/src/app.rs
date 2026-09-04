@@ -1751,44 +1751,42 @@ impl eframe::App for App {
         let prev_view = self.view.clone();
         let mut sidebar_action: Option<SidebarAction> = None;
         // The sidebar snaps between three designed layouts (see `NavDensity`)
-        // rather than resizing freely. While the edge is being dragged the panel
-        // tracks the pointer so the drag still feels direct; on release it eases
-        // into the nearest tier's width, and every tier is a layout that fits its
-        // own width — nothing is left mid-truncation.
+        // rather than resizing freely, and it is *never* at an in-between width
+        // — not even mid-drag. Dragging the edge picks a tier; the panel jumps
+        // to that tier's width and stays there. Letting the panel follow the
+        // pointer and only snap on release just moved the ugly continuous
+        // resize into the drag itself, which is the thing being fixed: at every
+        // instant the sidebar is one of three designed layouts.
         let drag_id = egui::Id::new("library_nav").with("__resize");
-        let dragging = ctx.is_being_dragged(drag_id);
-        let target = self.nav_density.width();
-        // Ease toward the snapped width once the drag lets go. `animate_value`
-        // repaints until it settles, so the lock-into-place is visible rather
-        // than an instant jump. While the drag is live the animation is fed the
-        // pointer's own width so it starts the ease from wherever the edge
-        // actually was, not from the previous tier.
-        let live = ctx
-            .pointer_interact_pos()
-            .map(|p| {
-                (p.x - ctx.screen_rect().left()).clamp(
-                    NavDensity::Icon.width(),
-                    NavDensity::Wide.width(),
-                )
-            })
-            .unwrap_or(target);
-        let settled = ctx.animate_value_with_time(
-            egui::Id::new("nav_snap"),
-            if dragging { live } else { target },
-            0.13,
-        );
+        // The tier the pointer is asking for while the edge is held. Chosen with
+        // hysteresis (see `NavDensity::dragged_to`) so a pointer hovering right
+        // on a boundary doesn't strobe between two layouts.
+        if ctx.is_being_dragged(drag_id) {
+            if let Some(pos) = ctx.pointer_interact_pos() {
+                let want = self
+                    .nav_density
+                    .dragged_to(pos.x - ctx.screen_rect().left());
+                if want != self.nav_density {
+                    self.nav_density = want;
+                    self.config.nav_density = want.key().to_string();
+                    let _ = self.config.save();
+                }
+            }
+        }
         let density = self.nav_density;
+        let target = density.width();
+        // Ease between tiers so the change of layout reads as a deliberate
+        // lock-into-place rather than a hard cut. `animate_value` repaints until
+        // it settles; the width it produces is only ever *travelling between*
+        // two tiers, never a width the user can hold it at.
+        let settled = ctx.animate_value_with_time(egui::Id::new("nav_snap"), target, 0.13);
         egui::SidePanel::left("library_nav")
             .resizable(true)
             .default_width(target)
-            // Free travel only while the pointer holds the edge; the moment it
-            // is released the range collapses to the snapped width, which is
-            // what makes the panel spring back into a tier.
-            .width_range(if dragging {
-                NavDensity::Icon.width()..=NavDensity::Wide.width()
-            } else {
-                settled..=settled
-            })
+            // Pinned to the snapped width at all times — a collapsed range is
+            // what stops egui's own resize from writing an arbitrary width back
+            // into the panel. The drag above is the only thing that changes it.
+            .width_range(settled..=settled)
             .show(ctx, |ui| {
                 // Header for a section: a small dimmed all-caps caption that sets
                 // the playlist / collection groups apart without competing with
@@ -2127,22 +2125,6 @@ impl eframe::App for App {
                             });
                     });
             });
-        // Commit the drag: while the edge is held the panel follows the pointer
-        // freely, and the tier it will lock into is whichever is nearest at that
-        // moment. Latched every frame of the drag so releasing needs no separate
-        // event — the width the panel already has is the width it keeps.
-        if dragging {
-            // The panel's left edge is the screen's left edge, so the pointer's
-            // x is the width the user is asking for.
-            if let Some(pos) = ctx.pointer_interact_pos() {
-                let snapped = NavDensity::nearest(pos.x - ctx.screen_rect().left());
-                if snapped != self.nav_density {
-                    self.nav_density = snapped;
-                    self.config.nav_density = snapped.key().to_string();
-                    let _ = self.config.save();
-                }
-            }
-        }
         match sidebar_action {
             Some(SidebarAction::NewPlaylist(parent)) => {
                 if let Ok(cat) = Catalog::open(&self.db_path) {
