@@ -8,7 +8,7 @@
 //! /PIONEER/rekordbox/export.pdb           DeviceSQL database   (pdbw)
 //! /PIONEER/rekordbox/exportExt.pdb        My Tag skeleton      (pdbw)
 //! /PIONEER/rekordbox/exportLibrary.db     Device Library Plus  (dlp)
-//! /PIONEER/USBANLZ/Pnnn/<8-hex>/ANLZ0000.{DAT,EXT}             (anlz)
+//! /PIONEER/USBANLZ/Pnnn/<8-hex>/ANLZ0000.{DAT,EXT,2EX}         (anlz)
 //! /PIONEER/Artwork/nnnnn/{a,b}N[_m].jpg   cover art 80/240 px  (artwork)
 //! ```
 //!
@@ -579,17 +579,27 @@ pub fn export_usb(
             .join(format!("P{:03}", (tr.row.id - 1) / 256))
             .join(format!("{:08X}", tr.row.id));
         std::fs::create_dir_all(&dir).map_err(io_err(dir.clone()))?;
+        // Decode the audio for the detailed waveforms (PWV3/5/6/7): rekordbox
+        // stores linear per-column band peaks at 150 col/s, and the catalog's
+        // 20 bins/sec analysis cache can't reconstruct that beat-level pulse.
+        // On decode failure the coarse cached data still renders something.
+        let scroll = ordnung_core::analysis::decode_mono(&tr.source)
+            .map(|a| ordnung_core::analysis::waveform::scroll_bands(&a.samples, a.sample_rate))
+            .unwrap_or_default();
         let inp = anlz::AnlzInput {
             usb_path: &tr.usb_path,
             beats: &tr.beats,
             duration_ms: tr.duration_ms,
             preview: &tr.preview,
             bands: &tr.bands,
+            scroll: &scroll,
         };
         let dat = dir.join("ANLZ0000.DAT");
         write_synced(&dat, &anlz::build_dat(&inp)).map_err(io_err(dat))?;
         let ext = dir.join("ANLZ0000.EXT");
         write_synced(&ext, &anlz::build_ext(&inp)).map_err(io_err(ext))?;
+        let ex2 = dir.join("ANLZ0000.2EX");
+        write_synced(&ex2, &anlz::build_2ex(&inp)).map_err(io_err(ex2))?;
     }
 
     // ---- playlists --------------------------------------------------------

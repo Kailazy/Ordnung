@@ -1,9 +1,10 @@
-//! ANLZ `.DAT`/`.EXT` writer.
+//! ANLZ `.DAT`/`.EXT`/`.2EX` writer.
 //!
 //! Serializes the tagged-section analysis files CDJs read: beatgrid (`PQTZ`),
-//! waveforms (`PWAV`/`PWV2`/`PWV3`/`PWV4`/`PWV5`), cue lists (`PCOB`/`PCO2`),
-//! path (`PPTH`), VBR index (`PVBR`) and the extended grid (`PQT2`). Section
-//! orders, header constants and field layouts follow rekordbox 7.2.2 exactly —
+//! waveforms (`PWAV`/`PWV2`/`PWV3`/`PWV4`/`PWV5`/`PWV6`/`PWV7`), cue lists
+//! (`PCOB`/`PCO2`), path (`PPTH`), VBR index (`PVBR`), the extended grid
+//! (`PQT2`) and the 3-band scale stub (`PWVC`). Section orders, header
+//! constants and field layouts follow rekordbox 7.2.2 exactly —
 //! byte provenance in `docs/rekordbox-export-structure.md` §5.
 //!
 //! All integers big-endian. Empty cue lists and the header-only `PQT2` are
@@ -23,6 +24,11 @@ pub(crate) struct AnlzInput<'a> {
     pub preview: &'a [u8],
     /// `[low, mid, high, loudness]` quads at 20 bins/sec (may be empty).
     pub bands: &'a [u8],
+    /// Rekordbox-style detail columns `[low, mid, high, amp]` at 150 col/s
+    /// (`waveform::scroll_bands`) — linear per-column band peaks, exactly
+    /// what the detailed waveforms should carry. Empty when the audio wasn't
+    /// decodable at export time; the coarse cached data above fills in.
+    pub scroll: &'a [u8],
 }
 
 const BANDS_PER_SEC: f64 = 20.0;
@@ -311,7 +317,11 @@ fn pwv3(inp: &AnlzInput) -> Vec<u8> {
     body.extend_from_slice(&be32(n));
     body.extend_from_slice(&be32(0x0096_0000));
     for i in 0..n {
-        body.push(mono_col(inp, i as f64 / n as f64));
+        let frac = i as f64 / n as f64;
+        body.push(match scroll_col(inp, frac) {
+            Some([l, m, h, amp]) => (whiteness(&[l, m, h, 0]) << 5) | (amp >> 3),
+            None => mono_col(inp, frac),
+        });
     }
     section(b"PWV3", 0x18, &body)
 }
@@ -326,9 +336,17 @@ fn pwv5(inp: &AnlzInput) -> Vec<u8> {
     body.extend_from_slice(&be32(0x0096_0305));
     for i in 0..n {
         let frac = i as f64 / n as f64;
-        let b = band_at(inp.bands, frac * inp.duration_ms as f64);
-        let h = (amp_at(inp.preview, frac) >> 3) as u16;
-        let (low, mid, high) = ((b[0] >> 5) as u16, (b[1] >> 5) as u16, (b[2] >> 5) as u16);
+        let (low, mid, high, h) = if let Some([l, m, hb, amp]) = scroll_col(inp, frac) {
+            ((l >> 4) as u16, (m >> 4) as u16, (hb >> 4) as u16, (amp >> 3) as u16)
+        } else {
+            let b = band_at(inp.bands, frac * inp.duration_ms as f64);
+            (
+                (b[0] >> 5) as u16,
+                (b[1] >> 5) as u16,
+                (b[2] >> 5) as u16,
+                (amp_at(inp.preview, frac) >> 3) as u16,
+            )
+        };
         body.extend_from_slice(&be16((low << 13) | (mid << 10) | (high << 7) | (h << 2)));
     }
     section(b"PWV5", 0x18, &body)
@@ -374,6 +392,101 @@ fn pwv4(inp: &AnlzInput) -> Vec<u8> {
     section(b"PWV4", 0x18, &body)
 }
 
+/// The scroll column `[low, mid, high, amp]` at a fraction of the track,
+/// when export-time audio decoding produced one.
+fn scroll_col(inp: &AnlzInput, frac: f64) -> Option<[u8; 4]> {
+    let cols = inp.scroll.len() / 4;
+    if cols == 0 {
+        return None;
+    }
+    let i = ((frac * cols as f64) as usize).min(cols - 1);
+    Some(inp.scroll[i * 4..i * 4 + 4].try_into().unwrap())
+}
+
+/// One 3-band column `[low, mid, high]`, 0–127 — the scale the golden PWV7
+/// carries. Prefers the export-time scroll columns (real per-column band
+/// peaks). The cached fallback's band bytes are sqrt-companded for GUI
+/// drawing (`waveform::color_bands`) while rekordbox stores linear levels,
+/// so square them back or every loud track renders as a solid pinned block;
+/// with no band data at all, shape the amplitude preview so the waveform
+/// never comes out blank.
+fn band3_col(inp: &AnlzInput, frac: f64) -> [u8; 3] {
+    if let Some([l, m, h, _]) = scroll_col(inp, frac) {
+        return [l, m, h];
+    }
+    let decompand = |v: u8| {
+        let r = v as f64 / 255.0;
+        (r * r * 127.0).round() as u8
+    };
+    if inp.bands.is_empty() {
+        let a = amp_at(inp.preview, frac);
+        return [decompand(a), decompand(a) >> 1, decompand(a) >> 3];
+    }
+    let b = band_at(inp.bands, frac * inp.duration_ms as f64);
+    [decompand(b[0]), decompand(b[1]), decompand(b[2])]
+}
+
+/// 3-band scrolling waveform (rekordbox 6/7's default display style and the
+/// CDJ-3000's): 3 bytes/column (low/mid/high, 0–127) at 150 col/s.
+fn pwv7(inp: &AnlzInput) -> Vec<u8> {
+    let n = scroll_cols(inp.duration_ms);
+    let mut body = Vec::with_capacity(12 + n as usize * 3);
+    body.extend_from_slice(&be32(3));
+    body.extend_from_slice(&be32(n));
+    body.extend_from_slice(&be32(0x0096_0000));
+    for i in 0..n {
+        body.extend_from_slice(&band3_col(inp, i as f64 / n as f64));
+    }
+    section(b"PWV7", 0x18, &body)
+}
+
+/// 3-band preview: 1200 columns × 3 bytes. Golden files normalize each band
+/// to the same track-wide mean brightness (~26) so all three stay visible in
+/// the small preview; reproduce that from per-column window means.
+fn pwv6(inp: &AnlzInput) -> Vec<u8> {
+    const N: usize = 1200;
+    const TARGET_MEAN: f64 = 26.0;
+    // Pass 1: per-column window means of each band.
+    let mut cols = vec![[0f64; 3]; N];
+    let steps = 8;
+    for (i, col) in cols.iter_mut().enumerate() {
+        for s in 0..steps {
+            let f = (i as f64 + s as f64 / steps as f64) / N as f64;
+            let b = band3_col(inp, f);
+            for k in 0..3 {
+                col[k] += b[k] as f64 / steps as f64;
+            }
+        }
+    }
+    // Pass 2: per-band gain to the golden mean brightness.
+    let mut gain = [1.0f64; 3];
+    for k in 0..3 {
+        let mean = cols.iter().map(|c| c[k]).sum::<f64>() / N as f64;
+        if mean > 0.0 {
+            gain[k] = (TARGET_MEAN / mean).min(8.0);
+        }
+    }
+    let mut body = Vec::with_capacity(8 + N * 3);
+    body.extend_from_slice(&be32(3));
+    body.extend_from_slice(&be32(N as u32));
+    for col in &cols {
+        for k in 0..3 {
+            body.push((col[k] * gain[k]).round().min(127.0) as u8);
+        }
+    }
+    section(b"PWV6", 0x14, &body)
+}
+
+/// 3-band scale metadata stub — semantics unresolved; a mid-range observed
+/// value (rekordbox writes per-track numbers in these bands' neighborhoods).
+fn pwvc() -> Vec<u8> {
+    let mut body = Vec::with_capacity(8);
+    for w in [0u16, 0x63, 0x64, 0x120] {
+        body.extend_from_slice(&be16(w));
+    }
+    section(b"PWVC", 0x0E, &body)
+}
+
 /// Build the `.DAT` — the classic set every CDJ generation requires.
 /// Section order is rekordbox's, and rigid.
 pub(crate) fn build_dat(inp: &AnlzInput) -> Vec<u8> {
@@ -402,6 +515,13 @@ pub(crate) fn build_ext(inp: &AnlzInput) -> Vec<u8> {
         pwv5(inp),
         pwv4(inp),
     ])
+}
+
+/// Build the `.2EX` — 3-band waveforms, the style rekordbox 6/7 and the
+/// CDJ-3000 render by default. Without it an exported track draws as a flat
+/// featureless bar on those displays. Section order is rekordbox's.
+pub(crate) fn build_2ex(inp: &AnlzInput) -> Vec<u8> {
+    pmai(vec![ppth(inp.usb_path), pwv7(inp), pwv6(inp), pwvc()])
 }
 
 #[cfg(test)]
@@ -446,6 +566,7 @@ mod tests {
             duration_ms: 4_100,
             preview: &[128; 400],
             bands: &vec![64; 4 * 82],
+            scroll: &[],
         };
         let dat = build_dat(&inp);
         // PMAI header words as every golden file has them; 1 in the third
@@ -491,6 +612,7 @@ mod tests {
             duration_ms: 4_100,
             preview: &preview,
             bands: &bands,
+            scroll: &[],
         };
         let dir = std::env::temp_dir().join(format!("ordnung-anlzr-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -540,6 +662,7 @@ mod tests {
             duration_ms: 60_000,
             preview: &[200; 400],
             bands: &vec![100; 4 * 1200],
+            scroll: &[],
         };
         let ext = build_ext(&inp);
         let secs = walk(&ext);
@@ -556,6 +679,40 @@ mod tests {
     }
 
     #[test]
+    fn ex2_sections_in_rekordbox_order() {
+        let b = beats();
+        let inp = AnlzInput {
+            usb_path: "/Contents/x.mp3",
+            beats: &b,
+            duration_ms: 60_000,
+            preview: &[200; 400],
+            bands: &vec![100; 4 * 1200],
+            scroll: &[],
+        };
+        let ex2 = build_2ex(&inp);
+        let secs = walk(&ex2);
+        let tags: Vec<&str> = secs.iter().map(|(t, _, _)| t.as_str()).collect();
+        assert_eq!(tags, ["PPTH", "PWV7", "PWV6", "PWVC"]);
+        // PWV7: 3 bytes × duration × 150/s columns; PWV6: exactly 1200 × 3;
+        // PWVC: the fixed 20-byte stub.
+        let pwv7 = secs.iter().find(|(t, _, _)| t == "PWV7").unwrap();
+        assert_eq!(pwv7.2, 0x18 + 60 * 150 * 3);
+        let pwv6 = secs.iter().find(|(t, _, _)| t == "PWV6").unwrap();
+        assert_eq!((pwv6.1, pwv6.2), (0x14, 0x14 + 1200 * 3));
+        let pwvc = secs.iter().find(|(t, _, _)| t == "PWVC").unwrap();
+        assert_eq!((pwvc.1, pwvc.2), (0x0E, 20));
+
+        // Every band byte stays in the golden 0–127 range, and the uniform
+        // input renders non-blank in all three bands.
+        let off = 0x1C + secs[0].2 as usize + 12 + 12; // past PPTH + PWV7 prelude/header
+        let cols = &ex2[off..off + 60 * 150 * 3];
+        assert!(cols.iter().all(|&v| v <= 127));
+        for k in 0..3 {
+            assert!(cols.iter().skip(k).step_by(3).any(|&v| v > 0));
+        }
+    }
+
+    #[test]
     fn empty_analysis_still_produces_valid_files() {
         let inp = AnlzInput {
             usb_path: "/Contents/x.wav",
@@ -563,8 +720,10 @@ mod tests {
             duration_ms: 0,
             preview: &[],
             bands: &[],
+            scroll: &[],
         };
         walk(&build_dat(&inp));
         walk(&build_ext(&inp));
+        walk(&build_2ex(&inp));
     }
 }

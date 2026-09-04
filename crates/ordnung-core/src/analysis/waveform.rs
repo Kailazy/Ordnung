@@ -279,3 +279,152 @@ fn preview(samples: &[f32]) -> Vec<u8> {
     out.resize(PREVIEW_BINS, 0);
     out
 }
+
+/// Bytes per column in [`scroll_bands`]: `[low, mid, high, amp]`.
+pub const SCROLL_STRIDE: usize = 4;
+/// Column rate of [`scroll_bands`] — rekordbox's detailed-waveform rate.
+pub const SCROLL_COLS_PER_SEC: u32 = 150;
+
+/// RBJ-cookbook biquad, direct form 1.
+struct Biquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl Biquad {
+    fn new(b0: f32, b1: f32, b2: f32, a0: f32, a1: f32, a2: f32) -> Self {
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+    fn lowpass(hz: f32, sample_rate: u32) -> Self {
+        let w = 2.0 * std::f32::consts::PI * hz / sample_rate.max(1) as f32;
+        let (sw, cw) = w.sin_cos();
+        let alpha = sw / std::f32::consts::SQRT_2; // Q = 0.707
+        let b1 = 1.0 - cw;
+        Self::new(b1 / 2.0, b1, b1 / 2.0, 1.0 + alpha, -2.0 * cw, 1.0 - alpha)
+    }
+    fn highpass(hz: f32, sample_rate: u32) -> Self {
+        let w = 2.0 * std::f32::consts::PI * hz / sample_rate.max(1) as f32;
+        let (sw, cw) = w.sin_cos();
+        let alpha = sw / std::f32::consts::SQRT_2;
+        let b1 = 1.0 + cw;
+        Self::new(b1 / 2.0, -b1, b1 / 2.0, 1.0 + alpha, -2.0 * cw, 1.0 - alpha)
+    }
+    #[inline]
+    fn step(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
+/// Rekordbox-style detailed 3-band waveform: `[low, mid, high, amp]` per
+/// column at [`SCROLL_COLS_PER_SEC`]. `low`/`mid`/`high` are per-column peak
+/// amplitudes of the band-filtered signal (split at 200 Hz / 2 kHz — low sits
+/// a little wider than [`color_bands`]' 120 Hz so the blue band carries the
+/// kick's punch, matching golden rekordbox files' fat low band), 0–127 like
+/// rekordbox's `PWV7`; `amp` is the unfiltered
+/// column peak, 0–255. All linear (no companding) and normalized to the
+/// track's overall peak, so a kick pulses per beat and breakdowns dip —
+/// matching what a golden rekordbox export stores. Time-domain single pass;
+/// meant for export, where the audio is already being read anyway.
+pub fn scroll_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+    let sr = sample_rate.max(1) as u64;
+    let cols = ((samples.len() as u64 * SCROLL_COLS_PER_SEC as u64) / sr).max(1) as usize;
+    let mut peaks = vec![[0.0f32; 4]; cols];
+    let mut lp = Biquad::lowpass(200.0, sample_rate);
+    let mut hp = Biquad::highpass(2000.0, sample_rate);
+    let mut mid_hp = Biquad::highpass(200.0, sample_rate);
+    let mut mid_lp = Biquad::lowpass(2000.0, sample_rate);
+    for (i, &s) in samples.iter().enumerate() {
+        let col = ((i as u64 * SCROLL_COLS_PER_SEC as u64) / sr) as usize;
+        let p = &mut peaks[col.min(cols - 1)];
+        let vals = [
+            lp.step(s).abs(),
+            mid_lp.step(mid_hp.step(s)).abs(),
+            hp.step(s).abs(),
+            s.abs(),
+        ];
+        for (pk, v) in p.iter_mut().zip(vals) {
+            *pk = pk.max(v);
+        }
+    }
+    let max = peaks
+        .iter()
+        .flat_map(|p| p.iter().copied())
+        .fold(0.0f32, f32::max)
+        .max(1e-6);
+    let mut out = Vec::with_capacity(cols * SCROLL_STRIDE);
+    for p in &peaks {
+        for (k, &v) in p.iter().enumerate() {
+            let full = if k == 3 { 255.0 } else { 127.0 };
+            out.push(((v / max) * full).round().min(full) as u8);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sine(hz: f32, secs: f32, sr: u32) -> Vec<f32> {
+        (0..(secs * sr as f32) as usize)
+            .map(|i| (2.0 * std::f32::consts::PI * hz * i as f32 / sr as f32).sin() * 0.8)
+            .collect()
+    }
+
+    #[test]
+    fn scroll_bands_split_by_frequency() {
+        let sr = 44_100;
+        // 60 Hz belongs to the low band, 5 kHz to the high band.
+        for (hz, band) in [(60.0, 0), (5_000.0, 2)] {
+            let cols = scroll_bands(&sine(hz, 2.0, sr), sr);
+            assert_eq!(cols.len(), 300 * SCROLL_STRIDE);
+            // Steady-state columns (skip the filter warm-up at the start).
+            let steady = &cols[100 * SCROLL_STRIDE..];
+            let mean = |k: usize| {
+                steady.iter().skip(k).step_by(SCROLL_STRIDE).map(|&v| v as u32).sum::<u32>()
+                    / (steady.len() / SCROLL_STRIDE) as u32
+            };
+            for other in 0..3 {
+                if other != band {
+                    assert!(
+                        mean(band) > mean(other) * 4,
+                        "{hz} Hz: band {band} ({}) should dominate band {other} ({})",
+                        mean(band),
+                        mean(other)
+                    );
+                }
+            }
+            // The unfiltered amp channel tracks the signal at full scale.
+            assert!(mean(3) > 200, "amp channel too small: {}", mean(3));
+        }
+    }
+
+    #[test]
+    fn scroll_bands_empty_input_is_one_zero_column() {
+        assert_eq!(scroll_bands(&[], 44_100), vec![0; SCROLL_STRIDE]);
+    }
+}
