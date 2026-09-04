@@ -148,6 +148,43 @@ pub struct Beatgrid {
     pub beats: Vec<Beat>,
 }
 
+impl Beatgrid {
+    /// Expand to one entry per audible beat across `duration_ms`.
+    ///
+    /// The catalog persists a beatgrid as a single anchor beat (first-beat
+    /// position + bpm + bar number) and consumers re-derive the rest; a grid
+    /// fresh from the analyzer already carries every beat. Either way this
+    /// returns the full per-beat list a rekordbox `PQTZ` section (or any other
+    /// per-beat consumer) wants: positions every `60000/bpm` ms from the
+    /// anchor, bar numbers cycling 1..=4 from the anchor's number.
+    pub fn expand_to(&self, duration_ms: u64) -> Vec<Beat> {
+        let Some(anchor) = self.beats.first() else {
+            return Vec::new();
+        };
+        // Already expanded (analyzer output): more than an anchor, keep as-is.
+        if self.beats.len() > 1 {
+            return self.beats.clone();
+        }
+        if anchor.bpm <= 0.0 || duration_ms == 0 || anchor.position_ms > duration_ms {
+            return self.beats.clone();
+        }
+        let period = 60_000.0 / anchor.bpm as f64;
+        let mut beats = Vec::new();
+        let mut pos = anchor.position_ms as f64;
+        let mut number = anchor.number.clamp(1, 4);
+        while pos.round() as u64 <= duration_ms {
+            beats.push(Beat {
+                number,
+                position_ms: pos.round() as u64,
+                bpm: anchor.bpm,
+            });
+            number = if number == 4 { 1 } else { number + 1 };
+            pos += period;
+        }
+        beats
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CueKind {
     Hot,

@@ -118,6 +118,21 @@ impl App {
         });
     }
 
+    /// Export the whole catalog (tracks + playlists) as a native rekordbox
+    /// USB onto `dest` — the flow behind the USB view's Export button, always
+    /// via its confirmation modal. Explicit-only: rewrites the destination's
+    /// `PIONEER/rekordbox` databases and adds under `/Contents`, never touches
+    /// library source files.
+    pub(crate) fn spawn_export(&mut self, ctx: egui::Context, dest: PathBuf) {
+        let (tx, rx) = mpsc::channel();
+        self.job_rx = Some(rx);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.job_cancel = Some(cancel.clone());
+        self.status = format!("Exporting library to {}…", dest.display());
+        let db = self.db_path.clone();
+        thread::spawn(move || run_export(db, dest, cancel, tx, ctx));
+    }
+
     /// Import paths dropped onto the window from Finder (folders are walked,
     /// individual audio files taken as-is). Behaves exactly like "Add songs…".
     pub(crate) fn spawn_import(&mut self, ctx: egui::Context, paths: Vec<PathBuf>) {
@@ -596,6 +611,117 @@ pub(crate) fn run_scan(
     }
     let outcome = import_files(&catalog, &files, &cancel, &tx, &ctx);
     finish_import(&catalog, outcome, auto_analyze, &cancel, &tx, &ctx);
+}
+
+/// Build a native rekordbox export of the whole catalog onto `dest`.
+/// See [`App::spawn_export`]. Audio is copied under `/Contents` (unchanged
+/// files skip the copy), analysis is serialized to ANLZ files, and playlists
+/// land in both `export.pdb` and `exportLibrary.db` so every CDJ generation
+/// sees them. Library sources are read, never written.
+pub(crate) fn run_export(
+    db: PathBuf,
+    dest: PathBuf,
+    cancel: Arc<AtomicBool>,
+    tx: Sender<JobMsg>,
+    ctx: egui::Context,
+) {
+    use ordnung_rbdb::export::{export_usb, ExportError, ExportStage};
+
+    let catalog = match Catalog::open(&db) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            ctx.request_repaint();
+            return;
+        }
+    };
+    let (tracks, playlists) = match (catalog.list_tracks(None, 0), catalog.list_playlists()) {
+        (Ok(t), Ok(p)) => (t, p),
+        (Err(e), _) | (_, Err(e)) => {
+            let _ = tx.send(JobMsg::Failed(format!("reading catalog: {e}")));
+            ctx.request_repaint();
+            return;
+        }
+    };
+    let name_by_id: std::collections::HashMap<u64, String> = tracks
+        .iter()
+        .map(|t| {
+            let label = match (&t.tags.artist, &t.tags.title) {
+                (Some(a), Some(ti)) => format!("{a} — {ti}"),
+                _ => t.source_path.clone(),
+            };
+            (t.id, label)
+        })
+        .collect();
+
+    let result = export_usb(
+        &dest,
+        &tracks,
+        &playlists,
+        &mut |p| {
+            let stage = match p.stage {
+                ExportStage::CopyingAudio => "Copying",
+                ExportStage::WritingAnalysis => "Writing analysis for",
+                ExportStage::WritingDatabase => "Writing databases",
+            };
+            let msg = if p.stage == ExportStage::WritingDatabase {
+                format!("{stage}…")
+            } else {
+                format!("{stage} {}…", p.detail)
+            };
+            let _ = tx.send(JobMsg::Status(msg));
+            let _ = tx.send(JobMsg::Progress {
+                done: p.done,
+                total: p.total,
+            });
+            ctx.request_repaint();
+        },
+        &cancel,
+    );
+    match result {
+        Ok(report) => {
+            if !report.skipped.is_empty() {
+                let items = report
+                    .skipped
+                    .iter()
+                    .map(|(id, why)| {
+                        (
+                            name_by_id
+                                .get(id)
+                                .cloned()
+                                .unwrap_or_else(|| format!("track {id}")),
+                            why.clone(),
+                        )
+                    })
+                    .collect();
+                let _ = tx.send(JobMsg::Failures {
+                    title: "Export".into(),
+                    items,
+                });
+            }
+            let _ = tx.send(JobMsg::Done(format!(
+                "Exported {} track(s), {} playlist node(s) to {} ({:.1} MB copied). \
+Eject before unplugging.",
+                report.tracks_exported,
+                report.playlists_exported,
+                dest.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| dest.display().to_string()),
+                report.bytes_copied as f64 / 1_048_576.0,
+            )));
+        }
+        Err(ExportError::Canceled) => {
+            let _ = tx.send(JobMsg::Done(
+                "Export aborted — the stick may hold a partial export; run Export again \
+to finish it."
+                    .into(),
+            ));
+        }
+        Err(e) => {
+            let _ = tx.send(JobMsg::Failed(format!("export: {e}")));
+        }
+    }
+    ctx.request_repaint();
 }
 
 /// Copy device tracks into the local library folder, then import the copies.

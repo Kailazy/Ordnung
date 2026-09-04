@@ -2145,6 +2145,19 @@ impl App {
                 {
                     rescan = true;
                 }
+                if ui
+                    .add_enabled(!self.is_busy(), egui::Button::new("⇪ Export library"))
+                    .on_hover_note("Write the Ordnung library to this stick as a native rekordbox export")
+                    .clicked()
+                {
+                    // Count what would go over, then confirm — the export
+                    // replaces any rekordbox database already on the stick.
+                    let n_tracks = Catalog::open(&self.db_path)
+                        .and_then(|c| c.count_tracks())
+                        .unwrap_or(0) as usize;
+                    self.export_confirm =
+                        Some((vol.to_path_buf(), n_tracks, self.playlists.len()));
+                }
             });
         });
         if eject {

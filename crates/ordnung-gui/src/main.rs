@@ -1288,6 +1288,10 @@ struct App {
     discogs_auth_rx: Option<Receiver<DiscogsAuth>>,
     /// Whether the "clear the whole catalog?" confirmation popup is showing.
     confirm_clear_db: bool,
+    /// USB export pending confirmation: destination volume root plus the
+    /// track / playlist-node counts to show (counted once when the button was
+    /// clicked). The modal either spawns the export job or clears this.
+    export_confirm: Option<(PathBuf, usize, usize)>,
     /// Title of the failure report (which job produced it).
     failure_report_title: String,
     /// Per-item failures `(item name, reason)` from the last job that had any.

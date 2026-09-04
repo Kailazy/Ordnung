@@ -843,6 +843,113 @@ fn parse_note(s: &str) -> Result<u8> {
     Ok((base + accidental).rem_euclid(12) as u8)
 }
 
+/// `export DEST [--playlist ID]...` — build a native rekordbox USB.
+pub fn export(db: &Path, dest: &Path, playlist_ids: &[u64]) -> Result<()> {
+    use ordnung_rbdb::export::{export_usb, ExportStage};
+
+    let catalog = Catalog::open(db).context("opening catalog")?;
+    let all_playlists = catalog.list_playlists()?;
+
+    // Resolve what goes on the stick: whole catalog by default, or the chosen
+    // playlists (folders expand recursively) plus every track they contain.
+    let (tracks, playlists) = if playlist_ids.is_empty() {
+        (catalog.list_tracks(None, 0)?, all_playlists)
+    } else {
+        let mut wanted: Vec<u64> = Vec::new();
+        let mut queue: Vec<u64> = playlist_ids.to_vec();
+        while let Some(id) = queue.pop() {
+            if all_playlists.iter().all(|p| p.id != id) {
+                bail!("no playlist with id {id} (see `playlist ls`)");
+            }
+            if !wanted.contains(&id) {
+                wanted.push(id);
+                queue.extend(
+                    all_playlists
+                        .iter()
+                        .filter(|p| p.parent == Some(id))
+                        .map(|p| p.id),
+                );
+            }
+        }
+        // Keep ancestor folders so the tree renders intact on the player.
+        let mut keep = wanted.clone();
+        for id in &wanted {
+            let mut cur = all_playlists.iter().find(|p| p.id == *id).and_then(|p| p.parent);
+            while let Some(pid) = cur {
+                if !keep.contains(&pid) {
+                    keep.push(pid);
+                }
+                cur = all_playlists
+                    .iter()
+                    .find(|p| p.id == pid)
+                    .and_then(|p| p.parent);
+            }
+        }
+        let playlists: Vec<_> = all_playlists
+            .iter()
+            .filter(|p| keep.contains(&p.id))
+            .cloned()
+            .collect();
+        let mut tracks = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for p in &playlists {
+            if p.is_folder {
+                continue;
+            }
+            for t in catalog.list_playlist_tracks(p.id, None)? {
+                if seen.insert(t.id) {
+                    tracks.push(t);
+                }
+            }
+        }
+        (tracks, playlists)
+    };
+    if tracks.is_empty() {
+        bail!("nothing to export — no tracks matched");
+    }
+
+    println!(
+        "Exporting {} track(s), {} playlist node(s) → {}",
+        tracks.len(),
+        playlists.len(),
+        dest.display()
+    );
+    let bar = ProgressBar::new(tracks.len() as u64);
+    bar.set_style(
+        ProgressStyle::with_template("{bar:40} {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut stage = ExportStage::CopyingAudio;
+    let report = export_usb(dest, &tracks, &playlists, &mut |p| {
+        if p.stage != stage {
+            stage = p.stage;
+            bar.set_position(0);
+        }
+        bar.set_position(p.done as u64);
+        bar.set_message(match p.stage {
+            ExportStage::CopyingAudio => format!("copying {}", p.detail),
+            ExportStage::WritingAnalysis => format!("analysis {}", p.detail),
+            ExportStage::WritingDatabase => "writing databases".to_string(),
+        });
+    }, &cancel)
+    .context("export failed")?;
+    bar.finish_and_clear();
+
+    println!(
+        "Done: {} track(s), {} playlist node(s), {:.1} MB copied.",
+        report.tracks_exported,
+        report.playlists_exported,
+        report.bytes_copied as f64 / 1_048_576.0
+    );
+    for (id, why) in &report.skipped {
+        println!("  skipped track {id}: {why}");
+    }
+    println!("Eject the volume before unplugging so FAT flushes fully.");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::common_dir_prefix;

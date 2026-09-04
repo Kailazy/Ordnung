@@ -1764,6 +1764,15 @@ impl Catalog {
     /// How many tracks have a missing source file. Cheaper than
     /// [`Catalog::missing_tracks`] — it stats paths without building `Track`s —
     /// so it can drive the toolbar's "relocate" affordance on refresh.
+    /// Total tracks in the catalog — a bare `COUNT(*)`, cheap enough for UI
+    /// affordances (e.g. sizing an export before loading full rows).
+    pub fn count_tracks(&self) -> Result<u64> {
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM tracks", [], |r| r.get::<_, i64>(0))?
+            as u64)
+    }
+
     pub fn count_missing(&self) -> Result<u64> {
         let mut stmt = self.conn.prepare("SELECT source_path FROM tracks")?;
         let paths = stmt

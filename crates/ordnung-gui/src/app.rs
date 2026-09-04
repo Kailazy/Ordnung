@@ -188,6 +188,7 @@ impl App {
             discogs_auth: DiscogsAuth::default(),
             discogs_auth_rx: None,
             confirm_clear_db: false,
+            export_confirm: None,
             failure_report_title: String::new(),
             failure_report: Vec::new(),
             show_failure_report: false,
@@ -2927,6 +2928,7 @@ impl eframe::App for App {
         self.draw_vinyl_sheet(ctx, frame);
         self.draw_versions(ctx);
         self.draw_failure_report(ctx);
+        self.draw_export_confirm(ctx);
         // Drawn last so the welcome tour sits above every other window on a
         // first launch.
         self.draw_tour(ctx);

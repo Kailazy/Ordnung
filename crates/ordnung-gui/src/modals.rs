@@ -1807,6 +1807,74 @@ impl App {
     /// Report popup listing every item a background job skipped or errored on,
     /// with the reason. Auto-opens after a job that had any failures (scan, write
     /// edits, analyze, relocate) so the user knows exactly what didn't go through.
+    /// "Export the library to this stick?" confirmation. The export rewrites
+    /// the destination's `PIONEER/rekordbox` databases (a rekordbox-made
+    /// export there is replaced by Ordnung's), so it never runs un-confirmed.
+    pub(crate) fn draw_export_confirm(&mut self, ctx: &egui::Context) {
+        let Some((dest, n_tracks, n_playlists)) = self.export_confirm.clone() else {
+            return;
+        };
+        let name = dest
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dest.display().to_string());
+        let has_export = dest.join("PIONEER").join("rekordbox").join("export.pdb").is_file();
+        let mut open = true;
+        egui::Window::new(format!("Export library to {name}?"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.set_max_width(440.0);
+                ui.label(format!(
+                    "Writes a native rekordbox/CDJ export: {n_tracks} track(s) and \
+{n_playlists} playlist node(s), with beatgrids, keys and waveforms."
+                ));
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Audio is copied into /Contents (files already there are kept). \
+Library files on this Mac are only read.",
+                    )
+                    .weak(),
+                );
+                if has_export {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "⚠ {name} already carries a rekordbox export — its database \
+(playlists, cues, grids made in rekordbox) will be replaced by Ordnung's.",
+                        ))
+                        .color(ui.visuals().warn_fg_color),
+                    );
+                }
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    let busy = self.is_busy();
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("⇪ Export"))
+                        .clicked()
+                    {
+                        self.export_confirm = None;
+                        self.spawn_export(ctx.clone(), dest.clone());
+                    }
+                    if busy {
+                        ui.label(egui::RichText::new("another job is running").weak());
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.export_confirm = None;
+                        }
+                    });
+                });
+            });
+        if !open {
+            self.export_confirm = None;
+        }
+    }
+
     pub(crate) fn draw_failure_report(&mut self, ctx: &egui::Context) {
         if !self.show_failure_report {
             return;

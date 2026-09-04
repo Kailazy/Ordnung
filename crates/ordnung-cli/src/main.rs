@@ -115,8 +115,16 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// [Phase 5] Build a rekordbox/CDJ USB.
-    Export,
+    /// Build a native rekordbox/CDJ USB at a mounted volume (or any folder).
+    Export {
+        /// Destination root — the USB volume (e.g. /Volumes/MYSTICK) or a
+        /// staging directory. Must already exist.
+        dest: PathBuf,
+        /// Export only these playlist ids (repeatable; folders include their
+        /// contents). Default: the whole catalog and every playlist.
+        #[arg(long = "playlist", value_name = "ID")]
+        playlists: Vec<u64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -188,9 +196,7 @@ fn main() {
         Command::Convert { ids, to, bitrate, out, in_place, yes } => {
             commands::convert(&db, &ids, &to, bitrate, out.as_deref(), in_place, yes)
         }
-        Command::Export => Err(anyhow::anyhow!(
-            "not implemented yet — see the ordnung-roadmap skill"
-        )),
+        Command::Export { dest, playlists } => commands::export(&db, &dest, &playlists),
     };
 
     if let Err(e) = result {

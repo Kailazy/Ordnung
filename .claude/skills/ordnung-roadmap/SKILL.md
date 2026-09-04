@@ -82,11 +82,28 @@ Never auto-runs (its own command; `scan` is still separate for cataloging new fi
 aac→aac@~192–256k); 2 unit tests (extensions/bitrate, path mapping) + end-to-end smoke
 tests (new-file, in-place repoint, overwrite-guard, confirm-abort) pass.
 
-## Phase 5 — rekordbox export  `[ ]`
+## Phase 5 — rekordbox export  `[~]`
 `export`: assemble FAT32/MBR USB — `/CONTENTS`, `export.pdb`, ANLZ `.DAT`/`.EXT`
 with beatgrids, cues, waveforms, playlists. (See `rekordbox-format`.)
 **DoD:** exported USB re-parses cleanly (round-trip) and loads on rekordbox/CDJ with
 tracks, waveforms, beatgrids, cues, and playlists intact.
+**Status (2026-09-04):** the writer is built and software-verified; hardware
+(CDJ/XDJ) validation is the remaining DoD item. Self-contained writers in
+`ordnung-rbdb` (no rekordcrate — its toolchain problems made our own byte-level
+writers, validated against the EYEBAGS golden dissection in
+`docs/rekordbox-export-structure.md`, the safer path): `pdbw` (full 20-table
+export.pdb incl. static menu tables + one-shot page signatures), `anlz`
+(.DAT/.EXT: PPTH/PVBR/PQTZ/PWAV/PWV2/PCOB + PWV3/PCO2/PQT2/PWV5/PWV4),
+`export` (orchestrator: /Contents copy with FAT-safe dedup + incremental
+re-copy, ANLZ per track, exportExt.pdb skeleton), and `dlp::write_library`
+(full 22-table SQLCipher exportLibrary.db) — playlists land in *both*
+databases so CDJ-2000→XDJ-AZ generations all see them. Cues export as empty
+lists (Phase 6). Surfaced as CLI `export DEST [--playlist ID]…` and the USB
+view's confirm-gated "⇪ Export library" button (background job + Abort).
+Verified: 13 unit + 3 round-trip tests (export → `pdb::read_export`/
+`read_stick`/`dlp::read_playlists`), byte-dissection of generated output with
+the golden-reference tooling (page accounting matches rekordbox exactly), and
+a real 80-track / 2 GB CLI export.
 
 ## Phase 6 — Validation & cues  `[ ]`
 Golden-fixture diffing vs rekordbox exports; hot/memory cue editing; compatibility

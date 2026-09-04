@@ -106,6 +106,274 @@ pub fn read_playlists(db_path: &Path) -> Result<DlpPlaylists, ReadError> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Write side (Phase 5)
+// ---------------------------------------------------------------------------
+
+/// Full 22-table Device Library Plus schema, as rekordbox 7.2.2 writes it
+/// (column list captured from the EYEBAGS golden reference — see
+/// `docs/rekordbox-export-structure.md` §4).
+const DLP_SCHEMA: &str = "
+CREATE TABLE album(album_id INTEGER PRIMARY KEY, name varchar, artist_id INTEGER,
+    image_id INTEGER, isComplation INTEGER, nameForSearch varchar);
+CREATE TABLE artist(artist_id INTEGER PRIMARY KEY, name varchar, nameForSearch varchar);
+CREATE TABLE category(category_id INTEGER PRIMARY KEY, menuItem_id INTEGER,
+    sequenceNo INTEGER, isVisible INTEGER);
+CREATE TABLE color(color_id INTEGER PRIMARY KEY, name varchar);
+CREATE TABLE content(content_id INTEGER PRIMARY KEY, title varchar, titleForSearch varchar,
+    subtitle varchar, bpmx100 INTEGER, length INTEGER, trackNo INTEGER, discNo INTEGER,
+    artist_id_artist INTEGER, artist_id_remixer INTEGER, artist_id_originalArtist INTEGER,
+    artist_id_composer INTEGER, artist_id_lyricist INTEGER, album_id INTEGER,
+    genre_id INTEGER, label_id INTEGER, key_id INTEGER, color_id INTEGER, image_id INTEGER,
+    djComment varchar, rating INTEGER, releaseYear INTEGER, releaseDate varchar,
+    dateCreated varchar, dateAdded varchar, path varchar, fileName varchar,
+    fileSize INTEGER, fileType INTEGER, bitrate INTEGER, bitDepth INTEGER,
+    samplingRate INTEGER, isrc varchar, djPlayCount INTEGER, isHotCueAutoLoadOn INTEGER,
+    isKuvoDeliverStatusOn INTEGER, kuvoDeliveryComment varchar, masterDbId INTEGER,
+    masterContentId INTEGER, analysisDataFilePath varchar, analysedBits INTEGER,
+    contentLink INTEGER, hasModified INTEGER, cueUpdateCount INTEGER,
+    analysisDataUpdateCount INTEGER, informationUpdateCount INTEGER);
+CREATE TABLE cue(cue_id INTEGER PRIMARY KEY, content_id INTEGER, kind INTEGER,
+    colorTableIndex INTEGER, cueComment varchar, isActiveLoop INTEGER,
+    beatLoopNumerator INTEGER, beatLoopDenominator INTEGER, inUsec INTEGER, outUsec INTEGER,
+    in150FramePerSec INTEGER, out150FramePerSec INTEGER, inMpegFrameNumber INTEGER,
+    outMpegFrameNumber INTEGER, inMpegAbs INTEGER, outMpegAbs INTEGER,
+    inDecodingStartFramePosition INTEGER, outDecodingStartFramePosition INTEGER,
+    inFileOffsetInBlock INTEGER, OutFileOffsetInBlock INTEGER,
+    inNumberOfSampleInBlock INTEGER, outNumberOfSampleInBlock INTEGER);
+CREATE TABLE genre(genre_id INTEGER PRIMARY KEY, name varchar);
+CREATE TABLE history(history_id INTEGER PRIMARY KEY, sequenceNo INTEGER, name varchar,
+    attribute INTEGER, history_id_parent INTEGER);
+CREATE TABLE history_content(history_id INTEGER, content_id INTEGER, sequenceNo INTEGER);
+CREATE TABLE hotCueBankList(hotCueBankList_id INTEGER PRIMARY KEY, sequenceNo INTEGER,
+    name varchar, image_id INTEGER, attribute INTEGER, hotCueBankList_id_parent INTEGER);
+CREATE TABLE hotCueBankList_cue(hotCueBankList_id INTEGER, cue_id INTEGER, sequenceNo INTEGER);
+CREATE TABLE image(image_id INTEGER PRIMARY KEY, path varchar);
+CREATE TABLE key(key_id INTEGER PRIMARY KEY, name varchar);
+CREATE TABLE label(label_id INTEGER PRIMARY KEY, name varchar);
+CREATE TABLE menuItem(menuItem_id INTEGER PRIMARY KEY, kind INTEGER, name varchar);
+CREATE TABLE myTag(myTag_id INTEGER PRIMARY KEY, sequenceNo INTEGER, name varchar,
+    attribute INTEGER, myTag_id_parent INTEGER);
+CREATE TABLE myTag_content(myTag_id INTEGER, content_id INTEGER);
+CREATE TABLE playlist(playlist_id INTEGER PRIMARY KEY, sequenceNo INTEGER, name varchar,
+    image_id INTEGER, attribute INTEGER, playlist_id_parent INTEGER);
+CREATE TABLE playlist_content(playlist_id INTEGER, content_id INTEGER, sequenceNo INTEGER);
+CREATE TABLE property(deviceName varchar, dbVersion varchar, numberOfContents INTEGER,
+    createdDate varchar, backGroundColorType INTEGER, myTagMasterDBID INTEGER);
+CREATE TABLE recommendedLike(content_id_1 INTEGER, content_id_2 INTEGER, rating INTEGER,
+    createdDate INTEGER);
+CREATE TABLE sort(sort_id INTEGER PRIMARY KEY, menuItem_id INTEGER, sequenceNo INTEGER,
+    isVisible INTEGER, isSelectedAsSubColumn INTEGER);
+";
+
+/// Player browse-menu definitions, verbatim from the golden reference. The
+/// `\u{FFFA}`/`\u{FFFB}` wrappers (interlinear annotation anchors) are part of
+/// the names as rekordbox stores them.
+const MENU_ITEMS: &[(i64, i64, &str)] = &[
+    (1, 128, "GENRE"), (2, 129, "ARTIST"), (3, 130, "ALBUM"), (4, 131, "TRACK"),
+    (5, 133, "BPM"), (6, 134, "RATING"), (7, 135, "YEAR"), (8, 136, "REMIXER"),
+    (9, 137, "LABEL"), (10, 138, "ORIGINAL ARTIST"), (11, 139, "KEY"), (12, 141, "CUE"),
+    (13, 142, "COLOR"), (14, 146, "TIME"), (15, 147, "BITRATE"), (16, 148, "FILE NAME"),
+    (17, 132, "PLAYLIST"), (18, 152, "HOT CUE BANK"), (19, 149, "HISTORY"),
+    (20, 145, "SEARCH"), (21, 150, "COMMENTS"), (22, 140, "DATE ADDED"),
+    (23, 151, "DJ PLAY COUNT"), (24, 144, "FOLDER"), (25, 161, "DEFAULT"),
+    (26, 162, "ALPHABET"), (27, 170, "MATCHING"),
+];
+
+const CATEGORIES: &[(i64, i64, i64, i64)] = &[
+    (1, 1, 0, 0), (2, 2, 1, 1), (3, 3, 2, 1), (4, 4, 3, 1), (5, 17, 5, 1),
+    (6, 5, 0, 0), (7, 6, 0, 0), (8, 7, 0, 0), (9, 8, 0, 0), (10, 9, 0, 0),
+    (11, 10, 0, 0), (12, 11, 4, 1), (15, 13, 0, 0), (17, 24, 9, 1), (18, 20, 7, 1),
+    (19, 14, 0, 0), (20, 15, 0, 0), (21, 16, 0, 0), (22, 19, 6, 1), (23, 18, 0, 0),
+    (26, 27, 8, 1), (27, 22, 10, 1),
+];
+
+const SORTS: &[(i64, i64, i64, i64, i64)] = &[
+    (0, 25, 1, 1, 0), (1, 26, 2, 1, 0), (2, 2, 3, 1, 0), (3, 3, 4, 1, 0),
+    (4, 5, 5, 1, 0), (5, 6, 6, 1, 0), (6, 1, 0, 0, 0), (7, 21, 0, 0, 0),
+    (8, 14, 0, 0, 0), (9, 8, 0, 0, 0), (10, 9, 0, 0, 0), (11, 10, 0, 0, 0),
+    (12, 11, 7, 1, 0), (13, 15, 0, 0, 0), (15, 13, 0, 0, 0), (16, 23, 0, 0, 0),
+    (17, 22, 0, 0, 0),
+];
+
+const COLOR_NAMES: [&str; 8] = [
+    "Pink", "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple",
+];
+
+/// Fixed masterDbId stamped on every row (rekordbox uses its install's random
+/// id; any consistent nonzero value serves).
+const MASTER_DB_ID: i64 = 715_983_263;
+
+/// Write a complete `exportLibrary.db` beside an `export.pdb`, mirroring the
+/// same resolved library. Overwrites any existing database (and removes stale
+/// WAL sidecars). Written fully checkpointed in rollback-journal mode so
+/// read-only players never need to recover a WAL.
+pub(crate) fn write_library(
+    db_path: &Path,
+    t: &crate::pdbw::PdbTables,
+    device_name: &str,
+) -> Result<(), ReadError> {
+    for suffix in ["", "-wal", "-shm"] {
+        let p = db_path.with_file_name(format!("exportLibrary.db{suffix}"));
+        let _ = std::fs::remove_file(p);
+    }
+    let conn =
+        rusqlite::Connection::open(db_path).map_err(|e| ReadError::Dlp(e.to_string()))?;
+    conn.execute_batch(&format!(
+        "PRAGMA key = '{DLP_KEY}'; PRAGMA cipher_compatibility = 4;"
+    ))
+    .map_err(|e| ReadError::Dlp(e.to_string()))?;
+    conn.execute_batch(DLP_SCHEMA)
+        .map_err(|e| ReadError::Dlp(e.to_string()))?;
+
+    let err = |e: rusqlite::Error| ReadError::Dlp(e.to_string());
+    conn.execute_batch("BEGIN").map_err(err)?;
+    {
+        for (id, name) in &t.artists {
+            conn.execute(
+                "INSERT INTO artist VALUES (?1, ?2, ?3)",
+                rusqlite::params![*id as i64, name, name.to_lowercase()],
+            )
+            .map_err(err)?;
+        }
+        for (id, name) in &t.albums {
+            conn.execute(
+                "INSERT INTO album VALUES (?1, ?2, NULL, NULL, 0, ?3)",
+                rusqlite::params![*id as i64, name, name.to_lowercase()],
+            )
+            .map_err(err)?;
+        }
+        for (id, name) in &t.genres {
+            conn.execute(
+                "INSERT INTO genre VALUES (?1, ?2)",
+                rusqlite::params![*id as i64, name],
+            )
+            .map_err(err)?;
+        }
+        for (id, name) in &t.labels {
+            conn.execute(
+                "INSERT INTO label VALUES (?1, ?2)",
+                rusqlite::params![*id as i64, name],
+            )
+            .map_err(err)?;
+        }
+        for (id, name) in &t.keys {
+            conn.execute(
+                "INSERT INTO key VALUES (?1, ?2)",
+                rusqlite::params![*id as i64, name],
+            )
+            .map_err(err)?;
+        }
+        for (i, name) in COLOR_NAMES.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO color VALUES (?1, ?2)",
+                rusqlite::params![i as i64 + 1, name],
+            )
+            .map_err(err)?;
+        }
+        for (id, kind, name) in MENU_ITEMS {
+            conn.execute(
+                "INSERT INTO menuItem VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, kind, format!("\u{FFFA}{name}\u{FFFB}")],
+            )
+            .map_err(err)?;
+        }
+        for (id, mi, seq, vis) in CATEGORIES {
+            conn.execute(
+                "INSERT INTO category VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, mi, seq, vis],
+            )
+            .map_err(err)?;
+        }
+        for (id, mi, seq, vis, sub) in SORTS {
+            conn.execute(
+                "INSERT INTO sort VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![id, mi, seq, vis, sub],
+            )
+            .map_err(err)?;
+        }
+        let mut content = conn
+            .prepare(
+                "INSERT INTO content VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, \
+                 ?8, 0, 0, 0, 0, ?9, ?10, ?11, ?12, 0, NULL, \
+                 ?13, ?14, ?15, NULL, ?16, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
+                 0, 1, 1, NULL, ?25, ?26, ?27, 41, 788224, 0, NULL, 1, 1)",
+            )
+            .map_err(err)?;
+        for tr in &t.tracks {
+            content
+                .execute(rusqlite::params![
+                    tr.id as i64,
+                    tr.title,
+                    tr.title.to_lowercase(),
+                    tr.tempo_centi_bpm as i64,
+                    tr.duration_s as i64,
+                    tr.track_number as i64,
+                    tr.disc_number as i64,
+                    zero_null(tr.artist_id),
+                    zero_null(tr.album_id),
+                    zero_null(tr.genre_id),
+                    zero_null(tr.label_id),
+                    zero_null(tr.key_id),
+                    tr.comment,
+                    tr.rating as i64,
+                    zero_null(tr.year as u32),
+                    tr.date_added,
+                    tr.file_path,
+                    tr.filename,
+                    tr.file_size as i64,
+                    tr.file_type as i64,
+                    tr.bitrate_kbps as i64,
+                    tr.sample_depth as i64,
+                    tr.sample_rate_hz as i64,
+                    tr.isrc,
+                    MASTER_DB_ID,
+                    tr.master_content_id as i64,
+                    tr.analyze_path,
+                ])
+                .map_err(err)?;
+        }
+        drop(content);
+        for p in &t.playlists {
+            conn.execute(
+                "INSERT INTO playlist VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
+                rusqlite::params![
+                    p.id as i64,
+                    p.sort_order as i64,
+                    p.name,
+                    p.is_folder as i64,
+                    p.parent_id as i64,
+                ],
+            )
+            .map_err(err)?;
+        }
+        for (idx, track, playlist) in &t.playlist_entries {
+            conn.execute(
+                "INSERT INTO playlist_content VALUES (?1, ?2, ?3)",
+                rusqlite::params![*playlist as i64, *track as i64, *idx as i64],
+            )
+            .map_err(err)?;
+        }
+        conn.execute(
+            "INSERT INTO property VALUES (?1, '1000', ?2, ?3, 0, ?4)",
+            rusqlite::params![
+                device_name,
+                t.tracks.len() as i64,
+                t.created_date,
+                MASTER_DB_ID,
+            ],
+        )
+        .map_err(err)?;
+    }
+    conn.execute_batch("COMMIT").map_err(err)?;
+    Ok(())
+}
+
+/// rekordbox leaves absent interned refs NULL rather than 0.
+fn zero_null(v: u32) -> Option<i64> {
+    (v != 0).then_some(v as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

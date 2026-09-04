@@ -29,18 +29,20 @@ If a requested change would break one of these, stop and flag it rather than cod
 - `ordnung-core` — domain model + engines. **No policy, no UI, no `println!`, no
   process exits.** Pure library returning typed results/errors. Submodules:
   `model`, `catalog`, `scan`, `analysis`, `tag`, `convert`, `discogs`, `error`.
-- `ordnung-rbdb` — rekordbox export only: `pdb` (DeviceSQL via `rekordcrate`) and
-  `anlz` (.DAT/.EXT). Depends on `ordnung-core` model, not the reverse. Format
-  details belong in the `rekordbox-format` skill.
+- `ordnung-rbdb` — rekordbox import/export only: `pdb` (self-contained
+  DeviceSQL reader), `pdbw` (DeviceSQL writer), `anlz` (.DAT/.EXT writer),
+  `dlp` (exportLibrary.db read/write), `export` (USB export orchestration).
+  Depends on `ordnung-core` model, not the reverse. Format details belong in
+  the `rekordbox-format` skill and `docs/rekordbox-export-structure.md`.
 - `ordnung-cli` — the ONLY place that decides policy, prints, prompts, and maps
   user intent to core calls. Owns `clap` definitions and progress UI.
 - `ordnung-gui` — the egui/eframe desktop app, the primary front-end. Wraps
   `ordnung-core` exactly like the CLI does — so keep all reusable logic in core,
   never in the CLI or GUI.
 
-Dependency direction: `cli` → `rbdb` → `core`, and `gui` → `core` (the GUI does
-NOT depend on `rbdb` — rekordbox export is CLI-only for now). Never let `core`
-depend upward.
+Dependency direction: `cli` → `rbdb` → `core`, and `gui` → `rbdb` → `core`
+(the GUI reads mounted sticks and drives the USB export through `rbdb`).
+Never let `core` depend upward.
 
 ## Data model (authoritative shapes)
 

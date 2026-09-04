@@ -19,7 +19,11 @@ as authoritative and validate every byte against a real rekordbox-produced expor
 - **Deep Symmetry djl-analysis** — the authoritative reverse-engineered docs for
   `export.pdb` and ANLZ: https://djl-analysis.deepsymmetry.org/
 - **rekordcrate** (Rust, `binrw` read/write of DeviceSQL/PDB):
-  https://github.com/Holzhaus/rekordcrate — build on its structs; do not re-derive.
+  https://github.com/Holzhaus/rekordcrate — reference implementation for
+  cross-checking. Ordnung's writer is now **self-contained** (`pdbw`/`anlz`/
+  `export`/`dlp::write_library`, landed 2026-09-04): rekordcrate's toolchain
+  problems and private fields made writing our own, validated against the
+  golden dissection, the safer path. Consult it when bytes disagree.
 - Original RE credit: Henry Betts, Fabian Lesniak, James Elliott.
 
 ## USB layout (FAT32, MBR)
