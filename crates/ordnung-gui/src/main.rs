@@ -253,7 +253,7 @@ enum SortColumn {
     Added,
 }
 
-/// One column of the track table. The cover thumbnail plus the ten data columns
+/// One column of the track table. The cover thumbnail plus the data columns
 /// are reorderable and show/hideable from the header's right-click menu; the
 /// chosen order and hidden set persist to `~/.ordnung/config.toml`. The trailing
 /// `remainder` spacer is structural (it just fills slack so the striped rows span
@@ -270,10 +270,7 @@ enum TableColumn {
     Album,
     Genre,
     Duration,
-    // Temporarily not shown (omitted from `DEFAULT_ORDER`) while tempo detection
-    // is reworked, so it's never constructed right now — keep the variant and its
-    // match arms intact for a one-line restore.
-    #[allow(dead_code)]
+    /// Detected/tagged tempo in BPM (`tracks.bpm_tag`), shown to one decimal.
     Bpm,
     Key,
     Format,
@@ -293,13 +290,7 @@ impl TableColumn {
     /// truth for "which columns exist": the reorder menu lists these, and loading
     /// a saved layout appends any column missing from it (so a config written by
     /// an older build still shows columns added since).
-    // NOTE: `Bpm` is intentionally omitted here — the BPM column is hidden for now
-    // while tempo detection is being reworked (stored BPM values were cleared too).
-    // The `TableColumn::Bpm` variant and all its match arms are kept so re-adding
-    // this one line restores the column. Because `from_key`/`load_column_layout`
-    // only resolve columns present in this list, a saved layout containing "bpm"
-    // also drops it cleanly.
-    const DEFAULT_ORDER: [TableColumn; 13] = [
+    const DEFAULT_ORDER: [TableColumn; 14] = [
         TableColumn::Cover,
         TableColumn::Artist,
         TableColumn::Title,
@@ -308,6 +299,7 @@ impl TableColumn {
         TableColumn::Duration,
         TableColumn::Waveform,
         TableColumn::Added,
+        TableColumn::Bpm,
         TableColumn::Key,
         TableColumn::Format,
         TableColumn::Bitrate,
