@@ -291,6 +291,69 @@ impl App {
         self.spawn_sheet_price(release_id, ctx.clone());
     }
 
+    /// Open the record sheet for the release a *library track* is matched to —
+    /// the inspector's "View release".
+    ///
+    /// The sheet is the same one the vinyl grid and a dig open, so the answer to
+    /// "what else is on this record, and do I own it?" is one view rather than
+    /// three. It already draws the tracklist, marks which positions exist in the
+    /// catalog, and shows "✓ In collection" / "✓ In wantlist" for the release —
+    /// so this only has to supply the identity for its header.
+    ///
+    /// Identity comes from what's already local, so the sheet opens populated
+    /// rather than blank-until-fetched: the release title from the detail cache
+    /// when it's warm (falling back to the track's album tag, then its title),
+    /// and the artist from the track's own tag, since `ReleaseDetail` carries no
+    /// release-level artist. The cover URL recorded with the match feeds the
+    /// same lazy image cache a dug record uses. Every one of these is
+    /// best-effort — `open_release_sheet` fetches the authoritative tracklist
+    /// regardless, and a missing cover just opens the sheet without art.
+    pub(crate) fn open_track_release_sheet(&mut self, id: Id, ctx: &egui::Context) {
+        let Some(release_id) = self.track_releases.get(&id).copied() else {
+            return;
+        };
+        let cat = Catalog::open(&self.db_path).ok();
+        let track = cat.as_ref().and_then(|c| c.get_track(id).ok());
+        let artist = track
+            .as_ref()
+            .and_then(|t| t.tags.artist.clone())
+            .unwrap_or_default();
+        let cached = cat
+            .as_ref()
+            .and_then(|c| c.cached_release(&release_id.to_string()).ok())
+            .flatten();
+        let title = cached
+            .as_ref()
+            .map(|d| d.title.clone())
+            .or_else(|| track.as_ref().and_then(|t| t.tags.album.clone()))
+            .or_else(|| track.as_ref().and_then(|t| t.tags.title.clone()))
+            .unwrap_or_else(|| format!("Release {release_id}"));
+        // Same citation line the record search builds, from whatever the cache
+        // has: year · label · catalogue number.
+        let sub = cached
+            .as_ref()
+            .map(|d| {
+                let year = d.year.map(|y| y.to_string()).unwrap_or_default();
+                let imprint = match (
+                    d.label.as_deref().unwrap_or("").trim(),
+                    d.catalog_number.as_deref().unwrap_or("").trim(),
+                ) {
+                    ("", "") => String::new(),
+                    (l, "") => l.to_string(),
+                    ("", c) => c.to_string(),
+                    (l, c) => format!("{l} {c}"),
+                };
+                [year.as_str(), imprint.as_str()]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            })
+            .unwrap_or_default();
+        let cover_url = cat.as_ref().and_then(|c| c.external_cover_url(id).ok()).flatten();
+        self.open_release_sheet(release_id, artist, title, sub, cover_url, ctx);
+    }
+
     /// The catalog tracks linked to `release_id`, with the analysis figures the
     /// sheet shows. One small read per linked track — a record is a handful of
     /// tracks, so this stays on the UI thread like the other inline reads.

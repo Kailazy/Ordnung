@@ -1103,6 +1103,27 @@ impl Catalog {
             .flatten())
     }
 
+    /// The cover URL recorded alongside a track's external release match, if the
+    /// fetch stored one.
+    ///
+    /// Separate from [`Self::get_external_artwork`], which returns *bytes*: the
+    /// record sheet takes a URL so it can reuse the same lazy image cache a dug
+    /// record uses, and a track matched via
+    /// [`Self::set_external_release_link`] has an id and a URL but no cached
+    /// image at all. `None` is fine — the sheet simply opens without art.
+    pub fn external_cover_url(&self, track_id: Id) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT url FROM track_external_artwork WHERE track_id=?1",
+                params![track_id as i64],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .filter(|u| !u.trim().is_empty()))
+    }
+
     /// Every catalog track that is linked to a Discogs release (via the release
     /// id stored when its art/metadata was fetched), as `(release_id, track_id)`
     /// pairs. Used to cross-reference the vinyl collection against the catalog so

@@ -348,3 +348,45 @@ pub fn shield(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
         s,
     ));
 }
+
+/// Folder: the reveal-in-Finder mark, drawn as a tab-and-body outline.
+///
+/// `r` is the half-width of the body, and the whole mark is centred on `c`, so
+/// it optically matches a line of text the way the marks above do rather than
+/// sitting on its own baseline.
+pub fn folder(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
+    let s = egui::Stroke::new(MARK, col);
+    let (l, rt) = (c.x - r, c.x + r);
+    let (top, bot) = (c.y - r * 0.62, c.y + r * 0.62);
+    // Tab along the top-left, then the body — one closed outline so the two
+    // never drift apart at a corner.
+    p.add(egui::Shape::closed_line(
+        vec![
+            egui::pos2(l, bot),
+            egui::pos2(l, top - r * 0.2),
+            egui::pos2(l + r * 0.5, top - r * 0.2),
+            egui::pos2(l + r * 0.72, top),
+            egui::pos2(rt, top),
+            egui::pos2(rt, bot),
+        ],
+        s,
+    ));
+}
+
+/// A frameless folder button sized to sit inline with a line of text: allocates
+/// its own square, paints the mark, and answers the pointer. Returns true when
+/// clicked.
+///
+/// Same shape as [`close_button`] — the control is the whole thing, not just its
+/// mark — so every "show me this file" affordance stays one control.
+pub fn folder_button(ui: &mut egui::Ui, tip: &str) -> bool {
+    const SIZE: f32 = 14.0;
+    const R: f32 = 4.5;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::click());
+    let resp = resp.on_hover_note(tip);
+    folder(ui.painter(), rect.center(), col(&resp), R);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp.clicked()
+}

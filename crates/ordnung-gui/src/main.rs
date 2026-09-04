@@ -519,6 +519,10 @@ enum InspectorAction {
     SaveToCatalog(Id),
     /// Commit to the catalog AND write the tags into the source file.
     WriteToFile(Id, PathBuf),
+    /// Open the record sheet for the Discogs release this track is matched to,
+    /// so its full tracklist (and whether the record is in the collection or the
+    /// wantlist) is one click from the track.
+    ViewRelease(Id),
 }
 
 /// State for the conversion modal. Also lets the user rename the track

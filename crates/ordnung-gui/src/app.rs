@@ -1741,6 +1741,7 @@ impl eframe::App for App {
             Some(InspectorAction::EmbedCover(id, path)) => self.embed_cover_into_file(id, path),
             Some(InspectorAction::SaveToCatalog(id)) => self.save_tags(id, None),
             Some(InspectorAction::WriteToFile(id, path)) => self.save_tags(id, Some(path)),
+            Some(InspectorAction::ViewRelease(id)) => self.open_track_release_sheet(id, ctx),
             None => {}
         }
 

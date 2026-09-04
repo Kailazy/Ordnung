@@ -257,14 +257,41 @@ impl App {
         // it here rather than in the string means the eyebrow reads as a label
         // and not as a word someone mistyped.
         ui.add_space(space::S4);
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new("T R A C K")
-                    .font(crate::ui::tokens::font::caption())
-                    .color(color::LABEL_3),
-            )
-            .truncate(),
-        );
+        // The eyebrow shares its line with "View release": the button belongs to
+        // the track's identity block, and this is the one line up here with room
+        // to spare — the title and artist beneath it are truncating labels that a
+        // trailing button would eat into. Right-aligned so it reads as an action
+        // on the header rather than another piece of the label.
+        let mut view_release = false;
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("T R A C K")
+                        .font(crate::ui::tokens::font::caption())
+                        .color(color::LABEL_3),
+                )
+                .truncate(),
+            );
+            // Only shown when this track actually has a matched release — the
+            // same signal the cover dot in the table reads. Nothing to open
+            // otherwise, and a permanently-disabled button would just be noise.
+            if self
+                .selected_track
+                .as_ref()
+                .is_some_and(|t| self.track_releases.contains_key(&t.id))
+            {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    view_release = ui
+                        .add(egui::Button::new(
+                            egui::RichText::new("View release")
+                                .font(crate::ui::tokens::font::caption())
+                                .color(color::LABEL_2),
+                        ))
+                        .on_hover_note("Show this record's tracklist")
+                        .clicked();
+                });
+            }
+        });
         ui.add_space(space::S3);
 
         // Copied out before borrowing `selected_track` so the button below can
@@ -354,15 +381,37 @@ impl App {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path_str.clone());
         ui.add_space(space::S1);
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(file_name)
-                    .font(crate::ui::tokens::font::footnote())
-                    .color(color::LABEL_4),
-            )
-            .truncate(),
-        )
-        .on_hover_note(&path_str);
+        // Filename, with a folder button beside it that reveals the file in
+        // Finder. The icon sits on this line rather than in a section below
+        // because this *is* the line about where the file lives — the name is
+        // already here and the full path is already its tooltip, so the mark
+        // that opens it belongs in the same place. Drawn small and quiet: it's
+        // an affordance on a tertiary line, not a call to action.
+        ui.horizontal(|ui| {
+            // The icon trails the name, so it reads as belonging to *this*
+            // filename rather than floating at the panel edge. The label is
+            // capped to the row minus the button's own width so a long name
+            // truncates *before* it would push the icon out of the panel —
+            // which is exactly when reaching the file matters most.
+            const BTN_W: f32 = 14.0;
+            ui.set_max_width(ui.available_width());
+            let room = (ui.available_width() - BTN_W - space::S2).max(0.0);
+            ui.scope(|ui| {
+                ui.set_max_width(room);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(file_name)
+                            .font(crate::ui::tokens::font::footnote())
+                            .color(color::LABEL_4),
+                    )
+                    .truncate(),
+                )
+                .on_hover_note(&path_str);
+            });
+            if crate::ui::icon::folder_button(ui, "Reveal in Finder") {
+                crate::util::reveal_in_finder(&source_path);
+            }
+        });
 
         // Cover art preview. Decoded off-thread (see `cover_full_texture`): once
         // ready we show the high-quality image (embedded art wins, fetched
@@ -393,7 +442,10 @@ impl App {
         // The user's requested action this frame, if any. Acted on by the caller
         // after this method's borrow of `self` ends. Declared outside the scroll
         // area because the buttons that set it now live inside it.
-        let mut action: Option<InspectorAction> = None;
+        // Seeded from the header's "View release", which is drawn (and clicked)
+        // well before this point.
+        let mut action: Option<InspectorAction> =
+            view_release.then_some(InspectorAction::ViewRelease(id));
         let dirty = self.tag_edit != self.tag_edit_saved;
         // One scroll area over the edit form *and* the read-only sections: with
         // the form outside it, a tall inspector clipped the form instead of
