@@ -1,6 +1,7 @@
 # Large libraries: onboarding, analysis, and Discogs at scale
 
-**Status:** plan. Quick wins landed in v0.49.2; everything below is unbuilt.
+**Status:** in progress. Quick wins landed in v0.49.2; step 1 (library root +
+tour on-ramp) landed in v0.50.0. Everything else below is unbuilt.
 **Goal:** a new user pointing Ordnung at 30–50k tracks gets a first run that is
 legible, resumable, and mostly hands-off — instead of an empty window followed
 by hours of opaque work and tens of thousands of manual picks.
@@ -108,11 +109,12 @@ Two things make this worse than it looks:
 Ordered so each step makes the next one cheaper or more legible. Items marked
 **[decision]** need a product call before implementation.
 
-### 1. Library root + first-run import  *(addresses P1)*
+### 1. Library root + first-run import  *(addresses P1)* — **done, v0.50.0**
 
-Add a `library_root: Option<PathBuf>` to `Config`. Extend the tour with a step
-that asks for it and kicks off the first import, so the tour becomes an on-ramp
-instead of an explainer.
+Landed as planned: `Config::library_root`, a tour step ("Where does your music
+live?") that picks the folder and kicks off the first import on Finish,
+`TOUR_VERSION` 2 so existing users are asked once, and a Settings → General
+section to view/change the folder and scan it for new songs on demand.
 
 - Bump `TOUR_VERSION` to replay once for existing users — they don't have a root
   either, so this is the right migration mechanism.
