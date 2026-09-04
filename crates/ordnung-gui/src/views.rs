@@ -2145,29 +2145,6 @@ impl App {
                 {
                     rescan = true;
                 }
-                if ui
-                    .add_enabled(!self.is_busy(), egui::Button::new("⇪ Export entire library"))
-                    .on_hover_note(
-                        "Write the whole Ordnung library to this stick as a native rekordbox \
-export. To export just one playlist, right-click it in the Library sidebar",
-                    )
-                    .clicked()
-                {
-                    // Count what would go over, then confirm — the export
-                    // replaces any rekordbox database already on the stick.
-                    let n_tracks = Catalog::open(&self.db_path)
-                        .and_then(|c| c.count_tracks())
-                        .unwrap_or(0) as usize;
-                    self.export_confirm = Some(ExportConfirm {
-                        dest: vol.to_path_buf(),
-                        playlist_ids: Vec::new(),
-                        scope: "your entire library".into(),
-                        n_tracks,
-                        n_playlists: self.playlists.len(),
-                        // The whole-library button rebuilds the stick.
-                        replace: true,
-                    });
-                }
             });
         });
         if eject {
