@@ -209,15 +209,36 @@ const MASTER_DB_ID: i64 = 715_983_263;
 /// same resolved library. Overwrites any existing database (and removes stale
 /// WAL sidecars). Written fully checkpointed in rollback-journal mode so
 /// read-only players never need to recover a WAL.
+///
+/// SQLite cannot write in place on macOS's msdos (FAT32) driver — the second
+/// transaction dies with "attempt to write a readonly database", leaving a
+/// one-table stub that players reject as a corrupted device library. So the
+/// database is built on local disk and the finished bytes are copied over.
 pub(crate) fn write_library(
     db_path: &Path,
     t: &crate::pdbw::PdbTables,
     device_name: &str,
 ) -> Result<(), ReadError> {
+    let err_io = |e: std::io::Error| ReadError::Dlp(e.to_string());
+    let tmp = scratch_db_path("ordnung-dlp-write");
+    let _ = std::fs::remove_file(&tmp);
+    build_library(&tmp, t, device_name)?;
     for suffix in ["", "-wal", "-shm"] {
         let p = db_path.with_file_name(format!("exportLibrary.db{suffix}"));
         let _ = std::fs::remove_file(p);
     }
+    std::fs::copy(&tmp, db_path).map_err(err_io)?;
+    let _ = std::fs::remove_file(&tmp);
+    Ok(())
+}
+
+/// Create and populate a fresh Device Library Plus database at `db_path`
+/// (which must be on a filesystem SQLite can journal on — i.e. local disk).
+fn build_library(
+    db_path: &Path,
+    t: &crate::pdbw::PdbTables,
+    device_name: &str,
+) -> Result<(), ReadError> {
     let conn =
         rusqlite::Connection::open(db_path).map_err(|e| ReadError::Dlp(e.to_string()))?;
     conn.execute_batch(&format!(
@@ -375,9 +396,93 @@ fn zero_null(v: u32) -> Option<i64> {
     (v != 0).then_some(v as i64)
 }
 
+/// A collision-free scratch path on local disk for building a database that
+/// will be copied onto the stick whole (process id alone isn't unique enough:
+/// parallel test threads share one process).
+pub(crate) fn scratch_db_path(prefix: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}.db",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The full production writer must persist the complete 22-table schema
+    /// and its rows — a partially written exportLibrary.db is exactly what a
+    /// player rejects as "Device library is corrupted".
+    #[test]
+    fn write_library_persists_every_table() {
+        let dir = std::env::temp_dir().join(format!("ordnung-dlpw-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("exportLibrary.db");
+
+        let tables = crate::pdbw::PdbTables {
+            tracks: vec![crate::pdbw::TrackRow {
+                id: 1,
+                title: "One".into(),
+                filename: "one.mp3".into(),
+                file_path: "/Contents/one.mp3".into(),
+                ..Default::default()
+            }],
+            genres: vec![(1, "House".into())],
+            artists: vec![(1, "A".into())],
+            albums: vec![(1, "B".into())],
+            labels: vec![],
+            keys: vec![(1, "8A".into())],
+            artwork: vec![],
+            playlists: vec![crate::pdbw::PlaylistRow {
+                id: 1,
+                parent_id: 0,
+                sort_order: 1,
+                is_folder: false,
+                name: "set".into(),
+            }],
+            playlist_entries: vec![(1, 1, 1)],
+            created_date: "2026-09-04".into(),
+        };
+        write_library(&db, &tables, "TEST").expect("write");
+
+        let conn = rusqlite::Connection::open_with_flags(
+            &db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA key = '{DLP_KEY}'; PRAGMA cipher_compatibility = 4;"
+        ))
+        .unwrap();
+        let n_tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n_tables, 22, "full DLP schema must be present");
+        for (table, want) in [
+            ("content", 1i64),
+            ("playlist", 1),
+            ("playlist_content", 1),
+            ("menuItem", 27),
+            ("category", 22),
+            ("sort", 17),
+            ("property", 1),
+        ] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, want, "{table} row count");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Round-trip through a real SQLCipher database: write a miniature
     /// Device Library Plus export with the production key, read it back

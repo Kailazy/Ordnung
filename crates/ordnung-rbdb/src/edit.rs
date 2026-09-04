@@ -388,7 +388,25 @@ fn u32_at(data: &[u8], pos: usize) -> Option<u32> {
 /// export's current tree. Content ids are the DLP's own — resolved by file
 /// path, the only key shared with the pdb; entries whose path the DLP doesn't
 /// know are skipped rather than failing the edit.
+///
+/// SQLite cannot write in place on macOS's msdos (FAT32) driver (see
+/// [`crate::dlp::write_library`]), so the database is copied to local disk,
+/// edited there, and copied back whole.
 fn sync_dlp_playlists(db_path: &Path, export: &RbExport) -> Result<(), ReadError> {
+    let err_io = |e: std::io::Error| ReadError::Dlp(e.to_string());
+    let tmp = crate::dlp::scratch_db_path("ordnung-dlp-sync");
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::copy(db_path, &tmp).map_err(err_io)?;
+    let result = sync_dlp_playlists_at(&tmp, export);
+    if result.is_ok() {
+        std::fs::copy(&tmp, db_path).map_err(err_io)?;
+    }
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+/// The actual sync, run against a database on a journal-friendly filesystem.
+fn sync_dlp_playlists_at(db_path: &Path, export: &RbExport) -> Result<(), ReadError> {
     let err = |e: rusqlite::Error| ReadError::Dlp(e.to_string());
     let conn = rusqlite::Connection::open(db_path).map_err(err)?;
     conn.execute_batch(&format!(

@@ -73,6 +73,13 @@ internally — see `audio-analysis` for the Camelot↔OpenKey table).
 4. Beatgrid first downbeat aligns with the analysis beatgrid anchor.
 5. Playlists in `PlaylistTree` reference valid track ids in entry order.
 6. USB is FAT32/MBR and paths use the exact casing CDJs expect.
+7. **Never let SQLite write in place on the mounted stick.** macOS's msdos
+   (FAT32) driver breaks SQLite mid-write ("attempt to write a readonly
+   database" after the first commit), leaving a truncated exportLibrary.db
+   that players reject as "Device library is corrupted". Build/edit the DLP
+   database on local disk and copy the finished file over — `dlp::write_library`
+   and `edit::sync_dlp_playlists` both do this; keep any new SQLite-on-stick
+   path doing the same.
 
 ## Validation workflow
 
