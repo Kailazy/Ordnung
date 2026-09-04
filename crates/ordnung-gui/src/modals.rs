@@ -1848,20 +1848,44 @@ Library files on this Mac are only read.",
                     .weak(),
                 );
                 ui.add_space(6.0);
+                // The mode is editable only when it's a live choice: an existing
+                // export on the stick. On an empty stick merge and replace do
+                // the same thing, so there's nothing to toggle.
+                let mut replace = confirm.replace;
                 if has_export {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "⚠ {name} already carries a rekordbox export — its database is \
-replaced: afterwards the stick lists exactly this selection, and playlists/cues/grids made \
-in rekordbox are gone from it.",
-                        ))
-                        .color(ui.visuals().warn_fg_color),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut replace, false, "Add to stick");
+                        ui.selectable_value(&mut replace, true, "Replace stick");
+                    });
+                    ui.add_space(4.0);
+                    if replace {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "⚠ {name} already carries an export — it will be replaced: \
+afterwards the stick lists exactly this selection, and anything else on it (other playlists, \
+cues/grids made in rekordbox) is gone from the database.",
+                            ))
+                            .color(ui.visuals().warn_fg_color),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new(
+                                "This selection is added to what's already on the stick. \
+Tracks already there are kept; a playlist with the same name is updated, others are left \
+alone.",
+                            )
+                            .weak(),
+                        );
+                    }
+                    // Reflect the edited choice back so the button uses it.
+                    if let Some(c) = self.export_confirm.as_mut() {
+                        c.replace = replace;
+                    }
                 } else {
                     ui.label(
                         egui::RichText::new(
-                            "The stick's browse database will list exactly this selection; \
-a later export replaces it (audio files under /Contents are kept either way).",
+                            "The stick has no export yet — this creates one listing this \
+selection.",
                         )
                         .weak(),
                     );
@@ -1869,16 +1893,19 @@ a later export replaces it (audio files under /Contents are kept either way).",
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     let busy = self.is_busy();
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("⇪ Export"))
-                        .clicked()
-                    {
+                    let label = if has_export && !replace {
+                        "⇪ Add to stick"
+                    } else {
+                        "⇪ Export"
+                    };
+                    if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
                         self.export_confirm = None;
                         self.spawn_export(
                             ctx.clone(),
                             confirm.dest.clone(),
                             confirm.playlist_ids.clone(),
                             confirm.scope.clone(),
+                            replace,
                         );
                     }
                     if busy {

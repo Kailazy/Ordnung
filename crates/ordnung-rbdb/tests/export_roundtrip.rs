@@ -10,7 +10,7 @@ use ordnung_core::model::{
     Analysis, AudioProperties, Beat, Beatgrid, Format, Playlist, Tags, Track,
 };
 use ordnung_core::model::key::{Key, Mode, PitchClass};
-use ordnung_rbdb::export::{export_usb, ExportError};
+use ordnung_rbdb::export::{export_usb, ExportError, ExportMode};
 use ordnung_rbdb::{dlp, pdb};
 
 fn temp_root(tag: &str) -> PathBuf {
@@ -115,7 +115,7 @@ fn export_then_read_back_full_surface() {
 
     let cancel = AtomicBool::new(false);
     let mut stages = Vec::new();
-    let report = export_usb(&usb, &tracks, &playlists, &mut |p| stages.push(p.stage), &cancel)
+    let report = export_usb(&usb, &tracks, &playlists, ExportMode::Replace, &mut |p| stages.push(p.stage), &cancel)
         .expect("export succeeds");
     assert_eq!(report.tracks_exported, 2);
     assert_eq!(report.playlists_exported, 2);
@@ -215,8 +215,91 @@ fn export_then_read_back_full_surface() {
     );
 
     // --- re-export is incremental ------------------------------------------
-    let report2 = export_usb(&usb, &tracks, &playlists, &mut |_| {}, &cancel).unwrap();
+    let report2 = export_usb(&usb, &tracks, &playlists, ExportMode::Replace, &mut |_| {}, &cancel).unwrap();
     assert_eq!(report2.bytes_copied, 0, "unchanged audio must not re-copy");
+
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&usb);
+}
+
+#[test]
+fn merge_adds_to_an_existing_export_without_clobbering_it() {
+    let src = temp_root("merge-src");
+    let usb = temp_root("merge-usb");
+    let a = audio_file(&src, "alpha.mp3", 5_000);
+    let b = audio_file(&src, "beta.mp3", 6_000);
+    let c = audio_file(&src, "gamma.mp3", 7_000);
+    let cancel = AtomicBool::new(false);
+
+    // First export: playlist "set A" with alpha + beta.
+    let set_a = vec![Playlist {
+        id: 1,
+        name: "set A".into(),
+        parent: None,
+        is_folder: false,
+        track_ids: vec![10, 11],
+    }];
+    let tracks_a = vec![
+        track(10, &a, Format::Mp3, "Alpha", "AA"),
+        track(11, &b, Format::Mp3, "Beta", "BB"),
+    ];
+    export_usb(&usb, &tracks_a, &set_a, ExportMode::Replace, &mut |_| {}, &cancel).unwrap();
+
+    // Merge a second playlist "set B" with gamma (a new track) and alpha
+    // (already on the stick — must reuse its file, not duplicate it).
+    let set_b = vec![Playlist {
+        id: 2,
+        name: "set B".into(),
+        parent: None,
+        is_folder: false,
+        track_ids: vec![12, 10],
+    }];
+    let tracks_b = vec![
+        track(12, &c, Format::Mp3, "Gamma", "CC"),
+        track(10, &a, Format::Mp3, "Alpha", "AA"),
+    ];
+    let report =
+        export_usb(&usb, &tracks_b, &set_b, ExportMode::Merge, &mut |_| {}, &cancel).unwrap();
+    // The stick now carries all three tracks (beta was carried over untouched).
+    assert_eq!(report.tracks_exported, 3, "merge keeps the earlier tracks");
+
+    let export = pdb::read_export(&usb.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    assert_eq!(export.tracks.len(), 3);
+    let titles: std::collections::HashSet<&str> =
+        export.tracks.values().map(|t| t.title.as_str()).collect();
+    assert!(titles.contains("Alpha") && titles.contains("Beta") && titles.contains("Gamma"));
+
+    // alpha.mp3 exists exactly once — the merge reused it rather than writing
+    // an "alpha (2).mp3".
+    let contents: Vec<String> = std::fs::read_dir(usb.join("Contents"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        contents.iter().filter(|n| n.starts_with("alpha")).count(),
+        1,
+        "alpha must not be duplicated on merge; got {contents:?}"
+    );
+
+    // Both playlists survive, each with its own membership.
+    assert_eq!(export.playlists.len(), 2);
+    let a_pl = export.playlists.iter().find(|p| p.name == "set A").unwrap();
+    let b_pl = export.playlists.iter().find(|p| p.name == "set B").unwrap();
+    let a_titles: Vec<&str> = export.entries[&a_pl.id]
+        .iter()
+        .map(|id| export.tracks[id].title.as_str())
+        .collect();
+    let b_titles: Vec<&str> = export.entries[&b_pl.id]
+        .iter()
+        .map(|id| export.tracks[id].title.as_str())
+        .collect();
+    assert_eq!(a_titles, ["Alpha", "Beta"], "set A membership preserved");
+    assert_eq!(b_titles, ["Gamma", "Alpha"], "set B membership added");
+
+    // DLP mirrors the merged tree too.
+    let dlp = dlp::read_playlists(&usb.join("PIONEER/rekordbox/exportLibrary.db")).unwrap();
+    assert_eq!(dlp.playlists.len(), 2);
 
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&usb);
@@ -226,9 +309,9 @@ fn export_then_read_back_full_surface() {
 fn export_refuses_empty_and_missing_dest() {
     let usb = temp_root("empty");
     let cancel = AtomicBool::new(false);
-    let err = export_usb(&usb, &[], &[], &mut |_| {}, &cancel).unwrap_err();
+    let err = export_usb(&usb, &[], &[], ExportMode::Replace, &mut |_| {}, &cancel).unwrap_err();
     assert!(matches!(err, ExportError::NoTracks));
-    let err = export_usb(Path::new("/nonexistent-ordnung"), &[], &[], &mut |_| {}, &cancel)
+    let err = export_usb(Path::new("/nonexistent-ordnung"), &[], &[], ExportMode::Replace, &mut |_| {}, &cancel)
         .unwrap_err();
     assert!(matches!(err, ExportError::BadDestination(_)));
     let _ = std::fs::remove_dir_all(&usb);
@@ -241,7 +324,7 @@ fn cancel_aborts_before_completion() {
     let a = audio_file(&src, "x.mp3", 2_000);
     let tracks = vec![track(1, &a, Format::Mp3, "X", "Y")];
     let cancel = AtomicBool::new(true); // canceled from the start
-    let err = export_usb(&usb, &tracks, &[], &mut |_| {}, &cancel).unwrap_err();
+    let err = export_usb(&usb, &tracks, &[], ExportMode::Replace, &mut |_| {}, &cancel).unwrap_err();
     assert!(matches!(err, ExportError::Canceled));
     assert!(
         !usb.join("PIONEER/rekordbox/export.pdb").exists(),

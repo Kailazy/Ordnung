@@ -1676,6 +1676,10 @@ struct ExportConfirm {
     scope: String,
     n_tracks: usize,
     n_playlists: usize,
+    /// True = rebuild the stick from this selection alone; false = add to
+    /// whatever export is already on it. Scoped playlist exports default to
+    /// merge; the whole-library button defaults to replace.
+    replace: bool,
 }
 
 /// A request raised by a track row's right-click context menu. Collected inside

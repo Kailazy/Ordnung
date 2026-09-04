@@ -124,6 +124,11 @@ enum Command {
         /// contents). Default: the whole catalog and every playlist.
         #[arg(long = "playlist", value_name = "ID")]
         playlists: Vec<u64>,
+        /// Rebuild the stick from this selection alone, discarding whatever
+        /// export is already on it. Default is to ADD to the existing export
+        /// (tracks already present are kept; playlists merge by name).
+        #[arg(long)]
+        replace: bool,
     },
 }
 
@@ -196,7 +201,9 @@ fn main() {
         Command::Convert { ids, to, bitrate, out, in_place, yes } => {
             commands::convert(&db, &ids, &to, bitrate, out.as_deref(), in_place, yes)
         }
-        Command::Export { dest, playlists } => commands::export(&db, &dest, &playlists),
+        Command::Export { dest, playlists, replace } => {
+            commands::export(&db, &dest, &playlists, replace)
+        }
     };
 
     if let Err(e) = result {

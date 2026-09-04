@@ -182,16 +182,129 @@ impl Intern {
     }
 }
 
+/// How a new export relates to whatever is already on the stick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExportMode {
+    /// Rebuild the stick from this selection alone. The browse database ends
+    /// up listing exactly `tracks`; any earlier export's extra tracks and
+    /// playlists disappear from it (their audio under `/Contents` is left
+    /// untouched, just unreferenced).
+    #[default]
+    Replace,
+    /// Add this selection to whatever the stick already carries. Tracks
+    /// already present (matched by `/Contents` path) keep their existing id,
+    /// filename and ANLZ files; genuinely new tracks are appended. Playlists
+    /// merge by name — an incoming playlist with an existing name replaces
+    /// that one's membership, a new name is added.
+    Merge,
+}
+
+/// One track already on the stick, reconstructed from the existing export so a
+/// merge can preserve it verbatim (same id, same `/Contents` name, same ANLZ
+/// files) without re-copying anything.
+struct ExistingTrack {
+    id: u32,
+    usb_path: String,
+    row: TrackRow,
+}
+
+/// Read the export already at `dest_root` for a merge. Returns the existing
+/// tracks (keyed for path lookup) and playlist nodes. A stick with no export
+/// (or an unreadable one) merges as if empty.
+fn read_existing(dest_root: &Path) -> (Vec<ExistingTrack>, Vec<PlaylistRow>) {
+    let pdb = dest_root
+        .join("PIONEER")
+        .join("rekordbox")
+        .join("export.pdb");
+    let Ok(export) = crate::pdb::read_export(&pdb) else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut tracks = Vec::new();
+    for (id, t) in &export.tracks {
+        // Rebuild just enough of the row to re-emit it. The read-side view is
+        // lossy (no file_size/master id/etc.), so fields it can't see are
+        // derived the same way a fresh export would derive them, and the audio
+        // + ANLZ bytes already on the stick are what actually matter.
+        let name = t.file_path.rsplit('/').next().unwrap_or("").to_string();
+        let mut row = TrackRow {
+            id: *id,
+            master_content_id: master_content_id(*id),
+            tempo_centi_bpm: t.tempo_centi_bpm,
+            duration_s: t.duration_s,
+            bitrate_kbps: t.bitrate_kbps,
+            sample_rate_hz: t.sample_rate_hz,
+            year: t.year,
+            file_type: file_type_from_ext(&name),
+            analyze_path: t
+                .analyze_path
+                .clone()
+                .unwrap_or_else(|| default_anlz_path(*id)),
+            title: t.title.clone(),
+            comment: t.comment.clone(),
+            filename: name.clone(),
+            file_path: t.file_path.clone(),
+            sample_depth: 16,
+            // date_added is stamped with the export date by the caller.
+            ..Default::default()
+        };
+        // Re-fetch file size from the stick so the row stays truthful.
+        let on_disk = dest_root.join(t.file_path.trim_start_matches('/'));
+        row.file_size = std::fs::metadata(&on_disk)
+            .map(|m| m.len().min(u32::MAX as u64) as u32)
+            .unwrap_or(0);
+        tracks.push(ExistingTrack {
+            id: *id,
+            usb_path: t.file_path.clone(),
+            row,
+        });
+    }
+    let playlists = export
+        .playlists
+        .iter()
+        .map(|p| PlaylistRow {
+            id: p.id,
+            parent_id: p.parent_id,
+            sort_order: p.sort_order,
+            is_folder: p.is_folder,
+            name: p.name.clone(),
+        })
+        .collect();
+    (tracks, playlists)
+}
+
+/// File-type enum from a filename extension (the read side doesn't store it).
+fn file_type_from_ext(name: &str) -> u16 {
+    match name.rsplit('.').next().map(|e| e.to_lowercase()).as_deref() {
+        Some("mp3") => 1,
+        Some("m4a") | Some("aac") => 4,
+        Some("flac") => 5,
+        Some("wav") => 11,
+        Some("aif") | Some("aiff") => 12,
+        _ => 0,
+    }
+}
+
+/// The ANLZ path a fresh export would give track `id` (P-dir + 8-hex).
+fn default_anlz_path(id: u32) -> String {
+    format!(
+        "/PIONEER/USBANLZ/P{:03}/{:08X}/ANLZ0000.DAT",
+        (id - 1) / 256,
+        id
+    )
+}
+
 /// Export `tracks` (in the given order) and `playlists` onto `dest_root`.
 ///
 /// The destination is a mounted FAT32 volume root or any directory (a staging
-/// folder, an `ORDNUNG_FAKE_USB` root). Existing rekordbox files there are
-/// overwritten; audio already present in `/Contents` with matching size is
-/// not re-copied, so re-exports are incremental.
+/// folder, an `ORDNUNG_FAKE_USB` root). `mode` decides whether the stick is
+/// rebuilt from this selection ([`ExportMode::Replace`]) or the selection is
+/// added to what is already there ([`ExportMode::Merge`]). Audio already
+/// present in `/Contents` with matching size is not re-copied either way.
 pub fn export_usb(
     dest_root: &Path,
     tracks: &[Track],
     playlists: &[Playlist],
+    mode: ExportMode,
     progress: &mut dyn FnMut(ExportProgress),
     cancel: &AtomicBool,
 ) -> Result<ExportReport> {
@@ -216,6 +329,22 @@ pub fn export_usb(
     let mut report = ExportReport::default();
     let date = today();
 
+    // ---- carry-over from an existing export (Merge only) -----------------
+    // In Merge mode the tracks already on the stick are kept verbatim — same
+    // id, filename and ANLZ files — and the new selection is layered on top.
+    let (existing_tracks, existing_playlists) = if mode == ExportMode::Merge {
+        read_existing(dest_root)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    // Path (as stored on the stick) → its existing id, so a re-selected track
+    // reuses its slot instead of getting a duplicate.
+    let existing_by_path: HashMap<String, u32> = existing_tracks
+        .iter()
+        .map(|e| (e.usb_path.to_lowercase(), e.id))
+        .collect();
+    let mut next_id = existing_tracks.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+
     // ---- resolve tracks: filenames, interned ids, metadata ---------------
     let mut artists = Intern::default();
     let mut albums = Intern::default();
@@ -223,8 +352,15 @@ pub fn export_usb(
     let mut labels = Intern::default();
     let mut keys = Intern::default();
 
-    let mut taken: HashSet<String> = HashSet::new();
+    // Filenames already taken (existing rows + rows we assign this pass).
+    let mut taken: HashSet<String> = existing_tracks
+        .iter()
+        .map(|e| e.row.filename.to_lowercase())
+        .collect();
     let mut resolved: Vec<ExportTrack> = Vec::new();
+    // Track ids we've placed this pass, to skip carrying an existing row that
+    // the new selection already re-covers.
+    let mut placed_ids: HashSet<u32> = HashSet::new();
 
     for t in tracks {
         let source = PathBuf::from(&t.source_path);
@@ -238,9 +374,9 @@ pub fn export_usb(
                 .push((t.id, "format not CDJ-playable".into()));
             continue;
         }
-        let id = resolved.len() as u32 + 1;
 
-        // Unique FAT name (FAT is case-insensitive — dedupe accordingly).
+        // Filename first, so a merge can spot a track already on the stick by
+        // its `/Contents` path and reuse that id, filename and ANLZ dir.
         let base = sanitize_fat(
             source
                 .file_name()
@@ -252,12 +388,28 @@ pub fn export_usb(
             Some((s, e)) => (s.to_string(), format!(".{e}")),
             None => (base.clone(), String::new()),
         };
-        let mut name = base.clone();
-        let mut n = 2;
-        while !taken.insert(name.to_lowercase()) {
-            name = format!("{stem} ({n}){ext}");
-            n += 1;
-        }
+        // Does this exact `/Contents/<base>` already live on the stick?
+        let reuse_id = existing_by_path
+            .get(&format!("/contents/{}", base.to_lowercase()))
+            .copied();
+        let (id, name) = match reuse_id {
+            Some(id) => {
+                taken.insert(base.to_lowercase());
+                (id, base.clone())
+            }
+            None => {
+                let mut name = base.clone();
+                let mut n = 2;
+                while !taken.insert(name.to_lowercase()) {
+                    name = format!("{stem} ({n}){ext}");
+                    n += 1;
+                }
+                let id = next_id;
+                next_id += 1;
+                (id, name)
+            }
+        };
+        placed_ids.insert(id);
         let usb_path = format!("/Contents/{name}");
 
         let file_size = std::fs::metadata(&source)
@@ -332,7 +484,28 @@ pub fn export_usb(
             copy_needed,
         });
     }
-    if resolved.is_empty() {
+    // ---- carry over existing tracks the selection didn't re-cover --------
+    // Their audio and ANLZ files already sit on the stick, so they need a row
+    // (with re-interned metadata) but no copy and no ANLZ write. Re-interning
+    // pulls their artist/album/genre/label names out of the row strings we
+    // read back, so the browse tables stay populated for them too.
+    let mut carried: Vec<TrackRow> = Vec::new();
+    for e in &existing_tracks {
+        if placed_ids.contains(&e.id) {
+            continue; // the new selection re-covered this track
+        }
+        // The read side didn't preserve interned *names*, only that the row had
+        // them; re-intern from the DLP mirror is out of reach here, so carried
+        // rows keep their text fields but resolve id references to 0 (the
+        // player still lists them by title/filename). Their date_added is set
+        // to this export's date for consistency.
+        let mut row = e.row.clone();
+        row.date_added = date.clone();
+        row.analyze_date = date.clone();
+        carried.push(row);
+    }
+
+    if resolved.is_empty() && carried.is_empty() {
         return Err(ExportError::NoTracks);
     }
 
@@ -388,31 +561,83 @@ pub fn export_usb(
         detail: "export.pdb".into(),
     });
 
+    // Catalog track id → the pdb track id it landed on (new or reused slot).
     let by_catalog: HashMap<Id, u32> = resolved
         .iter()
         .map(|t| (t.catalog_id, t.row.id))
         .collect();
-    // Export playlist ids: 1..M in listing order; parents remapped (a parent
-    // outside the exported set becomes top-level rather than dangling).
-    let pl_ids: HashMap<Id, u32> = playlists
+
+    // Build the export playlist tree. In Merge mode we start from the existing
+    // tree (preserving ids and existing memberships) and layer the incoming
+    // playlists on by name: an incoming name that already exists replaces that
+    // node's membership; a new name is appended. In Replace mode the existing
+    // tree is empty, so this reduces to numbering the incoming playlists 1..M.
+    let mut playlist_rows: Vec<PlaylistRow> = existing_playlists.clone();
+    let mut entries: Vec<(u32, u32, u32)> = Vec::new();
+    // Existing memberships are read straight back onto their (unchanged) track
+    // ids, except for any node an incoming playlist is about to replace.
+    let existing_export = if mode == ExportMode::Merge {
+        crate::pdb::read_export(&rb_dir.join("export.pdb")).ok()
+    } else {
+        None
+    };
+    let mut next_pl_id = playlist_rows.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+    // Incoming names that will replace an existing node (so we drop its old
+    // membership below).
+    let incoming_names: HashSet<String> = playlists
         .iter()
-        .enumerate()
-        .map(|(i, p)| (p.id, i as u32 + 1))
+        .filter(|p| !p.is_folder)
+        .map(|p| clamp(&p.name, 300).to_lowercase())
         .collect();
-    let mut playlist_rows = Vec::new();
-    let mut entries = Vec::new();
-    for (i, p) in playlists.iter().enumerate() {
-        let id = i as u32 + 1;
-        playlist_rows.push(PlaylistRow {
-            id,
-            parent_id: p
-                .parent
-                .and_then(|pp| pl_ids.get(&pp).copied())
-                .unwrap_or(0),
-            sort_order: id,
-            is_folder: p.is_folder,
-            name: clamp(&p.name, 300),
-        });
+    if let Some(exp) = &existing_export {
+        for p in &playlist_rows {
+            if p.is_folder || incoming_names.contains(&p.name.to_lowercase()) {
+                continue;
+            }
+            if let Some(ids) = exp.entries.get(&p.id) {
+                for (i, tid) in ids.iter().enumerate() {
+                    entries.push((i as u32 + 1, *tid, p.id));
+                }
+            }
+        }
+    }
+    // Map an incoming catalog playlist id → the export playlist id it becomes.
+    let mut pl_ids: HashMap<Id, u32> = HashMap::new();
+    for p in playlists {
+        let clamped = clamp(&p.name, 300);
+        // Reuse an existing node of the same name+kind, else mint a new id.
+        let id = playlist_rows
+            .iter()
+            .find(|e| e.name == clamped && e.is_folder == p.is_folder)
+            .map(|e| e.id)
+            .unwrap_or_else(|| {
+                let id = next_pl_id;
+                next_pl_id += 1;
+                id
+            });
+        pl_ids.insert(p.id, id);
+    }
+    for p in playlists {
+        let id = pl_ids[&p.id];
+        let parent_id = p
+            .parent
+            .and_then(|pp| pl_ids.get(&pp).copied())
+            .unwrap_or(0);
+        let clamped = clamp(&p.name, 300);
+        match playlist_rows.iter_mut().find(|e| e.id == id) {
+            Some(existing) => {
+                existing.parent_id = parent_id;
+                existing.name = clamped;
+                existing.is_folder = p.is_folder;
+            }
+            None => playlist_rows.push(PlaylistRow {
+                id,
+                parent_id,
+                sort_order: id,
+                is_folder: p.is_folder,
+                name: clamped,
+            }),
+        }
         if !p.is_folder {
             let mut idx = 1u32;
             for tid in &p.track_ids {
@@ -424,10 +649,16 @@ pub fn export_usb(
         }
     }
     report.playlists_exported = playlist_rows.len();
-    report.tracks_exported = resolved.len();
+    report.tracks_exported = resolved.len() + carried.len();
 
+    // The full track set the database lists: freshly resolved + carried-over.
+    let all_track_rows: Vec<TrackRow> = resolved
+        .iter()
+        .map(|t| t.row.clone())
+        .chain(carried.iter().cloned())
+        .collect();
     let tables = PdbTables {
-        tracks: resolved.iter().map(|t| t.row.clone()).collect(),
+        tracks: all_track_rows,
         genres: genres.rows,
         artists: artists.rows,
         albums: albums.rows,

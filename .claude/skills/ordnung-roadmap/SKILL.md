@@ -98,11 +98,20 @@ export.pdb incl. static menu tables + one-shot page signatures), `anlz`
 re-copy, ANLZ per track, exportExt.pdb skeleton), and `dlp::write_library`
 (full 22-table SQLCipher exportLibrary.db) — playlists land in *both*
 databases so CDJ-2000→XDJ-AZ generations all see them. Cues export as empty
-lists (Phase 6). Surfaced as CLI `export DEST [--playlist ID]…` and, in the GUI: the USB
+lists (Phase 6). **Additive by default** (`ExportMode::Merge`): a scoped
+export adds to whatever is already on the stick — tracks already present
+(matched by `/Contents` path) keep their id/filename/ANLZ files, new tracks
+append after the max id, and playlists merge by name (same name updates its
+membership, new name is added). `ExportMode::Replace` rebuilds from the
+selection alone (the whole-library button, or CLI `--replace`). Known
+limitation: carried-over tracks (on the stick but not in the current
+selection) keep title/BPM/key/waveform but their artist/album/genre/label
+interned refs resolve to 0, since the read-side pdb view is lossy — re-export
+including them (or a Replace) restores full browse metadata. Surfaced as CLI
+`export DEST [--playlist ID]… [--replace]` and, in the GUI: the USB
 view's confirm-gated "⇪ Export entire library" button, per-playlist/folder
 right-click "Export to <device>…" (rekordbox-style scoped export via
-`Catalog::export_selection`; the confirm modal states the stick will list
-exactly the selection — no merge with a previous export yet), device-playlist
+`Catalog::export_selection`), device-playlist
 right-click "Import to library…" (copies tracks + recreates the playlist
 locally in order), and "Save track list…" (TSV .txt) on both local and device
 playlists. All jobs run in the background with Abort.

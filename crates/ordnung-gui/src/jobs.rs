@@ -133,14 +133,16 @@ impl App {
         dest: PathBuf,
         playlist_ids: Vec<Id>,
         scope: String,
+        replace: bool,
     ) {
         let (tx, rx) = mpsc::channel();
         self.job_rx = Some(rx);
         let cancel = Arc::new(AtomicBool::new(false));
         self.job_cancel = Some(cancel.clone());
-        self.status = format!("Exporting {scope} to {}…", dest.display());
+        let verb = if replace { "Exporting" } else { "Adding" };
+        self.status = format!("{verb} {scope} to {}…", dest.display());
         let db = self.db_path.clone();
-        thread::spawn(move || run_export(db, dest, playlist_ids, cancel, tx, ctx));
+        thread::spawn(move || run_export(db, dest, playlist_ids, replace, cancel, tx, ctx));
     }
 
     /// Import paths dropped onto the window from Finder (folders are walked,
@@ -628,15 +630,17 @@ pub(crate) fn run_scan(
 /// files skip the copy), analysis is serialized to ANLZ files, and playlists
 /// land in both `export.pdb` and `exportLibrary.db` so every CDJ generation
 /// sees them. Library sources are read, never written.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_export(
     db: PathBuf,
     dest: PathBuf,
     playlist_ids: Vec<Id>,
+    replace: bool,
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
 ) {
-    use ordnung_rbdb::export::{export_usb, ExportError, ExportStage};
+    use ordnung_rbdb::export::{export_usb, ExportError, ExportMode, ExportStage};
 
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
@@ -674,10 +678,16 @@ pub(crate) fn run_export(
         })
         .collect();
 
+    let mode = if replace {
+        ExportMode::Replace
+    } else {
+        ExportMode::Merge
+    };
     let result = export_usb(
         &dest,
         &tracks,
         &playlists,
+        mode,
         &mut |p| {
             let stage = match p.stage {
                 ExportStage::CopyingAudio => "Copying",

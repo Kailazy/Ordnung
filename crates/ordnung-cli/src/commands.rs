@@ -843,9 +843,9 @@ fn parse_note(s: &str) -> Result<u8> {
     Ok((base + accidental).rem_euclid(12) as u8)
 }
 
-/// `export DEST [--playlist ID]...` — build a native rekordbox USB.
-pub fn export(db: &Path, dest: &Path, playlist_ids: &[u64]) -> Result<()> {
-    use ordnung_rbdb::export::{export_usb, ExportStage};
+/// `export DEST [--playlist ID]... [--replace]` — build a native rekordbox USB.
+pub fn export(db: &Path, dest: &Path, playlist_ids: &[u64], replace: bool) -> Result<()> {
+    use ordnung_rbdb::export::{export_usb, ExportMode, ExportStage};
 
     let catalog = Catalog::open(db).context("opening catalog")?;
     // Strict id validation up front — export_selection ignores unknown ids.
@@ -861,9 +861,20 @@ pub fn export(db: &Path, dest: &Path, playlist_ids: &[u64]) -> Result<()> {
     if tracks.is_empty() {
         bail!("nothing to export — no tracks matched");
     }
+    let mode = if replace {
+        ExportMode::Replace
+    } else {
+        ExportMode::Merge
+    };
+    let existing = dest.join("PIONEER/rekordbox/export.pdb").is_file();
 
     println!(
-        "Exporting {} track(s), {} playlist node(s) → {}",
+        "{} {} track(s), {} playlist node(s) → {}",
+        if mode == ExportMode::Merge && existing {
+            "Merging"
+        } else {
+            "Exporting"
+        },
         tracks.len(),
         playlists.len(),
         dest.display()
@@ -876,7 +887,7 @@ pub fn export(db: &Path, dest: &Path, playlist_ids: &[u64]) -> Result<()> {
     );
     let cancel = std::sync::atomic::AtomicBool::new(false);
     let mut stage = ExportStage::CopyingAudio;
-    let report = export_usb(dest, &tracks, &playlists, &mut |p| {
+    let report = export_usb(dest, &tracks, &playlists, mode, &mut |p| {
         if p.stage != stage {
             stage = p.stage;
             bar.set_position(0);

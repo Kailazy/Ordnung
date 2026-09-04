@@ -2708,6 +2708,8 @@ impl eframe::App for App {
                     scope,
                     n_tracks,
                     n_playlists,
+                    // Sending one playlist adds it to the stick, rekordbox-style.
+                    replace: false,
                 });
             }
             Some(SidebarAction::SavePlaylistText(id)) => {

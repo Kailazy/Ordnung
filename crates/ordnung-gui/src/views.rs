@@ -2164,6 +2164,8 @@ export. To export just one playlist, right-click it in the Library sidebar",
                         scope: "your entire library".into(),
                         n_tracks,
                         n_playlists: self.playlists.len(),
+                        // The whole-library button rebuilds the stick.
+                        replace: true,
                     });
                 }
             });
