@@ -223,6 +223,7 @@ impl App {
             usb_edit: UsbEdit::default(),
             usb_edit_saved: UsbEdit::default(),
             nav_density: NavDensity::Wide,
+            nav_drag: None,
             view: LibraryView::Library,
             renaming: None,
             sort: None,
@@ -1751,26 +1752,37 @@ impl eframe::App for App {
         let prev_view = self.view.clone();
         let mut sidebar_action: Option<SidebarAction> = None;
         // The sidebar snaps between three designed layouts (see `NavDensity`)
-        // rather than resizing freely, and it is *never* at an in-between width
-        // — not even mid-drag. Dragging the edge picks a tier; the panel jumps
-        // to that tier's width and stays there. Letting the panel follow the
-        // pointer and only snap on release just moved the ugly continuous
-        // resize into the drag itself, which is the thing being fixed: at every
-        // instant the sidebar is one of three designed layouts.
+        // rather than resizing freely, and the layout it shows is *frozen* for
+        // the whole of a drag. Committing the tier live meant the labels
+        // rewrapped under the pointer on the way past every boundary — the
+        // sidebar flickering through layouts you were only travelling over, not
+        // choosing. So the edge drag no longer moves the panel at all: a ghost
+        // line follows the pointer, and the tier it implies is applied once, on
+        // release. One layout change per drag, at the moment you commit to it.
         let drag_id = egui::Id::new("library_nav").with("__resize");
-        // The tier the pointer is asking for while the edge is held. Chosen with
-        // hysteresis (see `NavDensity::dragged_to`) so a pointer hovering right
-        // on a boundary doesn't strobe between two layouts.
         if ctx.is_being_dragged(drag_id) {
             if let Some(pos) = ctx.pointer_interact_pos() {
-                let want = self
-                    .nav_density
-                    .dragged_to(pos.x - ctx.screen_rect().left());
-                if want != self.nav_density {
-                    self.nav_density = want;
-                    self.config.nav_density = want.key().to_string();
-                    let _ = self.config.save();
-                }
+                let w = pos.x - ctx.screen_rect().left();
+                // Hysteresis is applied against the tier in force (see
+                // `NavDensity::dragged_to`), which is the tier the panel is
+                // still showing — so the ghost snaps to the same tier the drop
+                // will pick, and never previews a landing the release refuses.
+                self.nav_drag = Some(crate::NavDrag {
+                    x: pos.x,
+                    target: self.nav_density.dragged_to(w),
+                });
+                // The panel is frozen for the duration, so nothing else is
+                // asking for frames — without this the ghost would only advance
+                // when some other part of the UI happened to repaint, and the
+                // line would visibly lag the cursor.
+                ctx.request_repaint();
+            }
+        } else if let Some(drag) = self.nav_drag.take() {
+            // Released: this is the only place the tier changes.
+            if drag.target != self.nav_density {
+                self.nav_density = drag.target;
+                self.config.nav_density = drag.target.key().to_string();
+                let _ = self.config.save();
             }
         }
         // Naming a playlist needs a text field, and the rail has no room for
@@ -1826,7 +1838,6 @@ impl eframe::App for App {
                 // Whether the Recent tab currently has anything on screen —
                 // pinned rows included. Guards the empty-inbox eviction below.
                 let rows_empty = self.rows.is_empty();
-                let vinyl_count = self.vinyl_count;
                 // Library health only earns sidebar space when something is
                 // actually wrong; the tab under "All songs" appears with the
                 // first missing file and vanishes once the catalog is clean.
@@ -1995,15 +2006,6 @@ impl eframe::App for App {
                 // place into whichever slot `nav_primary` assigns it — big and
                 // leading when vinyl is primary, a compact pinned row otherwise.
                 let draw_vinyl_tile = |ui: &mut egui::Ui, view: &mut LibraryView, lead: bool| {
-                    // "Vinyl Collection (130)" is the longest label in the
-                    // sidebar and the first thing to truncate, so the narrow
-                    // tier trims it to "Vinyl (130)" rather than clipping it.
-                    let vinyl_label = match (density, vinyl_count) {
-                        (NavDensity::Wide, 0) => "Vinyl Collection".to_string(),
-                        (NavDensity::Wide, n) => format!("Vinyl Collection ({n})"),
-                        (_, 0) => "Vinyl".to_string(),
-                        (_, n) => format!("Vinyl ({n})"),
-                    };
                     // The vinyl shelf is a top-level library whether or not it
                     // leads the sidebar, so at the icon tier it keeps the taller
                     // tile that earns the bigger glyph; only the captioned tiers
@@ -2017,7 +2019,11 @@ impl eframe::App for App {
                         ui,
                         density,
                         "💿",
-                        &vinyl_label,
+                        // Just "Vinyl", at every tier and with no count. The
+                        // shelf is a place you go, not a number you track, and
+                        // dropping the count also retires the longest string
+                        // the sidebar had to fit.
+                        "Vinyl",
                         *view == LibraryView::Vinyl,
                         h,
                         size,
@@ -2339,6 +2345,53 @@ impl eframe::App for App {
                     native_drag = self.draw_table(ui);
                 }
             });
+
+        // The resize ghost. While the edge is held the panel itself does not
+        // move, so this line is the entire feedback for the drag: it tracks the
+        // pointer freely, and a wider marker sits at the tier the drop would
+        // land on. Painted in a foreground layer after the panel so it reads on
+        // top of the sidebar's own content rather than being clipped by it.
+        // The panel is pinned to a single width (`settled..=settled`), so egui
+        // reads it as already at its minimum and offers a one-way "resize east"
+        // cursor — implying the sidebar can only be widened. It snaps both ways,
+        // so say so, on hover as well as mid-drag.
+        if self.nav_drag.is_some() || ctx.is_pointer_over_area() && {
+            let r = ctx.read_response(drag_id);
+            r.map(|r| r.hovered()).unwrap_or(false)
+        } {
+            ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        if let Some(drag) = self.nav_drag {
+            let screen = ctx.screen_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("nav_resize_ghost"),
+            ));
+            // Where the panel would settle if released now. Drawn solid, in the
+            // nav accent, so the eye reads the landing rather than the pointer.
+            let snap_x = screen.left() + drag.target.width();
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(snap_x - 1.5, screen.top()),
+                    egui::pos2(snap_x + 1.5, screen.bottom()),
+                ),
+                egui::Rounding::ZERO,
+                crate::sidebar::NAV_ACCENT,
+            );
+            // The pointer's own position, dimmer and hairline: it explains why
+            // the snap marker sits where it does while the two are apart, and
+            // is redundant (so unobtrusive) once the drag settles onto a tier.
+            if (drag.x - snap_x).abs() > 2.0 {
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(drag.x - 0.5, screen.top()),
+                        egui::pos2(drag.x + 0.5, screen.bottom()),
+                    ),
+                    egui::Rounding::ZERO,
+                    egui::Color32::from_white_alpha(60),
+                );
+            }
+        }
 
         // Native drag-out to rekordbox/Finder. A ⌥-drag begun in the table this
         // frame (`draw_table` returned its files) starts an `NSDraggingSession`

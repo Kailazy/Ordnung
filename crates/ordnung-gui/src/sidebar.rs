@@ -513,7 +513,7 @@ pub(crate) fn folder_context_menu(
 
 // ── Sidebar width tiers ───────────────────────────────────────────────────────
 // The sidebar isn't a free splitter. Dragging it anywhere in between only ever
-// produced half-truncated labels, so the panel locks into three designed
+// produced half-truncated labels, so the panel locks into two designed
 // layouts. Each tier is a real layout, not the same layout at a different size,
 // and each is sized from the content it has to hold:
 //
@@ -525,19 +525,18 @@ pub(crate) fn folder_context_menu(
 //     a predictable column of identical targets, so the rule is absolute:
 //     nothing in this tier renders a string.
 //
-//   Narrow (184pt) — one full-width tile per row, single-line. Sized so the
-//     longest label that must survive ("Vinyl Collection" is shortened here to
-//     "Vinyl", so the real worst case is a playlist name) has room beside its
-//     glyph and its track count.
-//
-//   Wide (260pt) — the designed default. Wide enough for the "All songs" /
-//     "New" tile pair on one row, and for "Vinyl Collection (130)" unabbreviated,
-//     which is the longest string the sidebar ever shows.
+//   Narrow (212pt) — the default, and the only captioned layout. One
+//     full-width tile per row, single-line. A third, wider tier used to sit
+//     above this one; it earned its width only by putting the "All songs" /
+//     "New" pair on a shared row, and once "New" became a badge inside the
+//     "All songs" tile there was nothing left for the extra 76pt to do but
+//     stretch the same rows. The width here is set by the one string that
+//     actually varies — a playlist name — leaving a useful prefix beside its
+//     glyph and track count before the ellipsis.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum NavDensity {
     Icon,
     Narrow,
-    Wide,
 }
 
 impl NavDensity {
@@ -548,8 +547,7 @@ impl NavDensity {
             // 64 and deliberately so: it reads as a rail rather than as a
             // sidebar that lost an argument with the drag handle.
             NavDensity::Icon => 56.0,
-            NavDensity::Narrow => 184.0,
-            NavDensity::Wide => 260.0,
+            NavDensity::Narrow => 212.0,
         }
     }
 
@@ -560,7 +558,7 @@ impl NavDensity {
 
     /// The tier whose width is closest to `w`.
     pub(crate) fn nearest(w: f32) -> Self {
-        [NavDensity::Icon, NavDensity::Narrow, NavDensity::Wide]
+        [NavDensity::Icon, NavDensity::Narrow]
             .into_iter()
             .min_by(|a, b| (a.width() - w).abs().total_cmp(&(b.width() - w).abs()))
             .unwrap()
@@ -605,7 +603,7 @@ impl NavDensity {
         match key {
             "icon" => NavDensity::Icon,
             "narrow" => NavDensity::Narrow,
-            _ => NavDensity::Wide,
+            _ => NavDensity::Narrow,
         }
     }
 
@@ -614,7 +612,6 @@ impl NavDensity {
         match self {
             NavDensity::Icon => "icon",
             NavDensity::Narrow => "narrow",
-            NavDensity::Wide => "wide",
         }
     }
 }
