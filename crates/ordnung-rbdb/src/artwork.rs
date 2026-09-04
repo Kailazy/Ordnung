@@ -71,10 +71,10 @@ pub(crate) fn write_files(dest_root: &Path, art: &ArtworkFiles) -> std::io::Resu
         .join(format!("{:05}", (art.id - 1) / 20 + 1));
     std::fs::create_dir_all(&dir)?;
     for (prefix, bytes) in [("a", &art.small), ("b", &art.small)] {
-        std::fs::write(dir.join(format!("{prefix}{}.jpg", art.id)), bytes)?;
+        crate::export::write_synced(&dir.join(format!("{prefix}{}.jpg", art.id)), bytes)?;
     }
     for (prefix, bytes) in [("a", &art.medium), ("b", &art.medium)] {
-        std::fs::write(dir.join(format!("{prefix}{}_m.jpg", art.id)), bytes)?;
+        crate::export::write_synced(&dir.join(format!("{prefix}{}_m.jpg", art.id)), bytes)?;
     }
     Ok(dir)
 }

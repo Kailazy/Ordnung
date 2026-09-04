@@ -340,7 +340,7 @@ fn rewrite_pdb_playlist_tables(
     // Atomic replace: a yanked stick mid-write leaves either the old database
     // or the new one, never a torn page.
     let tmp = pdb_path.with_extension("pdb.tmp");
-    std::fs::write(&tmp, &data).map_err(io_err)?;
+    crate::export::write_synced(&tmp, &data).map_err(io_err)?;
     std::fs::rename(&tmp, pdb_path).map_err(io_err)?;
     Ok(())
 }
@@ -400,6 +400,7 @@ fn sync_dlp_playlists(db_path: &Path, export: &RbExport) -> Result<(), ReadError
     let result = sync_dlp_playlists_at(&tmp, export);
     if result.is_ok() {
         std::fs::copy(&tmp, db_path).map_err(err_io)?;
+        crate::export::sync_existing(db_path).map_err(err_io)?;
     }
     let _ = std::fs::remove_file(&tmp);
     result

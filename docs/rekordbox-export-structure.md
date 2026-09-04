@@ -325,7 +325,11 @@ All values **big-endian**. File = `PMAI` header + tagged sections:
 next section at +len_tag).
 
 PMAI header (0x1c bytes) — identical in all 1821 files:
-`"PMAI", 0x1c, len_file, 0x00000001, 0x00010000, 0x00000001, 0x00000000`.
+`"PMAI", 0x1c, len_file, 0x00000001, 0x00010000, 0x00010000, 0x00000000`.
+(Correction 2026-09-04: the third u32 is 0x00010000, not 0x00000001 — the
+original transcription was wrong; re-verified against all 1218 DAT/EXT files.
+Writing 1 there makes rekordbox silently ignore the analysis: tracks browse
+fine but show no waveform previews.)
 
 Section order is rigid (all 607 sets):
 

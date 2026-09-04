@@ -51,6 +51,21 @@ fn io_err(path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> ExportErro
     move |source| ExportError::Io { path, source }
 }
 
+/// Write `bytes` to `path` and fsync before returning. Everything the export
+/// puts on the stick goes through this (or [`sync_existing`]): a USB pulled
+/// without ejecting must never hold a half-flushed database — that reads as
+/// "Device library is corrupted" on players.
+pub(crate) fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut f = std::fs::File::create(path)?;
+    std::io::Write::write_all(&mut f, bytes)?;
+    f.sync_all()
+}
+
+/// fsync a file that was produced by `fs::copy`.
+pub(crate) fn sync_existing(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
 /// What the export is doing right now; `done`/`total` count within the stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportStage {
@@ -532,7 +547,8 @@ pub fn export_usb(
         });
         if tr.copy_needed {
             let dest = contents.join(&tr.row.filename);
-            let n = std::fs::copy(&tr.source, &dest).map_err(io_err(dest))?;
+            let n = std::fs::copy(&tr.source, &dest).map_err(io_err(dest.clone()))?;
+            sync_existing(&dest).map_err(io_err(dest))?;
             report.bytes_copied += n;
         }
     }
@@ -571,9 +587,9 @@ pub fn export_usb(
             bands: &tr.bands,
         };
         let dat = dir.join("ANLZ0000.DAT");
-        std::fs::write(&dat, anlz::build_dat(&inp)).map_err(io_err(dat))?;
+        write_synced(&dat, &anlz::build_dat(&inp)).map_err(io_err(dat))?;
         let ext = dir.join("ANLZ0000.EXT");
-        std::fs::write(&ext, anlz::build_ext(&inp)).map_err(io_err(ext))?;
+        write_synced(&ext, &anlz::build_ext(&inp)).map_err(io_err(ext))?;
     }
 
     // ---- playlists --------------------------------------------------------
@@ -700,9 +716,9 @@ pub fn export_usb(
 
     // ---- databases --------------------------------------------------------
     let pdb = rb_dir.join("export.pdb");
-    std::fs::write(&pdb, pdbw::build_export_pdb(&tables)).map_err(io_err(pdb))?;
+    write_synced(&pdb, &pdbw::build_export_pdb(&tables)).map_err(io_err(pdb))?;
     let ext_pdb = rb_dir.join("exportExt.pdb");
-    std::fs::write(&ext_pdb, pdbw::build_export_ext_pdb()).map_err(io_err(ext_pdb))?;
+    write_synced(&ext_pdb, &pdbw::build_export_ext_pdb()).map_err(io_err(ext_pdb))?;
 
     check(cancel)?;
     let device_name = dest_root

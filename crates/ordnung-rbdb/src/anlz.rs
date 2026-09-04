@@ -57,9 +57,13 @@ fn pmai(sections: Vec<Vec<u8>>) -> Vec<u8> {
     v.extend_from_slice(b"PMAI");
     v.extend_from_slice(&be32(0x1C));
     v.extend_from_slice(&be32(0x1C + body_len as u32));
+    // Header words verified against all 1218 golden ANLZ files:
+    // 1, 0x00010000, 0x00010000, 0 — the third word is 0x00010000 (a
+    // version-like field), NOT 1; rekordbox silently ignores the analysis
+    // (no waveform previews) when it doesn't match.
     v.extend_from_slice(&be32(1));
     v.extend_from_slice(&be32(0x0001_0000));
-    v.extend_from_slice(&be32(1));
+    v.extend_from_slice(&be32(0x0001_0000));
     v.extend_from_slice(&be32(0));
     for s in sections {
         v.extend_from_slice(&s);
@@ -333,6 +337,15 @@ mod tests {
             bands: &vec![64; 4 * 82],
         };
         let dat = build_dat(&inp);
+        // PMAI header words as every golden file has them; 1 in the third
+        // slot makes rekordbox drop the analysis (blank waveform previews).
+        assert_eq!(&dat[0x0C..0x1C], {
+            let mut h = Vec::new();
+            for w in [1u32, 0x0001_0000, 0x0001_0000, 0] {
+                h.extend_from_slice(&w.to_be_bytes());
+            }
+            &h.clone()[..]
+        });
         let tags: Vec<String> = walk(&dat).into_iter().map(|(t, _, _)| t).collect();
         assert_eq!(tags, ["PPTH", "PVBR", "PQTZ", "PWAV", "PWV2", "PCOB", "PCOB"]);
         // PQTZ: count and first beat round-trip.

@@ -228,6 +228,7 @@ pub(crate) fn write_library(
         let _ = std::fs::remove_file(p);
     }
     std::fs::copy(&tmp, db_path).map_err(err_io)?;
+    crate::export::sync_existing(db_path).map_err(err_io)?;
     let _ = std::fs::remove_file(&tmp);
     Ok(())
 }
