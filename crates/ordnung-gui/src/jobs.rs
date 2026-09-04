@@ -86,6 +86,38 @@ impl App {
         thread::spawn(move || run_scan(db, dir, cancel, tx, ctx, auto_analyze));
     }
 
+    /// Transfer device tracks into the local library: copy the files off the
+    /// stick into `dest` (mirroring the stick's own folder layout, minus a
+    /// rekordbox export's `Contents/` wrapper), then run the normal import —
+    /// so the copies land in the catalog and, with auto-analyze on, the
+    /// analysis chain. Explicit-only: reachable solely from the USB rows'
+    /// "Add to Library" menu and a drag onto the Library tab. Source files on
+    /// the stick are never touched.
+    pub(crate) fn spawn_usb_transfer(
+        &mut self,
+        ctx: egui::Context,
+        sources: Vec<PathBuf>,
+        vol: PathBuf,
+        dest: PathBuf,
+    ) {
+        let (tx, rx) = mpsc::channel();
+        self.job_rx = Some(rx);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.job_cancel = Some(cancel.clone());
+        self.status = format!(
+            "Copying {} track(s) from {} to the library…",
+            sources.len(),
+            vol.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| vol.display().to_string())
+        );
+        let db = self.db_path.clone();
+        let auto_analyze = self.config.auto_analyze;
+        thread::spawn(move || {
+            run_usb_transfer(db, sources, vol, dest, cancel, tx, ctx, auto_analyze)
+        });
+    }
+
     /// Import paths dropped onto the window from Finder (folders are walked,
     /// individual audio files taken as-is). Behaves exactly like "Add songs…".
     pub(crate) fn spawn_import(&mut self, ctx: egui::Context, paths: Vec<PathBuf>) {
@@ -564,6 +596,121 @@ pub(crate) fn run_scan(
     }
     let outcome = import_files(&catalog, &files, &cancel, &tx, &ctx);
     finish_import(&catalog, outcome, auto_analyze, &cancel, &tx, &ctx);
+}
+
+/// Copy device tracks into the local library folder, then import the copies.
+/// See [`App::spawn_usb_transfer`]. A file already present at its destination
+/// with the same size is not re-copied (it still gets imported, so "transfer"
+/// always ends with the tracks in the catalog); a same-name file of a
+/// *different* size keeps both — the copy lands under a numbered name, since
+/// silently overwriting a local file with a device file would destroy data.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_usb_transfer(
+    db: PathBuf,
+    sources: Vec<PathBuf>,
+    vol: PathBuf,
+    dest: PathBuf,
+    cancel: Arc<AtomicBool>,
+    tx: Sender<JobMsg>,
+    ctx: egui::Context,
+    auto_analyze: bool,
+) {
+    let catalog = match Catalog::open(&db) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            ctx.request_repaint();
+            return;
+        }
+    };
+    let total = sources.len();
+    let mut copied = 0usize;
+    let mut already = 0usize;
+    let mut failures: Vec<(String, String)> = Vec::new();
+    let mut to_import: Vec<PathBuf> = Vec::new();
+    for (i, src) in sources.iter().enumerate() {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        let _ = tx.send(JobMsg::Progress { done: i, total });
+        let _ = tx.send(JobMsg::Status(format!(
+            "Copying to library ({} of {total})…",
+            i + 1
+        )));
+        ctx.request_repaint();
+        // Mirror the stick's own layout, minus the export's Contents/ wrapper,
+        // so an artist/album tree lands as an artist/album tree.
+        let rel = src
+            .strip_prefix(&vol)
+            .unwrap_or_else(|_| Path::new(src.file_name().unwrap_or_default()));
+        let rel = rel.strip_prefix("Contents").unwrap_or(rel);
+        let mut dst = dest.join(rel);
+        if let Some(parent) = dst.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                failures.push((src.display().to_string(), e.to_string()));
+                continue;
+            }
+        }
+        let src_size = std::fs::metadata(src).map(|m| m.len()).ok();
+        if let Ok(existing) = std::fs::metadata(&dst) {
+            if src_size == Some(existing.len()) {
+                // Same file, already local: nothing to copy, still import it.
+                already += 1;
+                to_import.push(dst);
+                continue;
+            }
+            dst = unique_destination(&dst);
+        }
+        match std::fs::copy(src, &dst) {
+            Ok(_) => {
+                copied += 1;
+                to_import.push(dst);
+            }
+            Err(e) => failures.push((src.display().to_string(), e.to_string())),
+        }
+    }
+    if !failures.is_empty() {
+        let _ = tx.send(JobMsg::Failures {
+            title: "Copy to library".into(),
+            items: failures,
+        });
+    }
+    if to_import.is_empty() {
+        let _ = tx.send(JobMsg::Done("Nothing was copied.".into()));
+        ctx.request_repaint();
+        return;
+    }
+    let _ = tx.send(JobMsg::Status(format!(
+        "Copied {copied} track(s){}; importing…",
+        if already > 0 {
+            format!(" ({already} already in the library folder)")
+        } else {
+            String::new()
+        }
+    )));
+    let outcome = import_files(&catalog, &to_import, &cancel, &tx, &ctx);
+    finish_import(&catalog, outcome, auto_analyze, &cancel, &tx, &ctx);
+}
+
+/// `song.mp3` → `song (2).mp3`, `song (3).mp3`, … — the first name that
+/// doesn't collide with an existing file.
+fn unique_destination(dst: &Path) -> PathBuf {
+    let stem = dst
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = dst
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let dir = dst.parent().unwrap_or(Path::new(""));
+    for n in 2.. {
+        let candidate = dir.join(format!("{stem} ({n}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
 }
 
 /// Import a drag-and-drop of paths from Finder: directories are walked for audio
@@ -2385,4 +2532,79 @@ fn analysis_pool() -> Option<rayon::ThreadPool> {
         .num_threads(workers)
         .build()
         .ok()
+}
+
+#[cfg(test)]
+mod usb_transfer_tests {
+    use super::*;
+
+    /// The whole point of the transfer: files leave the stick's layout
+    /// (minus the export's Contents/ wrapper) and land in the library
+    /// mirror-structured; an identical file already there isn't re-copied;
+    /// a same-name different file keeps both instead of overwriting.
+    #[test]
+    fn transfer_copies_with_layout_dedupe_and_no_overwrites() {
+        let base = std::env::temp_dir().join(format!("ordnung-transfer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let vol = base.join("STICK");
+        let dest = base.join("library");
+        let a = vol.join("Contents/Artist/Album/a.mp3");
+        let b = vol.join("Contents/Artist/Album/b.mp3");
+        let c = vol.join("loose.mp3"); // plain stick file, no Contents wrapper
+        for f in [&a, &b, &c] {
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        }
+        std::fs::write(&a, b"aaaa").unwrap();
+        std::fs::write(&b, b"bbbb").unwrap();
+        std::fs::write(&c, b"cccc").unwrap();
+        // b already exists locally, identical: must be skipped, not re-copied.
+        std::fs::create_dir_all(dest.join("Artist/Album")).unwrap();
+        std::fs::write(dest.join("Artist/Album/b.mp3"), b"bbbb").unwrap();
+        // a exists locally with DIFFERENT bytes: both must survive.
+        std::fs::write(dest.join("Artist/Album/a.mp3"), b"local-version").unwrap();
+
+        let db = base.join("catalog.db");
+        let (tx, _rx) = mpsc::channel();
+        run_usb_transfer(
+            db,
+            vec![a, b, c],
+            vol,
+            dest.clone(),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+            egui::Context::default(),
+            false,
+        );
+
+        assert_eq!(
+            std::fs::read(dest.join("Artist/Album/a.mp3")).unwrap(),
+            b"local-version",
+            "an existing local file must never be overwritten"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("Artist/Album/a (2).mp3")).unwrap(),
+            b"aaaa",
+            "the device copy lands under a numbered name"
+        );
+        assert_eq!(std::fs::read(dest.join("Artist/Album/b.mp3")).unwrap(), b"bbbb");
+        assert!(
+            !dest.join("Artist/Album/b (2).mp3").exists(),
+            "an identical file must not be duplicated"
+        );
+        assert_eq!(std::fs::read(dest.join("loose.mp3")).unwrap(), b"cccc");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn unique_destination_counts_up_from_two() {
+        let dir = std::env::temp_dir().join(format!("ordnung-uniq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("song.mp3");
+        std::fs::write(&f, b"x").unwrap();
+        assert_eq!(unique_destination(&f), dir.join("song (2).mp3"));
+        std::fs::write(dir.join("song (2).mp3"), b"x").unwrap();
+        assert_eq!(unique_destination(&f), dir.join("song (3).mp3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

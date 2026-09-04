@@ -492,20 +492,24 @@ pub(crate) fn draw_usb_playlist_nodes(
 /// header. Only drawn while a stick is mounted, so the sidebar's default look
 /// is unchanged the rest of the time. Each tab gets an equal share of the strip
 /// and truncates with an ellipsis, since volume names are user-controlled and
-/// unbounded. Returns the clicked target: `None` is the catalog, `Some(path)`
-/// a volume; the caller owns the switch.
+/// unbounded.
+///
+/// The Library tab doubles as a drop target for device rows: dragging tracks
+/// off a stick onto it copies them into the library (see
+/// [`crate::DraggedUsbTracks`]) — the same gesture as dragging files into a
+/// crate, pointed at the whole collection.
 pub(crate) fn source_tabs(
     ui: &mut egui::Ui,
     volumes: &[ordnung_core::usb::UsbVolume],
     active_vol: Option<&Path>,
-) -> Option<Option<PathBuf>> {
+) -> SourceTabsResponse {
     use crate::ui::tokens::{color, font, radius, space};
 
     let n = (volumes.len() + 1) as f32;
     // Each tab's outer budget: an equal share of the strip, minus the seams.
     let budget = ((ui.available_width() - space::S1 * (n - 1.0)) / n).max(44.0);
 
-    let tab = |ui: &mut egui::Ui, label: &str, active: bool, tip: &str| -> bool {
+    let tab = |ui: &mut egui::Ui, label: &str, active: bool, tip: &str| -> egui::Response {
         let text_font = if active {
             font::strong(font::callout().size)
         } else {
@@ -567,21 +571,39 @@ pub(crate) fn source_tabs(
             color::LABEL_2
         };
         ui.painter().galley(text_pos, galley, ink);
-        resp.on_hover_note(tip).clicked()
+        resp.on_hover_note(tip)
     };
 
     let mut clicked = None;
+    let mut dropped = None;
     let strip = ui
         .horizontal(|ui| {
             let prev_spacing = ui.spacing().item_spacing.x;
             ui.spacing_mut().item_spacing.x = space::S1;
-            if tab(
+            let lib = tab(
                 ui,
                 "Library",
                 active_vol.is_none(),
-                "Your catalog and playlists",
-            ) {
+                "Your catalog and playlists. Drop device tracks here to copy \
+                 them in",
+            );
+            if lib.clicked() {
                 clicked = Some(None);
+            }
+            // Device rows dragged over the tab: outline it as a landing zone,
+            // and take the payload on release.
+            if lib
+                .dnd_hover_payload::<crate::DraggedUsbTracks>()
+                .is_some()
+            {
+                ui.painter().rect_stroke(
+                    lib.rect,
+                    egui::Rounding::same(radius::SM),
+                    egui::Stroke::new(1.5, color::ACCENT),
+                );
+            }
+            if let Some(payload) = lib.dnd_release_payload::<crate::DraggedUsbTracks>() {
+                dropped = Some(payload.0.clone());
             }
             for v in volumes {
                 let tip = if v.is_rekordbox_export {
@@ -589,7 +611,7 @@ pub(crate) fn source_tabs(
                 } else {
                     "This volume's files"
                 };
-                if tab(ui, &v.name, active_vol == Some(v.path.as_path()), tip) {
+                if tab(ui, &v.name, active_vol == Some(v.path.as_path()), tip).clicked() {
                     clicked = Some(Some(v.path.clone()));
                 }
             }
@@ -607,7 +629,15 @@ pub(crate) fn source_tabs(
         ],
         egui::Stroke::new(1.0, crate::ui::tokens::color::SEPARATOR_OPAQUE),
     );
-    clicked
+    SourceTabsResponse { clicked, dropped }
+}
+
+/// What the source-tab strip reported this frame.
+pub(crate) struct SourceTabsResponse {
+    /// Clicked target: `None` is the catalog, `Some(path)` a volume.
+    pub clicked: Option<Option<PathBuf>>,
+    /// Device rows dropped onto the Library tab — a request to copy them in.
+    pub dropped: Option<Vec<Id>>,
 }
 
 pub(crate) fn folder_context_menu(

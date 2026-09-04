@@ -1547,8 +1547,20 @@ impl App {
                                             native_drag_ids = Some(drag_ids.clone());
                                         }
                                     }
-                                    if resp.dragged() && !alt_drag && !is_usb {
-                                        resp.dnd_set_drag_payload(DraggedTracks(drag_ids.clone()));
+                                    if resp.dragged() && !alt_drag {
+                                        if is_usb {
+                                            // Device rows drag as their own payload
+                                            // type: droppable on the Library source
+                                            // tab (copy to library), invisible to
+                                            // playlist targets that need catalog ids.
+                                            resp.dnd_set_drag_payload(DraggedUsbTracks(
+                                                drag_ids.clone(),
+                                            ));
+                                        } else {
+                                            resp.dnd_set_drag_payload(DraggedTracks(
+                                                drag_ids.clone(),
+                                            ));
+                                        }
                                     }
                                     // Right-click menu. Attached to each text cell's
                                     // interactive response (which senses secondary clicks);
@@ -1575,6 +1587,25 @@ impl App {
                                         // everything below this branch edits the catalog,
                                         // which these tracks aren't in.
                                         if is_usb {
+                                            let add_label = if drag_ids.len() > 1 {
+                                                format!("＋  Add {} to Library", drag_ids.len())
+                                            } else {
+                                                "＋  Add to Library".to_string()
+                                            };
+                                            if ui
+                                                .button(add_label)
+                                                .on_hover_note(
+                                                    "Copy the file(s) into your library \
+                                                     folder and import them",
+                                                )
+                                                .clicked()
+                                            {
+                                                menu_action = Some(TrackMenuAction::AddToLibrary(
+                                                    drag_ids.clone(),
+                                                ));
+                                                ui.close_menu();
+                                            }
+                                            ui.separator();
                                             if ui.button("Reveal in Finder").clicked() {
                                                 menu_action =
                                                     Some(TrackMenuAction::RevealInFinder(
@@ -2191,6 +2222,9 @@ impl App {
             Some(TrackMenuAction::MoveToTop(pid, ids)) => self.move_in_playlist(pid, &ids, true),
             Some(TrackMenuAction::MoveToBottom(pid, ids)) => {
                 self.move_in_playlist(pid, &ids, false)
+            }
+            Some(TrackMenuAction::AddToLibrary(ids)) => {
+                self.usb_add_to_library(ctx_clone.clone(), ids);
             }
             Some(TrackMenuAction::RevealInFinder(path)) => reveal_in_finder(&path),
             Some(TrackMenuAction::CopyPath(path)) => {

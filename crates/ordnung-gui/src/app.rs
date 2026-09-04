@@ -746,6 +746,53 @@ impl App {
         });
     }
 
+    /// Transfer device rows into the local library: resolve the (synthetic)
+    /// ids to their files on the stick and hand them to the copy-then-import
+    /// job. The destination is the library root; an install that never picked
+    /// one gets the folder dialog here, and the choice is kept — this is the
+    /// same "where does my music live?" question the tour asks.
+    pub(crate) fn usb_add_to_library(&mut self, ctx: egui::Context, ids: Vec<Id>) {
+        if self.is_busy() {
+            self.status = "Another job is running — try again when it finishes.".into();
+            return;
+        }
+        let LibraryView::Usb(vol, _) = self.view.clone() else {
+            return;
+        };
+        // Resolve through the visible rows so the copy order matches what the
+        // user sees (and ids that scrolled out of a filtered view still work
+        // via the track list itself).
+        let mut sources: Vec<PathBuf> = self
+            .rows
+            .iter()
+            .filter(|r| ids.contains(&r.id))
+            .map(|r| r.source_path.clone())
+            .collect();
+        if sources.is_empty() {
+            sources = ids
+                .iter()
+                .filter_map(|id| usb_track_index(*id))
+                .filter_map(|i| self.usb_tracks.get(i))
+                .map(|t| PathBuf::from(&t.source_path))
+                .collect();
+        }
+        if sources.is_empty() {
+            return;
+        }
+        let dest = match self.config.library_root.clone() {
+            Some(d) => d,
+            None => {
+                let Some(d) = rfd::FileDialog::new().pick_folder() else {
+                    return;
+                };
+                self.config.library_root = Some(d.clone());
+                let _ = self.config.save();
+                d
+            }
+        };
+        self.spawn_usb_transfer(ctx, sources, vol, dest);
+    }
+
     /// Build table rows for the active USB view straight from the scanned
     /// device tracks (synthetic ids — see [`usb_track_id`]). Mirrors
     /// `load_rows` field-for-field, but analysis-derived columns (waveform,
@@ -2062,15 +2109,19 @@ impl eframe::App for App {
                                 LibraryView::Usb(v, _) => Some(v.clone()),
                                 _ => None,
                             };
-                            if let Some(target) = crate::sidebar::source_tabs(
+                            let tabs = crate::sidebar::source_tabs(
                                 ui,
                                 &usb_volumes,
                                 active_vol.as_deref(),
-                            ) {
+                            );
+                            if let Some(target) = tabs.clicked {
                                 *view = match target {
                                     None => LibraryView::Library,
                                     Some(p) => LibraryView::Usb(p, None),
                                 };
+                            }
+                            if let Some(ids) = tabs.dropped {
+                                *sidebar_action = Some(SidebarAction::ImportUsbTracks(ids));
                             }
                             ui.add_space(8.0);
                         }
@@ -2280,6 +2331,9 @@ impl eframe::App for App {
                     });
             });
         match sidebar_action {
+            Some(SidebarAction::ImportUsbTracks(ids)) => {
+                self.usb_add_to_library(ctx.clone(), ids);
+            }
             Some(SidebarAction::NewPlaylist(parent)) => {
                 if let Ok(cat) = Catalog::open(&self.db_path) {
                     if let Ok(id) = cat.create_playlist("New playlist", parent, false) {

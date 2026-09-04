@@ -480,6 +480,13 @@ struct ColFilterPopup {
 #[derive(Clone)]
 struct DraggedTracks(Vec<Id>);
 
+/// Drag payload for rows from a mounted device (synthetic ids — see
+/// [`usb_track_id`]). A distinct type from [`DraggedTracks`] so catalog drop
+/// targets (playlists) can't accept device rows they have no ids for; the one
+/// target that accepts these is the sidebar's Library source tab, where a
+/// drop means "copy these files into my library".
+struct DraggedUsbTracks(Vec<Id>);
+
 /// Edit buffers for the inspector's editable Core tag fields. Held as plain
 /// strings so they bind directly to `TextEdit`s; converted back to typed `Tags`
 /// on save. Compared against a saved baseline to drive the dirty state.
@@ -1583,6 +1590,9 @@ enum SidebarAction {
     AddTracks(Id, Vec<Id>),
     /// Open the Library Health window on whichever tab was last used.
     OpenHealth,
+    /// Device rows dropped on the Library source tab: copy their files into
+    /// the library and import them.
+    ImportUsbTracks(Vec<Id>),
 }
 
 /// A request raised by a track row's right-click context menu. Collected inside
@@ -1617,6 +1627,9 @@ enum TrackMenuAction {
     /// Copy "Artist – Title" for the target track(s) to the clipboard, one line
     /// per track, formatted as a Soulseek search query.
     CopyForSoulseek(Vec<Id>),
+    /// Copy the target device rows' files into the local library and import
+    /// them (USB view only).
+    AddToLibrary(Vec<Id>),
     /// Open the track's release/album page on Discogs in the browser. Carries
     /// the track id (to look up a previously-fetched release id) and a search
     /// query (artist + album/title) used when no exact release is on file.
