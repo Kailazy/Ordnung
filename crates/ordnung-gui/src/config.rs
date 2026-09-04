@@ -31,6 +31,15 @@ pub struct Config {
     /// page across launches without re-resolving it. Empty until a sync runs.
     #[serde(default)]
     pub discogs_username: String,
+    /// The folder the user's music library lives in — the persistent answer to
+    /// "where does my music come from?". Picked in the welcome tour (or
+    /// Settings → General) and used to kick off the first import; later it is
+    /// what makes "scan for new arrivals" possible without re-picking a folder
+    /// every time. `None` — the default, and what every config predating the
+    /// field gets — means no root is set and music arrives only via
+    /// "Add songs…" or drag-drop, exactly as before.
+    #[serde(default)]
+    pub library_root: Option<PathBuf>,
     /// Track-table column order as stable column keys (see `TableColumn::key`).
     /// Empty means "use the default order". Tolerant of unknown or missing keys
     /// on load, so a config from an older build keeps working as columns change.
@@ -529,6 +538,7 @@ impl Default for Config {
             discogs_token: String::new(),
             discogs_username: String::new(),
             hidden_release_mediums: Vec::new(),
+            library_root: None,
             column_order: Vec::new(),
             hidden_columns: Vec::new(),
             column_widths: BTreeMap::new(),
@@ -736,6 +746,26 @@ mod tests {
         }
         assert!(cfg.shows_release_format("Vinyl, 12\""));
         assert!(cfg.shows_release_format("CD, Album"));
+    }
+
+    /// A config predating the library root loads with none set (music keeps
+    /// arriving only via explicit adds), and a chosen root survives the TOML
+    /// round trip.
+    #[test]
+    fn library_root_defaults_to_none_and_round_trips() {
+        let old: Config = toml::from_str("").unwrap();
+        assert_eq!(old.library_root, None);
+
+        let cfg = Config {
+            library_root: Some(PathBuf::from("/Users/dj/Music/seeker")),
+            ..Config::default()
+        };
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(
+            back.library_root,
+            Some(PathBuf::from("/Users/dj/Music/seeker"))
+        );
     }
 
     /// Proves the token survives a save → fresh-load cycle (the whole point of

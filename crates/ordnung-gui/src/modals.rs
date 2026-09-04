@@ -571,6 +571,9 @@ impl App {
         // Deferred: the General tab's tour button can't call `open_tour`
         // from inside the window closure, which already borrows `self`.
         let mut open_tour = false;
+        // Deferred for the same reason: the General tab's "Scan for new songs"
+        // can't call `spawn_scan` from inside the window closure.
+        let mut scan_root: Option<PathBuf> = None;
         // Resizable, with a drag grip in the bottom-right corner. The default
         // is deliberately shorter than the old fixed 620px viewport; anyone who
         // wants more can drag it, and egui persists the size across sessions.
@@ -710,6 +713,83 @@ impl App {
                                                     format!("Couldn't save settings: {e}");
                                             }
                                         }
+                                        ui.add_space(14.0);
+                                        ui.separator();
+                                        ui.add_space(10.0);
+                                        ui.label(
+                                            egui::RichText::new("Library folder").strong(),
+                                        );
+                                        ui.label(
+                    egui::RichText::new(
+                        "Where your music lives. Scanning it imports anything new into \
+                         the catalog; your files are never moved, renamed or modified.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                                        ui.add_space(4.0);
+                                        match &self.config.library_root {
+                                            Some(root) => {
+                                                ui.label(
+                                                    egui::RichText::new(
+                                                        root.display().to_string(),
+                                                    )
+                                                    .small(),
+                                                );
+                                            }
+                                            None => {
+                                                ui.label(
+                                                    egui::RichText::new("No folder set")
+                                                        .small()
+                                                        .weak(),
+                                                );
+                                            }
+                                        }
+                                        ui.add_space(4.0);
+                                        ui.horizontal(|ui| {
+                                            let label = if self.config.library_root.is_some() {
+                                                "Change folder…"
+                                            } else {
+                                                "Choose folder…"
+                                            };
+                                            if ui
+                                                .button(label)
+                                                .on_hover_note("Set where your library lives")
+                                                .clicked()
+                                            {
+                                                if let Some(dir) =
+                                                    rfd::FileDialog::new().pick_folder()
+                                                {
+                                                    self.config.library_root = Some(dir);
+                                                    match self.config.save() {
+                                                        Ok(()) => {
+                                                            self.status = "Library folder set. \
+                                                                Scan for new songs to import it."
+                                                                .into();
+                                                        }
+                                                        Err(e) => {
+                                                            self.status = format!(
+                                                                "Couldn't save settings: {e}"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            let can_scan = self.config.library_root.is_some()
+                                                && !self.is_busy();
+                                            if ui
+                                                .add_enabled(
+                                                    can_scan,
+                                                    egui::Button::new("Scan for new songs"),
+                                                )
+                                                .on_hover_note(
+                                                    "Import anything new from the library folder",
+                                                )
+                                                .clicked()
+                                            {
+                                                scan_root = self.config.library_root.clone();
+                                            }
+                                        });
                                         ui.add_space(14.0);
                                         ui.separator();
                                         ui.add_space(10.0);
@@ -1641,6 +1721,9 @@ impl App {
         if open_tour {
             self.open_tour();
             window_open = false;
+        }
+        if let Some(root) = scan_root {
+            self.spawn_scan(ctx.clone(), root);
         }
         // The window's [x] toggled `window_open`; mirror it back to our flag.
         if !window_open {

@@ -22,7 +22,10 @@ use super::*;
 /// [`Config::onboarding_completed_version`] stores the last version a user
 /// finished, so a stale completion re-opens the tour exactly once rather than
 /// nagging on every launch.
-pub(crate) const TOUR_VERSION: u32 = 1;
+///
+/// v2 added the library-root step. Existing users replay once deliberately:
+/// they don't have a root either, and the tour is the right place to ask.
+pub(crate) const TOUR_VERSION: u32 = 2;
 
 /// One step of the tour. Ordered as the questions actually arrive: what is this,
 /// how does my music get in, what does Discogs add, and only then — now that
@@ -33,6 +36,8 @@ pub(crate) enum TourStep {
     Welcome,
     /// Adding music and what analysis produces.
     Library,
+    /// Picking the library root — the on-ramp. Importing starts on Finish.
+    LibraryRoot,
     /// Playing, digging, and the vinyl shelf.
     Crate,
     /// Connecting Discogs and what it fills in.
@@ -43,9 +48,10 @@ pub(crate) enum TourStep {
 
 impl TourStep {
     /// Every step, in tour order.
-    pub(crate) const ALL: [TourStep; 5] = [
+    pub(crate) const ALL: [TourStep; 6] = [
         TourStep::Welcome,
         TourStep::Library,
+        TourStep::LibraryRoot,
         TourStep::Crate,
         TourStep::Discogs,
         TourStep::Writeback,
@@ -80,14 +86,19 @@ pub(crate) struct Tour {
     /// current config so reopening the tour shows what's actually in force.
     /// Only committed to config when the user finishes.
     pub(crate) auto_write: bool,
+    /// The folder picked on [`TourStep::LibraryRoot`], seeded from the current
+    /// config so a replay shows the root already in force. Committed on Finish;
+    /// a root that actually changed also kicks off the first import.
+    pub(crate) library_root: Option<PathBuf>,
 }
 
 impl Tour {
     /// Open the tour at the first step, seeded from the live config.
-    pub(crate) fn new(auto_write: bool) -> Self {
+    pub(crate) fn new(auto_write: bool, library_root: Option<PathBuf>) -> Self {
         Self {
             step: TourStep::Welcome,
             auto_write,
+            library_root,
         }
     }
 }
@@ -160,7 +171,10 @@ impl App {
     /// at startup; a user who finished the current tour never sees it again.
     pub(crate) fn maybe_open_tour(&mut self) {
         if self.config.onboarding_completed_version < TOUR_VERSION {
-            self.tour = Some(Tour::new(self.config.auto_write_tags));
+            self.tour = Some(Tour::new(
+                self.config.auto_write_tags,
+                self.config.library_root.clone(),
+            ));
         }
     }
 
@@ -168,7 +182,10 @@ impl App {
     /// next launch by itself: finishing stamps the version again, and closing
     /// leaves whatever stamp was already there.
     pub(crate) fn open_tour(&mut self) {
-        self.tour = Some(Tour::new(self.config.auto_write_tags));
+        self.tour = Some(Tour::new(
+            self.config.auto_write_tags,
+            self.config.library_root.clone(),
+        ));
     }
 
     /// The welcome tour window. Modal in spirit — it's the first thing a new
@@ -185,6 +202,7 @@ impl App {
         let mut goto: Option<TourStep> = None;
         let mut finish = false;
         let mut auto_write = tour.auto_write;
+        let mut library_root = tour.library_root.clone();
 
         egui::Window::new("Welcome to Ordnung")
             .open(&mut open)
@@ -279,6 +297,98 @@ impl App {
                                     "Organize",
                                     "Search, sort, playlists. Health finds dupes and \
                                      missing files.",
+                                );
+                            }
+                            TourStep::LibraryRoot => {
+                                step_heading(
+                                    ui,
+                                    "Where does your music live?",
+                                    "Pick your music folder and importing starts when you \
+                                     finish the tour.",
+                                );
+
+                                // The chosen root, in a framed block like the
+                                // Welcome step's trust statement — this is the
+                                // tour's one real input, so it gets the same
+                                // visual weight.
+                                egui::Frame::none()
+                                    .fill(ui.visuals().extreme_bg_color)
+                                    .rounding(egui::Rounding::same(
+                                        crate::ui::tokens::radius::SM,
+                                    ))
+                                    .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.5)))
+                                    .inner_margin(egui::Margin::symmetric(16.0, 14.0))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            let (r, _) = ui.allocate_exact_size(
+                                                egui::vec2(22.0, 22.0),
+                                                egui::Sense::hover(),
+                                            );
+                                            crate::ui::icon::library(
+                                                ui.painter(),
+                                                r.center(),
+                                                accent,
+                                                9.0,
+                                            );
+                                            ui.add_space(crate::ui::tokens::space::S2);
+                                            match &library_root {
+                                                Some(root) => {
+                                                    ui.label(
+                                                        egui::RichText::new(
+                                                            root.display().to_string(),
+                                                        )
+                                                        .font(crate::ui::tokens::font::strong(
+                                                            crate::ui::tokens::font::body().size,
+                                                        ))
+                                                        .color(crate::ui::tokens::color::LABEL),
+                                                    );
+                                                }
+                                                None => {
+                                                    ui.label(
+                                                        egui::RichText::new(
+                                                            "No folder chosen yet",
+                                                        )
+                                                        .font(crate::ui::tokens::font::body())
+                                                        .color(crate::ui::tokens::color::LABEL_3),
+                                                    );
+                                                }
+                                            }
+                                        });
+                                        ui.add_space(crate::ui::tokens::space::S3);
+                                        let label = if library_root.is_some() {
+                                            "Change folder…"
+                                        } else {
+                                            "Choose folder…"
+                                        };
+                                        let btn = egui::Button::new(
+                                            egui::RichText::new(label)
+                                                .color(egui::Color32::WHITE),
+                                        )
+                                        .fill(accent);
+                                        if ui.add(btn).clicked() {
+                                            if let Some(dir) =
+                                                rfd::FileDialog::new().pick_folder()
+                                            {
+                                                library_root = Some(dir);
+                                            }
+                                        }
+                                    });
+                                ui.add_space(crate::ui::tokens::space::S5);
+                                feature_row(
+                                    ui,
+                                    crate::ui::icon::import,
+                                    "Runs in the background",
+                                    "Import and analysis keep working while you use the app, \
+                                     and pick up where they left off.",
+                                );
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Optional. You can always add music with \
+                                         Add songs\u{2026} or by dropping files on the window.",
+                                    )
+                                    .font(crate::ui::tokens::font::body())
+                                    .color(crate::ui::tokens::color::LABEL_3),
                                 );
                             }
                             TourStep::Crate => {
@@ -505,17 +615,18 @@ impl App {
                 );
             });
 
-        // Apply what the frame decided. The live card selection is kept even
-        // when the user steps back and forth, so Finish commits what they see.
+        // Apply what the frame decided. The live selections are kept even when
+        // the user steps back and forth, so Finish commits what they see.
         if let Some(t) = self.tour.as_mut() {
             t.auto_write = auto_write;
+            t.library_root = library_root.clone();
             if let Some(next) = goto {
                 t.step = next;
             }
         }
 
         if finish {
-            self.finish_tour(auto_write);
+            self.finish_tour(ctx, auto_write, library_root);
         } else if !open {
             // Closing with the X is a deliberate "not now": don't write a
             // writeback choice the user skipped past, but do stop reopening the
@@ -528,8 +639,16 @@ impl App {
         }
     }
 
-    /// Commit the tour's writeback choice and mark it done.
-    fn finish_tour(&mut self, auto_write: bool) {
+    /// Commit the tour's choices (writeback policy and library root), mark it
+    /// done, and — when a root was actually picked or changed — kick off the
+    /// first import. The import only starts here, on Finish: closing the tour
+    /// with the X must never start reading a folder the user didn't confirm.
+    fn finish_tour(
+        &mut self,
+        ctx: &egui::Context,
+        auto_write: bool,
+        library_root: Option<PathBuf>,
+    ) {
         let changed = self.config.auto_write_tags != auto_write;
         self.config.auto_write_tags = auto_write;
         if changed {
@@ -537,6 +656,10 @@ impl App {
             // fresh request to try the files again.
             self.auto_write_stalled_at = None;
         }
+        // A replay that keeps the same root doesn't re-scan; the root has to
+        // have actually changed for Finish to mean "go read that folder".
+        let root_changed = library_root.is_some() && library_root != self.config.library_root;
+        self.config.library_root = library_root;
         self.config.onboarding_completed_version = TOUR_VERSION;
         if let Err(e) = self.config.save() {
             self.status = format!("Couldn't save settings: {e}");
@@ -548,6 +671,14 @@ impl App {
             };
         }
         self.tour = None;
+        if root_changed && !self.is_busy() {
+            if let Some(root) = self.config.library_root.clone() {
+                // Overwrites the status above with "Scanning …", which is the
+                // more useful message: the on-ramp's whole point is that the
+                // user sees the import start.
+                self.spawn_scan(ctx.clone(), root);
+            }
+        }
     }
 }
 
@@ -598,12 +729,34 @@ mod tests {
         assert!(!(done.onboarding_completed_version < TOUR_VERSION));
     }
 
-    /// The tour opens showing whatever writeback policy is actually in force,
-    /// so a user replaying it isn't told they chose something they didn't.
+    /// The tour opens showing whatever writeback policy and library root are
+    /// actually in force, so a user replaying it isn't told they chose
+    /// something they didn't.
     #[test]
-    fn the_tour_seeds_its_choice_from_the_live_setting() {
-        assert!(Tour::new(true).auto_write);
-        assert!(!Tour::new(false).auto_write);
-        assert_eq!(Tour::new(true).step, TourStep::Welcome);
+    fn the_tour_seeds_its_choices_from_the_live_settings() {
+        assert!(Tour::new(true, None).auto_write);
+        assert!(!Tour::new(false, None).auto_write);
+        assert_eq!(Tour::new(true, None).step, TourStep::Welcome);
+        assert_eq!(Tour::new(true, None).library_root, None);
+
+        let root = PathBuf::from("/music");
+        assert_eq!(
+            Tour::new(true, Some(root.clone())).library_root,
+            Some(root)
+        );
+    }
+
+    /// v2 added the library-root step; a user who finished v1 has no root and
+    /// must see the tour once more. That replay is the migration mechanism, so
+    /// this pins both the bump and the step's presence.
+    #[test]
+    fn a_v1_completion_is_due_the_root_asking_replay() {
+        assert!(TOUR_VERSION >= 2);
+        let v1 = Config {
+            onboarding_completed_version: 1,
+            ..Config::default()
+        };
+        assert!(v1.onboarding_completed_version < TOUR_VERSION);
+        assert!(TourStep::ALL.contains(&TourStep::LibraryRoot));
     }
 }
