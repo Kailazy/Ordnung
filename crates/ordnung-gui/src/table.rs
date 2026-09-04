@@ -799,6 +799,13 @@ impl App {
             .collect();
         const ROW_H: f32 = 28.0;
         const COVER_PX: f32 = 24.0;
+        /// Radius of the Discogs-match dot painted in the cover's corner, and
+        /// how far its centre sits in from the artwork's bottom-right. Sized to
+        /// read as a mark rather than a badge on a 24px thumbnail: big enough to
+        /// catch the eye while scanning a column of covers, small enough that it
+        /// never reads as part of the sleeve.
+        const DISCOGS_DOT_R: f32 = 2.5;
+        const DISCOGS_DOT_INSET: f32 = 3.5;
         // Color mode for the inline Waveform column, read once per frame (Copy, so
         // capturing it in the row closures doesn't borrow `self`).
         let waveform_color_mode =
@@ -1232,6 +1239,48 @@ impl App {
                                                 },
                                             )
                                             .inner;
+                                        // Discogs match mark: a small dot in the cover's
+                                        // bottom-right corner when this track has a fetched
+                                        // Discogs release. The artwork *is* the release, so the
+                                        // match belongs on it — and a dot in the corner costs no
+                                        // column width and leaves every other cell's layout
+                                        // untouched. Drawn with a dark ring so it survives a
+                                        // light-coloured sleeve.
+                                        if let Some(rid) = track_releases.get(&r.id).copied() {
+                                            let c = resp.rect.right_bottom()
+                                                + egui::vec2(
+                                                    -DISCOGS_DOT_INSET,
+                                                    -DISCOGS_DOT_INSET,
+                                                );
+                                            ui.painter().circle_filled(
+                                                c,
+                                                DISCOGS_DOT_R + 1.0,
+                                                egui::Color32::from_black_alpha(160),
+                                            );
+                                            ui.painter().circle_filled(
+                                                c,
+                                                DISCOGS_DOT_R,
+                                                crate::ui::tokens::color::ACCENT,
+                                            );
+                                            // Hover note scoped to the dot rather than the whole
+                                            // cover: the cover is a click/drag/preview target and
+                                            // shouldn't grow a tooltip, and an unmatched row has
+                                            // nothing to say here at all. `hover` only — the
+                                            // interact takes no clicks, so the row's own drag and
+                                            // double-click still see the pointer.
+                                            let hit = egui::Rect::from_center_size(
+                                                c,
+                                                egui::vec2(9.0, 9.0),
+                                            );
+                                            ui.interact(
+                                                hit,
+                                                egui::Id::new(("discogs-dot", r.id)),
+                                                egui::Sense::hover(),
+                                            )
+                                            .on_hover_note(format!(
+                                                "Matched to Discogs release {rid}"
+                                            ));
+                                        }
                                         // Play overlay: a play/pause disc centred on the cover.
                                         // Clicking it loads the track into the bottom now-playing
                                         // bar (or pauses it if it's already current). Kept hidden
