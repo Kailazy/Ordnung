@@ -230,6 +230,10 @@ impl App {
             usb_loading: false,
             usb_rx: None,
             usb_eject_rx: None,
+            usb_analysis: HashMap::new(),
+            usb_analysis_rx: None,
+            usb_analysis_progress: (0, 0),
+            usb_analysis_cancel: None,
             nav_density: NavDensity::Narrow,
             nav_drag: None,
             view: LibraryView::Library,
@@ -707,6 +711,47 @@ impl App {
                 self.cover_cache.retain(|id, _| *id < USB_ID_BASE);
                 // Build the table rows for whatever USB view is showing.
                 self.reload();
+                // The full file scan is the trigger for auto-analysis: only
+                // now do we know which files' BPM/key neither the pdb nor
+                // the tags could fill.
+                if scan.complete {
+                    self.spawn_usb_analysis(ctx);
+                }
+            }
+        }
+        // Adopt auto-analysis results as they stream in; each one can fill a
+        // visible "—" cell, so the USB view reloads per batch. The channel
+        // closing (workers done or cancelled) ends the run.
+        if let Some(rx) = &self.usb_analysis_rx {
+            let mut got_any = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(a) => {
+                        self.usb_analysis.insert(a.path.clone(), a);
+                        self.usb_analysis_progress.0 += 1;
+                        got_any = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.usb_analysis_rx = None;
+                        self.usb_analysis_cancel = None;
+                        let (done, _) = self.usb_analysis_progress;
+                        self.usb_analysis_progress = (0, 0);
+                        if done > 0 {
+                            self.status = format!("Analyzed {done} device track(s).");
+                        }
+                        break;
+                    }
+                }
+            }
+            if got_any {
+                if self.usb_analysis_rx.is_some() {
+                    let (done, total) = self.usb_analysis_progress;
+                    self.status = format!("Analyzing device tracks… {done}/{total}");
+                }
+                if matches!(self.view, LibraryView::Usb(..)) {
+                    self.reload();
+                }
             }
         }
         // The scan cache lives as long as its volume stays mounted — hopping
@@ -717,12 +762,20 @@ impl App {
         if let Some(loaded) = self.usb_loaded_for.clone() {
             if !self.usb_volumes.iter().any(|v| v.path == loaded) {
                 self.usb_tracks = Vec::new();
-        self.usb_generation = self.usb_generation.wrapping_add(1);
                 self.usb_generation = self.usb_generation.wrapping_add(1);
                 self.usb_playlists = Vec::new();
                 self.usb_playlist_tracks = HashMap::new();
                 self.usb_pdb_info = HashMap::new();
                 self.usb_loaded_for = None;
+                // The stick is gone: stop analyzing its files and drop the
+                // results — they're keyed by paths that no longer exist.
+                if let Some(c) = &self.usb_analysis_cancel {
+                    c.store(true, Ordering::Relaxed);
+                }
+                self.usb_analysis = HashMap::new();
+                self.usb_analysis_rx = None;
+                self.usb_analysis_cancel = None;
+                self.usb_analysis_progress = (0, 0);
             }
         }
         let LibraryView::Usb(vol, _) = &self.view else {
@@ -742,6 +795,15 @@ impl App {
         self.usb_playlists = Vec::new();
         self.usb_playlist_tracks = HashMap::new();
         self.usb_pdb_info = HashMap::new();
+        // A different stick is loading: its files are different paths, so the
+        // previous device's analysis results can't apply. Cancel and restart.
+        if let Some(c) = &self.usb_analysis_cancel {
+            c.store(true, Ordering::Relaxed);
+        }
+        self.usb_analysis = HashMap::new();
+        self.usb_analysis_rx = None;
+        self.usb_analysis_cancel = None;
+        self.usb_analysis_progress = (0, 0);
         self.usb_loading = true;
         let (tx, rx) = std::sync::mpsc::channel();
         self.usb_rx = Some(rx);
@@ -756,6 +818,77 @@ impl App {
             }
             let _ = tx.send(scan_usb_volume(vol));
             ctx.request_repaint();
+        });
+    }
+
+    /// Automatically analyze device tracks whose BPM or key neither the
+    /// stick's `export.pdb` nor the file's own tags could fill — so a plain
+    /// stick shows real numbers instead of a column of "—". Runs in the
+    /// background on the memory-capped analysis pool the moment the device
+    /// scan lands; results stream back per track (see the drain in
+    /// [`App::poll_usb`]) and live only in `usb_analysis` for as long as the
+    /// volume stays mounted. Nothing is written: device files aren't catalog
+    /// rows, and the stick itself is never touched.
+    fn spawn_usb_analysis(&mut self, ctx: &egui::Context) {
+        if let Some(c) = &self.usb_analysis_cancel {
+            c.store(true, Ordering::Relaxed);
+        }
+        let pending: Vec<String> = self
+            .usb_tracks
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| {
+                let pdb = self.usb_pdb_info.get(i);
+                let has_bpm = pdb.and_then(|p| p.bpm).or(t.tags.bpm_tag).is_some();
+                let has_key = pdb
+                    .and_then(|p| p.key.as_deref())
+                    .or(t.tags.initial_key_tag.as_deref())
+                    .is_some();
+                (!has_bpm || !has_key) && !self.usb_analysis.contains_key(&t.source_path)
+            })
+            .map(|(_, t)| t.source_path.clone())
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        self.usb_analysis_progress = (0, pending.len());
+        self.status = format!("Analyzing {} device track(s)…", pending.len());
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.usb_analysis_cancel = Some(cancel.clone());
+        let (tx, rx) = mpsc::channel::<UsbAnalyzed>();
+        self.usb_analysis_rx = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let params = AnalysisParams::default();
+            let run = || {
+                pending.par_iter().for_each_init(
+                    || tx.clone(),
+                    |tx, path| {
+                        // Cancellation skips tracks rayon hasn't started;
+                        // nothing is sent for them, and dropping the last
+                        // sender closes the channel (the drain's Done signal).
+                        if cancel.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let (bpm, key) = match analysis::analyze_file(path, params) {
+                            Ok(a) => (a.bpm, a.key),
+                            // A failed decode still reports (empty), so
+                            // progress reaches the total.
+                            Err(_) => (None, None),
+                        };
+                        let _ = tx.send(UsbAnalyzed {
+                            path: path.clone(),
+                            bpm,
+                            key,
+                        });
+                        ctx.request_repaint();
+                    },
+                );
+            };
+            match crate::jobs::analysis_pool() {
+                Some(pool) => pool.install(run),
+                None => run(),
+            }
         });
     }
 
@@ -846,6 +979,9 @@ impl App {
                     }
                 }
                 let pdb = self.usb_pdb_info.get(&i);
+                // Ordnung's own background analysis (see `spawn_usb_analysis`)
+                // fills whatever the stick's pdb and the file's tags left blank.
+                let analyzed = self.usb_analysis.get(&t.source_path);
                 let key_name = pdb
                     .and_then(|p| p.key.clone())
                     .or_else(|| t.tags.initial_key_tag.clone());
@@ -854,14 +990,18 @@ impl App {
                 // ("Unknown") shows verbatim and sorts to the end.
                 let parsed = key_name
                     .as_deref()
-                    .and_then(ordnung_core::model::key::Key::parse);
+                    .and_then(ordnung_core::model::key::Key::parse)
+                    .or_else(|| analyzed.and_then(|a| a.key));
                 let key = match (parsed, key_name) {
                     (Some(k), _) => k.display(),
                     (None, Some(raw)) => raw,
                     (None, None) => "—".into(),
                 };
                 let camelot = parsed.map(|k| k.camelot());
-                let bpm_val = pdb.and_then(|p| p.bpm).or(t.tags.bpm_tag);
+                let bpm_val = pdb
+                    .and_then(|p| p.bpm)
+                    .or(t.tags.bpm_tag)
+                    .or_else(|| analyzed.and_then(|a| a.bpm));
                 Some(TrackRow {
                     id: usb_track_id(i),
                     artist,

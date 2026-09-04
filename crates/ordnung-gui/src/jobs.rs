@@ -2516,7 +2516,7 @@ fn physical_memory_bytes() -> Option<u64> {
 /// *alongside* the OS, the catalog, and the GUI's cover textures, and the app has
 /// to stay responsive while it works. In practice this clamps 8 GB machines to
 /// 4-5 workers and leaves 16 GB and up at full core count.
-fn analysis_pool() -> Option<rayon::ThreadPool> {
+pub(crate) fn analysis_pool() -> Option<rayon::ThreadPool> {
     /// Rough peak footprint of one in-flight analysis worker.
     const BYTES_PER_WORKER: u64 = 350 * 1024 * 1024;
 

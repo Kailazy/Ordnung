@@ -1441,6 +1441,20 @@ struct App {
     /// in the status bar (ejecting can fail, e.g. Finder holding a file open,
     /// and a silent failure looks like a broken button). `None` when idle.
     usb_eject_rx: Option<std::sync::mpsc::Receiver<String>>,
+    /// BPM/key Ordnung analyzed itself for device files the stick's pdb and
+    /// tags left blank, keyed by source path (indices shift between the pdb
+    /// view and the file scan; paths don't). Filled by the auto-analysis
+    /// worker `poll_usb` spawns after a device scan lands; kept while the
+    /// volume stays mounted, cleared when it's pulled.
+    usb_analysis: HashMap<String, UsbAnalyzed>,
+    /// Receives per-track results from the USB auto-analysis worker. `None`
+    /// when no analysis is running; the channel closing marks the run done.
+    usb_analysis_rx: Option<std::sync::mpsc::Receiver<UsbAnalyzed>>,
+    /// Progress of the running USB auto-analysis (done, total) for the status
+    /// bar; zeroed when idle.
+    usb_analysis_progress: (usize, usize),
+    /// Cancels the in-flight USB auto-analysis (volume pulled, new scan).
+    usb_analysis_cancel: Option<Arc<AtomicBool>>,
     /// Which of the sidebar's three width tiers is in force. The panel snaps
     /// between designed layouts instead of resizing freely, so this — not a
     /// pixel width — is the resize state, and it persists via
@@ -1579,6 +1593,17 @@ struct UsbPdbInfo {
     /// The pre-extracted cover JPEG under `PIONEER/ARTWORK`, absolute on the
     /// mounted volume — how a CDJ shows art without touching the audio file.
     artwork_path: Option<PathBuf>,
+}
+
+/// One device file's BPM/key as analyzed by Ordnung's own engine — the
+/// automatic fallback for USB rows where neither the stick's `export.pdb` nor
+/// the file's tags carry them. Never written anywhere: device files aren't
+/// catalog rows, so this lives only in `App::usb_analysis` for the session.
+#[derive(Debug, Clone)]
+struct UsbAnalyzed {
+    path: String,
+    bpm: Option<f32>,
+    key: Option<ordnung_core::model::key::Key>,
 }
 
 /// USB tracks aren't catalog rows, but the shared table needs an `Id` per row.
