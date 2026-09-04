@@ -778,15 +778,30 @@ impl App {
                 self.usb_analysis_progress = (0, 0);
             }
         }
-        let LibraryView::Usb(vol, _) = &self.view else {
-            return;
+        // Which volume should be scanned. The viewed device always wins; with
+        // no USB view open, the first detected volume still gets scanned in
+        // the background — plugging a stick in is what kicks off the scan and
+        // its auto-analysis, not opening the view (which then finds the rows,
+        // and any analyzed BPM/keys, already waiting).
+        let vol = match &self.view {
+            LibraryView::Usb(vol, _) => {
+                let vol = vol.clone();
+                if !self.usb_volumes.iter().any(|v| v.path == vol) {
+                    self.view = LibraryView::Library;
+                    self.reload();
+                    return;
+                }
+                vol
+            }
+            // Only when nothing is loaded yet: with two sticks plugged, the
+            // one already scanned must not be evicted by the other until the
+            // user actually opens its view.
+            _ if self.usb_loaded_for.is_none() => match self.usb_volumes.first() {
+                Some(v) => v.path.clone(),
+                None => return,
+            },
+            _ => return,
         };
-        let vol = vol.clone();
-        if !self.usb_volumes.iter().any(|v| v.path == vol) {
-            self.view = LibraryView::Library;
-            self.reload();
-            return;
-        }
         if self.usb_loading || self.usb_loaded_for.as_deref() == Some(vol.as_path()) {
             return;
         }
