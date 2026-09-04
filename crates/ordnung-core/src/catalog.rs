@@ -2318,6 +2318,21 @@ impl Catalog {
             .map_err(Into::into)
     }
 
+    /// Fill `analysis` on already-loaded tracks in one query.
+    ///
+    /// Track listings (`list_tracks`, `list_playlist_tracks`) deliberately skip
+    /// the analysis join — the waveform blobs are ~31 KB per row and most
+    /// listing consumers never look at them. Consumers that DO need the full
+    /// analysis (the USB export writes beatgrids, keys and waveforms from it)
+    /// call this once on the batch instead of an N+1 of `get_analysis`.
+    pub fn attach_analyses(&self, tracks: &mut [Track]) -> Result<()> {
+        let mut by_id = self.analyses_by_track()?;
+        for t in tracks {
+            t.analysis = by_id.remove(&t.id);
+        }
+        Ok(())
+    }
+
     /// Load a track's analysis, if present.
     pub fn get_analysis(&self, id: Id) -> Result<Option<Analysis>> {
         let sql = format!(

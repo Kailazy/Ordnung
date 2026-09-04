@@ -635,7 +635,8 @@ pub(crate) fn run_export(
             return;
         }
     };
-    let (tracks, playlists) = match (catalog.list_tracks(None, 0), catalog.list_playlists()) {
+    let (mut tracks, playlists) = match (catalog.list_tracks(None, 0), catalog.list_playlists())
+    {
         (Ok(t), Ok(p)) => (t, p),
         (Err(e), _) | (_, Err(e)) => {
             let _ = tx.send(JobMsg::Failed(format!("reading catalog: {e}")));
@@ -643,6 +644,13 @@ pub(crate) fn run_export(
             return;
         }
     };
+    // Listings skip the analysis join; the export writes beatgrids, keys and
+    // waveforms from it, so attach the full analyses in one query.
+    if let Err(e) = catalog.attach_analyses(&mut tracks) {
+        let _ = tx.send(JobMsg::Failed(format!("reading analyses: {e}")));
+        ctx.request_repaint();
+        return;
+    }
     let name_by_id: std::collections::HashMap<u64, String> = tracks
         .iter()
         .map(|t| {

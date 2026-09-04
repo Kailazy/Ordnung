@@ -907,6 +907,10 @@ pub fn export(db: &Path, dest: &Path, playlist_ids: &[u64]) -> Result<()> {
     if tracks.is_empty() {
         bail!("nothing to export — no tracks matched");
     }
+    // Listings skip the analysis join; the export serializes beatgrids, keys
+    // and waveforms from it, so attach the full analyses in one query.
+    let mut tracks = tracks;
+    catalog.attach_analyses(&mut tracks)?;
 
     println!(
         "Exporting {} track(s), {} playlist node(s) → {}",
