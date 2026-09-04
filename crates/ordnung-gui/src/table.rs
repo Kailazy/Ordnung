@@ -2414,7 +2414,7 @@ pub(crate) fn load_rows(
         let (bpm, key) = match analysis.as_ref() {
             Some(a) => (
                 a.bpm
-                    .map(|b| format!("{b:.1}"))
+                    .map(|b| format!("{b:.2}"))
                     .unwrap_or_else(|| "—".into()),
                 a.key
                     .map(|k| k.camelot().label())

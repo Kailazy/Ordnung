@@ -270,7 +270,7 @@ enum TableColumn {
     Album,
     Genre,
     Duration,
-    /// Detected/tagged tempo in BPM (`tracks.bpm_tag`), shown to one decimal.
+    /// Detected/tagged tempo in BPM (`tracks.bpm_tag`), shown to two decimals.
     Bpm,
     Key,
     Format,
@@ -391,7 +391,7 @@ impl TableColumn {
             TableColumn::Album => 60.0,
             TableColumn::Genre => 60.0,
             TableColumn::Duration => 40.0,
-            TableColumn::Bpm => 46.0,
+            TableColumn::Bpm => 56.0,
             TableColumn::Key => 40.0,
             TableColumn::Format => 50.0,
             TableColumn::Bitrate => 50.0,
@@ -413,7 +413,7 @@ impl TableColumn {
             TableColumn::Album => 180.0,
             TableColumn::Genre => 110.0,
             TableColumn::Duration => 60.0,
-            TableColumn::Bpm => 62.0,
+            TableColumn::Bpm => 74.0,
             TableColumn::Key => 55.0,
             TableColumn::Format => 60.0,
             TableColumn::Bitrate => 70.0,

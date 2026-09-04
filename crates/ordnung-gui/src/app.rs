@@ -755,7 +755,7 @@ impl App {
                     genre,
                     duration: fmt_duration(t.properties.duration_ms),
                     bpm: bpm_val
-                        .map(|b| format!("{b:.1}"))
+                        .map(|b| format!("{b:.2}"))
                         .unwrap_or_else(|| "—".into()),
                     key,
                     format: t.format,

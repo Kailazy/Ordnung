@@ -917,7 +917,7 @@ impl App {
     fn set_row_bpm(&mut self, id: Id, bpm: f32) {
         if let Some(r) = self.rows.iter_mut().find(|r| r.id == id) {
             r.bpm_val = Some(bpm);
-            r.bpm = format!("{bpm:.1}");
+            r.bpm = format!("{bpm:.2}");
         }
     }
 
