@@ -485,6 +485,131 @@ pub(crate) fn draw_usb_playlist_nodes(
     }
 }
 
+/// The sidebar's source tabs: the local catalog ("Library") and each mounted
+/// removable volume, drawn as a slim strip of abutting browser-style tabs above
+/// the library group — the same shape as the vinyl view's Collection/Wantlist
+/// tabs, one step smaller, because this is navigation chrome rather than a page
+/// header. Only drawn while a stick is mounted, so the sidebar's default look
+/// is unchanged the rest of the time. Each tab gets an equal share of the strip
+/// and truncates with an ellipsis, since volume names are user-controlled and
+/// unbounded. Returns the clicked target: `None` is the catalog, `Some(path)`
+/// a volume; the caller owns the switch.
+pub(crate) fn source_tabs(
+    ui: &mut egui::Ui,
+    volumes: &[ordnung_core::usb::UsbVolume],
+    active_vol: Option<&Path>,
+) -> Option<Option<PathBuf>> {
+    use crate::ui::tokens::{color, font, radius, space};
+
+    let n = (volumes.len() + 1) as f32;
+    // Each tab's outer budget: an equal share of the strip, minus the seams.
+    let budget = ((ui.available_width() - space::S1 * (n - 1.0)) / n).max(44.0);
+
+    let tab = |ui: &mut egui::Ui, label: &str, active: bool, tip: &str| -> bool {
+        let text_font = if active {
+            font::strong(font::callout().size)
+        } else {
+            font::callout()
+        };
+        // Truncate the label to this tab's share of the strip, the same way
+        // playlist tiles do — a long volume name must not push "Library" out.
+        let inner = budget - space::S3 * 2.0;
+        let text_w = |s: &str| {
+            ui.fonts(|f| s.chars().map(|c| f.glyph_width(&text_font, c)).sum::<f32>())
+        };
+        let shown = if text_w(label) <= inner {
+            label.to_string()
+        } else {
+            let mut cut = label.to_string();
+            while !cut.is_empty() && text_w(&format!("{cut}…")) > inner {
+                cut.pop();
+            }
+            format!("{}…", cut.trim_end())
+        };
+        // Colour is overridden at paint time (hover lifts an inactive label).
+        let galley = ui.painter().layout_no_wrap(shown, text_font, color::LABEL);
+        let size = egui::vec2(
+            galley.size().x + space::S3 * 2.0,
+            galley.size().y + space::S2 * 2.0,
+        );
+        let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+        // Top-rounded only, seated on the hairline drawn under the strip.
+        let rounding = egui::Rounding {
+            nw: radius::SM,
+            ne: radius::SM,
+            sw: 0.0,
+            se: 0.0,
+        };
+        let fill = if active {
+            Some(color::SURFACE_HI)
+        } else if resp.hovered() {
+            Some(color::SURFACE)
+        } else {
+            None
+        };
+        if let Some(fill) = fill {
+            ui.painter().rect_filled(rect, rounding, fill);
+        }
+        if active {
+            let y = rect.bottom() - 1.0;
+            ui.painter().line_segment(
+                [
+                    egui::pos2(rect.left() + space::S2, y),
+                    egui::pos2(rect.right() - space::S2, y),
+                ],
+                egui::Stroke::new(2.0, color::ACCENT),
+            );
+        }
+        let text_pos = rect.center() - galley.size() * 0.5;
+        let ink = if active || resp.hovered() {
+            color::LABEL
+        } else {
+            color::LABEL_2
+        };
+        ui.painter().galley(text_pos, galley, ink);
+        resp.on_hover_note(tip).clicked()
+    };
+
+    let mut clicked = None;
+    let strip = ui
+        .horizontal(|ui| {
+            let prev_spacing = ui.spacing().item_spacing.x;
+            ui.spacing_mut().item_spacing.x = space::S1;
+            if tab(
+                ui,
+                "Library",
+                active_vol.is_none(),
+                "Your catalog and playlists",
+            ) {
+                clicked = Some(None);
+            }
+            for v in volumes {
+                let tip = if v.is_rekordbox_export {
+                    "This USB's files and rekordbox playlists"
+                } else {
+                    "This volume's files"
+                };
+                if tab(ui, &v.name, active_vol == Some(v.path.as_path()), tip) {
+                    clicked = Some(Some(v.path.clone()));
+                }
+            }
+            ui.spacing_mut().item_spacing.x = prev_spacing;
+        })
+        .response
+        .rect;
+    // The hairline the active tab seats on, spanning the panel so the strip
+    // reads as one shelf edge rather than a row of floating chips.
+    let y = strip.bottom();
+    ui.painter().line_segment(
+        [
+            egui::pos2(ui.max_rect().left(), y),
+            egui::pos2(ui.max_rect().right(), y),
+        ],
+        egui::Stroke::new(1.0, crate::ui::tokens::color::SEPARATOR_OPAQUE),
+    );
+    clicked
+}
+
 pub(crate) fn folder_context_menu(
     ui: &mut egui::Ui,
     p: &Playlist,

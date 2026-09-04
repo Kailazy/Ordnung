@@ -41,8 +41,39 @@ pub struct RbPlaylist {
     pub name: String,
 }
 
-/// The slice of an `export.pdb` the app reads: playlists and which files (in
-/// order) each contains. Track metadata itself comes from the audio files.
+/// One track row of the export, limited to what the read side consumes:
+/// identity, location, and the analysis summary the player itself shows
+/// (tempo and key) — so a stick browser can display what rekordbox analyzed
+/// without decoding a single audio file.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RbTrack {
+    /// File path as stored in the export (e.g. `/Contents/Artist/track.mp3`,
+    /// absolute from the volume root).
+    pub file_path: String,
+    /// Tempo as stored: BPM × 100. `0` means never analyzed.
+    pub tempo_centi_bpm: u32,
+    /// Key name resolved through the Keys table (e.g. "Am" or "8A" — whatever
+    /// notation rekordbox exported). `None` when unanalyzed or unresolvable.
+    pub key: Option<String>,
+    /// Title string from the row; empty when absent.
+    pub title: String,
+    /// The track's ANLZ analysis file (beatgrid, cues, waveforms), as stored —
+    /// e.g. `/PIONEER/USBANLZ/P016/0000B5/ANLZ0000.DAT`. Not parsed here yet;
+    /// carried so a caller (or the Phase 5 round-trip) can find it.
+    pub analyze_path: Option<String>,
+}
+
+impl RbTrack {
+    /// Tempo in BPM, filtered to plausible values; `None` when unanalyzed.
+    pub fn bpm(&self) -> Option<f32> {
+        (self.tempo_centi_bpm > 0 && self.tempo_centi_bpm < 60_000)
+            .then_some(self.tempo_centi_bpm as f32 / 100.0)
+    }
+}
+
+/// The slice of an `export.pdb` the app reads: playlists, which files (in
+/// order) each contains, and each track's location + player-shown analysis
+/// summary. Everything else about a track still comes from the audio file.
 #[derive(Debug, Default, Clone)]
 pub struct RbExport {
     /// Every playlist-tree node, sorted by `sort_order` (group by `parent_id`
@@ -50,13 +81,13 @@ pub struct RbExport {
     pub playlists: Vec<RbPlaylist>,
     /// Playlist id → track ids in playlist order.
     pub entries: HashMap<u32, Vec<u32>>,
-    /// Track id → file path as stored in the export (e.g.
-    /// `/Contents/Artist/Album/track.mp3`, absolute from the volume root).
-    pub track_paths: HashMap<u32, String>,
+    /// Track id → the row's read-side slice (path, tempo, key, title).
+    pub tracks: HashMap<u32, RbTrack>,
 }
 
 // Table/page type ids (DeviceSQL `PageType`).
 const TYPE_TRACKS: u32 = 0;
+const TYPE_KEYS: u32 = 5;
 const TYPE_PLAYLIST_TREE: u32 = 7;
 const TYPE_PLAYLIST_ENTRIES: u32 = 8;
 
@@ -94,6 +125,10 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
     let mut out = RbExport::default();
     // playlist id → (entry_index, track_id), sorted after collection.
     let mut raw_entries: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+    // Key resolution is a post-pass: the Keys table may come after Tracks in
+    // the table list, so rows carry their key *id* until both are read.
+    let mut key_names: HashMap<u32, String> = HashMap::new();
+    let mut track_key_ids: HashMap<u32, u32> = HashMap::new();
 
     for t in 0..num_tables {
         let base = 0x1C + t * 16;
@@ -102,7 +137,7 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
         };
         if !matches!(
             page_type,
-            TYPE_TRACKS | TYPE_PLAYLIST_TREE | TYPE_PLAYLIST_ENTRIES
+            TYPE_TRACKS | TYPE_KEYS | TYPE_PLAYLIST_TREE | TYPE_PLAYLIST_ENTRIES
         ) {
             continue;
         }
@@ -116,16 +151,46 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
             for row in page_rows(data, page_size, page_off, page_type) {
                 match page_type {
                     TYPE_TRACKS => {
-                        // Track row: id u32 @0x48; 21 string-offset u16s start
-                        // @0x5E, file_path is the last (@0x86), relative to
-                        // the row start.
+                        // Track row (Deep Symmetry layout): key_id u32 @0x20,
+                        // tempo (BPM×100) u32 @0x38, id u32 @0x48; then 21
+                        // string-offset u16s from @0x5E — analyze_path is
+                        // index 14 (@0x7A), title index 17 (@0x80), file_path
+                        // the last (@0x86) — each relative to the row start.
                         let (Some(id), Some(rel)) =
                             (u32_at(data, row + 0x48), u16_at(data, row + 0x86))
                         else {
                             continue;
                         };
-                        if let Some(path) = dsql_string(data, row + rel as usize) {
-                            out.track_paths.insert(id, path);
+                        let Some(file_path) = dsql_string(data, row + rel as usize) else {
+                            continue;
+                        };
+                        if let Some(key_id) = u32_at(data, row + 0x20).filter(|k| *k != 0) {
+                            track_key_ids.insert(id, key_id);
+                        }
+                        let title = u16_at(data, row + 0x80)
+                            .and_then(|rel| dsql_string(data, row + rel as usize))
+                            .unwrap_or_default();
+                        let analyze_path = u16_at(data, row + 0x7A)
+                            .and_then(|rel| dsql_string(data, row + rel as usize))
+                            .filter(|s| !s.is_empty());
+                        out.tracks.insert(
+                            id,
+                            RbTrack {
+                                file_path,
+                                tempo_centi_bpm: u32_at(data, row + 0x38).unwrap_or(0),
+                                key: None,
+                                title,
+                                analyze_path,
+                            },
+                        );
+                    }
+                    TYPE_KEYS => {
+                        // Key row: id u32 @0, id2 u32 @4 (same), name @8.
+                        let Some(id) = u32_at(data, row) else {
+                            continue;
+                        };
+                        if let Some(name) = dsql_string(data, row + 8) {
+                            key_names.insert(id, name);
                         }
                     }
                     TYPE_PLAYLIST_TREE => {
@@ -164,6 +229,15 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
                     _ => unreachable!(),
                 }
             }
+        }
+    }
+
+    // Resolve key ids into names now that both tables are read. A dangling id
+    // simply leaves `key` empty — same posture as every other bad row.
+    for (track_id, key_id) in track_key_ids {
+        if let (Some(track), Some(name)) = (out.tracks.get_mut(&track_id), key_names.get(&key_id))
+        {
+            track.key = Some(name.clone());
         }
     }
 

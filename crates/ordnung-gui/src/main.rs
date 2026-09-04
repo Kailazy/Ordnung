@@ -1377,9 +1377,14 @@ struct App {
     /// `ctx.input().time` of the last volume re-detection, throttling the poll.
     usb_last_poll: f64,
     /// Tracks found on the viewed USB volume — scanned off-thread straight from
-    /// the device (these are NOT catalog tracks and have no ids). Cleared when
-    /// the view leaves the volume.
+    /// the device (these are NOT catalog tracks and have no ids). Kept while
+    /// the volume stays mounted (so tab-hopping doesn't re-scan the stick);
+    /// cleared when it's pulled.
     usb_tracks: Vec<ScannedTrack>,
+    /// Per-track analysis summary lifted from the stick's `export.pdb` — the
+    /// tempo and key rekordbox itself analyzed — keyed by index into
+    /// `usb_tracks`. Empty for plain (non-rekordbox) sticks.
+    usb_pdb_info: HashMap<usize, UsbPdbInfo>,
     /// Which volume `usb_tracks` was scanned from, so switching volumes (or an
     /// explicit Rescan setting this to `None`) triggers a fresh scan.
     usb_loaded_for: Option<PathBuf>,
@@ -1519,6 +1524,21 @@ struct UsbScan {
     tracks: Vec<ScannedTrack>,
     playlists: Vec<ordnung_rbdb::pdb::RbPlaylist>,
     playlist_tracks: HashMap<u32, Vec<usize>>,
+    /// Index into `tracks` → what the stick's own `export.pdb` says rekordbox
+    /// analyzed for that file. See [`UsbPdbInfo`].
+    pdb_info: HashMap<usize, UsbPdbInfo>,
+}
+
+/// The analysis summary a rekordbox export carries per track — what the
+/// player itself displays. Used to fill the table's BPM/Key columns for
+/// device rows without decoding any audio.
+#[derive(Debug, Clone, Default)]
+struct UsbPdbInfo {
+    /// Tempo from the pdb track row (already ÷100), when analyzed.
+    bpm: Option<f32>,
+    /// Key name from the pdb Keys table, in whatever notation rekordbox
+    /// exported ("Am", "8A", "1d", …).
+    key: Option<String>,
 }
 
 /// USB tracks aren't catalog rows, but the shared table needs an `Id` per row.

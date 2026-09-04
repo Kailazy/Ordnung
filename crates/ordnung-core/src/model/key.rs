@@ -116,6 +116,75 @@ impl Key {
     pub fn compatible_with(self, other: Key) -> bool {
         self.camelot().compatible_with(other.camelot())
     }
+
+    /// Parse a key from the notations found in the wild — classical names
+    /// ("Am", "F♯m", "Bb", "C minor", "Dmaj"), Camelot labels ("8A") and Open
+    /// Key labels ("1d", "10m") — into the canonical form. This is how key
+    /// strings from *outside* (file tags, a rekordbox export's Keys table)
+    /// enter the model; unparseable input is `None`, never a guess.
+    pub fn parse(s: &str) -> Option<Key> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+        // Wheel forms: digits then a side letter — Camelot A/B or Open Key
+        // d/m. Tried first because a note-letter parse would misread "8A"
+        // starting from its digit anyway. ('m' can only be a wheel side here,
+        // not a minor suffix, because the prefix must be all digits.)
+        let last = s.chars().last()?;
+        if matches!(last, 'A' | 'B' | 'a' | 'b' | 'd' | 'D' | 'm' | 'M')
+            && !s[..s.len() - 1].is_empty()
+            && s[..s.len() - 1].chars().all(|c| c.is_ascii_digit())
+        {
+            let number: u8 = s[..s.len() - 1].parse().ok()?;
+            if !(1..=12).contains(&number) {
+                return None;
+            }
+            // Open Key is the same wheel rotated so Camelot 8 reads as 1 (see
+            // `open_key`); fold it onto the Camelot number first.
+            let (number, major) = match last.to_ascii_uppercase() {
+                'B' => (number, true),
+                'A' => (number, false),
+                'D' => ((number + 6) % 12 + 1, true),
+                _ => ((number + 6) % 12 + 1, false),
+            };
+            // Invert `major_number` (multiplying by 7 is its own inverse mod
+            // 12): the major tonic for this wheel number, and the relative
+            // minor a minor third below it.
+            let major_pc = (7 * (number as i16 - 8)).rem_euclid(12) as u8;
+            return Some(if major {
+                Key::new(PitchClass::new(major_pc), Mode::Major)
+            } else {
+                Key::new(PitchClass::new((major_pc + 9) % 12), Mode::Minor)
+            });
+        }
+        // Classical form: note letter, optional accidental, optional mode word.
+        let mut chars = s.chars();
+        let letter = chars.next()?.to_ascii_uppercase();
+        let base = match letter {
+            'C' => 0u8,
+            'D' => 2,
+            'E' => 4,
+            'F' => 5,
+            'G' => 7,
+            'A' => 9,
+            'B' => 11,
+            _ => return None,
+        };
+        let rest: String = chars.collect();
+        let (accidental, rest) = match rest.chars().next() {
+            Some('#') | Some('♯') => (1i8, &rest[rest.chars().next()?.len_utf8()..]),
+            Some('b') | Some('♭') => (-1i8, &rest[rest.chars().next()?.len_utf8()..]),
+            _ => (0i8, rest.as_str()),
+        };
+        let pc = PitchClass::new((base as i8 + accidental).rem_euclid(12) as u8);
+        let mode = match rest.trim().trim_start_matches(['-', ' ']).to_ascii_lowercase().as_str() {
+            "" | "maj" | "major" => Mode::Major,
+            "m" | "min" | "minor" => Mode::Minor,
+            _ => return None,
+        };
+        Some(Key::new(pc, mode))
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +193,40 @@ mod tests {
 
     fn key(name: u8, mode: Mode) -> Key {
         Key::new(PitchClass::new(name), mode)
+    }
+
+    /// `parse` accepts the notations key strings actually arrive in — file
+    /// tags and rekordbox Keys-table names — and lands them on the canonical
+    /// form; junk stays `None` rather than becoming a wrong key.
+    #[test]
+    fn parse_reads_classical_and_camelot_notations() {
+        assert_eq!(Key::parse("Am"), Some(key(9, Mode::Minor)));
+        assert_eq!(Key::parse("C"), Some(key(0, Mode::Major)));
+        assert_eq!(Key::parse("F#m"), Some(key(6, Mode::Minor)));
+        assert_eq!(Key::parse("Bb"), Some(key(10, Mode::Major)));
+        assert_eq!(Key::parse("B"), Some(key(11, Mode::Major)));
+        assert_eq!(Key::parse("E♭m"), Some(key(3, Mode::Minor)));
+        assert_eq!(Key::parse("C minor"), Some(key(0, Mode::Minor)));
+        assert_eq!(Key::parse("Dmaj"), Some(key(2, Mode::Major)));
+        // Camelot and Open Key labels round-trip through their own renderers.
+        assert_eq!(Key::parse("8A"), Some(key(9, Mode::Minor)));
+        assert_eq!(Key::parse("8B"), Some(key(0, Mode::Major)));
+        assert_eq!(Key::parse("11a"), Some(key(6, Mode::Minor)));
+        assert_eq!(Key::parse("1d"), Some(key(0, Mode::Major)));
+        assert_eq!(Key::parse("10m"), Some(key(0, Mode::Minor)));
+        for pc in 0..12 {
+            for mode in [Mode::Major, Mode::Minor] {
+                let k = key(pc, mode);
+                assert_eq!(Key::parse(&k.camelot().label()), Some(k));
+                assert_eq!(Key::parse(&k.classical()), Some(k));
+                assert_eq!(Key::parse(&k.open_key()), Some(k));
+            }
+        }
+        assert_eq!(Key::parse(""), None);
+        assert_eq!(Key::parse("13A"), None);
+        assert_eq!(Key::parse("0B"), None);
+        assert_eq!(Key::parse("Hm"), None);
+        assert_eq!(Key::parse("Applause"), None);
     }
 
     #[test]

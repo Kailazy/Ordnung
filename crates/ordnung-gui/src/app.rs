@@ -213,6 +213,7 @@ impl App {
             usb_volumes: ordnung_core::usb::detect_volumes(),
             usb_last_poll: 0.0,
             usb_tracks: Vec::new(),
+            usb_pdb_info: HashMap::new(),
             usb_loaded_for: None,
             usb_playlists: Vec::new(),
             usb_playlist_tracks: HashMap::new(),
@@ -667,20 +668,28 @@ impl App {
                     self.usb_tracks = scan.tracks;
                     self.usb_playlists = scan.playlists;
                     self.usb_playlist_tracks = scan.playlist_tracks;
+                    self.usb_pdb_info = scan.pdb_info;
                     // Build the table rows for whatever USB view is showing.
                     self.reload();
                 }
             }
         }
-        let LibraryView::Usb(vol, _) = &self.view else {
-            // Free the device's track list once the view moves elsewhere.
-            if !self.usb_tracks.is_empty() {
+        // The scan cache lives as long as its volume stays mounted — hopping
+        // between the Library and USB source tabs must not re-read the whole
+        // stick each time (it used to: the cache was freed the moment the view
+        // moved elsewhere, so every visit was a full rescan). It's dropped only
+        // when the device is actually gone.
+        if let Some(loaded) = self.usb_loaded_for.clone() {
+            if !self.usb_volumes.iter().any(|v| v.path == loaded) {
                 self.usb_tracks = Vec::new();
+                self.usb_playlists = Vec::new();
+                self.usb_playlist_tracks = HashMap::new();
+                self.usb_pdb_info = HashMap::new();
+                self.usb_loaded_for = None;
+                self.usb_selected = None;
             }
-            self.usb_playlists = Vec::new();
-            self.usb_playlist_tracks = HashMap::new();
-            self.usb_loaded_for = None;
-            self.usb_selected = None;
+        }
+        let LibraryView::Usb(vol, _) = &self.view else {
             return;
         };
         let vol = vol.clone();
@@ -696,6 +705,7 @@ impl App {
         self.usb_tracks = Vec::new();
         self.usb_playlists = Vec::new();
         self.usb_playlist_tracks = HashMap::new();
+        self.usb_pdb_info = HashMap::new();
         self.usb_selected = None;
         self.usb_loading = true;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -711,8 +721,10 @@ impl App {
     /// device tracks (synthetic ids — see [`usb_track_id`]). Mirrors
     /// `load_rows` field-for-field, but analysis-derived columns (waveform,
     /// quality, Added) stay empty: these files aren't in the catalog. BPM and
-    /// key come from the files' own tags — on a rekordbox export those carry
-    /// what rekordbox analyzed.
+    /// key prefer what the stick's own `export.pdb` says rekordbox analyzed
+    /// (the numbers the player displays), falling back to the files' tags on
+    /// plain sticks. Key names are folded into Camelot when they parse —
+    /// Camelot is the display contract — and shown verbatim when they don't.
     pub(crate) fn usb_rows(&self) -> Vec<TrackRow> {
         let LibraryView::Usb(_, playlist) = &self.view else {
             return Vec::new();
@@ -744,9 +756,23 @@ impl App {
                         return None;
                     }
                 }
-                let key = t.tags.initial_key_tag.clone().unwrap_or_else(|| "—".into());
-                let camelot = parse_camelot_label(&key);
-                let bpm_val = t.tags.bpm_tag;
+                let pdb = self.usb_pdb_info.get(&i);
+                let key_name = pdb
+                    .and_then(|p| p.key.clone())
+                    .or_else(|| t.tags.initial_key_tag.clone());
+                // Through the canonical parser (classical, Camelot and Open
+                // Key notations all appear in the wild); an unparseable name
+                // ("Unknown") shows verbatim and sorts to the end.
+                let parsed = key_name
+                    .as_deref()
+                    .and_then(ordnung_core::model::key::Key::parse);
+                let key = match (parsed, key_name) {
+                    (Some(k), _) => k.display(),
+                    (None, Some(raw)) => raw,
+                    (None, None) => "—".into(),
+                };
+                let camelot = parsed.map(|k| k.camelot());
+                let bpm_val = pdb.and_then(|p| p.bpm).or(t.tags.bpm_tag);
                 Some(TrackRow {
                     id: usb_track_id(i),
                     artist,
@@ -828,23 +854,6 @@ impl App {
             }
         }
     }
-}
-
-/// Parse a Camelot label from a file's key tag ("8A", "12b") so the Key column
-/// gets its coloured chip. Other notations (classical "Am", open key) simply
-/// render as plain text. `None` for anything that isn't `<1-12><A|B>`.
-fn parse_camelot_label(s: &str) -> Option<Camelot> {
-    let s = s.trim();
-    let letter = s.chars().last()?;
-    let major = match letter {
-        'B' | 'b' => true,
-        'A' | 'a' => false,
-        _ => return None,
-    };
-    let number: u8 = s[..s.len() - 1].parse().ok()?;
-    (1..=12)
-        .contains(&number)
-        .then_some(Camelot { number, major })
 }
 
 impl eframe::App for App {
@@ -1843,6 +1852,12 @@ impl eframe::App for App {
                 // actually wrong; the tab under "Library" appears with the
                 // first missing file and vanishes once the catalog is clean.
                 let missing_count = self.missing_count;
+                // Mounted removable volumes, copied out for the same reason as
+                // the counts above: the source tabs and the USB group render
+                // inside closures that must not borrow `self`.
+                let usb_volumes = self.usb_volumes.clone();
+                let usb_loaded_for = self.usb_loaded_for.clone();
+                let usb_has_playlists = !self.usb_playlists.is_empty();
 
                 // The digital-library group: the "Library" / "New" tile pair
                 // and the PLAYLISTS header (the tree itself scrolls in the middle
@@ -1994,6 +2009,87 @@ impl eframe::App for App {
                         }
                     };
 
+                // The library group as the sidebar actually shows it. With a
+                // removable volume mounted, a slim source-tab strip (Library |
+                // each stick — the vinyl view's Collection/Wantlist shape, a
+                // step smaller) sits where the library begins, and the group
+                // below follows the active tab: the catalog's tiles and
+                // playlist header, or the stick's tile and its rekordbox
+                // playlist header. The playlist tree in the middle panel
+                // follows the same switch, so a tab flips the whole lower
+                // sidebar between the two sources. No stick mounted means no
+                // strip, and the digital group draws alone exactly as before.
+                // The rail tier has no room for text tabs; it keeps its
+                // DEVICES tiles in the pinned bottom section instead.
+                let draw_library_group =
+                    |ui: &mut egui::Ui,
+                     view: &mut LibraryView,
+                     sidebar_action: &mut Option<SidebarAction>| {
+                        if !usb_volumes.is_empty() && !density.icons_only() {
+                            let active_vol = match view {
+                                LibraryView::Usb(v, _) => Some(v.clone()),
+                                _ => None,
+                            };
+                            if let Some(target) = crate::sidebar::source_tabs(
+                                ui,
+                                &usb_volumes,
+                                active_vol.as_deref(),
+                            ) {
+                                *view = match target {
+                                    None => LibraryView::Library,
+                                    Some(p) => LibraryView::Usb(p, None),
+                                };
+                            }
+                            ui.add_space(8.0);
+                        }
+                        // Re-read the view so a tab click switches the group in
+                        // the same frame rather than one frame late.
+                        let active = match view {
+                            LibraryView::Usb(v, _) => {
+                                usb_volumes.iter().find(|u| &u.path == v).cloned()
+                            }
+                            _ => None,
+                        };
+                        match active {
+                            Some(v) => {
+                                // The stick's own tile: the whole device, the
+                                // way "Library" is the whole catalog.
+                                if nav_button_dense(
+                                    ui,
+                                    density,
+                                    "⏏",
+                                    &v.name,
+                                    *view == LibraryView::Usb(v.path.clone(), None),
+                                    44.0,
+                                    16.5,
+                                )
+                                .on_hover_note(if v.is_rekordbox_export {
+                                    "Everything on this USB. Files are browsed in \
+                                     place, never copied or changed."
+                                } else {
+                                    "Everything on this volume. Files are browsed in \
+                                     place, never copied or changed."
+                                })
+                                .clicked()
+                                {
+                                    *view = LibraryView::Usb(v.path.clone(), None);
+                                }
+                                ui.add_space(10.0);
+                                // Header for the stick's rekordbox tree (drawn
+                                // in the scrolling middle panel). No "+": these
+                                // playlists live on the device and Ordnung
+                                // doesn't write to it.
+                                if usb_loaded_for.as_deref() == Some(v.path.as_path())
+                                    && usb_has_playlists
+                                {
+                                    section_caption(ui, "PLAYLISTS");
+                                    ui.add_space(4.0);
+                                }
+                            }
+                            None => draw_digital_group(ui, view, sidebar_action),
+                        }
+                    };
+
                 // The vinyl tile. Like the digital group, it's drawn from one
                 // place into whichever slot `nav_primary` assigns it — big and
                 // leading when vinyl is primary, a compact pinned row otherwise.
@@ -2039,7 +2135,7 @@ impl eframe::App for App {
                         ui.add_space(8.0);
                         match nav_primary {
                             NavPrimary::Digital => {
-                                draw_digital_group(ui, &mut self.view, &mut sidebar_action);
+                                draw_library_group(ui, &mut self.view, &mut sidebar_action);
                             }
                             NavPrimary::Vinyl => {
                                 draw_vinyl_tile(ui, &mut self.view, true);
@@ -2048,7 +2144,7 @@ impl eframe::App for App {
                                 ui.add_space(8.0);
                                 section_caption(ui, "DIGITAL LIBRARY");
                                 ui.add_space(4.0);
-                                draw_digital_group(ui, &mut self.view, &mut sidebar_action);
+                                draw_library_group(ui, &mut self.view, &mut sidebar_action);
                             }
                         }
                     });
@@ -2066,57 +2162,29 @@ impl eframe::App for App {
                         ui.add_space(8.0);
                         ui.separator();
                         ui.add_space(6.0);
-                        // ── Devices ──
-                        // Mounted removable volumes, rekordbox-style: plug a
-                        // stick in and it appears here, pull it and it's gone
-                        // (kept live by `poll_usb`). Hidden when nothing is
-                        // mounted so the sidebar doesn't carry an empty header.
-                        if !self.usb_volumes.is_empty() {
-                            section_caption(ui, "DEVICES");
-                            ui.add_space(4.0);
+                        // ── Devices (rail tier only) ──
+                        // At the captioned tier, mounted volumes live in the
+                        // source-tab strip at the top of the library group;
+                        // the rail has no room for text tabs, so it keeps a
+                        // tile per volume here instead. Plug a stick in and it
+                        // appears, pull it and it's gone (kept live by
+                        // `poll_usb`). The device's playlist tree renders in
+                        // the scrolling middle panel while its view is active,
+                        // same as the tab tiers.
+                        if density.icons_only() && !self.usb_volumes.is_empty() {
                             for v in self.usb_volumes.clone() {
-                                // The "(rekordbox)" suffix only ever fit the
-                                // retired wide tier; the volume's own name is
-                                // what identifies it, and the hover note still
-                                // says whether it holds a rekordbox export.
-                                let label = v.name.clone();
-                                if nav_button_dense(
-                                    ui,
-                                    density,
-                                    "⏏",
-                                    &label,
-                                    self.view == LibraryView::Usb(v.path.clone(), None),
-                                    34.0,
-                                    14.0,
-                                )
-                                .on_hover_note(if v.is_rekordbox_export {
-                                    "Removable volume with a rekordbox export. \
-                                     Browse and edit its files directly."
-                                } else {
-                                    "Removable volume. Browse and edit its files directly."
-                                })
-                                .clicked()
+                                let active =
+                                    matches!(&self.view, LibraryView::Usb(p, _) if *p == v.path);
+                                if nav_button_dense(ui, density, "⏏", &v.name, active, 34.0, 14.0)
+                                    .on_hover_note(if v.is_rekordbox_export {
+                                        "Removable volume with a rekordbox export. \
+                                         Browse and edit its files directly."
+                                    } else {
+                                        "Removable volume. Browse and edit its files directly."
+                                    })
+                                    .clicked()
                                 {
                                     self.view = LibraryView::Usb(v.path.clone(), None);
-                                }
-                                // The active device's rekordbox playlist tree,
-                                // indented under its tile like the catalog's
-                                // own playlist tree. Only the scanned device
-                                // has this data (the pdb is read by its scan).
-                                if self.usb_loaded_for.as_deref() == Some(v.path.as_path())
-                                    && !self.usb_playlists.is_empty()
-                                {
-                                    ui.indent(("usb-pl-tree", &v.path), |ui| {
-                                        draw_usb_playlist_nodes(
-                                            ui,
-                                            density,
-                                            &self.usb_playlists.clone(),
-                                            &self.usb_playlist_tracks,
-                                            0,
-                                            &v.path,
-                                            &mut self.view,
-                                        );
-                                    });
                                 }
                                 ui.add_space(3.0);
                             }
@@ -2137,22 +2205,42 @@ impl eframe::App for App {
                     });
 
                 // ── Playlist tree (middle, scrolls) ───────────────────────────
+                // Follows the active source: the catalog's tree normally, the
+                // device's rekordbox tree while a USB view is active — the
+                // second half of what the source tabs switch.
                 egui::CentralPanel::default()
                     .frame(egui::Frame::none())
                     .show_inside(ui, |ui| {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                let all = self.playlists.clone();
-                                draw_playlist_nodes(
-                                    ui,
-                                    density,
-                                    &all,
-                                    None,
-                                    &mut self.view,
-                                    &mut self.renaming,
-                                    &mut sidebar_action,
-                                );
+                                if let LibraryView::Usb(vol, _) = self.view.clone() {
+                                    // Only the scanned device has tree data
+                                    // (the pdb is read by its scan); until the
+                                    // scan lands the tree is simply empty.
+                                    if self.usb_loaded_for.as_deref() == Some(vol.as_path()) {
+                                        draw_usb_playlist_nodes(
+                                            ui,
+                                            density,
+                                            &self.usb_playlists.clone(),
+                                            &self.usb_playlist_tracks,
+                                            0,
+                                            &vol,
+                                            &mut self.view,
+                                        );
+                                    }
+                                } else {
+                                    let all = self.playlists.clone();
+                                    draw_playlist_nodes(
+                                        ui,
+                                        density,
+                                        &all,
+                                        None,
+                                        &mut self.view,
+                                        &mut self.renaming,
+                                        &mut sidebar_action,
+                                    );
+                                }
                             });
                     });
             });
@@ -2625,6 +2713,7 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
 
     let mut playlists = Vec::new();
     let mut playlist_tracks: HashMap<u32, Vec<usize>> = HashMap::new();
+    let mut pdb_info: HashMap<usize, UsbPdbInfo> = HashMap::new();
     let pdb = vol.join("PIONEER").join("rekordbox").join("export.pdb");
     if pdb.is_file() {
         if let Ok(export) = ordnung_rbdb::pdb::read_export(&pdb) {
@@ -2645,8 +2734,9 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
                     .iter()
                     .filter_map(|tid| {
                         let rel = export
-                            .track_paths
+                            .tracks
                             .get(tid)?
+                            .file_path
                             .trim_start_matches('/')
                             .to_lowercase();
                         by_rel_path.get(&rel).copied()
@@ -2662,6 +2752,22 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
                 }
             }
             playlists = export.playlists;
+            // The pdb rows carry what rekordbox analyzed (tempo, key); hang
+            // it off each scanned file so the table can show the same numbers
+            // the player would — resolved by the same case-insensitive
+            // relative path the playlists use.
+            for t in export.tracks.values() {
+                let rel = t.file_path.trim_start_matches('/').to_lowercase();
+                if let Some(&i) = by_rel_path.get(&rel) {
+                    let info = UsbPdbInfo {
+                        bpm: t.bpm(),
+                        key: t.key.clone(),
+                    };
+                    if info.bpm.is_some() || info.key.is_some() {
+                        pdb_info.insert(i, info);
+                    }
+                }
+            }
         }
     }
     UsbScan {
@@ -2669,6 +2775,7 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
         tracks,
         playlists,
         playlist_tracks,
+        pdb_info,
     }
 }
 
@@ -2723,6 +2830,16 @@ mod usb_scan_tests {
         assert_eq!(got, want);
         // A playlist whose files aren't on the stick is present but empty.
         assert_eq!(scan.playlist_tracks[&48], Vec::<usize>::new());
+
+        // Each planted file also picked up the analysis summary from its pdb
+        // row — the BPM rekordbox itself computed (values read from the
+        // fixture; these three rows carry no key). This is what fills the
+        // table's BPM column without decoding any audio.
+        let bpms: Vec<Option<f32>> = scan.playlist_tracks[&11]
+            .iter()
+            .map(|i| scan.pdb_info.get(i).and_then(|p| p.bpm))
+            .collect();
+        assert_eq!(bpms, vec![Some(124.0), Some(130.11), Some(130.3)]);
         let _ = std::fs::remove_dir_all(&vol);
     }
 }
