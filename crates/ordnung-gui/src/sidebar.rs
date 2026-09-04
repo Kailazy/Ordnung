@@ -267,7 +267,7 @@ pub(crate) fn draw_playlist_nodes(
             })
             .header_response
             .context_menu(|ui| folder_context_menu(ui, p, renaming, action));
-            ui.add_space(3.0);
+            playlist_row_gap(ui, density);
         } else {
             draw_playlist_leaf(ui, density, p, view, renaming, action);
         }
@@ -339,6 +339,94 @@ pub(crate) fn draw_inline_rename(
     true
 }
 
+// ── Shared playlist-row metrics ───────────────────────────────────────────────
+// One set of numbers for a playlist row wherever it appears — the catalog tree
+// and a USB device's rekordbox tree — so the two sources read as the same
+// pattern rather than two sidebars that happen to share a panel.
+
+/// Tile height of a playlist row at the captioned tier.
+pub(crate) const PLAYLIST_ROW_H: f32 = 34.0;
+/// Label point size of a playlist row.
+pub(crate) const PLAYLIST_TEXT_SIZE: f32 = 13.5;
+/// Inset of the track count from the tile's right edge.
+const PLAYLIST_COUNT_INSET: f32 = 12.0;
+/// Gap under a playlist row. The rail's square targets need slightly more
+/// separation to read as distinct than full-width bars do.
+const PLAYLIST_ROW_GAP: f32 = 3.0;
+const PLAYLIST_ROW_GAP_RAIL: f32 = 4.0;
+
+/// One playlist row, shared by both trees: a "♪" tile with the name truncated
+/// clear of the count lane and the track count painted inside the right end.
+/// At the rail tier the row collapses to a glyph square and the name moves to
+/// the tooltip; `note` is the hover note shown at the captioned tier. The
+/// trailing row gap is added here so every tree spaces its rows identically.
+/// Returns the tile's response so callers wire clicks, drag-and-drop and
+/// context menus on top of it.
+fn playlist_row(
+    ui: &mut egui::Ui,
+    density: NavDensity,
+    name: &str,
+    selected: bool,
+    count: usize,
+    note: &str,
+) -> egui::Response {
+    // The rail shows a playlist as a glyph like everything else. Keeping the
+    // name here was tried and it is what broke the tier: 56pt cannot hold
+    // "Traumprinz", so names wrapped to three lines and no two tiles were the
+    // same height. The name goes in the tooltip instead — the rail is for
+    // "which one of these did I have open", the wider tiers are for reading.
+    let resp = if density.icons_only() {
+        rail_tile(ui, "♪", selected).on_hover_text(name)
+    } else {
+        // The track count is painted over the tile's right end, so the name is
+        // truncated to leave that lane clear — otherwise a long name runs
+        // straight under the number. `nav_button` reserves the space; the
+        // ellipsis tells the user the name is longer than shown, and the
+        // tooltip carries it in full.
+        nav_button_truncated(
+            ui,
+            "♪",
+            name,
+            selected,
+            PLAYLIST_ROW_H,
+            PLAYLIST_TEXT_SIZE,
+            COUNT_LANE,
+        )
+        .on_hover_text(name)
+        .on_hover_note(note)
+    };
+    if !density.icons_only() {
+        // Small right-aligned track count inside the tile. Muted so the name
+        // stays the focus; brighter on the accent fill so it's still readable
+        // when selected.
+        let count_color = if selected {
+            egui::Color32::from_white_alpha(170)
+        } else {
+            egui::Color32::from_gray(130)
+        };
+        ui.painter().text(
+            egui::pos2(
+                resp.rect.right() - PLAYLIST_COUNT_INSET,
+                resp.rect.center().y,
+            ),
+            egui::Align2::RIGHT_CENTER,
+            count.to_string(),
+            crate::ui::tokens::font::footnote(),
+            count_color,
+        );
+    }
+    resp
+}
+
+/// Trailing gap under a playlist row or folder header, tier-appropriate.
+fn playlist_row_gap(ui: &mut egui::Ui, density: NavDensity) {
+    ui.add_space(if density.icons_only() {
+        PLAYLIST_ROW_GAP_RAIL
+    } else {
+        PLAYLIST_ROW_GAP
+    });
+}
+
 /// One playlist row: inline-rename when active, otherwise a selectable label
 /// that highlights on drag-hover and adds the dragged tracks when dropped on.
 pub(crate) fn draw_playlist_leaf(
@@ -350,39 +438,14 @@ pub(crate) fn draw_playlist_leaf(
     action: &mut Option<SidebarAction>,
 ) {
     let selected = *view == LibraryView::Playlist(p.id);
-    // The rail shows a playlist as a glyph like everything else. Keeping the
-    // name here was tried and it is what broke the tier: 56pt cannot hold
-    // "Traumprinz", so names wrapped to three lines and no two tiles were the
-    // same height. The name goes in the tooltip instead — the rail is for
-    // "which one of these did I have open", the wider tiers are for reading.
-    let resp = if density.icons_only() {
-        rail_tile(ui, "♪", selected).on_hover_text(&p.name)
-    } else {
-        // The track count is painted over the tile's right end, so the name is
-        // truncated to leave that lane clear — otherwise a long name runs
-        // straight under the number. `nav_button` reserves the space; the
-        // ellipsis tells the user the name is longer than shown, and the
-        // tooltip carries it in full.
-        nav_button_truncated(ui, "♪", &p.name, selected, 34.0, 13.5, COUNT_LANE)
-            .on_hover_text(&p.name)
-            .on_hover_note("Click to view. Drag tracks here to add them")
-    };
-    // Small right-aligned track count inside the tile. Muted so the name stays
-    // the focus; brighter on the accent fill so it's still readable when selected.
-    let count_color = if selected {
-        egui::Color32::from_white_alpha(170)
-    } else {
-        egui::Color32::from_gray(130)
-    };
-    if !density.icons_only() {
-        ui.painter().text(
-            egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            p.track_ids.len().to_string(),
-            crate::ui::tokens::font::footnote(),
-            count_color,
-        );
-    }
+    let resp = playlist_row(
+        ui,
+        density,
+        &p.name,
+        selected,
+        p.track_ids.len(),
+        "Click to view. Drag tracks here to add them",
+    );
     if resp.dnd_hover_payload::<DraggedTracks>().is_some() {
         // Inset the highlight so the stroke sits inside the tile's rounded box
         // (drawn on the edge, not floating outside it) and the corners stay round.
@@ -415,9 +478,7 @@ pub(crate) fn draw_playlist_leaf(
             ui.close_menu();
         }
     });
-    // The rail's rows sit tighter than the wide tiers': square targets in a
-    // column need less separation to read as distinct than full-width bars do.
-    ui.add_space(if density.icons_only() { 4.0 } else { 3.0 });
+    playlist_row_gap(ui, density);
 }
 
 /// Render one level of a USB device's rekordbox playlist tree in the sidebar,
@@ -440,47 +501,32 @@ pub(crate) fn draw_usb_playlist_nodes(
                 draw_usb_playlist_nodes(ui, density, all, tracks_by_playlist, p.id, vol, view);
                 continue;
             }
+            // Same header style as the catalog's folders; only the open
+            // default differs — a device tree is read-only reference, so its
+            // folders start collapsed.
             egui::CollapsingHeader::new(
-                egui::RichText::new(p.name.as_str()).font(crate::ui::tokens::font::callout()),
+                egui::RichText::new(p.name.as_str()).font(crate::ui::tokens::font::body()),
             )
             .id_salt(("usb-pl-folder", vol, p.id))
             .default_open(false)
             .show(ui, |ui| {
                 draw_usb_playlist_nodes(ui, density, all, tracks_by_playlist, p.id, vol, view);
             });
-            ui.add_space(2.0);
+            playlist_row_gap(ui, density);
         } else {
             let selected = *view == LibraryView::Usb(vol.to_path_buf(), Some(p.id));
-            let resp = if density.icons_only() {
-                rail_tile(ui, "♪", selected).on_hover_text(&p.name)
-            } else {
-                nav_button_truncated(ui, "♪", &p.name, selected, 30.0, 12.5, COUNT_LANE)
-                    .on_hover_text(&p.name)
-                    .on_hover_note("Playlist from this device's rekordbox export")
-            };
-            // Right-aligned track count, mirroring the catalog playlist rows.
-            let count_color = if selected {
-                egui::Color32::from_white_alpha(170)
-            } else {
-                egui::Color32::from_gray(130)
-            };
-            if !density.icons_only() {
-                ui.painter().text(
-                    egui::pos2(resp.rect.right() - 10.0, resp.rect.center().y),
-                    egui::Align2::RIGHT_CENTER,
-                    tracks_by_playlist
-                        .get(&p.id)
-                        .map(Vec::len)
-                        .unwrap_or(0)
-                        .to_string(),
-                    crate::ui::tokens::font::caption(),
-                    count_color,
-                );
-            }
+            let resp = playlist_row(
+                ui,
+                density,
+                &p.name,
+                selected,
+                tracks_by_playlist.get(&p.id).map(Vec::len).unwrap_or(0),
+                "Playlist from this device's rekordbox export",
+            );
             if resp.clicked() {
                 *view = LibraryView::Usb(vol.to_path_buf(), Some(p.id));
             }
-            ui.add_space(2.0);
+            playlist_row_gap(ui, density);
         }
     }
 }
