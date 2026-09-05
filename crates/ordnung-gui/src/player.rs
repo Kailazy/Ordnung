@@ -1203,6 +1203,35 @@ impl App {
     }
 }
 
+impl App {
+    /// Re-read the loaded track's analysis and swap the lane's grid + stored
+    /// waveforms in place, so a just-finished (re-)analysis shows up without
+    /// reloading the track. Playback and the hi-res lane (rendered from the
+    /// engine's own PCM) are untouched.
+    pub(crate) fn refresh_now_playing_analysis(&mut self) {
+        let Some(id) = self.now_playing.as_ref().map(|n| n.id) else {
+            return;
+        };
+        let analysis = Catalog::open(&self.db_path)
+            .and_then(|c| c.get_analysis(id))
+            .ok()
+            .flatten();
+        let grid = analysis
+            .as_ref()
+            .and_then(player_grid)
+            .or_else(|| self.usb_anlz_grid(id));
+        if let Some(np) = self.now_playing.as_mut() {
+            if let Some(a) = &analysis {
+                np.waveform = Arc::new(a.waveform_preview.clone());
+                if a.analyzer_version >= 11 {
+                    np.waveform_bands = Arc::new(a.waveform_bands.clone());
+                }
+            }
+            np.grid = grid;
+        }
+    }
+}
+
 fn player_grid(a: &Analysis) -> Option<PlayerGrid> {
     let bpm = a.bpm?;
     let b0 = a.beatgrid.beats.first()?;

@@ -1447,6 +1447,10 @@ impl eframe::App for App {
         if self.poll_worker() {
             self.reload();
             self.refresh_selected();
+            // A finished analysis job may have re-gridded the loaded track;
+            // swap the lane's grid/waveform in place so the result is visible
+            // without reloading the track.
+            self.refresh_now_playing_analysis();
             self.recount_missing();
             // `reload` has just refreshed `edited_count`. If an automatic write
             // ran and tracks are still pending, those files can't be written —
