@@ -339,48 +339,72 @@ impl Biquad {
     }
 }
 
+/// Half-width, in columns, of the band RMS smoothing window (±2 cols ≈ 33 ms
+/// at 150 col/s): wide enough to hold a full bass cycle, so the low band
+/// reads as a stable envelope instead of dipping to zero mid-cycle, and to
+/// dilute hi-hat transients so the high band stops towering as spikes.
+const SCROLL_SMOOTH: usize = 2;
+/// Per-band display gains after global normalization, tuned against golden
+/// rekordbox PWV7 percentiles for the same audio (see `scrollstats` example).
+const SCROLL_GAIN: [f32; 3] = [1.4, 2.2, 1.0];
+
 /// Rekordbox-style detailed 3-band waveform: `[low, mid, high, amp]` per
-/// column at [`SCROLL_COLS_PER_SEC`]. `low`/`mid`/`high` are per-column peak
+/// column at [`SCROLL_COLS_PER_SEC`]. `low`/`mid`/`high` are windowed RMS
 /// amplitudes of the band-filtered signal (split at 200 Hz / 2 kHz — low sits
 /// a little wider than [`color_bands`]' 120 Hz so the blue band carries the
-/// kick's punch, matching golden rekordbox files' fat low band), 0–127 like
-/// rekordbox's `PWV7`; `amp` is the unfiltered
-/// column peak, 0–255. All linear (no companding) and normalized to the
-/// track's overall peak, so a kick pulses per beat and breakdowns dip —
-/// matching what a golden rekordbox export stores. Time-domain single pass;
-/// meant for export, where the audio is already being read anyway.
+/// kick's punch), smoothed over ±[`SCROLL_SMOOTH`] columns, 0–127 like
+/// rekordbox's `PWV7`; `amp` is the unfiltered column peak, 0–255. All
+/// linear (no companding), normalized to the loudest smoothed band column,
+/// then trimmed per band by [`SCROLL_GAIN`] — matching golden rekordbox
+/// exports' per-band percentile profile, so a kick pulses per beat and
+/// breakdowns dip without the columns collapsing to zero between beats.
+/// Time-domain single pass; meant for export, where the audio is already
+/// being read anyway.
 pub fn scroll_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let sr = sample_rate.max(1) as u64;
     let cols = ((samples.len() as u64 * SCROLL_COLS_PER_SEC as u64) / sr).max(1) as usize;
-    let mut peaks = vec![[0.0f32; 4]; cols];
+    let mut ssq = vec![[0.0f64; 3]; cols];
+    let mut cnt = vec![0u32; cols];
+    let mut amp_peak = vec![0.0f32; cols];
     let mut lp = Biquad::lowpass(200.0, sample_rate);
     let mut hp = Biquad::highpass(2000.0, sample_rate);
     let mut mid_hp = Biquad::highpass(200.0, sample_rate);
     let mut mid_lp = Biquad::lowpass(2000.0, sample_rate);
     for (i, &s) in samples.iter().enumerate() {
-        let col = ((i as u64 * SCROLL_COLS_PER_SEC as u64) / sr) as usize;
-        let p = &mut peaks[col.min(cols - 1)];
-        let vals = [
-            lp.step(s).abs(),
-            mid_lp.step(mid_hp.step(s)).abs(),
-            hp.step(s).abs(),
-            s.abs(),
-        ];
-        for (pk, v) in p.iter_mut().zip(vals) {
-            *pk = pk.max(v);
+        let col = (((i as u64 * SCROLL_COLS_PER_SEC as u64) / sr) as usize).min(cols - 1);
+        let vals = [lp.step(s), mid_lp.step(mid_hp.step(s)), hp.step(s)];
+        for (k, v) in vals.iter().enumerate() {
+            ssq[col][k] += f64::from(v * v);
         }
+        cnt[col] += 1;
+        amp_peak[col] = amp_peak[col].max(s.abs());
     }
-    let max = peaks
+    // Power-averaged RMS smoothing over ±SCROLL_SMOOTH columns.
+    let smooth: Vec<[f32; 3]> = (0..cols)
+        .map(|i| {
+            let lo = i.saturating_sub(SCROLL_SMOOTH);
+            let hi = (i + SCROLL_SMOOTH + 1).min(cols);
+            let mut acc = [0.0f64; 3];
+            for j in lo..hi {
+                for k in 0..3 {
+                    acc[k] += ssq[j][k] / f64::from(cnt[j].max(1));
+                }
+            }
+            std::array::from_fn(|k| (acc[k] / (hi - lo) as f64).sqrt() as f32)
+        })
+        .collect();
+    let band_max = smooth
         .iter()
-        .flat_map(|p| p.iter().copied())
+        .flat_map(|c| c.iter().copied())
         .fold(0.0f32, f32::max)
         .max(1e-6);
+    let peak_max = amp_peak.iter().copied().fold(0.0f32, f32::max).max(1e-6);
     let mut out = Vec::with_capacity(cols * SCROLL_STRIDE);
-    for p in &peaks {
-        for (k, &v) in p.iter().enumerate() {
-            let full = if k == 3 { 255.0 } else { 127.0 };
-            out.push(((v / max) * full).round().min(full) as u8);
+    for (c, &ap) in smooth.iter().zip(&amp_peak) {
+        for k in 0..3 {
+            out.push(((c[k] / band_max) * SCROLL_GAIN[k] * 127.0).round().min(127.0) as u8);
         }
+        out.push(((ap / peak_max) * 255.0).round().min(255.0) as u8);
     }
     out
 }
@@ -410,8 +434,10 @@ mod tests {
             };
             for other in 0..3 {
                 if other != band {
+                    // >2x, not more: the 12 dB/oct crossovers leak, and the
+                    // per-band SCROLL_GAIN trim amplifies the leakage.
                     assert!(
-                        mean(band) > mean(other) * 4,
+                        mean(band) > mean(other) * 2,
                         "{hz} Hz: band {band} ({}) should dominate band {other} ({})",
                         mean(band),
                         mean(other)

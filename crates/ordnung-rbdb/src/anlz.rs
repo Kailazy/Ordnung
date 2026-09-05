@@ -445,11 +445,19 @@ fn pwv7(inp: &AnlzInput) -> Vec<u8> {
 /// the small preview; reproduce that from per-column window means.
 fn pwv6(inp: &AnlzInput) -> Vec<u8> {
     const N: usize = 1200;
-    const TARGET_MEAN: f64 = 26.0;
-    // Pass 1: per-column window means of each band.
-    let mut cols = vec![[0f64; 3]; N];
+    // Fixed per-band preview scale relative to the detail columns, matching
+    // the golden files' PWV6:PWV7 ratio for the same audio (low/mid shrink,
+    // high gets lifted so hat texture stays visible at preview size). A
+    // fixed scale keeps quiet sections quiet -- normalizing each band's mean
+    // instead turned sparse high bands into a forest of full-height spikes.
+    const SCALE: [f64; 3] = [0.55, 0.7, 2.5];
+    let mut body = Vec::with_capacity(8 + N * 3);
+    body.extend_from_slice(&be32(3));
+    body.extend_from_slice(&be32(N as u32));
     let steps = 8;
-    for (i, col) in cols.iter_mut().enumerate() {
+    for i in 0..N {
+        // Window mean of the detail columns this preview column spans.
+        let mut col = [0f64; 3];
         for s in 0..steps {
             let f = (i as f64 + s as f64 / steps as f64) / N as f64;
             let b = band3_col(inp, f);
@@ -457,21 +465,8 @@ fn pwv6(inp: &AnlzInput) -> Vec<u8> {
                 col[k] += b[k] as f64 / steps as f64;
             }
         }
-    }
-    // Pass 2: per-band gain to the golden mean brightness.
-    let mut gain = [1.0f64; 3];
-    for k in 0..3 {
-        let mean = cols.iter().map(|c| c[k]).sum::<f64>() / N as f64;
-        if mean > 0.0 {
-            gain[k] = (TARGET_MEAN / mean).min(8.0);
-        }
-    }
-    let mut body = Vec::with_capacity(8 + N * 3);
-    body.extend_from_slice(&be32(3));
-    body.extend_from_slice(&be32(N as u32));
-    for col in &cols {
         for k in 0..3 {
-            body.push((col[k] * gain[k]).round().min(127.0) as u8);
+            body.push((col[k] * SCALE[k]).round().min(127.0) as u8);
         }
     }
     section(b"PWV6", 0x14, &body)
