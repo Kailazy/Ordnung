@@ -11,7 +11,11 @@
 //!   * **Anchor** — median signed distance from rekordbox beats to ours.
 //!   * **Downbeat** — over rekordbox beats that align with one of ours, how often
 //!     the bar numbers agree, plus the modal `(rb − ours) mod 4` offset so a
-//!     systematic flip (e.g. backbeat picked as the "1") is visible.
+//!     systematic flip (e.g. backbeat picked as the "1") is visible. NOTE: since
+//!     analyzer v24 the bar numbers *intentionally* diverge — Ordnung puts the
+//!     "1" at the kick's entrance (what a DJ expects), while rekordbox's
+//!     pattern-derived phase routinely starts tracks on "3"/"4". The agreement
+//!     figure is informational, not a target; BPM and phase are the targets.
 //!
 //! Needs the mounted EYEBAGS volume, so it's `#[ignore]`d like the other evals.
 //!

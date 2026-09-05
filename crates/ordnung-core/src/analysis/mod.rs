@@ -113,7 +113,14 @@ use std::path::Path;
 ///     beats got no lines at all and every bar number shifted with them. The
 ///     anchor is now always the beat phase's first instance (within one
 ///     period of 0), like rekordbox's own grids.
-pub const ANALYZER_VERSION: u32 = 23;
+/// v24: kick-entrance downbeat — the bar "1" is now the beat where the kick
+///     first enters (sustained kick-band energy arriving as a jump; see
+///     `downbeat::kick_entrance`), which is where a DJ expects it; the
+///     backbeat/novelty cues only decide for kickless material. This
+///     deliberately diverges from rekordbox, whose pattern-derived bar phase
+///     routinely starts tracks on "3"/"4" (its own reference grids do), which
+///     is exactly the behavior being overridden.
+pub const ANALYZER_VERSION: u32 = 24;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key

@@ -5,8 +5,14 @@
 //! the answer is a phase in `0..4`: the index, within the detected beat sequence,
 //! of the first beat that is a downbeat.
 //!
-//! For steady four-on-the-floor the kick lands on every beat, so kick energy can't
-//! disambiguate. Two cues that *do*:
+//! The primary rule is the **kick's entrance**: club tracks bring the kick in
+//! on a bar "1" (usually a phrase boundary), and that is also where a DJ
+//! expects the "1" to be — so the first beat with sustained kick-band energy
+//! is the downbeat (see `kick_entrance`). Only when no entrance is found
+//! (kickless material) do the pattern cues below decide.
+//!
+//! For steady four-on-the-floor the kick lands on every beat, so kick energy
+//! within the groove can't disambiguate. Two cues that *do*:
 //!
 //! 1. **Backbeat** — claps/snares sit on beats 2 & 4. The band around 2–8 kHz is
 //!    louder on the off-beats than on 1 & 3, so the phase whose beats 2 & 4 carry
@@ -25,16 +31,28 @@ use super::dsp::{Spectrogram, WINDOW};
 
 const BAR: usize = 4;
 
-// Analysis bands (Hz). Kick is unused for scoring (it's on every beat in 4/4) but
-// documents the split; clap/snare and the harmonic band drive the two cues.
+// Analysis bands (Hz). Clap/snare and the harmonic band drive the fallback
+// cues; the kick band drives the first-entrance rule.
 const CLAP_LO: f32 = 2_000.0;
 const CLAP_HI: f32 = 8_000.0;
 const HARM_LO: f32 = 150.0;
 const HARM_HI: f32 = 2_000.0;
+const KICK_LO: f32 = 40.0;
+const KICK_HI: f32 = 130.0;
 
 /// Relative cue weights. Backbeat leads; novelty only tips close calls.
 const W_BACKBEAT: f32 = 1.0;
 const W_NOVELTY: f32 = 0.8;
+
+/// First-kick rule: club tracks bring the kick in on a bar "1" (usually a
+/// phrase boundary), so the first beat whose kick-band energy reaches this
+/// fraction of the track's median — sustained for [`KICK_ENTRY_RUN`]
+/// consecutive beats, so a one-off intro boom doesn't count — is taken as the
+/// downbeat. This matches what a DJ expects the "1" to be; the backbeat and
+/// novelty cues only decide when no kick entrance is found (kickless
+/// material).
+const KICK_ENTRY_FRAC: f32 = 0.5;
+const KICK_ENTRY_RUN: usize = 4;
 
 /// Fewest beats we'll decide a downbeat from (two bars); below this, default to 0.
 const MIN_BEATS: usize = 8;
@@ -54,6 +72,7 @@ pub fn detect_phase(spec: &Spectrogram, bpm: f32, first_beat_ms: u64) -> u32 {
 
     let (clap_lo, clap_hi) = bin_range(spec, CLAP_LO, CLAP_HI);
     let (harm_lo, harm_hi) = bin_range(spec, HARM_LO, HARM_HI);
+    let (kick_lo, kick_hi) = bin_range(spec, KICK_LO, KICK_HI);
     // Energy is sampled over the first ~half-beat after each beat, where transients
     // (kick/clap) and note onsets live.
     let win = (beat_frames * 0.5).max(1.0) as usize;
@@ -67,6 +86,7 @@ pub fn detect_phase(spec: &Spectrogram, bpm: f32, first_beat_ms: u64) -> u32 {
     // *detected* beat and dropping beats silently would rotate every phase.
     let mut skipped = 0usize;
     let mut clap: Vec<f32> = Vec::new();
+    let mut kick: Vec<f32> = Vec::new();
     let mut harm_vecs: Vec<Vec<f32>> = Vec::new();
     let mut i = 0;
     loop {
@@ -82,6 +102,7 @@ pub fn detect_phase(spec: &Spectrogram, bpm: f32, first_beat_ms: u64) -> u32 {
         }
         let f1 = (f0 + win).min(n_frames);
         clap.push(band_energy(spec, f0, f1, clap_lo, clap_hi));
+        kick.push(band_energy(spec, f0, f1, kick_lo, kick_hi));
         harm_vecs.push(band_profile(spec, f0, f1, harm_lo, harm_hi));
         i += 1;
     }
@@ -89,6 +110,14 @@ pub fn detect_phase(spec: &Spectrogram, bpm: f32, first_beat_ms: u64) -> u32 {
     let n = clap.len();
     if n < MIN_BEATS {
         return 0;
+    }
+
+    // First-kick rule: the kick's entrance marks the bar "1". An entrance at
+    // the first measurable beat means the kick was already playing at the
+    // track start (any beats we skipped are indistinguishable), so the run's
+    // first beat is the "1".
+    if let Some(k0) = kick_entrance(&kick) {
+        return if k0 == 0 { 0 } else { ((k0 + skipped) % BAR) as u32 };
     }
 
     // Beat-synchronous harmonic flux: L1 change from the previous beat's profile.
@@ -119,6 +148,29 @@ pub fn detect_phase(spec: &Spectrogram, bpm: f32, first_beat_ms: u64) -> u32 {
         }
     }
     best_phase
+}
+
+/// The beat index where the kick enters: the first beat whose kick-band
+/// energy reaches [`KICK_ENTRY_FRAC`] of the track's median, sustained for
+/// [`KICK_ENTRY_RUN`] consecutive beats, and arriving as a *jump* — the two
+/// beats before it carry well under half its energy — so a bassy intro pad
+/// fading in doesn't read as an entrance. Beat 0 qualifying means the kick
+/// was already playing at the start. `None` when no beat qualifies (kickless
+/// or fade-in material; the pattern cues decide instead).
+fn kick_entrance(kick: &[f32]) -> Option<usize> {
+    let mut sorted: Vec<f32> = kick.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = sorted[sorted.len() / 2];
+    if !(median > f32::EPSILON) {
+        return None;
+    }
+    let thr = median * KICK_ENTRY_FRAC;
+    (0..kick.len().saturating_sub(KICK_ENTRY_RUN - 1)).find(|&k| {
+        let sustained = kick[k..k + KICK_ENTRY_RUN].iter().all(|&e| e >= thr);
+        let jump = k == 0
+            || kick[k.saturating_sub(2)..k].iter().all(|&e| e < 0.4 * kick[k]);
+        sustained && jump
+    })
 }
 
 /// Inclusive bin range covering `[lo_hz, hi_hz]`, clamped to the spectrum.
@@ -258,18 +310,38 @@ mod tests {
     }
 
     #[test]
-    fn finds_shifted_downbeat() {
-        // Drop the first beat so the detected run starts on bar position 1 (beat
-        // "2"): positions become 1,2,3,0,1,2,3,0,… and the first downbeat is the
-        // *fourth* detected beat → phase 3.
+    fn kick_entrance_marks_the_one() {
+        // Two beats of chord-only intro (no kick, no clap), then the full 4/4
+        // pattern: the kick's entrance is the bar "1", so phase = 2 — even
+        // though the backbeat cue alone would have voted for the pattern's
+        // internal alignment.
+        let sr = 44_100;
+        let bpm = 128.0;
+        let beat = (60.0 / bpm * sr as f32) as usize;
+        let full = four_four(sr, bpm, 8);
+        let mut s = vec![0.0f32; beat * 2 + full.len()];
+        // Intro: a sustained harmonic-band tone so the opening beats are
+        // audible but kickless.
+        for (j, v) in s.iter_mut().take(beat * 2).enumerate() {
+            let t = j as f32 / sr as f32;
+            *v = (2.0 * std::f32::consts::PI * 220.0 * t).sin() * 0.15;
+        }
+        s[beat * 2..].copy_from_slice(&full);
+        let spec = spectrogram(&s, sr);
+        assert_eq!(detect_phase(&spec, bpm, 0), 2);
+    }
+
+    #[test]
+    fn immediate_kick_makes_the_first_beat_the_one() {
+        // Kicks from the very first beat: the entrance is beat 0, so the first
+        // beat is the "1" regardless of any other cue.
         let sr = 44_100;
         let bpm = 128.0;
         let full = four_four(sr, bpm, 8);
-        let drop = (60.0 / bpm * sr as f32) as usize; // one beat
+        let drop = (60.0 / bpm * sr as f32) as usize; // start mid-bar
         let s = full[drop..].to_vec();
         let spec = spectrogram(&s, sr);
-        // First detected beat sits at ~0 ms; its bar position is 1, so phase = 3.
-        assert_eq!(detect_phase(&spec, bpm, 0), 3);
+        assert_eq!(detect_phase(&spec, bpm, 0), 0);
     }
 
     #[test]
