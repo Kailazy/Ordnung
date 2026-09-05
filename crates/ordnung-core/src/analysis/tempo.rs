@@ -532,10 +532,11 @@ impl FluxEnv {
     }
 }
 
-/// Slide `coarse_ms` (the comb's anchor) onto the nearest real transient, keeping
-/// `bpm` fixed. Searches ±half a beat, so the grid keeps the beats it locked —
-/// only their alignment moves. Returns `coarse_ms` unchanged when the audio
-/// gives the search nothing to lock onto.
+/// Snap the anchor onto the beat phase (see `snap_anchor_env`), keeping `bpm`
+/// fixed. The result is always the phase's FIRST instance in the track (within
+/// one period of 0), so the static grid covers every beat from the start.
+/// Keeps `coarse_ms`'s phase when the audio gives the search nothing to lock
+/// onto.
 pub fn snap_anchor(samples: &[f32], sample_rate: u32, bpm: f32, coarse_ms: u64) -> u64 {
     if bpm <= 0.0 {
         return coarse_ms;
@@ -578,7 +579,11 @@ fn snap_anchor_env(env: &FluxEnv, bpm: f32, coarse_ms: u64) -> u64 {
     let best_edge = edges.iter().cloned().fold(f32::MIN, f32::max);
     let mean_level = win_mean(&cum_edge, 0, n).max(f32::EPSILON);
     if !(best_edge > mean_level * EDGE_MIN_STEP) {
-        return coarse_ms; // no edge worth trusting (flat / transient-free)
+        // No edge worth trusting (flat / transient-free): keep the coarse
+        // phase, but still pull it into the first period so the grid spans
+        // the whole track.
+        let ms = coarse_ms as f64;
+        return (ms - (ms / period_ms).floor() * period_ms).round() as u64;
     }
 
     // Candidate feet: strong edges, greedily kept with ≥ 0.15-beat separation.
@@ -653,14 +658,15 @@ fn snap_anchor_env(env: &FluxEnv, bpm: f32, coarse_ms: u64) -> u64 {
         }
     }
 
-    // Map the winning phase to the beat instance nearest the coarse anchor.
+    // Anchor at the winning phase's FIRST instance in the track: the grid
+    // extrapolates forward only, so an anchor even one beat in leaves the
+    // track's real first beat with no grid line (and shifts every bar
+    // number). rekordbox does the same — its grids start within the first
+    // period (a line may land in intro silence; that's what a static grid
+    // over the whole track means).
     let phase_ms = foot as f64 / n as f64 * period_ms;
-    let k = ((coarse_ms as f64 - phase_ms) / period_ms).round();
-    let mut ms = phase_ms + k * period_ms;
-    while ms < 0.0 {
-        ms += period_ms;
-    }
-    ms.round() as u64
+    let ms = phase_ms - (phase_ms / period_ms).floor() * period_ms;
+    ms.round().max(0.0) as u64
 }
 
 /// Fine-search the period against every beat of the envelope, pivoting at

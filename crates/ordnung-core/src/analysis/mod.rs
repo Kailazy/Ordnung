@@ -107,7 +107,13 @@ use std::path::Path;
 ///     set: 28→64 of 121 grids in phase, 22→52 with the downbeat also right
 ///     (rekordbox's own ~45 ms early stamp convention aside —
 ///     `tempo::RB_GRID_LEAD_MS`). Downbeat novelty weight retuned (0.5→0.8).
-pub const ANALYZER_VERSION: u32 = 22;
+/// v23: grid spans the whole track — the snap could anchor at the beat
+///     instance nearest the coarse comb phase, which sits beats into the
+///     track; the grid only extrapolates forward, so the track's opening
+///     beats got no lines at all and every bar number shifted with them. The
+///     anchor is now always the beat phase's first instance (within one
+///     period of 0), like rekordbox's own grids.
+pub const ANALYZER_VERSION: u32 = 23;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key
