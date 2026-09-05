@@ -16,8 +16,10 @@
 //!    track pins the tempo to well under 0.5 BPM and yields the first downbeat.
 //! 4. **Sample-level grid lock** ([`lock_grid`]) — a kick-weighted onset flux at
 //!    ~1.5 ms resolution over the *full* track refines the period to sub-0.001
-//!    BPM (a static grid extrapolates any residual into audible creep) and
-//!    snaps the anchor onto the transient itself.
+//!    BPM (a static grid extrapolates any residual into audible creep), then the
+//!    snap folds sub/high/full-band RMS envelopes into one average beat and
+//!    anchors at the *foot* of the most kick-like rising edge — see the
+//!    `EDGE_*`/`VOTE_*` constants for why flux-max alone grids off the beat.
 
 use super::dsp::Spectrogram;
 
@@ -378,12 +380,6 @@ const SNAP_BROADBAND_WEIGHT: f32 = 0.35;
 /// Phase search step, in milliseconds.
 const SNAP_STEP_MS: f32 = 0.5;
 
-/// How far the winning offset must stand above the average candidate before the
-/// snap is trusted. Material with no transients (pads, ambient intros) produces
-/// a flat score curve whose argmax is noise; below this we keep the comb's
-/// answer rather than inventing a sharper-looking wrong one.
-const SNAP_MIN_LIFT: f32 = 1.25;
-
 /// Fine period search around the comb's BPM, as a fraction of the period, and
 /// its step count. ±0.05% covers the frame-grid refine's quantization (~0.03 BPM
 /// at club tempo) with margin, while staying far inside the one-beat-slip alias
@@ -392,19 +388,65 @@ const SNAP_MIN_LIFT: f32 = 1.25;
 const PERIOD_FRAC: f64 = 0.0005;
 const PERIOD_STEPS: i32 = 120;
 
-/// Like [`SNAP_MIN_LIFT`]: how far the winning period must stand above the
+/// How far the winning period must stand above the
 /// average candidate before the refine is trusted over the comb's answer.
 const PERIOD_MIN_LIFT: f32 = 1.05;
 
-/// The sample-level onset envelope shared by the anchor snap and period refine:
-/// kick-weighted flux at [`SNAP_HOP`] resolution, addressed in milliseconds.
+/// Beat-phase edge detection: rekordbox-style grids sit where the kick's
+/// energy bump *begins*, not where onset flux is loudest. A bare flux comb
+/// drags the anchor into the bump on soft/sidechained kicks (late by 50–200 ms)
+/// or onto louder offbeat percussion entirely — measured against rekordbox's
+/// own grids, 93 of 121 club tracks gridded off the beat that way. The snap
+/// instead folds the sub- and full-band RMS envelopes into one beat and
+/// anchors at a *rising edge* of that folded profile (mean energy in the
+/// [`EDGE_FRAC`]-beat window after a phase minus the window before) — the
+/// kick's leading foot, which sidechain pumping sharpens further.
+///
+/// Offbeat chord/bass stabs put a second rising edge half a beat away and can
+/// out-sharpen a soft kick, so every strong edge (≥ [`EDGE_KEEP`] of the best)
+/// is a candidate and the one whose bump carries the most *sub-band* energy
+/// wins — kicks own the sub band; stabs and hats are mid/high-heavy.
+///
+/// [`EDGE_FULL_WEIGHT`] blends the full-band profile into the sub-band one for
+/// edge *timing* (sub alone rises mushily); [`EDGE_MIN_STEP`] is the trust
+/// gate: the winning edge must step by at least this fraction of the profile's
+/// mean or the coarse anchor is kept (flat material has no edge worth
+/// inventing).
+const EDGE_FRAC: f64 = 0.10;
+const EDGE_FULL_WEIGHT: f32 = 0.5;
+const EDGE_MIN_STEP: f32 = 0.10;
+const EDGE_KEEP: f32 = 0.15;
+/// Sub-band low-pass for the kick-vs-stab vote: cutoff (Hz) and pole count.
+const SUB_HZ: f32 = 60.0;
+const SUB_POLES: u32 = 2;
+/// High band (one-pole high-pass) for the beat-vs-offbeat vote: the kick's
+/// click and on-beat hats live here as sharp transients.
+const CLAP_HZ: f32 = 2_000.0;
+/// Sub-band weight in the percussive vote: a kick's thump outranks an equally
+/// sharp offbeat hat, but a bare hi click still beats a bare bass swell.
+const VOTE_SUB_WEIGHT: f32 = 2.0;
+/// Documented convention difference, not applied to the grid: rekordbox
+/// stamps its lines ~45–55 ms *before* the kick's energy foot (measured
+/// against 121 rekordbox-7-analyzed tracks, where the correct-phase cluster
+/// sat at a consistent −0.1 beat). Ordnung anchors at the audible foot
+/// instead; the rekordbox ground-truth eval compensates by this constant.
+pub const RB_GRID_LEAD_MS: f64 = 45.0;
+
+/// The sample-level envelopes shared by the anchor snap and period refine:
+/// kick-weighted onset flux plus the low- and full-band RMS it derives from,
+/// all at [`SNAP_HOP`] resolution, addressed in milliseconds.
 struct FluxEnv {
     flux: Vec<f32>,
-    /// Milliseconds per envelope index, and the offset of index 0. A block's
+    /// Mean-normalized sub-, high- and full-band RMS envelopes (same index grid).
+    sub_rms: Vec<f32>,
+    hi_rms: Vec<f32>,
+    full_rms: Vec<f32>,
+    /// Milliseconds per envelope index, and the offset of index 0. A flux
     /// value is the energy *change* across the step, so it belongs midway
-    /// between the two windows' centres.
+    /// between the two windows' centres; an RMS block belongs at its centre.
     ms_per: f64,
     ms_0: f64,
+    ms_0_energy: f64,
 }
 
 impl FluxEnv {
@@ -413,14 +455,18 @@ impl FluxEnv {
             return None;
         }
         let sr = sample_rate as f32;
-        let flux = onset_flux(samples, sr);
+        let (flux, sub_rms, hi_rms, full_rms) = onset_flux(samples, sr);
         if flux.len() < 8 {
             return None;
         }
         Some(FluxEnv {
             flux,
+            sub_rms,
+            hi_rms,
+            full_rms,
             ms_per: SNAP_HOP as f64 / sr as f64 * 1000.0,
             ms_0: (SNAP_WIN as f64 / 2.0 - SNAP_HOP as f64 / 2.0) / sr as f64 * 1000.0,
+            ms_0_energy: SNAP_WIN as f64 / 2.0 / sr as f64 * 1000.0,
         })
     }
 
@@ -465,6 +511,25 @@ impl FluxEnv {
             sum / k as f32
         }
     }
+
+    /// Fold an RMS envelope into one beat of `period_ms` over `n_bins` phase
+    /// bins: the track's average beat as an energy profile. Bins are per-bin
+    /// means so sparse coverage can't tilt the profile.
+    fn folded(&self, env: &[f32], period_ms: f64, n_bins: usize) -> Vec<f32> {
+        let mut sum = vec![0.0f64; n_bins];
+        let mut cnt = vec![0u32; n_bins];
+        for (i, &v) in env.iter().enumerate() {
+            let ms = self.ms_0_energy + i as f64 * self.ms_per;
+            let ph = (ms / period_ms).fract();
+            let b = ((ph * n_bins as f64) as usize).min(n_bins - 1);
+            sum[b] += v as f64;
+            cnt[b] += 1;
+        }
+        sum.iter()
+            .zip(&cnt)
+            .map(|(&s, &c)| if c == 0 { 0.0 } else { (s / c as f64) as f32 })
+            .collect()
+    }
 }
 
 /// Slide `coarse_ms` (the comb's anchor) onto the nearest real transient, keeping
@@ -483,25 +548,115 @@ pub fn snap_anchor(samples: &[f32], sample_rate: u32, bpm: f32, coarse_ms: u64) 
 
 fn snap_anchor_env(env: &FluxEnv, bpm: f32, coarse_ms: u64) -> u64 {
     let period_ms = 60_000.0 / bpm as f64;
-    let steps = (period_ms / SNAP_STEP_MS as f64).round().max(1.0) as i32;
-    let mut best = coarse_ms as f64;
-    let mut best_score = f32::MIN;
-    let mut total = 0.0f32;
-    for k in -steps / 2..=steps / 2 {
-        let cand = coarse_ms as f64 + k as f64 * SNAP_STEP_MS as f64;
-        let s = env.comb(period_ms, cand);
-        total += s;
-        if s > best_score {
-            best_score = s;
-            best = cand;
+    let n = (period_ms / SNAP_STEP_MS as f64).round().max(8.0) as usize;
+    let p_sub = env.folded(&env.sub_rms, period_ms, n);
+    let p_hi = env.folded(&env.hi_rms, period_ms, n);
+    let p_full = env.folded(&env.full_rms, period_ms, n);
+    // Candidate generation sees every band: a clicky kick that barely dents
+    // the full-band RMS still raises a sharp high-band edge.
+    let p_edge: Vec<f32> = (0..n)
+        .map(|b| p_sub[b] + EDGE_FULL_WEIGHT * (p_full[b] + p_hi[b]))
+        .collect();
+    let half = ((n as f64 * EDGE_FRAC) as usize).max(1);
+
+    // Circular windowed means via doubled prefix sums.
+    let cum = |p: &[f32]| {
+        let mut c = Vec::with_capacity(2 * n + 1);
+        c.push(0.0f64);
+        for i in 0..2 * n {
+            c.push(c[i] + p[i % n] as f64);
+        }
+        c
+    };
+    let cum_edge = cum(&p_edge);
+    let win_mean = |c: &[f64], a: usize, len: usize| ((c[a + len] - c[a]) / len as f64) as f32;
+
+    // Rising-edge strength at every phase of the average beat.
+    let edge_at =
+        |b: usize| win_mean(&cum_edge, b, half) - win_mean(&cum_edge, b + n - half, half);
+    let edges: Vec<f32> = (0..n).map(edge_at).collect();
+    let best_edge = edges.iter().cloned().fold(f32::MIN, f32::max);
+    let mean_level = win_mean(&cum_edge, 0, n).max(f32::EPSILON);
+    if !(best_edge > mean_level * EDGE_MIN_STEP) {
+        return coarse_ms; // no edge worth trusting (flat / transient-free)
+    }
+
+    // Candidate feet: strong edges, greedily kept with ≥ 0.15-beat separation.
+    let min_sep = n * 3 / 20;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| edges[b].partial_cmp(&edges[a]).unwrap());
+    let mut cands: Vec<usize> = Vec::new();
+    for b in order {
+        if edges[b] < best_edge * EDGE_KEEP || cands.len() >= 5 {
+            break;
+        }
+        let sep_ok = cands.iter().all(|&c| {
+            let d = (b as i64 - c as i64).rem_euclid(n as i64) as usize;
+            d.min(n - d) >= min_sep
+        });
+        if sep_ok {
+            cands.push(b);
         }
     }
-    let mean = total / (steps + 1) as f32;
-    if !(best_score > mean * SNAP_MIN_LIFT) {
-        return coarse_ms;
+
+    // Beat-vs-offbeat vote: the beat is marked by *percussive* onsets — a
+    // kick's sub thump and/or its click / an on-beat hat — while the competing
+    // edges are syncopated bass swells (sub-band but SLOW: 100+ ms rise) and
+    // offbeat hats (hi-only). Score each candidate by its steepest short-window
+    // rise: swells score near zero, transients score their full height. The
+    // sub band gets [`VOTE_SUB_WEIGHT`]× — a kick's thump outranks an equally
+    // sharp offbeat hat, but a bare hi click still beats a bare swell.
+    let small = ((n as f64 * 0.05) as usize).max(1);
+    let short_edge = |p: &[f32], c: usize| {
+        (c + n - small..c + n + 2 * half)
+            .map(|j| p[(j + small) % n] - p[j % n])
+            .fold(f32::MIN, f32::max)
+            .max(0.0)
+    };
+    // Sustain penalty: a kick's bump decays within a fraction of a beat, while
+    // an offbeat chord stab rings (reverb/delay) — its folded bump stays above
+    // half its height for much longer. Width is measured on the combined
+    // profile from the candidate's foot, in beats.
+    let width_bt = |c: usize| {
+        let peak = (c..c + n / 2).map(|j| p_edge[j % n]).fold(f32::MIN, f32::max);
+        let base = (c + n - half..c + n).map(|j| p_edge[j % n]).fold(f32::MAX, f32::min);
+        let thr = base + 0.5 * (peak - base);
+        let over = (c..c + n / 2).filter(|&j| p_edge[j % n] >= thr).count();
+        over as f32 / n as f32
+    };
+    let best_bin = cands
+        .iter()
+        .cloned()
+        .max_by(|&a, &b| {
+            let score = |c: usize| {
+                (VOTE_SUB_WEIGHT * short_edge(&p_sub, c) + short_edge(&p_hi, c))
+                    / (1.0 + 6.0 * width_bt(c))
+            };
+            score(a).partial_cmp(&score(b)).unwrap()
+        })
+        .unwrap_or(0);
+
+    // The big edge window plateaus over any placement that fully covers the
+    // bump, so refine to the *foot*: walk back up to a window, then forward to
+    // the first crossing of base + 25% of the local rise.
+    let base = win_mean(&cum_edge, best_bin + n - half, half);
+    let peak = (best_bin..best_bin + half)
+        .map(|j| p_edge[j % n])
+        .fold(f32::MIN, f32::max);
+    let thr = base + 0.25 * (peak - base);
+    let mut foot = best_bin;
+    for step in 0..2 * half {
+        let j = (best_bin + n - half + step) % n;
+        if p_edge[j] >= thr {
+            foot = j;
+            break;
+        }
     }
-    // Keep the anchor inside the track: a snap that walks past zero moves up a beat.
-    let mut ms = best;
+
+    // Map the winning phase to the beat instance nearest the coarse anchor.
+    let phase_ms = foot as f64 / n as f64 * period_ms;
+    let k = ((coarse_ms as f64 - phase_ms) / period_ms).round();
+    let mut ms = phase_ms + k * period_ms;
     while ms < 0.0 {
         ms += period_ms;
     }
@@ -551,10 +706,14 @@ pub fn lock_grid(samples: &[f32], sample_rate: u32, bpm: f32, coarse_ms: u64) ->
 /// computed for a kick-band copy of the signal and for the full band, each
 /// normalized to its own mean before they're mixed. Normalizing first is what
 /// lets one weight (`SNAP_BROADBAND_WEIGHT`) hold across a bass-heavy techno
-/// track and a thin, kickless intro alike.
-fn onset_flux(samples: &[f32], sr: f32) -> Vec<f32> {
+/// track and a thin, kickless intro alike. Also returns the mean-normalized
+/// sub-band ([`SUB_HZ`], [`SUB_POLES`]) and full-band RMS envelopes, which the
+/// snap's folded profiles read.
+fn onset_flux(samples: &[f32], sr: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
     let n_blocks = samples.len().saturating_sub(SNAP_WIN) / SNAP_HOP + 1;
     let mut rms_lo = Vec::with_capacity(n_blocks);
+    let mut rms_sub = Vec::with_capacity(n_blocks);
+    let mut rms_hi = Vec::with_capacity(n_blocks);
     let mut rms_full = Vec::with_capacity(n_blocks);
 
     // One-pole low-pass (a = 1 - e^{-2π fc/sr}) run once over the signal; the
@@ -569,16 +728,46 @@ fn onset_flux(samples: &[f32], sr: f32) -> Vec<f32> {
         })
         .collect();
 
+    // Steeper sub-band copy for the kick-vs-stab vote: a leaky one-pole lets
+    // loud mid stabs bleed into the "low" band; two poles at SUB_HZ keep the
+    // sub band the kick's own.
+    let a_sub = 1.0 - (-std::f32::consts::TAU * SUB_HZ / sr).exp();
+    let mut sub = samples.to_vec();
+    for _ in 0..SUB_POLES {
+        let mut lp = 0.0f32;
+        for x in &mut sub {
+            lp += a_sub * (*x - lp);
+            *x = lp;
+        }
+    }
+
+    // High band (clap/snare) for the backbeat vote: one-pole high-pass.
+    let a_hi = 1.0 - (-std::f32::consts::TAU * CLAP_HZ / sr).exp();
+    let mut lp_hi = 0.0f32;
+    let hi: Vec<f32> = samples
+        .iter()
+        .map(|&s| {
+            lp_hi += a_hi * (s - lp_hi);
+            s - lp_hi
+        })
+        .collect();
+
     let mut pos = 0;
     while pos + SNAP_WIN <= samples.len() {
         let mut sl = 0.0f64;
+        let mut ss = 0.0f64;
+        let mut sh = 0.0f64;
         let mut sf = 0.0f64;
         for i in pos..pos + SNAP_WIN {
             sl += (low[i] * low[i]) as f64;
+            ss += (sub[i] * sub[i]) as f64;
+            sh += (hi[i] * hi[i]) as f64;
             sf += (samples[i] * samples[i]) as f64;
         }
         let inv = 1.0 / SNAP_WIN as f64;
         rms_lo.push((sl * inv).sqrt() as f32);
+        rms_sub.push((ss * inv).sqrt() as f32);
+        rms_hi.push((sh * inv).sqrt() as f32);
         rms_full.push((sf * inv).sqrt() as f32);
         pos += SNAP_HOP;
     }
@@ -598,10 +787,23 @@ fn onset_flux(samples: &[f32], sr: f32) -> Vec<f32> {
     };
     let lo = rise(&rms_lo);
     let full = rise(&rms_full);
-    lo.iter()
+    let flux = lo
+        .iter()
         .zip(&full)
         .map(|(l, f)| l + SNAP_BROADBAND_WEIGHT * f)
-        .collect()
+        .collect();
+
+    // Mean-normalize the RMS envelopes themselves for the snap's folded profiles.
+    let normalize = |xs: &mut Vec<f32>| {
+        let mean = xs.iter().sum::<f32>() / xs.len().max(1) as f32;
+        if mean > 0.0 {
+            xs.iter_mut().for_each(|x| *x /= mean);
+        }
+    };
+    normalize(&mut rms_sub);
+    normalize(&mut rms_hi);
+    normalize(&mut rms_full);
+    (flux, rms_sub, rms_hi, rms_full)
 }
 
 #[cfg(test)]
@@ -634,6 +836,39 @@ mod tests {
         let s = click_train(sr, bpm, secs);
         let spec = spectrogram(&s, sr);
         detect(&spec).bpm
+    }
+
+    #[test]
+    #[ignore = "diagnostic against the EYEBAGS USB"]
+    fn debug_snap_on_real_track() {
+        let path = std::env::var("SNAP_DEBUG_FILE")
+            .unwrap_or_else(|_| "/Volumes/EYEBAGS/Contents/01 Two Chords Deep.aif".into());
+        let audio = crate::analysis::decode_mono_capped(&path, Some(48_000 * 160)).unwrap();
+        let spec = spectrogram(&audio.samples, audio.sample_rate);
+        let t = detect(&spec);
+        let env = FluxEnv::new(&audio.samples, audio.sample_rate).unwrap();
+        let bpm = refine_period_env(&env, t.bpm, t.beat_offset_ms);
+        let period_ms = 60_000.0 / bpm as f64;
+        let n = (period_ms / SNAP_STEP_MS as f64).round().max(8.0) as usize;
+        let p_sub = env.folded(&env.sub_rms, period_ms, n);
+        let p_full = env.folded(&env.full_rms, period_ms, n);
+        let p_hi2 = env.folded(&env.hi_rms, period_ms, n);
+        let sparow = |p: &[f32], label: &str| {
+            let k = p.len() / 32;
+            let bins: Vec<f32> = (0..32)
+                .map(|i| p[i * k..(i + 1) * k].iter().sum::<f32>() / k as f32)
+                .collect();
+            let (lo, hi) = bins.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+            let row: String = bins
+                .iter()
+                .map(|&v| char::from_digit((((v - lo) / (hi - lo).max(1e-9)) * 9.0) as u32, 10).unwrap())
+                .collect();
+            eprintln!("{label:<8} |{row}|");
+        };
+        eprintln!("bpm {bpm:.2} coarse {}ms snap {}ms", t.beat_offset_ms, snap_anchor_env(&env, bpm, t.beat_offset_ms));
+        sparow(&p_sub, "sub");
+        sparow(&p_full, "full");
+        sparow(&p_hi2, "hi");
     }
 
     #[test]

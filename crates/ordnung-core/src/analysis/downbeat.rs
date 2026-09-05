@@ -34,7 +34,7 @@ const HARM_HI: f32 = 2_000.0;
 
 /// Relative cue weights. Backbeat leads; novelty only tips close calls.
 const W_BACKBEAT: f32 = 1.0;
-const W_NOVELTY: f32 = 0.5;
+const W_NOVELTY: f32 = 0.8;
 
 /// Fewest beats we'll decide a downbeat from (two bars); below this, default to 0.
 const MIN_BEATS: usize = 8;

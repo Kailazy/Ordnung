@@ -10,18 +10,31 @@ stateless and parallelizable with `rayon`. Every result is cached.
 
 ## Pipeline per track
 
-The live pipeline (analyzer **v14**) currently emits **key, waveform, and loudness**.
-BPM/tempo and beatgrid are **disabled as of v8** — `analyze_file` leaves `bpm: None`
-and an empty (anchorless) beatgrid. Steps 2–3 below describe how they worked and
-should be rebuilt when re-enabled; they are NOT in the current output.
+The live pipeline (analyzer **v22**) emits **BPM, a static beatgrid with downbeats,
+key, waveform, and loudness**.
 
 1. **Decode** to mono f32 PCM at a known rate (e.g. downmix; 44.1 kHz) via symphonia.
-2. **BPM / tempo** *(disabled, v8+)* — spectral-flux onset envelope → tempo via
-   autocorrelation / comb-filter over a plausible DJ range (~70–185 BPM, with
-   octave-error correction).
-3. **Beatgrid** *(disabled, v8+)* — phase-align beats to onset peaks; emit anchored
-   beat positions. Assume near-constant tempo for electronic music; support tempo
-   segments for variable material.
+2. **BPM / tempo** (`tempo::detect`, re-enabled v16) — spectral-flux onset envelope →
+   autocorrelation + harmonic comb with a log-Gaussian club-tempo prior (70–185 BPM,
+   octave and 3:2/5:4 metrical correction), then `tempo::lock_grid` refines the
+   period to sub-0.001 BPM against every beat of the full track at sample
+   resolution.
+3. **Beatgrid** — a constant-tempo (static) grid anchored by the beat-aware snap
+   (v22): sub/high/full-band RMS envelopes folded into one average beat; strong
+   rising edges become candidate feet; a percussive-sharpness vote (sub-weighted
+   short-window slope, with a sustain penalty so ringing offbeat chord stabs lose
+   to narrow kick bumps) picks the beat; the anchor lands on the winning bump's
+   foot. `downbeat::detect_phase` (v17) then picks which of the four beats is the
+   bar's "1" (backbeat + harmonic-novelty cues). Ground truth: rekordbox 7's own
+   PQTZ grids on the EYEBAGS reference USB — run
+   `cargo test -p ordnung-rbdb --test downbeat_eval --release -- --ignored --nocapture`
+   (121 tracks: v22 gets 64 grids in phase, 52 with the downbeat right; the
+   flux-max snap managed 28/22). `phase_probe` in the same crate prints per-band
+   beat profiles on the rekordbox grid for diagnosing a flagged track. Note:
+   rekordbox stamps lines ~45 ms before the kick's energy foot
+   (`tempo::RB_GRID_LEAD_MS`); Ordnung anchors at the audible foot and the eval
+   compensates. Known miss class: dub-techno tracks whose offbeat chord stab
+   out-guns a clicky, sub-light kick can still grid half a beat off.
 4. **Key** — HPCP-style chromagram correlated against EDM-tuned profiles → best
    `(PitchClass, Mode)`. See "Key detection" below; the naive version is a trap.
 5. **Waveform** — preview (low-res, for CDJ overview) + detailed/color bins. Spans the

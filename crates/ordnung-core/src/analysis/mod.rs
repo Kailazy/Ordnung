@@ -93,7 +93,21 @@ use std::path::Path;
 ///     visible creep: lines on the beat at the start of a six-minute track
 ///     drifted ~50 ms off by the end. The grid also keeps the refined BPM at
 ///     full precision (display still rounds); residual creep is under ~2 ms.
-pub const ANALYZER_VERSION: u32 = 21;
+/// v22: beat-aware anchor snap — graded against rekordbox 7's own grids for 121
+///     club tracks (EYEBAGS USB PQTZ ground truth, `ordnung-rbdb`'s
+///     `downbeat_eval`), the flux-max snap gridded 93/121 tracks off the beat:
+///     it lands mid-bump on soft/sidechained kicks (50–200 ms late) or on
+///     louder offbeat percussion outright. The snap now folds sub-, high- and
+///     full-band RMS envelopes into one average beat, takes strong rising
+///     edges as candidate feet, votes for the beat by percussive sharpness
+///     (short-window slope; sub-weighted, so a kick's thump outranks an offbeat
+///     hat, and a bare hi click still beats a slow bass swell) with a sustain
+///     penalty (ringing offbeat chord stabs fold wide; kicks fold narrow), and
+///     anchors at the winning bump's foot. rekordbox parity on the reference
+///     set: 28→64 of 121 grids in phase, 22→52 with the downbeat also right
+///     (rekordbox's own ~45 ms early stamp convention aside —
+///     `tempo::RB_GRID_LEAD_MS`). Downbeat novelty weight retuned (0.5→0.8).
+pub const ANALYZER_VERSION: u32 = 22;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key
