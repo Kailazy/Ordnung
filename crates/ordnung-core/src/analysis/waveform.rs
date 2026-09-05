@@ -346,7 +346,7 @@ impl Biquad {
 const SCROLL_SMOOTH: usize = 2;
 /// Per-band display gains after global normalization, tuned against golden
 /// rekordbox PWV7 percentiles for the same audio (see `scrollstats` example).
-const SCROLL_GAIN: [f32; 3] = [1.4, 2.2, 1.0];
+const SCROLL_GAIN: [f32; 3] = [1.4, 2.2, 0.75];
 
 /// Rekordbox-style detailed 3-band waveform: `[low, mid, high, amp]` per
 /// column at [`SCROLL_COLS_PER_SEC`]. `low`/`mid`/`high` are windowed RMS

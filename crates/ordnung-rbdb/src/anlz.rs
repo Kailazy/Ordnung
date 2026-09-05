@@ -104,6 +104,23 @@ pub fn read_beatgrid(dat_path: &std::path::Path) -> Vec<Beat> {
         .collect()
 }
 
+/// Read the track path a `ANLZ0000.DAT` describes, from its `PPTH` section:
+/// `u32 byte length` (terminator included), then the UTF-16BE path as exported
+/// (e.g. `/Contents/Artist - Title.aiff`, relative to the USB root). `None`
+/// when the file is missing or carries no path.
+pub fn read_track_path(dat_path: &std::path::Path) -> Option<String> {
+    let dat = std::fs::read(dat_path).ok()?;
+    let body = find_section(&dat, b"PPTH")?;
+    let len = u32::from_be_bytes(body.get(0..4)?.try_into().ok()?) as usize;
+    let raw = body.get(4..4 + len)?;
+    let units: Vec<u16> = raw
+        .chunks_exact(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .take_while(|&u| u != 0)
+        .collect();
+    String::from_utf16(&units).ok()
+}
+
 /// Read a track's waveforms from its `ANLZ0000.DAT` (the `.EXT` sibling is
 /// derived by extension swap, as players do). `None` when the file is
 /// missing, unreadable, or carries no `PWAV`.
@@ -450,7 +467,7 @@ fn pwv6(inp: &AnlzInput) -> Vec<u8> {
     // high gets lifted so hat texture stays visible at preview size). A
     // fixed scale keeps quiet sections quiet -- normalizing each band's mean
     // instead turned sparse high bands into a forest of full-height spikes.
-    const SCALE: [f64; 3] = [0.55, 0.7, 2.5];
+    const SCALE: [f64; 3] = [0.55, 0.7, 2.0];
     let mut body = Vec::with_capacity(8 + N * 3);
     body.extend_from_slice(&be32(3));
     body.extend_from_slice(&be32(N as u32));
