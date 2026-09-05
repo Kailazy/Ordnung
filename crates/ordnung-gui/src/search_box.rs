@@ -548,14 +548,32 @@ fn search_hit_row(
         }
     };
 
+    // A library track can be *carried* out of the popup and dropped on a
+    // sidebar playlist — the same in-app drag its table row offers, with the
+    // same payload type, so every drop target already understands it. Vinyl
+    // hits have no file to add, so their rows stay click-only.
+    let track_id = match hit {
+        SearchHit::Track { id, .. } => Some(*id),
+        SearchHit::Vinyl { .. } => None,
+    };
+
     // Tall enough for the artwork plus breathing room, so the two text lines
     // sit centred against it rather than crowding the square. One S3 gutter
     // above and below keeps the popup on the same 8-pt rhythm as the toolbar.
     let height = HIT_COVER_PX + space::S3 * 2.0;
     let (slot, resp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
-        egui::Sense::click(),
+        if track_id.is_some() {
+            egui::Sense::click_and_drag()
+        } else {
+            egui::Sense::click()
+        },
     );
+    if let Some(id) = track_id {
+        if resp.dragged() {
+            resp.dnd_set_drag_payload(DraggedTracks(vec![id]));
+        }
+    }
     // Everything the row paints is offset by the remaining slide and dimmed by
     // the remaining fade. The allocated slot above is untouched, so layout is
     // stable while the contents move.
