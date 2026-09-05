@@ -380,6 +380,45 @@ fn embedded_cover_becomes_stick_artwork() {
 }
 
 #[test]
+fn export_leaves_no_temp_files_and_passes_validation() {
+    // A clean export must validate (the tail re-reads and checks the pdb) and
+    // must not leave any `.tmp` sidecars from the atomic writes.
+    let src = temp_root("clean-src");
+    let usb = temp_root("clean-usb");
+    let a = audio_file(&src, "one.mp3", 4_000);
+    let b = audio_file(&src, "two.aiff", 5_000);
+    let tracks = vec![
+        track(1, &a, Format::Mp3, "One", "A"),
+        track(2, &b, Format::Aiff, "Two", "B"),
+    ];
+    let pl = vec![Playlist {
+        id: 1,
+        name: "set".into(),
+        parent: None,
+        is_folder: false,
+        track_ids: vec![1, 2],
+    }];
+    let cancel = AtomicBool::new(false);
+    // export_usb returning Ok already means validate_export passed.
+    export_usb(&usb, &tracks, &pl, ExportMode::Replace, &mut |_| {}, &cancel).unwrap();
+
+    let rb = usb.join("PIONEER/rekordbox");
+    let temps: Vec<_> = std::fs::read_dir(&rb)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(temps.is_empty(), "atomic writes left temp files: {temps:?}");
+    // The real databases are in place.
+    assert!(rb.join("export.pdb").is_file());
+    assert!(rb.join("exportLibrary.db").is_file());
+
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&usb);
+}
+
+#[test]
 fn cancel_aborts_before_completion() {
     let src = temp_root("cancel-src");
     let usb = temp_root("cancel-usb");

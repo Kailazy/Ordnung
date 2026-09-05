@@ -223,12 +223,16 @@ pub(crate) fn write_library(
     let tmp = scratch_db_path("ordnung-dlp-write");
     let _ = std::fs::remove_file(&tmp);
     build_library(&tmp, t, device_name)?;
-    for suffix in ["", "-wal", "-shm"] {
+    // Stale journal sidecars from a prior write must go — a leftover -wal/-shm
+    // beside a fresh database makes SQLite try (and, on FAT, fail) to recover.
+    // The main db itself is replaced atomically below, so it is NOT removed
+    // first: an interrupted placement then leaves the previous complete
+    // database rather than nothing at all.
+    for suffix in ["-wal", "-shm"] {
         let p = db_path.with_file_name(format!("exportLibrary.db{suffix}"));
         let _ = std::fs::remove_file(p);
     }
-    std::fs::copy(&tmp, db_path).map_err(err_io)?;
-    crate::export::sync_existing(db_path).map_err(err_io)?;
+    crate::export::place_atomic(&tmp, db_path).map_err(err_io)?;
     let _ = std::fs::remove_file(&tmp);
     Ok(())
 }

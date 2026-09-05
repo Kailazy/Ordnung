@@ -42,6 +42,12 @@ pub enum ExportError {
     BadDestination(PathBuf),
     #[error("device library: {0}")]
     Dlp(String),
+    #[error(
+        "not enough space on the destination: need ~{need_mb} MB, {free_mb} MB free"
+    )]
+    NotEnoughSpace { need_mb: u64, free_mb: u64 },
+    #[error("the export wrote a database that failed validation ({0}); the stick was not left in a half-written state")]
+    Validation(String),
 }
 
 type Result<T> = std::result::Result<T, ExportError>;
@@ -61,9 +67,101 @@ pub(crate) fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     f.sync_all()
 }
 
+/// Write `bytes` to `path` **atomically**: fsync a sibling temp file, then
+/// rename it over `path`. A reader (a CDJ, rekordbox) therefore only ever sees
+/// the complete old file or the complete new one — never a truncated file mid
+/// write. Used for the browse databases, which a player reads first and treats
+/// as the manifest for the whole stick: a torn `export.pdb` fails the device.
+/// The temp sits in the same directory so the rename stays within one
+/// filesystem (a cross-device rename would fall back to a non-atomic copy).
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = tmp_sibling(path);
+    // A leftover temp from a previously-killed export would fail create; clear it.
+    let _ = std::fs::remove_file(&tmp);
+    write_synced(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Atomically place an already-built file (e.g. the DLP built on local disk)
+/// onto `dest`: copy to a sibling temp, fsync, rename over `dest`. Same
+/// all-or-nothing guarantee as [`write_atomic`] without holding the bytes in
+/// memory.
+pub(crate) fn place_atomic(src: &Path, dest: &Path) -> std::io::Result<()> {
+    let tmp = tmp_sibling(dest);
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::copy(src, &tmp)?;
+    sync_existing(&tmp)?;
+    std::fs::rename(&tmp, dest)?;
+    Ok(())
+}
+
+/// A hidden temp path beside `path` (`.foo.pdb.tmp`), on the same filesystem so
+/// the rename is atomic.
+fn tmp_sibling(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    path.with_file_name(format!(".{name}.tmp"))
+}
+
 /// fsync a file that was produced by `fs::copy`.
 pub(crate) fn sync_existing(path: &Path) -> std::io::Result<()> {
     std::fs::File::open(path)?.sync_all()
+}
+
+/// fsync a directory so a rename/create *into* it is durable. On FAT (and
+/// most filesystems) a file rename isn't persisted until the directory entry
+/// itself is flushed — without this a power loss just after export can leave
+/// the directory still pointing at the old file even though the new bytes are
+/// on disk. Best-effort: platforms/filesystems that reject a directory fsync
+/// (some don't support it) simply skip it rather than failing the export.
+pub(crate) fn sync_dir(dir: &Path) {
+    if let Ok(f) = std::fs::File::open(dir) {
+        let _ = f.sync_all();
+    }
+}
+
+/// Bytes we expect to add to the destination for `sources` not already present
+/// at the right size, plus a fractional margin for the databases, ANLZ files
+/// and artwork the export also writes. Summed from the true u64 file lengths
+/// (the `TrackRow.file_size` field is clamped to u32, so it must not be used
+/// here). `dest_contents` is the stick's `/Contents` dir, used to skip files
+/// already copied.
+fn estimated_bytes_needed(sources: &[(PathBuf, String)], dest_contents: &Path) -> u64 {
+    let mut audio: u64 = 0;
+    for (src, name) in sources {
+        let src_len = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+        let already = std::fs::metadata(dest_contents.join(name))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if already != src_len {
+            audio += src_len;
+        }
+    }
+    // ANLZ + artwork + databases run well under a fifth of the audio in
+    // practice; a 25% margin comfortably covers them and FAT slack.
+    audio + audio / 4 + 8 * 1024 * 1024
+}
+
+/// Free bytes on the filesystem holding `path`. `None` when it can't be
+/// determined (the precheck then skips rather than blocking a valid export).
+#[cfg(unix)]
+fn free_space(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: statvfs reads into a zeroed struct we own; c is a valid C string.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    Some(st.f_bavail as u64 * st.f_frsize as u64)
+}
+
+#[cfg(not(unix))]
+fn free_space(_path: &Path) -> Option<u64> {
+    None
 }
 
 /// What the export is doing right now; `done`/`total` count within the stage.
@@ -312,11 +410,72 @@ fn default_anlz_path(id: u32) -> String {
 
 /// Export `tracks` (in the given order) and `playlists` onto `dest_root`.
 ///
+/// Re-read the databases the export just wrote and confirm the stick is
+/// internally consistent, so a subtle writer bug surfaces here as a loud
+/// failure instead of a stick that looks exported but won't load on a player.
+/// Checks: `export.pdb` re-parses; every track row's `analyze_path` names an
+/// ANLZ file that exists on the stick; every playlist entry points at a track
+/// the database actually contains; and the number of tracks/playlists read
+/// back matches what was written. Returns the offending detail on failure.
+fn validate_export(
+    dest_root: &Path,
+    expected_tracks: usize,
+    expected_playlists: usize,
+) -> std::result::Result<(), String> {
+    let pdb = dest_root
+        .join("PIONEER")
+        .join("rekordbox")
+        .join("export.pdb");
+    let export = crate::pdb::read_export(&pdb).map_err(|e| format!("export.pdb: {e}"))?;
+
+    if export.tracks.len() != expected_tracks {
+        return Err(format!(
+            "wrote {expected_tracks} track(s) but read back {}",
+            export.tracks.len()
+        ));
+    }
+    if export.playlists.len() != expected_playlists {
+        return Err(format!(
+            "wrote {expected_playlists} playlist node(s) but read back {}",
+            export.playlists.len()
+        ));
+    }
+    // Every track's analysis file must actually be on the stick.
+    for t in export.tracks.values() {
+        if let Some(rel) = t.analyze_path.as_deref() {
+            let on_disk = dest_root.join(rel.trim_start_matches('/'));
+            if !on_disk.is_file() {
+                return Err(format!(
+                    "track {:?} references a missing ANLZ file {rel}",
+                    t.title
+                ));
+            }
+        }
+    }
+    // Every playlist entry must resolve to a real track row.
+    for (playlist_id, track_ids) in &export.entries {
+        for tid in track_ids {
+            if !export.tracks.contains_key(tid) {
+                return Err(format!(
+                    "playlist {playlist_id} references track id {tid}, which has no row"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The destination is a mounted FAT32 volume root or any directory (a staging
 /// folder, an `ORDNUNG_FAKE_USB` root). `mode` decides whether the stick is
 /// rebuilt from this selection ([`ExportMode::Replace`]) or the selection is
 /// added to what is already there ([`ExportMode::Merge`]). Audio already
 /// present in `/Contents` with matching size is not re-copied either way.
+///
+/// Robustness contract: nothing is written until a free-space precheck passes;
+/// the audio, ANLZ and artwork are fsynced as they're written; the browse
+/// databases are placed atomically (temp + rename) so an interrupted export
+/// never leaves a torn manifest; the containing directory is fsynced; and the
+/// written databases are re-read and validated before success is reported.
 pub fn export_usb(
     dest_root: &Path,
     tracks: &[Track],
@@ -535,6 +694,23 @@ pub fn export_usb(
         return Err(ExportError::NoTracks);
     }
 
+    // ---- free-space precheck ----------------------------------------------
+    // Refuse before touching the stick if the selection can't fit, rather than
+    // half-writing it. Sum true file lengths of the audio we'd actually copy.
+    let sources: Vec<(PathBuf, String)> = resolved
+        .iter()
+        .map(|t| (t.source.clone(), t.row.filename.clone()))
+        .collect();
+    let need = estimated_bytes_needed(&sources, &contents);
+    if let Some(free) = free_space(dest_root) {
+        if free < need {
+            return Err(ExportError::NotEnoughSpace {
+                need_mb: need / (1024 * 1024),
+                free_mb: free / (1024 * 1024),
+            });
+        }
+    }
+
     // ---- copy audio -------------------------------------------------------
     let total = resolved.len();
     for (i, tr) in resolved.iter().enumerate() {
@@ -725,11 +901,11 @@ pub fn export_usb(
     };
 
     // ---- databases --------------------------------------------------------
-    let pdb = rb_dir.join("export.pdb");
-    write_synced(&pdb, &pdbw::build_export_pdb(&tables)).map_err(io_err(pdb))?;
-    let ext_pdb = rb_dir.join("exportExt.pdb");
-    write_synced(&ext_pdb, &pdbw::build_export_ext_pdb()).map_err(io_err(ext_pdb))?;
-
+    // The DLP is built first (on local disk, then placed) and the pdbs after,
+    // so `export.pdb` — the file a player reads first and treats as the whole
+    // stick's manifest — is the LAST thing to land. Each placement is atomic
+    // (temp + rename): an interrupted write leaves the previous complete file,
+    // never a torn one.
     check(cancel)?;
     let device_name = dest_root
         .file_name()
@@ -738,6 +914,25 @@ pub fn export_usb(
     let dlp = rb_dir.join("exportLibrary.db");
     crate::dlp::write_library(&dlp, &tables, &device_name)
         .map_err(|e| ExportError::Dlp(e.to_string()))?;
+
+    let ext_pdb = rb_dir.join("exportExt.pdb");
+    write_atomic(&ext_pdb, &pdbw::build_export_ext_pdb()).map_err(io_err(ext_pdb))?;
+    let pdb = rb_dir.join("export.pdb");
+    write_atomic(&pdb, &pdbw::build_export_pdb(&tables)).map_err(io_err(pdb))?;
+
+    // Make the renames durable: without a directory fsync a rename isn't
+    // persisted on FAT until the dir entry flushes, so a power loss right after
+    // export could leave the directory pointing at the old files.
+    sync_dir(&rb_dir);
+
+    // ---- validate what we wrote -------------------------------------------
+    // Re-read the databases and confirm the stick is internally consistent
+    // before reporting success. A writer bug surfaces here as a loud failure,
+    // not a stick that looks done but won't load. This runs after the atomic
+    // placement, so a failure still leaves a complete (if wrong) database
+    // rather than a half-written one — but the caller learns not to trust it.
+    validate_export(dest_root, tables.tracks.len(), tables.playlists.len())
+        .map_err(ExportError::Validation)?;
 
     progress(ExportProgress {
         stage: ExportStage::WritingDatabase,
@@ -775,5 +970,88 @@ mod tests {
         assert_eq!(d.len(), 10);
         assert_eq!(&d[4..5], "-");
         assert!(d.starts_with("20"));
+    }
+
+    #[test]
+    fn write_atomic_leaves_no_temp_and_replaces_content() {
+        let dir = std::env::temp_dir().join(format!("ordnung-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("export.pdb");
+        write_atomic(&f, b"first").unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"first");
+        write_atomic(&f, b"second-longer").unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"second-longer");
+        // No `.export.pdb.tmp` sidecar left behind.
+        let leftover: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftover.is_empty(), "temp not cleaned: {leftover:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn estimated_bytes_skips_files_already_present_at_size() {
+        let dir = std::env::temp_dir().join(format!("ordnung-space-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let contents = dir.join("Contents");
+        std::fs::create_dir_all(&contents).unwrap();
+        let src = dir.join("a.mp3");
+        std::fs::write(&src, vec![0u8; 1000]).unwrap();
+        let sources = vec![(src.clone(), "a.mp3".to_string())];
+        // Nothing on the stick yet: the 1000 bytes count (plus margin).
+        let need_fresh = estimated_bytes_needed(&sources, &contents);
+        assert!(need_fresh >= 1000);
+        // Same-size file already present: its bytes drop out of the estimate.
+        std::fs::write(contents.join("a.mp3"), vec![0u8; 1000]).unwrap();
+        let need_present = estimated_bytes_needed(&sources, &contents);
+        assert!(
+            need_present < need_fresh,
+            "an already-copied file must not be re-counted"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_export_flags_dangling_playlist_entry() {
+        // A hand-built stick whose playlist points at a nonexistent track must
+        // fail validation — proving the pass actually cross-checks entries.
+        let dir = std::env::temp_dir().join(format!("ordnung-val-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rb = dir.join("PIONEER").join("rekordbox");
+        let anlz = dir.join("PIONEER").join("USBANLZ").join("P000").join("00000001");
+        std::fs::create_dir_all(&rb).unwrap();
+        std::fs::create_dir_all(&anlz).unwrap();
+        // Write a pdb with one track (id 1) but a playlist entry for track 99.
+        let mut tables = crate::pdbw::PdbTables {
+            created_date: "2026-01-01".into(),
+            ..Default::default()
+        };
+        tables.tracks.push(crate::pdbw::TrackRow {
+            id: 1,
+            title: "T".into(),
+            filename: "t.mp3".into(),
+            file_path: "/Contents/t.mp3".into(),
+            analyze_path: "/PIONEER/USBANLZ/P000/00000001/ANLZ0000.DAT".into(),
+            ..Default::default()
+        });
+        tables.playlists.push(crate::pdbw::PlaylistRow {
+            id: 1,
+            parent_id: 0,
+            sort_order: 1,
+            is_folder: false,
+            name: "p".into(),
+        });
+        tables.playlist_entries.push((1, 99, 1)); // track 99 doesn't exist
+        std::fs::write(rb.join("export.pdb"), crate::pdbw::build_export_pdb(&tables)).unwrap();
+        // Give the referenced ANLZ file so only the dangling entry is wrong.
+        std::fs::write(anlz.join("ANLZ0000.DAT"), b"PMAI").unwrap();
+
+        let err = validate_export(&dir, 1, 1).unwrap_err();
+        assert!(err.contains("track id 99"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
