@@ -212,6 +212,7 @@ impl App {
             auto_write_job: false,
             auto_write_pending_latch: false,
             playlists: Vec::new(),
+            playlist_stats: HashMap::new(),
             dup_groups: Vec::new(),
             dup_dirty: false,
             dup_loading: false,
@@ -396,6 +397,55 @@ impl App {
         }
     }
 
+    /// Tiny floating info glyph over the top-right corner of an open playlist's
+    /// table, tucked just left of the inspector's pull tab. Hovering it reports
+    /// the playlist's rollup totals: how many files it holds, their combined
+    /// size and their combined running time (from `playlist_stats`, refreshed
+    /// on every reload). Painted as an overlay `Area` so the table keeps its
+    /// full width.
+    fn draw_playlist_info_glyph(&self, ui: &egui::Ui, pid: Id) {
+        /// Glyph diameter.
+        const D: f32 = 16.0;
+        /// Width of the inspector pull tab this sits beside (`draw_inspector_tab`).
+        const TAB_W: f32 = 18.0;
+        let stats = self.playlist_stats.get(&pid).copied().unwrap_or_default();
+        let content = ui.max_rect();
+        let pos = egui::pos2(content.right() - TAB_W - 8.0 - D, content.top() + 6.0);
+        egui::Area::new(egui::Id::new("playlist_info_glyph"))
+            .order(egui::Order::Middle)
+            .fixed_pos(pos)
+            .show(ui.ctx(), |ui| {
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(D, D), egui::Sense::hover());
+                // Quiet until pointed at, like the inspector tab: the glyph is a
+                // persistent affordance over the table, not a call to action.
+                let color = if resp.hovered() {
+                    crate::ui::tokens::color::LABEL
+                } else {
+                    crate::ui::tokens::color::LABEL_3
+                };
+                ui.painter().circle_stroke(
+                    rect.center(),
+                    D / 2.0 - 1.0,
+                    egui::Stroke::new(1.0, color),
+                );
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "i",
+                    egui::FontId::proportional(10.0),
+                    color,
+                );
+                let files = if stats.tracks == 1 { "file" } else { "files" };
+                resp.on_hover_note(format!(
+                    "{} {files}\n{}\n{}",
+                    stats.tracks,
+                    fmt_bytes(stats.bytes),
+                    fmt_running_time(stats.duration_ms),
+                ));
+            });
+    }
+
     pub(crate) fn reload(&mut self) {
         // Rows are about to be rebuilt from the catalog, so any waveform bytes a
         // (re)analysis rewrote are now stale in the smoothing cache — and its key
@@ -405,8 +455,8 @@ impl App {
         // Refresh the sidebar's playlist tree first. If the viewed playlist was
         // deleted (or turned out to be a folder), fall back to the Library so the
         // table never queries a playlist that no longer exists.
-        self.playlists = Catalog::open(&self.db_path)
-            .and_then(|c| c.list_playlists())
+        (self.playlists, self.playlist_stats) = Catalog::open(&self.db_path)
+            .and_then(|c| Ok((c.list_playlists()?, c.playlist_stats()?)))
             .unwrap_or_default();
         if let LibraryView::Playlist(id) = self.view {
             let still_valid = self.playlists.iter().any(|p| p.id == id && !p.is_folder);
@@ -3031,6 +3081,11 @@ impl eframe::App for App {
                     });
                 } else {
                     native_drag = self.draw_table(ui);
+                    // An open playlist gets a tiny info glyph over the table's
+                    // top-right corner with its rollup totals on hover.
+                    if let LibraryView::Playlist(pid) = self.view {
+                        self.draw_playlist_info_glyph(ui, pid);
+                    }
                 }
             });
 

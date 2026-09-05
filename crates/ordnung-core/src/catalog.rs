@@ -150,6 +150,16 @@ pub struct ScannedTrack {
     pub src_mtime: Option<i64>,
 }
 
+/// Rollup totals for one playlist, computed by [`Catalog::playlist_stats`]:
+/// how many tracks it holds, their combined source-file size in bytes, and
+/// their combined running time. Drives the GUI's playlist info glyph.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlaylistStats {
+    pub tracks: u64,
+    pub bytes: u64,
+    pub duration_ms: u64,
+}
+
 /// Why a [`DuplicateGroup`]'s tracks are considered duplicates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DuplicateKind {
@@ -2980,6 +2990,35 @@ impl Catalog {
             )?;
         }
         Ok(())
+    }
+
+    /// Rollup totals for every playlist in one grouped query: member count,
+    /// combined source-file size (rows scanned before `src_size` existed count
+    /// as 0 bytes) and combined running time. Playlists with no tracks simply
+    /// have no entry.
+    pub fn playlist_stats(&self) -> Result<HashMap<Id, PlaylistStats>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pt.playlist_id, COUNT(*),
+                    COALESCE(SUM(t.src_size), 0), COALESCE(SUM(t.duration_ms), 0)
+             FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
+             GROUP BY pt.playlist_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)? as Id,
+                PlaylistStats {
+                    tracks: r.get::<_, i64>(1)? as u64,
+                    bytes: r.get::<_, i64>(2)?.max(0) as u64,
+                    duration_ms: r.get::<_, i64>(3)?.max(0) as u64,
+                },
+            ))
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (id, stats) = row?;
+            out.insert(id, stats);
+        }
+        Ok(out)
     }
 
     fn playlist_track_ids(&self, id: Id) -> Result<Vec<Id>> {

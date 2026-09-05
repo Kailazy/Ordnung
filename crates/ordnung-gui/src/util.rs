@@ -35,6 +35,37 @@ pub(crate) fn track_list_text(name: &str, entries: &[TrackListEntry]) -> String 
     s
 }
 
+/// Human-readable file size in decimal units (1 GB = 10⁹ bytes), matching how
+/// Finder reports sizes on macOS. Used by the playlist info glyph.
+pub(crate) fn fmt_bytes(bytes: u64) -> String {
+    const K: f64 = 1000.0;
+    let b = bytes as f64;
+    if b >= K * K * K {
+        format!("{:.2} GB", b / (K * K * K))
+    } else if b >= K * K {
+        format!("{:.1} MB", b / (K * K))
+    } else if b >= K {
+        format!("{:.0} KB", b / K)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Long-form running time for playlist totals: "2 hr 05 min", "42 min", "38 sec".
+/// Unlike the per-track `fmt_duration` (m:ss), totals span hours, so the units
+/// are spelled out rather than stacking colons.
+pub(crate) fn fmt_running_time(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h} hr {m:02} min")
+    } else if m > 0 {
+        format!("{m} min")
+    } else {
+        format!("{s} sec")
+    }
+}
+
 pub(crate) fn non_empty(s: &str) -> Option<String> {
     let t = s.trim();
     if t.is_empty() {

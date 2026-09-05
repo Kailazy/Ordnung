@@ -20,7 +20,7 @@ pub mod usb;
 
 pub use catalog::{
     best_copy_index, AlbumSibling, Catalog, DuplicateGroup, DuplicateKind, MissingArtwork,
-    MissingTrack, ScannedTrack,
+    MissingTrack, PlaylistStats, ScannedTrack,
 };
 pub use error::{Error, Result};
 pub use model::key::{Camelot, Key, Mode, PitchClass};

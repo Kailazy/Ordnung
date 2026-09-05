@@ -48,7 +48,8 @@ use ordnung_core::model::{
 };
 use ordnung_core::search::{ScoredHit, SearchHit};
 use ordnung_core::{
-    best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind, ScannedTrack,
+    best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind, PlaylistStats,
+    ScannedTrack,
 };
 use player::*;
 use rayon::prelude::*;
@@ -1385,6 +1386,10 @@ struct App {
     auto_write_pending_latch: bool,
     /// Playlists & folders, refreshed on every `reload`. Drives the left sidebar.
     playlists: Vec<Playlist>,
+    /// Per-playlist rollups (track count, total bytes, total running time),
+    /// refreshed alongside `playlists`. Feeds the info glyph shown while a
+    /// playlist is open; playlists with no tracks have no entry.
+    playlist_stats: HashMap<Id, PlaylistStats>,
     /// Duplicate groups for the Duplicates view. Computed off the UI thread (the
     /// acoustic-fingerprint scan is a full-catalog pass and would otherwise freeze
     /// the frame on click) and cached here between scans. Drives `draw_duplicates`.
