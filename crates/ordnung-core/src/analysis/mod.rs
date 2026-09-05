@@ -120,7 +120,15 @@ use std::path::Path;
 ///     deliberately diverges from rekordbox, whose pattern-derived bar phase
 ///     routinely starts tracks on "3"/"4" (its own reference grids do), which
 ///     is exactly the behavior being overridden.
-pub const ANALYZER_VERSION: u32 = 24;
+/// v25: the beat line lands where the visible slope begins — the snap's foot
+///     crossing is now read off the full-band folded profile (the amplitude
+///     envelope the waveform view draws, threshold 15% of the local rise)
+///     instead of the sub-weighted one, whose slow sub swell parked lines
+///     mid-bump on soft kicks. Kick-entrance detection relaxed to an
+///     active-run rule (25% of median, two beats, preceded by an inactive
+///     beat): filtered intro kicks no longer push the "1" a bar in, and the
+///     brittle relative-jump test that could reject every beat is gone.
+pub const ANALYZER_VERSION: u32 = 25;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key

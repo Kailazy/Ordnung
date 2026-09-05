@@ -643,16 +643,25 @@ fn snap_anchor_env(env: &FluxEnv, bpm: f32, coarse_ms: u64) -> u64 {
 
     // The big edge window plateaus over any placement that fully covers the
     // bump, so refine to the *foot*: walk back up to a window, then forward to
-    // the first crossing of base + 25% of the local rise.
-    let base = win_mean(&cum_edge, best_bin + n - half, half);
+    // the first crossing of base + 15% of the local rise. The crossing is read
+    // off the FULL-band profile — that is the amplitude envelope the waveform
+    // view draws, so the line lands where the visible slope begins. The
+    // sub-weighted profile would read the kick's sub swell, which develops
+    // tens of ms after the attack and parks the line mid-bump on soft kicks.
+    let mut cum_full = Vec::with_capacity(2 * n + 1);
+    cum_full.push(0.0f64);
+    for i in 0..2 * n {
+        cum_full.push(cum_full[i] + p_full[i % n] as f64);
+    }
+    let base = win_mean(&cum_full, best_bin + n - half, half);
     let peak = (best_bin..best_bin + half)
-        .map(|j| p_edge[j % n])
+        .map(|j| p_full[j % n])
         .fold(f32::MIN, f32::max);
-    let thr = base + 0.25 * (peak - base);
+    let thr = base + 0.15 * (peak - base);
     let mut foot = best_bin;
     for step in 0..2 * half {
         let j = (best_bin + n - half + step) % n;
-        if p_edge[j] >= thr {
+        if p_full[j] >= thr {
             foot = j;
             break;
         }

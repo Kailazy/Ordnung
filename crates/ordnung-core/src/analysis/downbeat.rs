@@ -45,14 +45,14 @@ const W_BACKBEAT: f32 = 1.0;
 const W_NOVELTY: f32 = 0.8;
 
 /// First-kick rule: club tracks bring the kick in on a bar "1" (usually a
-/// phrase boundary), so the first beat whose kick-band energy reaches this
-/// fraction of the track's median — sustained for [`KICK_ENTRY_RUN`]
-/// consecutive beats, so a one-off intro boom doesn't count — is taken as the
-/// downbeat. This matches what a DJ expects the "1" to be; the backbeat and
-/// novelty cues only decide when no kick entrance is found (kickless
-/// material).
-const KICK_ENTRY_FRAC: f32 = 0.5;
-const KICK_ENTRY_RUN: usize = 4;
+/// phrase boundary), so the first beat where the kick becomes *active* — at
+/// least this fraction of the track's median kick-band energy, for two
+/// consecutive beats, with the beat before it inactive — is taken as the
+/// downbeat. The fraction is deliberately lax: intro kicks are often filtered
+/// quieter than the drop's, and a missed opening kick pushes the "1" a bar in.
+/// This matches what a DJ expects the "1" to be; the backbeat and novelty
+/// cues only decide when no kick entrance is found (kickless material).
+const KICK_ACTIVE_FRAC: f32 = 0.25;
 
 /// Fewest beats we'll decide a downbeat from (two bars); below this, default to 0.
 const MIN_BEATS: usize = 8;
@@ -150,13 +150,13 @@ pub fn detect_phase(spec: &Spectrogram, bpm: f32, first_beat_ms: u64) -> u32 {
     best_phase
 }
 
-/// The beat index where the kick enters: the first beat whose kick-band
-/// energy reaches [`KICK_ENTRY_FRAC`] of the track's median, sustained for
-/// [`KICK_ENTRY_RUN`] consecutive beats, and arriving as a *jump* — the two
-/// beats before it carry well under half its energy — so a bassy intro pad
-/// fading in doesn't read as an entrance. Beat 0 qualifying means the kick
+/// The beat index where the kick enters: the first beat that is kick-active
+/// ([`KICK_ACTIVE_FRAC`] of the track's median kick-band energy) for two
+/// consecutive beats, with the beat before it inactive — so a bassy intro pad
+/// (active throughout, never "entering") can only yield beat 0, and a one-off
+/// intro boom (no second beat) never counts. Beat 0 qualifying means the kick
 /// was already playing at the start. `None` when no beat qualifies (kickless
-/// or fade-in material; the pattern cues decide instead).
+/// material; the pattern cues decide instead).
 fn kick_entrance(kick: &[f32]) -> Option<usize> {
     let mut sorted: Vec<f32> = kick.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -164,12 +164,9 @@ fn kick_entrance(kick: &[f32]) -> Option<usize> {
     if !(median > f32::EPSILON) {
         return None;
     }
-    let thr = median * KICK_ENTRY_FRAC;
-    (0..kick.len().saturating_sub(KICK_ENTRY_RUN - 1)).find(|&k| {
-        let sustained = kick[k..k + KICK_ENTRY_RUN].iter().all(|&e| e >= thr);
-        let jump = k == 0
-            || kick[k.saturating_sub(2)..k].iter().all(|&e| e < 0.4 * kick[k]);
-        sustained && jump
+    let active = |e: f32| e >= median * KICK_ACTIVE_FRAC;
+    (0..kick.len().saturating_sub(1)).find(|&k| {
+        active(kick[k]) && active(kick[k + 1]) && (k == 0 || !active(kick[k - 1]))
     })
 }
 
