@@ -2407,8 +2407,7 @@ pub(crate) fn run_fetch_tracks(
                 } else {
                     none += 1;
                     // A real no-match: Discogs has nothing for this track. Mark
-                    // it fetched so it leaves the "recently added" inbox instead
-                    // of lingering forever with nothing to populate it.
+                    // it fetched so future song-data runs don't offer it again.
                     // (Artwork-only runs leave the marker alone.) Re-runnable
                     // via the menu's ↻ re-pick.
                     if enrich {

@@ -2666,15 +2666,16 @@ selection.",
                         }
                         if ui
                             .button("Skip track")
-                            .on_hover_note("Decide later. The track stays in Recently Added")
+                            .on_hover_note("Decide later. The track can be offered again")
                             .clicked()
                         {
                             skip = true;
                         }
                         // Song-data run only: a definitive "none of these is right"
-                        // that retires the track from the inbox (vs. Skip, which
-                        // keeps it re-fetchable). Wrong matches are a song-details
-                        // problem; the artwork-only run has no inbox to clear.
+                        // that marks the track fetched so it isn't offered again
+                        // (vs. Skip, which keeps it re-fetchable). Wrong matches
+                        // are a song-details problem; the artwork-only run has no
+                        // fetch marker to set.
                         if enrich
                             && ui
                                 .button("None of these")
@@ -2735,27 +2736,13 @@ selection.",
             // that same release. `enrich` is read inside `save_selected_artwork`.
             self.save_selected_artwork(ctx, selected);
         } else if no_match {
-            // Retire the track from the inbox: mark it fetched (no cover/tags
-            // written) so it leaves Recently Added and isn't re-offered, then
-            // advance. Reload so the badge/inbox update right away.
+            // Mark the track fetched (no cover/tags written) so it isn't
+            // re-offered by future song-data runs, then advance. Reload so
+            // anything watching the fetch state updates right away.
             if let Some(choices) = self.artwork_queue.front() {
                 let id = choices.id;
-                // Note whether it was in the inbox *before* marking, so the
-                // message only claims removal when the track actually left it.
-                let was_recent = Catalog::open(&self.db_path)
-                    .and_then(|c| c.is_recently_added(id, ANALYZER_VERSION))
-                    .unwrap_or(false);
                 match Catalog::open(&self.db_path).and_then(|c| c.mark_metadata_fetched(id)) {
-                    Ok(()) => {
-                        let still_recent = Catalog::open(&self.db_path)
-                            .and_then(|c| c.is_recently_added(id, ANALYZER_VERSION))
-                            .unwrap_or(false);
-                        self.status = if was_recent && !still_recent {
-                            "Marked as no match — removed from Recently Added.".into()
-                        } else {
-                            "Marked as no match.".into()
-                        };
-                    }
+                    Ok(()) => self.status = "Marked as no match.".into(),
                     Err(e) => self.status = format!("Couldn't mark as no match: {e}"),
                 }
             }

@@ -2463,17 +2463,11 @@ pub(crate) fn fmt_added(added_at: i64, now: i64) -> String {
     }
 }
 
-/// Load the rows for `view`. `keep` only matters for [`LibraryView::RecentlyAdded`]:
-/// it's the set of track ids that should stay visible even after they've expired
-/// out of the inbox query (i.e. tracks the user analyzed + fetched while looking
-/// at the tab). They're pinned in place until the tab is left, so a row never
-/// vanishes from under the cursor the instant its work finishes. Empty for every
-/// other view.
+/// Load the rows for `view`.
 pub(crate) fn load_rows(
     db: &Path,
     filter: &str,
     view: &LibraryView,
-    keep: &HashSet<Id>,
 ) -> Result<Vec<TrackRow>, String> {
     let catalog = Catalog::open(db).map_err(|e| e.to_string())?;
     let q = if filter.trim().is_empty() {
@@ -2483,24 +2477,7 @@ pub(crate) fn load_rows(
     };
     let tracks = match view {
         LibraryView::Library => catalog.list_tracks(q, 0),
-        LibraryView::RecentlyAdded => {
-            // The live inbox (still-incomplete tracks) plus any pinned tracks that
-            // have since completed — re-fetched by id since the inbox query no
-            // longer returns them. Union, de-duplicated on id.
-            catalog
-                .list_recently_added(q, ANALYZER_VERSION)
-                .and_then(|mut t| {
-                    let have: HashSet<Id> = t.iter().map(|x| x.id).collect();
-                    let extra: Vec<Id> = keep
-                        .iter()
-                        .copied()
-                        .filter(|id| !have.contains(id))
-                        .collect();
-                    let mut pinned = catalog.list_tracks_by_ids(&extra, q)?;
-                    t.append(&mut pinned);
-                    Ok(t)
-                })
-        }
+        LibraryView::RecentlyAdded => catalog.list_recently_added(q),
         LibraryView::Playlist(id) => catalog.list_playlist_tracks(*id, q),
         // The Duplicates, Missing, Vinyl and USB views render from their own
         // caches (`dup_groups` / `missing_list` / `vinyl` / `usb_tracks`), not
@@ -2619,12 +2596,6 @@ pub(crate) fn load_rows(
             quality_src,
             quality_sort,
         });
-    }
-    // The Recent view unions two queries (live inbox + pinned-complete), so its
-    // rows arrive out of order — restore newest-first by `added_at`. Other views
-    // keep their query order (the table's header sort applies on top either way).
-    if *view == LibraryView::RecentlyAdded {
-        rows.sort_by(|a, b| b.added_at.cmp(&a.added_at).then(b.id.cmp(&a.id)));
     }
     Ok(rows)
 }

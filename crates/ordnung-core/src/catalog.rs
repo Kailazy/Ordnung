@@ -243,10 +243,10 @@ pub struct RelinkReport {
 const METADATA_COMPLETE_SQL: &str =
     "TRIM(COALESCE(album, '')) <> '' AND TRIM(COALESCE(genre, '')) <> '' AND year IS NOT NULL";
 
-/// How long a freshly scanned track stays in the "recently added" inbox: one
+/// How long a freshly scanned track stays in the "recently added" view: one
 /// day (in seconds). Past this, it drops out of the view and its sidebar badge
-/// count regardless of whether analysis/fetch finished, keeping the inbox a
-/// short list of genuinely fresh imports. See [`Catalog::list_recently_added`].
+/// count, keeping the view a short list of genuinely fresh imports. See
+/// [`Catalog::list_recently_added`].
 const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 
 /// Schema generation stamped into `PRAGMA user_version` once [`Catalog::init_schema`]
@@ -1625,105 +1625,38 @@ impl Catalog {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// The "recently added" inbox: tracks that still need finishing work, newest
-    /// first. A track appears here until it has been BOTH analyzed at the current
-    /// analyzer `version` AND had its Discogs song-data fetched
-    /// (`discogs_meta_fetched_at` set) — at which point it "expires" out of the
-    /// view automatically. So it's a self-clearing to-do list of fresh imports:
-    /// analyze + fetch a track and it leaves on the next reload. `query` filters
-    /// the same fields as [`Catalog::list_tracks`].
-    ///
-    /// It's also time-bounded: a track only counts as "recent" while it was
-    /// added within the last [`RECENTLY_ADDED_WINDOW_SECS`] (one day). After
-    /// that it drops out regardless of whether the finishing work happened, so
-    /// the inbox stays a short, fresh list rather than accumulating stale imports
-    /// the user never got around to.
-    pub fn list_recently_added(&self, query: Option<&str>, version: u32) -> Result<Vec<Track>> {
+    /// The "recently added" view: every track added within the last
+    /// [`RECENTLY_ADDED_WINDOW_SECS`] (one day), newest first. Purely
+    /// time-based — a simple answer to "what did I just import?" — so a track
+    /// stays visible for the whole day regardless of analysis or Discogs-fetch
+    /// state, then ages out. `query` filters the same fields as
+    /// [`Catalog::list_tracks`].
+    pub fn list_recently_added(&self, query: Option<&str>) -> Result<Vec<Track>> {
         let (filter_sql, filter_params) = search_filter(query, "");
         let sql = format!(
             "SELECT {SELECT_COLS} FROM tracks
               WHERE ({filter_sql})
                 AND (unixepoch() - added_at) < {RECENTLY_ADDED_WINDOW_SECS}
-                AND (
-                  discogs_meta_fetched_at IS NULL
-                  OR id NOT IN (SELECT track_id FROM analysis WHERE analyzer_version >= ?)
-                )
               ORDER BY added_at DESC, id DESC"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = filter_params
-            .into_iter()
-            .map(|p| Box::new(p) as Box<dyn rusqlite::ToSql>)
-            .collect();
-        params.push(Box::new(version as i64));
-        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let refs: Vec<&dyn rusqlite::ToSql> =
+            filter_params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
         let rows = stmt.query_map(refs.as_slice(), row_to_track)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Load specific tracks by id, optionally narrowed by the same `query` as
-    /// [`Catalog::list_tracks`]. Used by the "recently added" view to keep tracks
-    /// that have *just* finished (analyzed + fetched) pinned in place until the
-    /// user leaves the tab — those rows are no longer "recent" by the inbox query,
-    /// so they're re-fetched explicitly by id. Returns whatever subset of `ids`
-    /// exists and matches the filter; order is unspecified (the caller re-sorts).
-    pub fn list_tracks_by_ids(&self, ids: &[Id], query: Option<&str>) -> Result<Vec<Track>> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let (filter_sql, filter_params) = search_filter(query, "");
-        let placeholders = vec!["?"; ids.len()].join(",");
-        let sql = format!(
-            "SELECT {SELECT_COLS} FROM tracks
-              WHERE id IN ({placeholders})
-                AND ({filter_sql})"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        // Bind the id placeholders first, then the search-filter `%term%` params,
-        // matching the `?` order in the statement.
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
-            ids.iter().map(|&id| Box::new(id as i64) as Box<dyn rusqlite::ToSql>).collect();
-        params.extend(filter_params.into_iter().map(|p| Box::new(p) as Box<dyn rusqlite::ToSql>));
-        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-        let rows = stmt.query_map(refs.as_slice(), row_to_track)?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
-    /// How many tracks are in the "recently added" inbox — i.e. not yet both
-    /// analyzed at `version` and song-data fetched. Cheap (no `Track` building),
-    /// so it can drive the sidebar badge on every refresh. See
-    /// [`Catalog::list_recently_added`].
-    pub fn count_recently_added(&self, version: u32) -> Result<u64> {
+    /// How many tracks are in the "recently added" view — added within the last
+    /// day. Cheap (no `Track` building), so it can drive the sidebar badge on
+    /// every refresh. See [`Catalog::list_recently_added`].
+    pub fn count_recently_added(&self) -> Result<u64> {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM tracks
-              WHERE (unixepoch() - added_at) < ?1
-                AND (
-                  discogs_meta_fetched_at IS NULL
-                  OR id NOT IN (SELECT track_id FROM analysis WHERE analyzer_version >= ?2)
-                )",
-            params![RECENTLY_ADDED_WINDOW_SECS, version as i64],
+              WHERE (unixepoch() - added_at) < ?1",
+            params![RECENTLY_ADDED_WINDOW_SECS],
             |r| r.get(0),
         )?;
         Ok(n as u64)
-    }
-
-    /// Whether `id` is currently in the "recently added" inbox — the same
-    /// predicate as [`Catalog::list_recently_added`], scoped to one track. Lets
-    /// callers tailor messaging (e.g. only say "removed from Recently Added"
-    /// when the track was actually there).
-    pub fn is_recently_added(&self, id: Id, version: u32) -> Result<bool> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM tracks
-              WHERE id = ?1
-                AND (unixepoch() - added_at) < ?2
-                AND (
-                  discogs_meta_fetched_at IS NULL
-                  OR id NOT IN (SELECT track_id FROM analysis WHERE analyzer_version >= ?3)
-                )",
-            params![id as i64, RECENTLY_ADDED_WINDOW_SECS, version as i64],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
     }
 
     /// Tracks whose recorded `source_path` no longer exists on disk — the file

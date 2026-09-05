@@ -234,10 +234,10 @@ enum ThumbState {
 #[derive(Clone, PartialEq, Eq)]
 enum LibraryView {
     Library,
-    /// The "recently added" inbox — fresh imports that still need analysis and/or
-    /// a Discogs song-data fetch. A track expires out of this view automatically
-    /// once it's both analyzed (at the current analyzer version) and fetched, so
-    /// it reads as a self-clearing to-do list. Backed by the flat track table.
+    /// The "recently added" view — every track added within the last day,
+    /// newest first, whatever its analysis/fetch state. A track ages out of
+    /// this view automatically once it's older than a day, so it always reads
+    /// as "what did I just import?". Backed by the flat track table.
     RecentlyAdded,
     Playlist(Id),
     /// The duplicate finder — rendered as grouped blocks, not the flat table.
@@ -1346,18 +1346,11 @@ struct App {
     /// doesn't change with the filter). Drives the toolbar's "relocate missing"
     /// button, which only appears when this is non-zero.
     missing_count: u64,
-    /// How many tracks sit in the "recently added" inbox — fresh imports not yet
-    /// both analyzed and song-data fetched. Refreshed on every `reload` (it's a
-    /// cheap count) so the sidebar's Recent badge stays live as tracks expire out
-    /// of the view. See [`LibraryView::RecentlyAdded`].
+    /// How many tracks sit in the "recently added" view — added within the last
+    /// day. Refreshed on every `reload` (it's a cheap count) so the sidebar's
+    /// New badge stays live as tracks age out of the view. See
+    /// [`LibraryView::RecentlyAdded`].
     recent_count: u64,
-    /// Track ids currently pinned into the [`LibraryView::RecentlyAdded`] table:
-    /// the rows shown the last time it was loaded while the tab was open. A track
-    /// that finishes (analyzed + fetched) while you're looking at Recent stays
-    /// here so it doesn't vanish mid-glance; the set is cleared when you leave the
-    /// tab, so re-entering recomputes the live inbox and the finished track drops
-    /// off. Empty whenever the Recent tab isn't the active view.
-    recent_pinned: HashSet<Id>,
     /// "Artist — Title" labels for the missing tracks, refreshed alongside
     /// `missing_count`. Drives the relocate button's hover list so it works from
     /// any view (unlike `missing_list`, which only fills in the Missing view).

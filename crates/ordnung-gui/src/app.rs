@@ -203,7 +203,6 @@ impl App {
             edited_count: 0,
             missing_count: 0,
             recent_count: 0,
-            recent_pinned: HashSet::new(),
             missing_labels: Vec::new(),
             confirm_bulk_write: false,
             confirm_delete: None,
@@ -421,7 +420,7 @@ impl App {
         let loaded = if matches!(self.view, LibraryView::Usb(..)) {
             Ok(self.usb_rows())
         } else {
-            load_rows(&self.db_path, &self.filter, &self.view, &self.recent_pinned)
+            load_rows(&self.db_path, &self.filter, &self.view)
         };
         match loaded {
             Ok(rows) => {
@@ -446,14 +445,6 @@ impl App {
                 self.rows = rows;
                 self.apply_sort();
                 self.load_error = None;
-                // Pin whatever Recent currently shows so a track that finishes
-                // (analyzed + fetched) on the next reload stays put instead of
-                // disappearing mid-glance. Entering/leaving the tab resets this
-                // (see the view-change handler), which is what eventually expires
-                // the completed tracks.
-                if self.view == LibraryView::RecentlyAdded {
-                    self.recent_pinned = self.rows.iter().map(|r| r.id).collect();
-                }
             }
             Err(e) => {
                 self.rows.clear();
@@ -472,12 +463,12 @@ impl App {
             .and_then(|c| c.count_edited())
             .unwrap_or(0);
 
-        // The "recently added" inbox count drives the sidebar badge. It's a cheap
-        // count (no Track building) and view-independent, so refresh it on every
-        // reload — that's what makes tracks visibly drop off as they're analyzed
-        // and fetched. A failure just hides the badge.
+        // The "recently added" count drives the sidebar badge: how many tracks
+        // were added in the last day. It's a cheap count (no Track building) and
+        // view-independent, so refresh it on every reload. A failure just hides
+        // the badge.
         self.recent_count = Catalog::open(&self.db_path)
-            .and_then(|c| c.count_recently_added(ANALYZER_VERSION))
+            .and_then(|c| c.count_recently_added())
             .unwrap_or(0);
 
         // The duplicate finder is a full-catalog scan (the acoustic pass decodes and
@@ -2409,8 +2400,8 @@ impl eframe::App for App {
                 // Copied out so the section closures below don't borrow `self`
                 // while the panel is drawing (`view` is threaded in explicitly).
                 let recent_count = self.recent_count;
-                // Whether the Recent tab currently has anything on screen —
-                // pinned rows included. Guards the empty-inbox eviction below.
+                // Whether the Recent tab currently has anything on screen.
+                // Guards the empty-view eviction below.
                 let rows_empty = self.rows.is_empty();
                 // Library health only earns sidebar space when something is
                 // actually wrong; the tab under "Library" appears with the
@@ -2433,24 +2424,21 @@ impl eframe::App for App {
                      sidebar_action: &mut Option<SidebarAction>| {
                         // "Library" is the home base — the big tile — and
                         // fresh imports live *inside* it: a small "New" pill on
-                        // the tile's right edge, present only while something is
-                        // actually waiting on analysis or a Discogs fetch. They
-                        // are a subset of the catalog rather than a sibling
-                        // library, so an empty inbox leaves no tile behind and
-                        // the sidebar's top row stays a single clear target.
-                        const RECENT_NOTE: &str = "New imports awaiting analysis or a \
-                                                   Discogs fetch. They drop off once both \
-                                                   are done.";
+                        // the tile's right edge, present only while something
+                        // was added within the last day. They are a subset of
+                        // the catalog rather than a sibling library, so an
+                        // empty view leaves no tile behind and the sidebar's
+                        // top row stays a single clear target.
+                        const RECENT_NOTE: &str =
+                            "Tracks added in the last day. They drop off after that.";
                         // Icon tier has no room for a pill beside the glyph, so
                         // the inbox keeps its own stacked tile there.
                         let inline_badge = recent_count > 0 && density != NavDensity::Icon;
-                        // The inbox has no permanent tile any more, so an empty
-                        // one must not leave the user parked on a view they
-                        // can't navigate back to. Only an inbox that is empty
-                        // *on screen* ejects, though: while tracks finish under
-                        // the pin, `recent_count` is already zero and the rows
-                        // are deliberately still there (see `recent_pinned`),
-                        // so eviction waits until nothing is left to look at.
+                        // The New view has no permanent tile any more, so an
+                        // empty one must not leave the user parked on a view
+                        // they can't navigate back to. Only a view that is
+                        // empty *on screen* ejects, so a row never vanishes
+                        // from under the cursor before the next reload.
                         if recent_count == 0 && *view == LibraryView::RecentlyAdded && rows_empty {
                             *view = LibraryView::Library;
                         }
@@ -2923,12 +2911,6 @@ impl eframe::App for App {
             None => {}
         }
         if self.view != prev_view {
-            // Switching tabs resets the Recent pin: a fresh entry starts from the
-            // live inbox (nothing pinned), and leaving drops the pin so finished
-            // tracks expire. `reload` then re-pins whatever Recent shows.
-            if prev_view == LibraryView::RecentlyAdded || self.view == LibraryView::RecentlyAdded {
-                self.recent_pinned.clear();
-            }
             // A record sheet belongs to the Vinyl section. Leaving that section
             // closes it rather than leaving it stranded over the Library — and,
             // as everywhere else the sheet closes, takes its video with it so
