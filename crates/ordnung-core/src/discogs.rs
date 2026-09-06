@@ -1246,8 +1246,10 @@ impl Client {
         title: Option<&str>,
         album: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
-        let album = album.map(str::trim).filter(|s| !s.is_empty());
-        let title = title.map(str::trim).filter(|s| !s.is_empty());
+        // Search without "(Original Mix)"-style markers: files carry them, the
+        // official releases don't, and Discogs still matches titles that do.
+        let album = album.map(strip_original_mix).filter(|s| !s.is_empty());
+        let title = title.map(strip_original_mix).filter(|s| !s.is_empty());
 
         if let Some(a) = album {
             for key in ["artist", "q"] {
@@ -1760,6 +1762,30 @@ fn video_title_candidates(title: &str) -> Vec<String> {
     }
     out.retain(|c| !c.is_empty());
     out
+}
+
+/// Drop a trailing "(Original Mix)"-style marker from a title before searching
+/// Discogs. Files from digital stores carry these suffixes, but the official
+/// releases usually don't, so leaving them in makes otherwise-good queries come
+/// back empty. Remix/edit credits are kept — those are part of the real title.
+/// Handles `(...)`, `[...]` and the bare `- Original Mix` dash form, stacked.
+pub fn strip_original_mix(title: &str) -> &str {
+    const MARKERS: [&str; 3] = ["original mix", "original version", "original"];
+    let mut t = title.trim();
+    'outer: loop {
+        for m in MARKERS {
+            for suffix in [format!("({m})"), format!("[{m}]"), format!("- {m}")] {
+                let Some(cut) = t.len().checked_sub(suffix.len()) else {
+                    continue;
+                };
+                if t.is_char_boundary(cut) && t[cut..].eq_ignore_ascii_case(&suffix) {
+                    t = t[..cut].trim_end();
+                    continue 'outer;
+                }
+            }
+        }
+        return t;
+    }
 }
 
 /// Drop a trailing Discogs disambiguation number, e.g. `Surgeon (2)` → `Surgeon`.
@@ -2476,6 +2502,25 @@ mod tests {
         let mut tags = Tags::default();
         d.apply_to_tags(&mut tags, false);
         assert_eq!(tags.genre.as_deref(), Some("Electronic"));
+    }
+
+    #[test]
+    fn strips_original_mix_markers() {
+        assert_eq!(strip_original_mix("Strings Of Life (Original Mix)"), "Strings Of Life");
+        assert_eq!(strip_original_mix("Strings Of Life [ORIGINAL MIX]"), "Strings Of Life");
+        assert_eq!(strip_original_mix("Strings Of Life - Original Mix"), "Strings Of Life");
+        assert_eq!(strip_original_mix("Voodoo Ray (Original Version)"), "Voodoo Ray");
+        assert_eq!(strip_original_mix("Voodoo Ray (Original)"), "Voodoo Ray");
+        // Stacked markers all come off.
+        assert_eq!(strip_original_mix("Track (Original Mix) [Original]"), "Track");
+        // Remix/edit credits are part of the real title and stay.
+        assert_eq!(
+            strip_original_mix("Age Of Love (Jam & Spoon Remix)"),
+            "Age Of Love (Jam & Spoon Remix)"
+        );
+        assert_eq!(strip_original_mix("Plain Title"), "Plain Title");
+        // A title that is nothing but the marker strips to empty (caller skips it).
+        assert_eq!(strip_original_mix("(Original Mix)"), "");
     }
 
     #[test]

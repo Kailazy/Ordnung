@@ -277,10 +277,12 @@ pub(crate) fn soulseek_query(artist: &str, title: &str) -> String {
 }
 
 pub(crate) fn discogs_search_query(artist: &str, album: &str, title: &str) -> String {
+    // Search without "(Original Mix)"-style markers: files carry them, the
+    // official releases on Discogs don't.
     let release = if album.trim().is_empty() {
-        title.trim()
+        ordnung_core::discogs::strip_original_mix(title)
     } else {
-        album.trim()
+        ordnung_core::discogs::strip_original_mix(album)
     };
     [artist.trim(), release]
         .iter()
@@ -354,6 +356,19 @@ mod tests {
         );
         // …and drops empty parts entirely.
         assert_eq!(discogs_search_query("", "", "Untitled"), "Untitled");
+    }
+
+    #[test]
+    fn search_query_drops_original_mix_marker() {
+        assert_eq!(
+            discogs_search_query("Rhythim Is Rhythim", "", "Strings Of Life (Original Mix)"),
+            "Rhythim Is Rhythim Strings Of Life"
+        );
+        // Remix credits are part of the real title and stay.
+        assert_eq!(
+            discogs_search_query("Age Of Love", "", "The Age Of Love (Jam & Spoon Remix)"),
+            "Age Of Love The Age Of Love (Jam & Spoon Remix)"
+        );
     }
 
     #[test]
