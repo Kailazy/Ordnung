@@ -14,7 +14,7 @@ lofty = "0.24.0"
 # Data-parallel fan-out for the batch passes that are pairwise-independent
 # (e.g. the acoustic-duplicate fingerprint comparison, which is O(n²)-in-window).
 rayon = "1.12.0"
-rusqlite = { version = "0.39.0", features = ["bundled"] }
+rusqlite = { version = "0.39.0", features = ["bundled", "functions"] }
 rustfft = "6.4.1"
 # Real-input FFT wrapper over the same rustfft primitives. The STFT feeds it real
 # audio, and a complex transform spends half its work on an imaginary part that is

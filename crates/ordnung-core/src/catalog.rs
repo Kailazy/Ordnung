@@ -13,6 +13,7 @@ use crate::model::{
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
+use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 /// Shape of the [`ReleaseDetail`](crate::discogs::ReleaseDetail) JSON held in
 /// `release_cache`. Bumped whenever a new field means an already-cached row is
@@ -288,6 +289,22 @@ impl Catalog {
         // to persist and the track would re-appear in the picker forever. Wait
         // for the lock instead of dropping the write.
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        // Unicode-aware search folding as a SQL function. SQLite's own
+        // `lower()` only folds ASCII, so a title like "Áttfalt" could never
+        // match a query lowercased in Rust ("áttfalt"), let alone the
+        // unaccented "attfalt" a user actually types. `fold()` strips
+        // diacritics and case the same way `fold_search` folds the query
+        // terms, so both sides of every LIKE meet in the same form.
+        conn.create_scalar_function(
+            "fold",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                let s: String = ctx.get(0)?;
+                Ok(fold_search(&s))
+            },
+        )?;
         let cat = Catalog { conn };
         cat.ensure_schema()?;
         Ok(cat)
@@ -3154,12 +3171,33 @@ fn strip_prefix_boundary(path: &str, prefix: &str) -> Option<String> {
 /// numeral spellings common in compilation titles, so a downloaded "Club Styling
 /// Vol. 2" links to the Discogs release "Club Styling Volume Two".
 pub(crate) fn norm_match(s: &str) -> String {
-    s.to_lowercase()
+    fold_search(s)
         .split(|c: char| !c.is_alphanumeric())
         .filter(|p| !p.is_empty())
         .map(canon_token)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Fold a string for search comparison: NFKD-decompose, drop the combining
+/// marks and invisible format characters, and lowercase. Collapses case,
+/// diacritics, and Unicode normalization form in one pass, so "Áttfalt",
+/// "áttfalt", "attfalt", and the NFD form a macOS filename paste carries all
+/// compare equal — and the zero-width joiners Bandcamp hides in album titles
+/// ("Q\u{200b}-\u{200b}Box") stop making them unsearchable. Mirrored into
+/// SQLite as the `fold()` function registered in [`Catalog::open`] — the two
+/// stay in sync by construction (the SQL side calls this).
+pub(crate) fn fold_search(s: &str) -> String {
+    s.nfkd()
+        .filter(|c| {
+            !is_combining_mark(*c)
+                && !matches!(
+                    c,
+                    '\u{00ad}' | '\u{200b}'..='\u{200f}' | '\u{2060}' | '\u{feff}'
+                )
+        })
+        .collect::<String>()
+        .to_lowercase()
 }
 
 /// Canonicalize a single normalized token to a common form so that equivalent
@@ -3250,17 +3288,20 @@ fn search_filter(query: Option<&str>, prefix: &str) -> (String, Vec<String>) {
     let terms: Vec<String> = query
         .into_iter()
         .flat_map(|q| q.split_whitespace())
-        .map(|t| format!("%{}%", t.to_lowercase()))
+        .map(|t| format!("%{}%", fold_search(t)))
         .collect();
     if terms.is_empty() {
         return ("1".to_string(), Vec::new());
     }
+    // `fold()` (registered in `Catalog::open`) rather than SQLite's `lower()`:
+    // lower() folds only ASCII, so accented titles were unfindable however the
+    // query was typed or cased.
     let clause = format!(
-        "(lower(coalesce({p}artist,'')) LIKE ? \
-          OR lower(coalesce({p}title,'')) LIKE ? \
-          OR lower(coalesce({p}album,'')) LIKE ? \
-          OR lower(coalesce({p}genre,'')) LIKE ? \
-          OR lower(coalesce({p}album_artist,'')) LIKE ?)",
+        "(fold(coalesce({p}artist,'')) LIKE ? \
+          OR fold(coalesce({p}title,'')) LIKE ? \
+          OR fold(coalesce({p}album,'')) LIKE ? \
+          OR fold(coalesce({p}genre,'')) LIKE ? \
+          OR fold(coalesce({p}album_artist,'')) LIKE ?)",
         p = prefix
     );
     let sql = vec![clause; terms.len()].join(" AND ");
@@ -4464,6 +4505,52 @@ mod tests {
         cat.set_external_artwork(b, "discogs", None, None, None, None).unwrap();
 
         assert_eq!(cat.tracks_without_release_attempt(&[a, b, c]).unwrap(), vec![c]);
+    }
+
+    /// The exact failure from the field: "Exos — Áttfalt" imported fine but no
+    /// spelling of the query could find it, because SQLite's `lower()` leaves
+    /// non-ASCII case alone while the query was lowercased in Rust. The search
+    /// must find accented titles however the query is cased, accented, or
+    /// normalized (a Finder filename paste arrives NFD-decomposed).
+    #[test]
+    fn search_finds_accented_titles_however_the_query_is_typed() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let mut t = scanned("/m/attfalt.aiff", "Exos", "Techno", 1000);
+        t.tags.title = Some("Áttfalt".into());
+        let (id, _) = cat.upsert_scanned(&t).unwrap();
+        // Zero-width joiners as Bandcamp writes them into album tags.
+        let mut r = scanned("/m/remix.aiff", "Exos", "Techno", 1000);
+        r.tags.album = Some("Q\u{200b}-\u{200b}Box Remixed".into());
+        let (rid, _) = cat.upsert_scanned(&r).unwrap();
+
+        for q in [
+            "attfalt",         // unaccented, how it's actually typed
+            "áttfalt",         // accented lowercase
+            "Áttfalt",         // exact
+            "ÁTTFALT",         // shouty
+            "A\u{0301}ttfalt", // NFD, pasted from a Finder filename
+        ] {
+            let found = cat.list_tracks(Some(q), 0).unwrap();
+            assert!(
+                found.iter().any(|t| t.id == id),
+                "query {q:?} should find the accented title"
+            );
+        }
+        let found = cat.list_tracks(Some("q-box"), 0).unwrap();
+        assert!(
+            found.iter().any(|t| t.id == rid),
+            "zero-width characters in tags must not defeat the search"
+        );
+    }
+
+    /// Diacritics fold in fuzzy matching too, so an accented file links to an
+    /// unaccented Discogs listing (and vice versa).
+    #[test]
+    fn norm_match_folds_diacritics_and_normalization_forms() {
+        assert_eq!(norm_match("Áttfalt"), "attfalt");
+        assert_eq!(norm_match("A\u{0301}ttfalt"), "attfalt");
+        assert_eq!(norm_match("Björk"), norm_match("bjork"));
+        assert_eq!(norm_match("Café del Mar"), "cafe del mar");
     }
 
     #[test]
