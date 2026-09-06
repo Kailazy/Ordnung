@@ -160,17 +160,16 @@ impl App {
         // what `inset` (the drawer's width) is measured against. Using
         // `available_rect` here would double-count — by this point it has
         // already had the open drawer subtracted from it, which left the tab
-        // stranded mid-table. Then stepped in past the table's floating
-        // vertical scrollbar, which hugs that same edge: without the clearance
-        // the tab sat on top of the scrollbar's upper end, hiding the thumb
-        // whenever the table was scrolled to the top.
+        // stranded mid-table. The tab sits flush at that edge, over the top of
+        // the table's floating scrollbar: the visible scroll track simply
+        // starts under the tab, which reads better than a skinny scrollbar
+        // strip running down the tab's right side.
         //
         // Vertical: flush with `available_rect`'s top (what the toolbar, player
         // and status bars left over) with no gap, so the tab meets the top
         // border cleanly instead of leaving a notch of table above it.
-        let scrollbar_clearance = ctx.style().spacing.scroll.bar_width + 2.0;
         let pos = egui::pos2(
-            ctx.screen_rect().right() - inset - scrollbar_clearance - W,
+            ctx.screen_rect().right() - inset - W,
             ctx.available_rect().top(),
         );
         // Middle order, and clipped to the content area: a Foreground area
@@ -190,15 +189,14 @@ impl App {
                 if hovered {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
-                // Rounded only along the bottom: the top edge butts against
-                // the content area's top border, so the two free corners are
-                // the ones to soften (the right edge floats just clear of the
-                // scrollbar strip rather than touching the drawer).
+                // Rounded only on the bottom-left: the top edge butts against
+                // the content area's top border and the right edge against the
+                // drawer, so the one free corner is the only one to soften.
                 let rounding = egui::Rounding {
                     nw: 0.0,
                     sw: W / 2.0,
                     ne: 0.0,
-                    se: W / 2.0,
+                    se: 0.0,
                 };
                 let bg = if hovered {
                     crate::ui::tokens::color::DRAWER_HOVER

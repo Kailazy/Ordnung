@@ -434,13 +434,7 @@ impl App {
         const TAB_W: f32 = 18.0;
         let stats = self.playlist_stats.get(&pid).copied().unwrap_or_default();
         let content = ui.max_rect();
-        // Same scrollbar clearance as the pull tab, so the glyph keeps its 8px
-        // gap to the tab now that the tab sits clear of the table's scrollbar.
-        let scrollbar_clearance = ui.spacing().scroll.bar_width + 2.0;
-        let pos = egui::pos2(
-            content.right() - scrollbar_clearance - TAB_W - 8.0 - D,
-            content.top() + 6.0,
-        );
+        let pos = egui::pos2(content.right() - TAB_W - 8.0 - D, content.top() + 6.0);
         egui::Area::new(egui::Id::new("playlist_info_glyph"))
             .order(egui::Order::Middle)
             .fixed_pos(pos)
