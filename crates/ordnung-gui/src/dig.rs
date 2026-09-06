@@ -7,11 +7,12 @@
 //! anything you've already saved is filtered out at every step; a dig that only
 //! walked your own shelves would just be a shuffle.
 //!
-//! The path is kept whole rather than collapsed to "where we are now", so
-//! stepping back and taking the other branch is a real move: the discarded
-//! future is only dropped once a *different* choice is made from that point,
-//! which is what makes back-and-forth digging feel like flipping through a
-//! crate rather than resetting a search.
+//! The dig is a *web*, not a line: every record ever dug on this dig stays on
+//! screen, and taking a thread from a record halfway back branches off rather
+//! than snipping the chain ahead. The strip lays the web out left-to-right —
+//! a record's first find continues its row, and each further branch drops to
+//! its own row below — so backtracking to compare two threads out of one
+//! record is a real move with nothing thrown away.
 //!
 //! Each step costs one Discogs search, paced by the shared client throttle, so
 //! the fetch runs off the UI thread and the strip shows a spinner meanwhile.
@@ -74,16 +75,30 @@ pub(crate) struct DigStep {
     /// refreshed: walking back over a card is navigation, not a new find, and
     /// re-animating there would make the path feel like it was being rebuilt.
     pub landed_at: std::time::Instant,
+    /// The step this one was dug from — `None` only on the record the dig
+    /// started at. Indices into [`DigPath::steps`], which never shrinks, so a
+    /// link can't dangle.
+    pub parent: Option<usize>,
+    /// Every branch taken out of this record, in the order they were dug. More
+    /// than one means the user came back here and pulled the other thread.
+    pub children: Vec<usize>,
+    /// The child most recently dug or walked through, so the forward button
+    /// retraces the branch the user was last on rather than always the first.
+    pub last_child: Option<usize>,
 }
 
-/// An in-progress dig: the records visited, and which one is on screen.
+/// An in-progress dig: the web of records visited, and which one is on screen.
 pub(crate) struct DigPath {
+    /// Every record this dig has landed on, as an arena — steps link to each
+    /// other by index (see [`DigStep::parent`]) and are never removed, which is
+    /// what lets a branch taken from halfway back coexist with the chain that
+    /// was already dug past that point.
     pub steps: Vec<DigStep>,
     /// Index into `steps` of the record currently being looked at. Always a
     /// valid index — `steps` is never empty while a dig exists.
     pub at: usize,
-    /// Release ids already visited on this dig, so a step never lands back on
-    /// something earlier in the path.
+    /// Release ids already visited anywhere on this dig, so a step never lands
+    /// back on something already in the web.
     pub seen: HashSet<u64>,
     /// The *records* already visited, folded to artist + title (see
     /// [`work_key`]). A Discogs release id identifies one pressing, not one
@@ -128,6 +143,102 @@ impl DigPath {
     pub(crate) fn head(&self) -> &DigStep {
         &self.steps[self.at]
     }
+
+    /// Move the cursor to `i` and point every ancestor's forward pointer down
+    /// the branch that leads there, so ← and → walk the thread the user is
+    /// actually on. Jumping between branches never edits the web itself —
+    /// focus is a cursor over the tree, not a rewrite of it.
+    pub(crate) fn refocus(&mut self, i: usize) {
+        self.at = i;
+        self.error = None;
+        let mut cur = i;
+        while let Some(p) = self.steps[cur].parent {
+            self.steps[p].last_child = Some(cur);
+            cur = p;
+        }
+    }
+
+    /// The lineage of the head: every step from the start of the dig down to
+    /// the record on screen, as a set of arena indices. What the strip uses to
+    /// keep the active thread readable through the rest of the web.
+    fn lineage(&self) -> HashSet<usize> {
+        let mut on = HashSet::new();
+        let mut cur = Some(self.at);
+        while let Some(i) = cur {
+            on.insert(i);
+            cur = self.steps[i].parent;
+        }
+        on
+    }
+}
+
+/// Grid positions for the web: `(row, column)` per step, laid out so a step's
+/// first child continues its row and each later branch drops to the first row
+/// below everything the earlier branches used. Depth-first from the root, so
+/// one branch reads left-to-right as an unbroken line — the shape a single
+/// chain dig always had — and the web grows *downward* only where the user
+/// actually forked.
+///
+/// `pending_under`, when set, reserves a slot for the step being fetched out of
+/// that node, returned separately — placed exactly where the find will land so
+/// the spinner doesn't jump when the card replaces it.
+fn layout_web(
+    steps: &[DigStep],
+    pending_under: Option<usize>,
+) -> (Vec<(usize, usize)>, Option<(usize, usize)>) {
+    fn walk(
+        steps: &[DigStep],
+        pending_under: Option<usize>,
+        node: usize,
+        depth: usize,
+        row: usize,
+        next_row: &mut usize,
+        pos: &mut [(usize, usize)],
+        pending_pos: &mut Option<(usize, usize)>,
+    ) {
+        pos[node] = (row, depth);
+        for (i, &c) in steps[node].children.iter().enumerate() {
+            let r = if i == 0 {
+                row
+            } else {
+                *next_row += 1;
+                *next_row
+            };
+            walk(
+                steps,
+                pending_under,
+                c,
+                depth + 1,
+                r,
+                next_row,
+                pos,
+                pending_pos,
+            );
+        }
+        if pending_under == Some(node) {
+            let r = if steps[node].children.is_empty() {
+                row
+            } else {
+                *next_row += 1;
+                *next_row
+            };
+            *pending_pos = Some((r, depth + 1));
+        }
+    }
+    let mut pos = vec![(0, 0); steps.len()];
+    let mut pending_pos = None;
+    let mut next_row = 0;
+    walk(
+        steps,
+        pending_under,
+        0,
+        0,
+        0,
+        &mut next_row,
+        &mut pos,
+        &mut pending_pos,
+    );
+    (pos, pending_pos)
 }
 
 /// A record the strip asked to open, carrying what the sheet needs for its
@@ -191,6 +302,52 @@ const CARD_MIN_SCALE: f32 = 0.72;
 /// card's slide, its scale and its fade so the three can't drift apart.
 fn card_enter_t(since: f32) -> f32 {
     egui::emath::easing::cubic_out((since / CARD_ANIM).clamp(0.0, 1.0))
+}
+
+/// Cover side length in the strip — deliberately smaller than the grid's
+/// 150pt tile so the web reads as a trail, not a second wall.
+const COVER: f32 = 92.0;
+
+/// A card's full slot height: the cover plus its three caption lines.
+const CARD_H: f32 = COVER + 60.0;
+
+/// Horizontal room between web columns — where the connectors live — and
+/// vertical room between branch rows.
+const GAP_X: f32 = 34.0;
+const GAP_Y: f32 = 14.0;
+
+/// The little rect a connector's arrowhead occupies, just left of a card's
+/// cover — also the hover target that names the thread that was followed.
+fn connector_glyph_rect(card_slot: egui::Rect) -> egui::Rect {
+    egui::Rect::from_center_size(
+        egui::pos2(card_slot.left() - 10.0, card_slot.top() + COVER * 0.5),
+        egui::vec2(18.0, 18.0),
+    )
+}
+
+/// The line from a record to one dug out of it. On the same row the arrowhead
+/// alone reads as the thread, like the single-chain strip always drew; a
+/// branch on a lower row gets an elbow down from its parent, so a fork is
+/// visible as a fork rather than two rows that happen to line up.
+fn draw_connector(
+    painter: &egui::Painter,
+    from: egui::Rect,
+    to: egui::Rect,
+    color: egui::Color32,
+) {
+    let pcy = from.top() + COVER * 0.5;
+    let ccy = to.top() + COVER * 0.5;
+    if (pcy - ccy).abs() < 0.5 {
+        return;
+    }
+    let xm = (from.right() + to.left()) * 0.5;
+    let stroke = egui::Stroke::new(1.5, color);
+    painter.line_segment([egui::pos2(from.right() + 2.0, pcy), egui::pos2(xm, pcy)], stroke);
+    painter.line_segment([egui::pos2(xm, pcy), egui::pos2(xm, ccy)], stroke);
+    painter.line_segment(
+        [egui::pos2(xm, ccy), egui::pos2(to.left() - 19.0, ccy)],
+        stroke,
+    );
 }
 
 /// A flag that is never raised, for the call sites that must not be cancelled.
@@ -399,6 +556,52 @@ mod tests {
         assert_ne!(work_key("XDB", "EP"), work_key("XDB", "LP"));
         assert_ne!(work_key("XDB", "Vol. 1"), work_key("XDB", "Vol. 2"));
     }
+
+    /// A bare step for layout tests — only the links matter to `layout_web`.
+    fn step(parent: Option<usize>, children: Vec<usize>) -> DigStep {
+        DigStep {
+            release_id: 0,
+            artist: String::new(),
+            title: String::new(),
+            label: None,
+            artist_ids: Vec::new(),
+            label_ids: Vec::new(),
+            sub: String::new(),
+            thumb_url: None,
+            owned: false,
+            via: None,
+            landed_at: std::time::Instant::now(),
+            parent,
+            children,
+            last_child: None,
+        }
+    }
+
+    /// A fork keeps its first branch on the parent's row and drops each later
+    /// branch below everything the earlier branches used, so no two cards can
+    /// ever share a slot however the web was grown.
+    #[test]
+    fn web_layout_branches_drop_below() {
+        // 0 → 1 → 2, then back to 1 for a second thread (4), then back to the
+        // start for a third (3) — the shape the feature exists for.
+        let steps = vec![
+            step(None, vec![1, 3]),
+            step(Some(0), vec![2, 4]),
+            step(Some(1), vec![]),
+            step(Some(0), vec![]),
+            step(Some(1), vec![]),
+        ];
+        let (pos, pending) = layout_web(&steps, None);
+        assert_eq!(pos, vec![(0, 0), (0, 1), (0, 2), (2, 1), (1, 2)]);
+        assert_eq!(pending, None);
+        // A fetch out of a leaf continues that leaf's row…
+        let (_, p) = layout_web(&steps, Some(2));
+        assert_eq!(p, Some((0, 3)));
+        // …and out of a record already forked, it opens a fresh row below
+        // the whole web, exactly where the new branch will land.
+        let (_, p) = layout_web(&steps, Some(0));
+        assert_eq!(p, Some((3, 1)));
+    }
 }
 
 /// The artist and title of a browse row, however this endpoint chose to pack
@@ -481,10 +684,10 @@ impl App {
     /// Begin a dig at `key`, replacing any dig already running. Silently does
     /// nothing if the record vanished from the lists under the click.
     ///
-    /// Re-digging a record that's already somewhere on the current path moves
+    /// Re-digging a record that's already somewhere in the current web moves
     /// the cursor there instead of starting over: the dig buttons stay visible
     /// on every cover, so hitting one for a record you dug to earlier reads as
-    /// "go back to it", not "throw the path away".
+    /// "go back to it", not "throw the web away".
     pub(crate) fn start_dig(&mut self, key: VinylCoverKey) {
         let Some(record) = self.vinyl_record(key) else {
             return;
@@ -495,7 +698,7 @@ impl App {
                 .iter()
                 .position(|s| s.release_id == record.release_id)
             {
-                dig.at = i;
+                dig.refocus(i);
                 return;
             }
         }
@@ -525,6 +728,9 @@ impl App {
                 owned: true,
                 via: None,
                 landed_at: std::time::Instant::now(),
+                parent: None,
+                children: Vec::new(),
+                last_child: None,
             }],
             at: 0,
             seen,
@@ -619,13 +825,10 @@ impl App {
             // rather than making them queue behind it.
             dig.cancel_prime.store(true, Ordering::Relaxed);
             dig.priming = None;
-            // Drop the discarded future *now*, not when the answer lands.
-            // Taking a branch is the decision; the request is only how it gets
-            // filled in. Leaving the old path drawn until the fetch returns
-            // makes the spinner look like a fifth step continuing the walk
-            // rather than the second step of a new branch. `seen` is untouched,
-            // so the abandoned records still don't come round again.
-            dig.steps.truncate(dig.at + 1);
+            // Nothing is discarded: a thread taken from halfway back becomes a
+            // new branch under this record, and whatever was already dug past
+            // it stays on its own row. The spinner slot is drawn where the
+            // branch will land, so the request reads as a fork being pulled.
             dig.pending = Some(thread);
             dig.error = None;
         }
@@ -803,9 +1006,10 @@ impl App {
             owned: false,
             via: Some((msg_thread, matched)),
             landed_at: std::time::Instant::now(),
+            parent: Some(dig.at),
+            children: Vec::new(),
+            last_child: None,
         };
-        // Choosing from here makes this the new future.
-        dig.steps.truncate(dig.at + 1);
         dig.seen.insert(release_id);
         dig.works.insert(work_key(&step.artist, &step.title));
         // What an open sheet riding the dig needs to re-point at this record,
@@ -818,8 +1022,13 @@ impl App {
                 step.thumb_url.clone(),
             )
         });
+        // Grafted under the record it was dug from — a second thread taken out
+        // of the same record forks the web rather than replacing the first.
+        let idx = dig.steps.len();
         dig.steps.push(step);
-        dig.at = dig.steps.len() - 1;
+        dig.steps[dig.at].children.push(idx);
+        dig.steps[dig.at].last_child = Some(idx);
+        dig.at = idx;
         // The new step can't be dug from until we know its artist/label ids.
         self.dig_resolve_ids(release_id);
         // A thread taken from the open sheet's own branch buttons: the window
@@ -1099,9 +1308,6 @@ impl App {
         if self.dig.is_none() {
             return None;
         }
-        /// Cover side length in the strip — deliberately smaller than the grid's
-        /// 150pt tile so the path reads as a trail, not a second wall.
-        const COVER: f32 = 92.0;
 
         // Snapshot everything the strip paints before borrowing `self` for the
         // covers, matching how `vinyl_grid` decouples from the record lists.
@@ -1117,24 +1323,39 @@ impl App {
             /// Seconds since this record landed on the path, driving its
             /// entrance. Settled cards report a large value and animate nothing.
             since_landed: f32,
+            /// The step this one was dug from, as an index into this same
+            /// snapshot — what its connector is drawn against.
+            parent: Option<usize>,
+            /// Grid slot in the web, from [`layout_web`].
+            row: usize,
+            col: usize,
+            /// Whether this record is on the thread from the start of the dig
+            /// to the head — the one branch that stays bright through the web.
+            on_lineage: bool,
         }
         let (
             cards,
             at,
             pending,
+            pending_slot,
             error,
             head_artist,
             head_label,
             has_artist_id,
             has_label_id,
+            head_back,
+            head_forward,
             since_opened,
         ) = {
             let dig = self.dig.as_ref().expect("checked above");
             let head = dig.head();
+            let (pos, pending_slot) = layout_web(&dig.steps, dig.pending.map(|_| dig.at));
+            let lineage = dig.lineage();
             (
                 dig.steps
                     .iter()
-                    .map(|s| Card {
+                    .enumerate()
+                    .map(|(i, s)| Card {
                         release_id: s.release_id,
                         title: s.title.clone(),
                         artist: s.artist.clone(),
@@ -1149,15 +1370,22 @@ impl App {
                             _ => None,
                         }),
                         since_landed: s.landed_at.elapsed().as_secs_f32(),
+                        parent: s.parent,
+                        row: pos[i].0,
+                        col: pos[i].1,
+                        on_lineage: lineage.contains(&i),
                     })
                     .collect::<Vec<_>>(),
                 dig.at,
                 dig.pending,
+                pending_slot,
                 dig.error.clone(),
                 strip_disambiguator(&head.artist).to_string(),
                 head.label.clone(),
                 !head.artist_ids.is_empty(),
                 !head.label_ids.is_empty(),
+                head.parent,
+                head.last_child,
                 dig.opened_at.elapsed().as_secs_f32(),
             )
         };
@@ -1196,82 +1424,129 @@ impl App {
                             {
                                 end = true;
                             }
-                            // Forward only re-walks a path already dug — a new
-                            // branch is taken with the buttons below instead.
+                            // Forward only re-walks a branch already dug — a
+                            // new one is taken with the buttons below instead.
                             if ui
-                                .add_enabled(at + 1 < cards.len(), egui::Button::new("→"))
-                                .on_hover_note("Forward to the next record you dug")
+                                .add_enabled(head_forward.is_some(), egui::Button::new("→"))
+                                .on_hover_note("Forward, down the branch you were last on")
                                 .clicked()
                             {
-                                goto = Some(at + 1);
+                                goto = head_forward;
                             }
                             if ui
-                                .add_enabled(at > 0, egui::Button::new("←"))
-                                .on_hover_note("Back one record, to choose the other thread")
+                                .add_enabled(head_back.is_some(), egui::Button::new("←"))
+                                .on_hover_note("Back one record, to branch off from there")
                                 .clicked()
                             {
-                                goto = Some(at - 1);
+                                goto = head_back;
                             }
                         });
                     });
                     ui.add_space(6.0);
 
-                    // The path itself. Scrolls horizontally once a dig runs past the
-                    // window width; each card is clickable to jump back to that point.
-                    egui::ScrollArea::horizontal()
-                        .max_height(COVER + 74.0)
+                    // The web itself. One branch reads left to right like the
+                    // chain always did; a fork drops its extra branches to rows
+                    // below. Scrolls both ways once the dig outgrows the strip;
+                    // each card is clickable to move the cursor there.
+                    let rows = 1 + cards
+                        .iter()
+                        .map(|c| c.row)
+                        .chain(pending_slot.map(|(r, _)| r))
+                        .max()
+                        .unwrap_or(0);
+                    let cols = 1 + cards
+                        .iter()
+                        .map(|c| c.col)
+                        .chain(pending_slot.map(|(_, c)| c))
+                        .max()
+                        .unwrap_or(0);
+                    // A single-row dig keeps the strip at its old height; a web
+                    // shows two rows at once and scrolls for the rest, so a
+                    // deep fork can't shove the shelf off the window.
+                    let max_h = if rows > 1 {
+                        CARD_H * 2.0 + GAP_Y + 14.0
+                    } else {
+                        CARD_H + 14.0
+                    };
+                    egui::ScrollArea::both()
+                        .max_height(max_h)
                         .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
-                                for (i, card) in cards.iter().enumerate() {
-                                    // How far into its arrival this card is. Every
-                                    // card but a just-dug one is settled at 1.0, so
-                                    // the path as a whole stays still while the new
-                                    // find is the only thing moving.
-                                    let enter = card_enter_t(card.since_landed);
-                                    if enter < 1.0 {
-                                        ui.ctx().request_repaint();
-                                    }
-                                    if let Some((thread, matched)) = &card.via {
-                                        // The connector names what was followed, so
-                                        // a finished path explains itself. It draws
-                                        // itself in ahead of the record it points
-                                        // at, so the arrow reads as the thread being
-                                        // pulled and the card as what came up on it.
-                                        ui.vertical(|ui| {
-                                            ui.add_space(COVER * 0.5 - 8.0);
-                                            let arrow = (enter * 1.6).min(1.0);
-                                            ui.label(egui::RichText::new("→").size(16.0).color(
-                                                egui::Color32::from_gray(120).gamma_multiply(arrow),
-                                            ))
-                                            .on_hover_note(format!(
-                                                "Same {}: {matched}",
-                                                thread.label()
-                                            ));
-                                        });
-                                    }
-                                    let current = i == at;
-                                    // A landing card slides in from the right of
-                                    // its slot and fades up, like a sleeve being
-                                    // pushed into the row. Only the contents move:
-                                    // the slot below is allocated at full size
-                                    // either way, so the rest of the path holds
-                                    // still while the new find settles.
-                                    let card_size = egui::vec2(COVER, COVER + 60.0);
-                                    let slot =
-                                        egui::Rect::from_min_size(ui.cursor().min, card_size);
-                                    let shifted =
-                                        slot.translate(egui::vec2(CARD_SLIDE * (1.0 - enter), 0.0));
-                                    ui.allocate_rect(slot, egui::Sense::hover());
-                                    let mut card_ui = ui.new_child(
-                                        egui::UiBuilder::new()
-                                            .max_rect(shifted)
-                                            .layout(egui::Layout::top_down(egui::Align::Min)),
-                                    );
-                                    card_ui.multiply_opacity(enter);
+                            let grid = egui::vec2(
+                                cols as f32 * (COVER + GAP_X) - GAP_X,
+                                rows as f32 * (CARD_H + GAP_Y) - GAP_Y,
+                            );
+                            let (grid_rect, _) =
+                                ui.allocate_exact_size(grid, egui::Sense::hover());
+                            let slot_of = |row: usize, col: usize| {
+                                egui::Rect::from_min_size(
+                                    grid_rect.min
+                                        + egui::vec2(
+                                            col as f32 * (COVER + GAP_X),
+                                            row as f32 * (CARD_H + GAP_Y),
+                                        ),
+                                    egui::vec2(COVER, CARD_H),
+                                )
+                            };
+                            // Connectors first, so a card entering over one
+                            // paints on top of it. Each names the thread that
+                            // was followed, so a finished web explains itself.
+                            for (i, card) in cards.iter().enumerate() {
+                                let (Some(p), Some((thread, matched))) = (card.parent, &card.via)
+                                else {
+                                    continue;
+                                };
+                                let enter = card_enter_t(card.since_landed);
+                                let arrow = (enter * 1.6).min(1.0);
+                                // The head's own thread stays bright; the roads
+                                // not taken recede without disappearing.
+                                let tone = if card.on_lineage { 150 } else { 80 };
+                                let color = egui::Color32::from_gray(tone).gamma_multiply(arrow);
+                                let pslot = slot_of(cards[p].row, cards[p].col);
+                                let cslot = slot_of(card.row, card.col);
+                                draw_connector(ui.painter(), pslot, cslot, color);
+                                let glyph = connector_glyph_rect(cslot);
+                                ui.painter().text(
+                                    glyph.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "→",
+                                    egui::FontId::proportional(16.0),
+                                    color,
+                                );
+                                ui.interact(
+                                    glyph,
+                                    ui.id().with(("dig-conn", i)),
+                                    egui::Sense::hover(),
+                                )
+                                .on_hover_note(format!("Same {}: {matched}", thread.label()));
+                            }
+                            for (i, card) in cards.iter().enumerate() {
+                                // How far into its arrival this card is. Every
+                                // card but a just-dug one is settled at 1.0, so
+                                // the web as a whole stays still while the new
+                                // find is the only thing moving.
+                                let enter = card_enter_t(card.since_landed);
+                                if enter < 1.0 {
+                                    ui.ctx().request_repaint();
+                                }
+                                let current = i == at;
+                                // A landing card slides in from the right of
+                                // its slot and fades up, like a sleeve being
+                                // pushed into the row. Only the contents move:
+                                // the slot keeps its full place in the grid
+                                // either way, so the rest of the web holds
+                                // still while the new find settles.
+                                let slot = slot_of(card.row, card.col);
+                                let shifted =
+                                    slot.translate(egui::vec2(CARD_SLIDE * (1.0 - enter), 0.0));
+                                let mut card_ui = ui.new_child(
+                                    egui::UiBuilder::new()
+                                        .max_rect(shifted)
+                                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                                );
+                                card_ui.multiply_opacity(enter);
+                                {
+                                    let ui = &mut card_ui;
                                     {
-                                        let ui = &mut card_ui;
-                                        {
                                             let (rect, resp) = ui.allocate_exact_size(
                                                 egui::vec2(COVER, COVER),
                                                 egui::Sense::click(),
@@ -1340,14 +1615,17 @@ impl App {
                                                     );
                                                 }
                                             }
-                                            // Steps behind and ahead of the cursor
-                                            // are dimmed, so where you are on the
-                                            // path is readable at a glance.
+                                            // Everything but the head is dimmed,
+                                            // and branches off the head's own
+                                            // thread more so — where you are in
+                                            // the web reads at a glance.
                                             if !current {
                                                 ui.painter().rect_filled(
                                                     rect,
                                                     egui::Rounding::same(5.0),
-                                                    egui::Color32::from_black_alpha(120),
+                                                    egui::Color32::from_black_alpha(
+                                                        if card.on_lineage { 100 } else { 165 },
+                                                    ),
                                                 );
                                             } else {
                                                 ui.painter().rect_stroke(
@@ -1441,36 +1719,36 @@ impl App {
                                         }
                                     }
                                 }
-                                // The step being fetched, as a placeholder tile at
-                                // the end of the path — so a dig in flight looks
-                                // like it's going somewhere.
-                                if pending.is_some() {
-                                    ui.vertical(|ui| {
-                                        ui.add_space(COVER * 0.5 - 8.0);
-                                        ui.label(
-                                            egui::RichText::new("→")
-                                                .size(16.0)
-                                                .color(egui::Color32::from_gray(120)),
-                                        );
-                                    });
-                                    ui.allocate_ui_with_layout(
-                                        egui::vec2(COVER, COVER + 60.0),
-                                        egui::Layout::top_down(egui::Align::Min),
-                                        |ui| {
-                                            let (rect, _) = ui.allocate_exact_size(
-                                                egui::vec2(COVER, COVER),
-                                                egui::Sense::hover(),
-                                            );
-                                            ui.painter().rect_filled(
-                                                rect,
-                                                egui::Rounding::same(5.0),
-                                                egui::Color32::from_gray(34),
-                                            );
-                                            ui.put(rect, egui::Spinner::new());
-                                        },
+                            // The step being fetched, as a placeholder tile in
+                            // the slot where the find will land — so a dig in
+                            // flight looks like it's going somewhere, and the
+                            // card that arrives replaces the spinner in place.
+                            if pending.is_some() {
+                                if let Some((r, c)) = pending_slot {
+                                    let slot = slot_of(r, c);
+                                    let head_slot = slot_of(cards[at].row, cards[at].col);
+                                    let color = egui::Color32::from_gray(120);
+                                    draw_connector(ui.painter(), head_slot, slot, color);
+                                    let glyph = connector_glyph_rect(slot);
+                                    ui.painter().text(
+                                        glyph.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "→",
+                                        egui::FontId::proportional(16.0),
+                                        color,
                                     );
+                                    let rect = egui::Rect::from_min_size(
+                                        slot.min,
+                                        egui::vec2(COVER, COVER),
+                                    );
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        egui::Rounding::same(5.0),
+                                        egui::Color32::from_gray(34),
+                                    );
+                                    ui.put(rect, egui::Spinner::new());
                                 }
-                            });
+                            }
                         });
 
                     ui.add_space(8.0);
@@ -1547,8 +1825,7 @@ impl App {
             self.dig = None;
         } else if let Some(i) = goto {
             if let Some(dig) = self.dig.as_mut() {
-                dig.at = i;
-                dig.error = None;
+                dig.refocus(i);
             }
         } else if let Some(thread) = step {
             self.dig_step(thread);
