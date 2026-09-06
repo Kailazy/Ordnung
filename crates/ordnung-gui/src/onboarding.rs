@@ -443,6 +443,15 @@ impl App {
                                     "Search, sort, playlists. Health finds dupes and \
                                      missing files.",
                                 );
+                                ui.add_space(crate::ui::tokens::space::S3);
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Analysis runs by itself as songs arrive. Turn \
+                                         that off any time in Settings \u{2192} Analysis.",
+                                    )
+                                    .font(crate::ui::tokens::font::body())
+                                    .color(crate::ui::tokens::color::LABEL_3),
+                                );
                             }
                             TourStep::LibraryRoot => {
                                 step_heading(
@@ -687,9 +696,10 @@ impl App {
                                 ui.add_space(crate::ui::tokens::space::S3);
                                 ui.label(
                                     egui::RichText::new(
-                                        "Optional \u{2014} you can add it later in Settings \
-                                         \u{2192} Discogs. Read-only: Ordnung never edits \
-                                         your Discogs account.",
+                                        "Optional \u{2014} everything here lives in Settings \
+                                         \u{2192} Discogs: add the token later, switch \
+                                         matching between automatic and manual, or change \
+                                         which release wins, any time.",
                                     )
                                     .font(crate::ui::tokens::font::body())
                                     .color(crate::ui::tokens::color::LABEL_3),
