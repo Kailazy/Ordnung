@@ -398,11 +398,11 @@ impl App {
     }
 
     /// Tiny floating info glyph over the top-right corner of an open playlist's
-    /// table, tucked just left of the inspector's pull tab. Hovering it reports
-    /// the playlist's rollup totals: how many files it holds, their combined
-    /// size and their combined running time (from `playlist_stats`, refreshed
-    /// on every reload). Painted as an overlay `Area` so the table keeps its
-    /// full width.
+    /// table, tucked just left of the inspector's pull tab. Clicking it opens a
+    /// small popup with the playlist's rollup totals: how many files it holds,
+    /// their combined size and their combined running time (from
+    /// `playlist_stats`, refreshed on every reload); clicking anywhere else
+    /// closes it. Painted as an overlay `Area` so the table keeps its full width.
     fn draw_playlist_info_glyph(&self, ui: &egui::Ui, pid: Id) {
         /// Glyph diameter.
         const D: f32 = 16.0;
@@ -416,10 +416,19 @@ impl App {
             .fixed_pos(pos)
             .show(ui.ctx(), |ui| {
                 let (rect, resp) =
-                    ui.allocate_exact_size(egui::vec2(D, D), egui::Sense::hover());
-                // Quiet until pointed at, like the inspector tab: the glyph is a
-                // persistent affordance over the table, not a call to action.
-                let color = if resp.hovered() {
+                    ui.allocate_exact_size(egui::vec2(D, D), egui::Sense::click());
+                let popup_id = egui::Id::new("playlist_info_popup");
+                if resp.clicked() {
+                    ui.memory_mut(|m| m.toggle_popup(popup_id));
+                }
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                // Quiet until pointed at (or open), like the inspector tab: the
+                // glyph is a persistent affordance over the table, not a call to
+                // action.
+                let open = ui.memory(|m| m.is_popup_open(popup_id));
+                let color = if resp.hovered() || open {
                     crate::ui::tokens::color::LABEL
                 } else {
                     crate::ui::tokens::color::LABEL_3
@@ -437,12 +446,21 @@ impl App {
                     color,
                 );
                 let files = if stats.tracks == 1 { "file" } else { "files" };
-                resp.on_hover_note(format!(
-                    "{} {files}\n{}\n{}",
-                    stats.tracks,
-                    fmt_bytes(stats.bytes),
-                    fmt_running_time(stats.duration_ms),
-                ));
+                egui::popup::popup_below_widget(
+                    ui,
+                    popup_id,
+                    &resp,
+                    egui::PopupCloseBehavior::CloseOnClickOutside,
+                    |ui| {
+                        ui.set_min_width(110.0);
+                        ui.label(crate::ui::hover::note(format!(
+                            "{} {files}\n{}\n{}",
+                            stats.tracks,
+                            fmt_bytes(stats.bytes),
+                            fmt_running_time(stats.duration_ms),
+                        )));
+                    },
+                );
             });
     }
 
