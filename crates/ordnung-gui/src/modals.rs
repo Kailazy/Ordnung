@@ -535,6 +535,65 @@ impl App {
         ui.add_space(14.0);
         ui.separator();
         ui.add_space(10.0);
+
+        // ---- Automatic matching -------------------------------------------
+        // Every new import gets its release found and applied with no picker;
+        // the rule below decides which candidate wins. The right-click menu's
+        // "Find Discogs release" stays the manual override and re-pick.
+        ui.label(egui::RichText::new("Automatic matching").strong());
+        ui.label(
+            egui::RichText::new(
+                "Match each new import to a Discogs release as it's added, with \
+                 no picker: the winning release links the track and fills its \
+                 cover art and empty tag fields. Right-click a track and choose \
+                 \"Find Discogs release\" to re-pick by hand.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(6.0);
+        let mut auto_dirty = false;
+        if ui
+            .checkbox(
+                &mut self.config.discogs_auto_fetch,
+                "Match new imports automatically",
+            )
+            .on_hover_note("Find each new track's release on import")
+            .changed()
+        {
+            auto_dirty = true;
+        }
+        ui.add_enabled_ui(self.config.discogs_auto_fetch, |ui| {
+            let current =
+                config::ReleaseAutoMatch::from_key(&self.config.discogs_auto_match);
+            let mut picked = current;
+            ui.horizontal(|ui| {
+                ui.label("Prefer:");
+                egui::ComboBox::from_id_salt("discogs_auto_match_rule")
+                    .selected_text(current.label())
+                    .show_ui(ui, |ui| {
+                        for rule in config::ReleaseAutoMatch::ALL {
+                            ui.selectable_value(&mut picked, rule, rule.label())
+                                .on_hover_note(rule.hint());
+                        }
+                    });
+            })
+            .response
+            .on_hover_note(current.hint());
+            if picked != current {
+                self.config.discogs_auto_match = picked.key().to_string();
+                auto_dirty = true;
+            }
+        });
+        if auto_dirty {
+            if let Err(e) = self.config.save() {
+                self.status = format!("Couldn't save settings: {e}");
+            }
+        }
+
+        ui.add_space(14.0);
+        ui.separator();
+        ui.add_space(10.0);
         // Required verbatim by the Discogs API Terms of Use, which oblige us to
         // display it "prominently" wherever the API and its content are used.
         ui.label(

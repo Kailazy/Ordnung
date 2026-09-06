@@ -30,7 +30,10 @@ use super::*;
 ///
 /// v4 added the rekordbox hand-off step: with the direct USB export not yet
 /// in shipped builds, the tour has to say how finished tracks reach the decks.
-pub(crate) const TOUR_VERSION: u32 = 4;
+///
+/// v5 added the automatic Discogs match choice: whether new imports get their
+/// release found and applied automatically, and which candidate wins.
+pub(crate) const TOUR_VERSION: u32 = 5;
 
 /// One step of the tour. Ordered as the questions actually arrive: what is this,
 /// how does my music get in, what does Discogs add, and only then — now that
@@ -110,6 +113,13 @@ pub(crate) struct Tour {
     /// token. Committed on Finish; a token that actually changed also kicks off
     /// the identity check so the user sees it turn into a signed-in account.
     pub(crate) token_input: String,
+    /// Whether new imports get their Discogs release matched automatically,
+    /// chosen on [`TourStep::Discogs`]. Seeded from
+    /// [`crate::config::Config::discogs_auto_fetch`]; committed on Finish.
+    pub(crate) auto_fetch: bool,
+    /// Which candidate the automatic match commits to, also from the Discogs
+    /// step. Seeded from [`crate::config::Config::discogs_auto_match`].
+    pub(crate) auto_match: crate::config::ReleaseAutoMatch,
 }
 
 impl Tour {
@@ -119,6 +129,8 @@ impl Tour {
         library_root: Option<PathBuf>,
         vinyl_first: bool,
         token_input: String,
+        auto_fetch: bool,
+        auto_match: crate::config::ReleaseAutoMatch,
     ) -> Self {
         Self {
             step: TourStep::Welcome,
@@ -126,6 +138,8 @@ impl Tour {
             library_root,
             vinyl_first,
             token_input,
+            auto_fetch,
+            auto_match,
         }
     }
 }
@@ -273,6 +287,8 @@ impl App {
             crate::config::NavPrimary::from_key(&self.config.nav_primary)
                 == crate::config::NavPrimary::Vinyl,
             self.config.discogs_token.clone(),
+            self.config.discogs_auto_fetch,
+            crate::config::ReleaseAutoMatch::from_key(&self.config.discogs_auto_match),
         ));
     }
 
@@ -293,6 +309,8 @@ impl App {
         let mut library_root = tour.library_root.clone();
         let mut vinyl_first = tour.vinyl_first;
         let mut token_input = tour.token_input.clone();
+        let mut auto_fetch = tour.auto_fetch;
+        let mut auto_match = tour.auto_match;
 
         egui::Window::new("Welcome to Ordnung")
             .open(&mut open)
@@ -585,7 +603,7 @@ impl App {
                                         ui,
                                         crate::ui::icon::art,
                                         "Cover art",
-                                        "Full-size artwork. You review every cover.",
+                                        "Full-size artwork for every matched release.",
                                     );
                                 }
 
@@ -629,6 +647,43 @@ impl App {
                                             );
                                         });
                                     });
+                                // The automation fork, right under the token it
+                                // depends on: automatic keeps imports hands-off
+                                // (analysis, release, tags, cover in one pass);
+                                // unticking keeps the manual picker flow.
+                                ui.add_space(crate::ui::tokens::space::S3);
+                                ui.checkbox(
+                                    &mut auto_fetch,
+                                    "Match new imports to a Discogs release automatically",
+                                )
+                                .on_hover_note(
+                                    "Find each new track's release on import, \
+                                     with no picker",
+                                );
+                                if auto_fetch {
+                                    ui.add_space(crate::ui::tokens::space::S2);
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("Prefer")
+                                                .font(crate::ui::tokens::font::body())
+                                                .color(crate::ui::tokens::color::LABEL_3),
+                                        );
+                                        egui::ComboBox::from_id_salt("tour_auto_match_rule")
+                                            .selected_text(auto_match.label())
+                                            .show_ui(ui, |ui| {
+                                                for rule in
+                                                    crate::config::ReleaseAutoMatch::ALL
+                                                {
+                                                    ui.selectable_value(
+                                                        &mut auto_match,
+                                                        rule,
+                                                        rule.label(),
+                                                    )
+                                                    .on_hover_note(rule.hint());
+                                                }
+                                            });
+                                    });
+                                }
                                 ui.add_space(crate::ui::tokens::space::S3);
                                 ui.label(
                                     egui::RichText::new(
@@ -766,13 +821,23 @@ impl App {
             t.library_root = library_root.clone();
             t.vinyl_first = vinyl_first;
             t.token_input = token_input.clone();
+            t.auto_fetch = auto_fetch;
+            t.auto_match = auto_match;
             if let Some(next) = goto {
                 t.step = next;
             }
         }
 
         if finish {
-            self.finish_tour(ctx, auto_write, library_root, vinyl_first, token_input);
+            self.finish_tour(
+                ctx,
+                auto_write,
+                library_root,
+                vinyl_first,
+                token_input,
+                auto_fetch,
+                auto_match,
+            );
         } else if !open {
             // Closing with the X is a deliberate "not now": don't write a
             // writeback choice the user skipped past, but do stop reopening the
@@ -789,6 +854,7 @@ impl App {
     /// done, and — when a root was actually picked or changed — kick off the
     /// first import. The import only starts here, on Finish: closing the tour
     /// with the X must never start reading a folder the user didn't confirm.
+    #[allow(clippy::too_many_arguments)]
     fn finish_tour(
         &mut self,
         ctx: &egui::Context,
@@ -796,6 +862,8 @@ impl App {
         library_root: Option<PathBuf>,
         vinyl_first: bool,
         token_input: String,
+        auto_fetch: bool,
+        auto_match: crate::config::ReleaseAutoMatch,
     ) {
         let changed = self.config.auto_write_tags != auto_write;
         self.config.auto_write_tags = auto_write;
@@ -835,6 +903,10 @@ impl App {
                 self.discogs_auth = DiscogsAuth::SignedOut;
             }
         }
+        // The automation fork from the Discogs step, committed like the
+        // writeback one: what the user saw ticked is what runs from now on.
+        self.config.discogs_auto_fetch = auto_fetch;
+        self.config.discogs_auto_match = auto_match.key().to_string();
         self.config.onboarding_completed_version = TOUR_VERSION;
         if let Err(e) = self.config.save() {
             self.status = format!("Couldn't save settings: {e}");
@@ -912,7 +984,17 @@ mod tests {
     /// something they didn't.
     #[test]
     fn the_tour_seeds_its_choices_from_the_live_settings() {
-        let fresh = |auto: bool| Tour::new(auto, None, false, String::new());
+        use crate::config::ReleaseAutoMatch;
+        let fresh = |auto: bool| {
+            Tour::new(
+                auto,
+                None,
+                false,
+                String::new(),
+                true,
+                ReleaseAutoMatch::MostCollected,
+            )
+        };
         assert!(fresh(true).auto_write);
         assert!(!fresh(false).auto_write);
         assert_eq!(fresh(true).step, TourStep::Welcome);
@@ -921,10 +1003,19 @@ mod tests {
         assert!(fresh(true).token_input.is_empty());
 
         let root = PathBuf::from("/music");
-        let seeded = Tour::new(true, Some(root.clone()), true, "tok".into());
+        let seeded = Tour::new(
+            true,
+            Some(root.clone()),
+            true,
+            "tok".into(),
+            false,
+            ReleaseAutoMatch::Oldest,
+        );
         assert_eq!(seeded.library_root, Some(root));
         assert!(seeded.vinyl_first);
         assert_eq!(seeded.token_input, "tok");
+        assert!(!seeded.auto_fetch);
+        assert_eq!(seeded.auto_match, ReleaseAutoMatch::Oldest);
     }
 
     /// v2 added the library-root step; a user who finished v1 has no root and

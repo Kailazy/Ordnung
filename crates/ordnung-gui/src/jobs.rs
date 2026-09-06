@@ -35,6 +35,15 @@ impl App {
                     // Don't save yet — queue the candidates for the user to pick.
                     self.artwork_queue.push_back(c);
                 }
+                Ok(JobMsg::CoversChanged(ids)) => {
+                    // The auto-match replaced these tracks' covers; drop the
+                    // cached textures so each re-decodes on next render.
+                    for id in ids {
+                        self.cover_cache.remove(&id);
+                        self.cover_full_cache.remove(&id);
+                        self.cover_inflight.remove(&id);
+                    }
+                }
                 Ok(JobMsg::VinylUsername(u)) => {
                     // Persist the resolved username so the collection link works
                     // across launches. Only write when it actually changed.
@@ -92,8 +101,29 @@ impl App {
         self.job_cancel = Some(cancel.clone());
         self.status = format!("Scanning {}…", dir.display());
         let db = self.db_path.clone();
-        let auto_analyze = self.config.auto_analyze;
-        thread::spawn(move || run_scan(db, dir, cancel, tx, ctx, auto_analyze));
+        let follow = self.import_follow_ups();
+        thread::spawn(move || run_scan(db, dir, cancel, tx, ctx, follow));
+    }
+
+    /// What runs after an import lands, per the user's settings: auto-analysis,
+    /// and the automatic Discogs release match (only when it's switched on AND a
+    /// token exists — without one the searches could only fail). Snapshotted at
+    /// spawn time so the worker never reads config off another thread.
+    fn import_follow_ups(&self) -> FollowUps {
+        let token = self.discogs_token().trim().to_string();
+        let auto_match = if self.config.discogs_auto_fetch && !token.is_empty() {
+            Some(AutoMatchSpec {
+                token,
+                criterion: config::ReleaseAutoMatch::from_key(&self.config.discogs_auto_match),
+                hidden_mediums: self.config.hidden_release_mediums.clone(),
+            })
+        } else {
+            None
+        };
+        FollowUps {
+            auto_analyze: self.config.auto_analyze,
+            auto_match,
+        }
     }
 
     /// Transfer device tracks into the local library: copy the files off the
@@ -126,9 +156,9 @@ impl App {
                 .unwrap_or_else(|| vol.display().to_string())
         );
         let db = self.db_path.clone();
-        let auto_analyze = self.config.auto_analyze;
+        let follow = self.import_follow_ups();
         thread::spawn(move || {
-            run_usb_transfer(db, sources, vol, dest, playlist, cancel, tx, ctx, auto_analyze)
+            run_usb_transfer(db, sources, vol, dest, playlist, cancel, tx, ctx, follow)
         });
     }
 
@@ -167,8 +197,8 @@ impl App {
         self.job_cancel = Some(cancel.clone());
         self.status = format!("Importing {} dropped item(s)…", paths.len());
         let db = self.db_path.clone();
-        let auto_analyze = self.config.auto_analyze;
-        thread::spawn(move || run_import(db, paths, cancel, tx, ctx, auto_analyze));
+        let follow = self.import_follow_ups();
+        thread::spawn(move || run_import(db, paths, cancel, tx, ctx, follow));
     }
 
     /// Drop-to-import: shade the window while files hover over it, and scan
@@ -615,7 +645,7 @@ pub(crate) fn run_scan(
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
-    auto_analyze: bool,
+    follow: FollowUps,
 ) {
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
@@ -635,7 +665,7 @@ pub(crate) fn run_scan(
         return;
     }
     let outcome = import_files(&catalog, &files, &cancel, &tx, &ctx);
-    finish_import(&catalog, outcome, auto_analyze, &cancel, &tx, &ctx);
+    finish_import(&catalog, outcome, &follow, &cancel, &tx, &ctx);
 }
 
 /// Build a native rekordbox export of the whole catalog onto `dest`.
@@ -784,7 +814,7 @@ pub(crate) fn run_usb_transfer(
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
-    auto_analyze: bool,
+    follow: FollowUps,
 ) {
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
@@ -908,7 +938,7 @@ pub(crate) fn run_usb_transfer(
             }
         }
     }
-    finish_import(&catalog, outcome, auto_analyze, &cancel, &tx, &ctx);
+    finish_import(&catalog, outcome, &follow, &cancel, &tx, &ctx);
 }
 
 /// `song.mp3` → `song (2).mp3`, `song (3).mp3`, … — the first name that
@@ -941,7 +971,7 @@ pub(crate) fn run_import(
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
-    auto_analyze: bool,
+    follow: FollowUps,
 ) {
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
@@ -969,7 +999,7 @@ pub(crate) fn run_import(
         return;
     }
     let outcome = import_files(&catalog, &files, &cancel, &tx, &ctx);
-    finish_import(&catalog, outcome, auto_analyze, &cancel, &tx, &ctx);
+    finish_import(&catalog, outcome, &follow, &cancel, &tx, &ctx);
 }
 
 /// What an import run touched, so the caller can report it and (optionally)
@@ -1090,41 +1120,278 @@ pub(crate) fn import_files(
     }
 }
 
-/// Close out an import: either report the tally, or — when auto-analysis is on
-/// and tracks were added/updated — chain straight into analyzing them on this
-/// same job thread (so it stays one progress flow with one terminal `Done`).
-/// Auto-analysis is GUI policy, mirroring the explicit "Analyze" action; core
+/// The per-user follow-up policy an import spawn snapshots for its worker:
+/// whether to chain analysis, and whether (and how) to auto-match new tracks
+/// to Discogs releases. Both are GUI policy mirroring explicit actions; core
 /// stays explicit-only.
+pub(crate) struct FollowUps {
+    pub auto_analyze: bool,
+    pub auto_match: Option<AutoMatchSpec>,
+}
+
+/// Everything the automatic Discogs match needs off the UI thread: the token,
+/// the winner-picking rule, and the user's release-format filter.
+pub(crate) struct AutoMatchSpec {
+    pub token: String,
+    pub criterion: config::ReleaseAutoMatch,
+    pub hidden_mediums: Vec<String>,
+}
+
+/// Close out an import: report the tally, chaining auto-analysis and then the
+/// automatic Discogs release match onto this same job thread first when they're
+/// enabled — one progress flow, one terminal `Done` carrying the combined
+/// summary. The import's cancel flag stays live through every chained phase,
+/// so one Abort covers the whole run.
 fn finish_import(
     catalog: &Catalog,
     outcome: ImportOutcome,
-    auto_analyze: bool,
+    follow: &FollowUps,
     cancel: &AtomicBool,
     tx: &Sender<JobMsg>,
     ctx: &egui::Context,
 ) {
-    if outcome.cancelled || !auto_analyze || outcome.touched.is_empty() {
-        let _ = tx.send(JobMsg::Done(outcome.summary));
-        ctx.request_repaint();
-        return;
+    let mut summary = outcome.summary;
+    if !outcome.cancelled && follow.auto_analyze && !outcome.touched.is_empty() {
+        // Resolve the touched ids to tracks; skip any that vanished since the
+        // scan. Lead the analysis tally with what was imported, so the combined
+        // Done reads e.g. "Scanned 5 file(s): … Analyzed 5 track(s), 0 failed."
+        let tracks: Vec<Track> = outcome
+            .touched
+            .iter()
+            .filter_map(|&id| catalog.get_track(id).ok())
+            .collect();
+        if !tracks.is_empty() {
+            let lead = format!("{summary} ");
+            summary = analyze_tracks(catalog, tracks, false, &lead, cancel, tx, ctx);
+        }
     }
-    // Resolve the touched ids to tracks; skip any that vanished since the scan.
-    let tracks: Vec<Track> = outcome
-        .touched
-        .iter()
-        .filter_map(|&id| catalog.get_track(id).ok())
-        .collect();
-    if tracks.is_empty() {
-        let _ = tx.send(JobMsg::Done(outcome.summary));
-        ctx.request_repaint();
-        return;
+    if !outcome.cancelled && !cancel.load(Ordering::Relaxed) && !outcome.touched.is_empty() {
+        if let Some(spec) = &follow.auto_match {
+            let tally = auto_match_tracks(catalog, spec, &outcome.touched, cancel, tx, ctx);
+            if !tally.is_empty() {
+                summary = format!("{summary} {tally}");
+            }
+        }
     }
-    // Lead the analysis tally with what was imported, so the one combined Done
-    // reads e.g. "Scanned 5 file(s): … Analyzed 5 track(s), 0 failed."
-    let lead = format!("{} ", outcome.summary);
-    // The import's cancel flag stays live into the chained analysis, so one
-    // Abort covers the whole scan → analyze run.
-    analyze_tracks(catalog, tracks, false, &lead, cancel, tx, ctx);
+    let _ = tx.send(JobMsg::Done(summary));
+    ctx.request_repaint();
+}
+
+/// Match freshly imported tracks to a Discogs release with no picker: search
+/// each track exactly like the manual "Find Discogs release" run, keep the
+/// candidates the user's format filter allows, commit the best one by the
+/// configured rule, and apply it the way the picker's Save does — release
+/// link, cover art, empty tag fields, and the fetched marker. Only tracks with
+/// no recorded Discogs attempt are touched, so re-imports never re-fight a
+/// match (or a "none of these") that's already settled. Returns a tally
+/// sentence for the combined `Done` line, empty when there was nothing to do.
+fn auto_match_tracks(
+    catalog: &Catalog,
+    spec: &AutoMatchSpec,
+    ids: &[Id],
+    cancel: &AtomicBool,
+    tx: &Sender<JobMsg>,
+    ctx: &egui::Context,
+) -> String {
+    let ids = match catalog.tracks_without_release_attempt(ids) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    if ids.is_empty() {
+        return String::new();
+    }
+    // Same trick as the manual fetch: rebuild the sliver of `Config` that
+    // answers "show this format?" from the bare keys the spawn snapshotted.
+    let medium_filter = config::Config {
+        hidden_release_mediums: spec.hidden_mediums.clone(),
+        ..config::Config::default()
+    };
+    let client = discogs::Client::new(
+        spec.token.clone(),
+        "Ordnung/0.1 +https://kailazy.github.io/Ordnung/",
+    );
+    let total = ids.len();
+    let _ = tx.send(JobMsg::Progress { done: 0, total });
+    ctx.request_repaint();
+    let (mut matched, mut none, mut skipped) = (0usize, 0usize, 0usize);
+    let mut fails: Vec<(String, String)> = Vec::new();
+    // Tracks whose cover art changed, so the UI can drop their stale textures.
+    let mut covers: Vec<Id> = Vec::new();
+    for (i, track_id) in ids.into_iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let _ = tx.send(JobMsg::Progress { done: i, total });
+        let Ok(track) = catalog.get_track(track_id) else {
+            skipped += 1;
+            continue;
+        };
+        let artist = track
+            .tags
+            .artist
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let title = track
+            .tags
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let album = track
+            .tags
+            .album
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let label = format!(
+            "{} — {}",
+            if artist.is_empty() {
+                "Unknown"
+            } else {
+                &artist
+            },
+            title.as_deref().unwrap_or("Untitled"),
+        );
+        if artist.is_empty() && title.is_none() && album.is_none() {
+            skipped += 1;
+            continue;
+        }
+        let _ = tx.send(JobMsg::Status(format!(
+            "Matching Discogs release ({}/{total}) {label}",
+            i + 1
+        )));
+        ctx.request_repaint();
+        match client.find_artwork_candidates(&artist, title.as_deref(), album.as_deref()) {
+            Ok(found) => {
+                let hit_any = !found.is_empty();
+                let kept: Vec<_> = found
+                    .into_iter()
+                    .filter(|c| medium_filter.shows_release_format(&c.format))
+                    .collect();
+                match best_candidate(&kept, spec.criterion) {
+                    Some(c) => {
+                        apply_release(catalog, &client, track_id, c);
+                        covers.push(track_id);
+                        matched += 1;
+                    }
+                    None => {
+                        none += 1;
+                        // A true no-match is marked like the manual run, so it
+                        // isn't offered again. A list emptied purely by the
+                        // format filter is NOT marked — widening the filter
+                        // should bring the track back.
+                        if !hit_any {
+                            let _ = catalog.mark_metadata_fetched(track_id);
+                        } else {
+                            fails.push((
+                                label,
+                                "every release Discogs found is on a format hidden \
+                                 in Settings › Discogs"
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                fails.push((label, format!("Discogs search failed: {e}")));
+            }
+        }
+        ctx.request_repaint();
+    }
+    let _ = tx.send(JobMsg::Progress { done: total, total });
+    if !covers.is_empty() {
+        let _ = tx.send(JobMsg::CoversChanged(covers));
+    }
+    if !fails.is_empty() {
+        let _ = tx.send(JobMsg::Failures {
+            title: "Discogs match".into(),
+            items: fails,
+        });
+    }
+    let mut tally = format!("Matched {matched} of {total} to Discogs releases");
+    if none > 0 {
+        tally.push_str(&format!(", {none} without a match"));
+    }
+    if skipped > 0 {
+        tally.push_str(&format!(", {skipped} skipped"));
+    }
+    tally.push('.');
+    tally
+}
+
+/// The candidate the automatic match commits to, by the configured rule.
+/// Discogs orders hits by relevance, so ties go to the earlier candidate.
+fn best_candidate(
+    cands: &[discogs::ReleaseCandidate],
+    by: config::ReleaseAutoMatch,
+) -> Option<&discogs::ReleaseCandidate> {
+    use config::ReleaseAutoMatch::*;
+    use std::cmp::Reverse;
+    match by {
+        TopHit => cands.first(),
+        MostCollected => cands
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, c)| (c.in_collection, c.in_wantlist, Reverse(*i)))
+            .map(|(_, c)| c),
+        MostWanted => cands
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, c)| (c.in_wantlist, c.in_collection, Reverse(*i)))
+            .map(|(_, c)| c),
+        // Unparsable/absent years sort last; popularity breaks year ties.
+        Oldest => cands
+            .iter()
+            .enumerate()
+            .min_by_key(|(i, c)| {
+                (
+                    c.year.trim().parse::<u32>().unwrap_or(u32::MAX),
+                    Reverse(c.in_collection),
+                    *i,
+                )
+            })
+            .map(|(_, c)| c),
+    }
+}
+
+/// Commit `c` as `track_id`'s release the way the picker's Save does: external
+/// cover art, empty tag fields from the cached release detail, the release
+/// link, and the fetched marker. Catalog only — the auto-write flow decides
+/// separately whether files get touched, exactly as after a manual pick.
+fn apply_release(
+    catalog: &Catalog,
+    client: &discogs::Client,
+    track_id: Id,
+    c: &discogs::ReleaseCandidate,
+) {
+    let thumb_png = client.fetch_thumb(&c.thumb_url).unwrap_or_default();
+    let url = if c.cover_image_url.is_empty() {
+        &c.thumb_url
+    } else {
+        &c.cover_image_url
+    };
+    let full = client.fetch_full(url).unwrap_or_else(|| thumb_png.clone());
+    let _ = catalog.set_external_artwork(
+        track_id,
+        "discogs",
+        Some(&c.release_id),
+        Some(&c.thumb_url),
+        Some(&thumb_png),
+        Some(&full),
+    );
+    let rel = catalog.release_cached_or(&c.release_id, || client.fetch_release(&c.release_id));
+    if let (Ok(rel), Ok(track)) = (rel, catalog.get_track(track_id)) {
+        let mut tags = track.tags;
+        if rel.apply_to_tags(&mut tags, false) > 0 {
+            let _ = catalog.update_tags(track_id, &tags);
+        }
+    }
+    let _ = catalog.mark_metadata_fetched(track_id);
 }
 
 /// Locate moved source files and repoint the catalog at them. Reads the missing
@@ -1441,14 +1708,17 @@ pub(crate) fn run_analyze(
         ctx.request_repaint();
         return;
     }
-    analyze_tracks(&catalog, tracks, force, "", &cancel, &tx, &ctx);
+    let summary = analyze_tracks(&catalog, tracks, force, "", &cancel, &tx, &ctx);
+    let _ = tx.send(JobMsg::Done(summary));
+    ctx.request_repaint();
 }
 
 /// Analyze `tracks` in parallel, skipping any already current at this analyzer
-/// version (unless `force`), then save each result. Sends progress and exactly
-/// one terminal `Done`, whose message is prefixed with `lead` (empty for a
-/// standalone analyze; the import tally when chained after a scan). Shared by
-/// the explicit "Analyze" action and auto-analysis-on-import.
+/// version (unless `force`), then save each result. Sends progress and returns
+/// the closing tally, prefixed with `lead` (empty for a standalone analyze; the
+/// import tally when chained after a scan) — the caller owns the terminal
+/// `Done`, so `finish_import` can chain further phases after this one. Shared
+/// by the explicit "Analyze" action and auto-analysis-on-import.
 fn analyze_tracks(
     catalog: &Catalog,
     tracks: Vec<Track>,
@@ -1457,7 +1727,7 @@ fn analyze_tracks(
     cancel: &AtomicBool,
     tx: &Sender<JobMsg>,
     ctx: &egui::Context,
-) {
+) -> String {
     let mut pending = Vec::new();
     for t in &tracks {
         let (size, mtime) = file_stamp(&t.source_path);
@@ -1468,12 +1738,7 @@ fn analyze_tracks(
         }
     }
     if pending.is_empty() {
-        let _ = tx.send(JobMsg::Done(format!(
-            "{lead}All {} track(s) already analyzed.",
-            tracks.len()
-        )));
-        ctx.request_repaint();
-        return;
+        return format!("{lead}All {} track(s) already analyzed.", tracks.len());
     }
     let total = pending.len();
     let _ = tx.send(JobMsg::Status(format!("Analyzing {total} track(s)…")));
@@ -1592,15 +1857,14 @@ fn analyze_tracks(
     }
     // A cancelled run reports what it managed to keep, so the user knows the
     // finished analyses were saved and only the remainder was dropped.
-    let _ = tx.send(JobMsg::Done(if skipped > 0 {
+    if skipped > 0 {
         format!(
             "{lead}Analysis cancelled: {ok} of {total} track(s) analyzed, \
              {failed} failed, {skipped} skipped."
         )
     } else {
         format!("{lead}Analyzed {ok} track(s), {failed} failed.")
-    }));
-    ctx.request_repaint();
+    }
 }
 
 /// How long a cached marketplace price stays fresh (30 days). Prices are the one
@@ -2753,6 +3017,47 @@ pub(crate) fn analysis_pool() -> Option<rayon::ThreadPool> {
 }
 
 #[cfg(test)]
+mod auto_match_tests {
+    use super::*;
+
+    fn cand(year: &str, have: u32, want: u32) -> discogs::ReleaseCandidate {
+        discogs::ReleaseCandidate {
+            release_id: format!("{year}-{have}-{want}"),
+            title: String::new(),
+            year: year.into(),
+            label: String::new(),
+            country: String::new(),
+            format: String::new(),
+            thumb_url: String::new(),
+            cover_image_url: String::new(),
+            in_collection: have,
+            in_wantlist: want,
+        }
+    }
+
+    /// Each rule picks the release it says it does, and ties go to the earlier
+    /// (more relevant) hit so the pick is deterministic.
+    #[test]
+    fn best_candidate_follows_the_configured_rule() {
+        use config::ReleaseAutoMatch::*;
+        let cands = vec![
+            cand("2001", 40, 5),
+            cand("1998", 40, 90),
+            cand("", 900, 2),
+            cand("2010", 12, 90),
+        ];
+        let id = |c: Option<&discogs::ReleaseCandidate>| c.unwrap().release_id.clone();
+        assert_eq!(id(best_candidate(&cands, TopHit)), "2001-40-5");
+        assert_eq!(id(best_candidate(&cands, MostCollected)), "-900-2");
+        // Wantlist tie between two: the earlier hit wins.
+        assert_eq!(id(best_candidate(&cands, MostWanted)), "1998-40-90");
+        // A blank year sorts last, so 1998 is the oldest.
+        assert_eq!(id(best_candidate(&cands, Oldest)), "1998-40-90");
+        assert!(best_candidate(&[], MostCollected).is_none());
+    }
+}
+
+#[cfg(test)]
 mod usb_transfer_tests {
     use super::*;
 
@@ -2792,7 +3097,10 @@ mod usb_transfer_tests {
             Arc::new(AtomicBool::new(false)),
             tx,
             egui::Context::default(),
-            false,
+            FollowUps {
+                auto_analyze: false,
+                auto_match: None,
+            },
         );
 
         assert_eq!(

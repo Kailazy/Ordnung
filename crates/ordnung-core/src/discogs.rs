@@ -100,6 +100,12 @@ pub struct ReleaseCandidate {
     pub format: String,
     pub thumb_url: String,
     pub cover_image_url: String,
+    /// How many Discogs users have this release in their collection. Comes free
+    /// with every search hit, so callers can rank candidates by popularity
+    /// without spending further API requests.
+    pub in_collection: u32,
+    /// How many Discogs users have this release on their wantlist.
+    pub in_wantlist: u32,
 }
 
 /// One release returned by a free-text record lookup ([`Client::search_records`]).
@@ -831,6 +837,8 @@ impl Client {
                 format: h.format.join(", "),
                 thumb_url: h.thumb,
                 cover_image_url: h.cover_image,
+                in_collection: h.community.have,
+                in_wantlist: h.community.want,
             })
             .collect())
     }
@@ -1491,6 +1499,16 @@ struct SearchPagination {
     items: u32,
 }
 
+/// Per-hit community tallies the search endpoint includes with every result:
+/// how many users have (`have`) and want (`want`) the release.
+#[derive(Debug, Default, Deserialize)]
+struct HitCommunity {
+    #[serde(default, deserialize_with = "null_as_default")]
+    have: u32,
+    #[serde(default, deserialize_with = "null_as_default")]
+    want: u32,
+}
+
 #[derive(Debug, Deserialize)]
 struct SearchHit {
     id: u64,
@@ -1513,6 +1531,8 @@ struct SearchHit {
     label: Vec<String>,
     #[serde(default, deserialize_with = "null_as_default")]
     format: Vec<String>,
+    #[serde(default)]
+    community: HitCommunity,
 }
 
 #[derive(Debug, Deserialize)]

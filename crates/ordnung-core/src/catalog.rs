@@ -1134,6 +1134,26 @@ impl Catalog {
             .filter(|u| !u.trim().is_empty()))
     }
 
+    /// Of `ids`, the tracks with no Discogs release attempt recorded at all —
+    /// no `track_external_artwork` row, matched or otherwise. A row with an
+    /// `external_id` means the track is already linked to a release; a row
+    /// without one logged a no-match (Discogs had nothing, or the user said
+    /// "none of these"). Both count as attempts and are excluded, so an
+    /// automatic matcher never re-fights a settled decision. Preserves the
+    /// order of `ids`.
+    pub fn tracks_without_release_attempt(&self, ids: &[Id]) -> Result<Vec<Id>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT 1 FROM track_external_artwork WHERE track_id = ?1")?;
+        let mut out = Vec::new();
+        for &id in ids {
+            if !stmt.exists(params![id as i64])? {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
     /// Every catalog track that is linked to a Discogs release (via the release
     /// id stored when its art/metadata was fetched), as `(release_id, track_id)`
     /// pairs. Used to cross-reference the vinyl collection against the catalog so
@@ -4428,6 +4448,22 @@ mod tests {
         let mut expected = vec![(555u64, a), (555u64, b)];
         expected.sort();
         assert_eq!(links, expected);
+    }
+
+    /// A matched row and a logged no-match both count as attempts; only tracks
+    /// with no row at all are offered to the automatic release matcher.
+    #[test]
+    fn tracks_without_release_attempt_skips_matched_and_no_match_rows() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let (a, _) = cat.upsert_scanned(&scanned("/m/a.mp3", "A", "Techno", 1000)).unwrap();
+        let (b, _) = cat.upsert_scanned(&scanned("/m/b.mp3", "B", "House", 1000)).unwrap();
+        let (c, _) = cat.upsert_scanned(&scanned("/m/c.mp3", "C", "House", 1000)).unwrap();
+
+        // a: linked to a release. b: a no-match row (attempt, no id). c: untouched.
+        cat.set_external_artwork(a, "discogs", Some("555"), None, Some(&[1]), None).unwrap();
+        cat.set_external_artwork(b, "discogs", None, None, None, None).unwrap();
+
+        assert_eq!(cat.tracks_without_release_attempt(&[a, b, c]).unwrap(), vec![c]);
     }
 
     #[test]

@@ -667,6 +667,9 @@ enum JobMsg {
     },
     /// Candidate releases fetched for one track, for the user to pick from.
     ArtworkChoices(ArtworkChoices),
+    /// Tracks whose cover art a background job replaced (the automatic Discogs
+    /// match), so the UI drops their cached textures and the new art re-decodes.
+    CoversChanged(Vec<Id>),
     /// The Discogs username resolved during a vinyl sync, so the UI can persist
     /// it (config) and link to the user's collection page.
     VinylUsername(String),

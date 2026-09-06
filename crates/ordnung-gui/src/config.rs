@@ -26,6 +26,19 @@ pub struct Config {
     /// never want.
     #[serde(default)]
     pub hidden_release_mediums: Vec<String>,
+    /// Match each new import to a Discogs release automatically, with no picker:
+    /// the imported track is searched as soon as it lands (after auto-analysis)
+    /// and the best candidate by [`Config::discogs_auto_match`] is applied —
+    /// release link, cover art, and empty tag fields. On by default; does
+    /// nothing until a Discogs token is configured. The right-click menu's
+    /// "Find Discogs release" picker remains the manual override and re-pick.
+    #[serde(default = "default_true")]
+    pub discogs_auto_fetch: bool,
+    /// Which candidate the automatic match commits to, as a stable
+    /// [`ReleaseAutoMatch`] key. Defaults to `"most_collected"` — the release
+    /// the most Discogs users own, the strongest signal for "the normal one".
+    #[serde(default = "default_discogs_auto_match")]
+    pub discogs_auto_match: String,
     /// Discogs username of the token owner, captured on the first collection
     /// sync. Lets the "Vinyl Collection" view link to the user's collection
     /// page across launches without re-resolving it. Empty until a sync runs.
@@ -244,6 +257,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_discogs_auto_match() -> String {
+    "most_collected".to_string()
+}
+
 fn default_convert_format() -> String {
     "aiff".to_string()
 }
@@ -363,6 +380,73 @@ impl NavPrimary {
 
     /// Both options, in picker order.
     pub const ALL: [NavPrimary; 2] = [NavPrimary::Digital, NavPrimary::Vinyl];
+}
+
+/// Which candidate the automatic Discogs match commits to when a new import
+/// turns up several releases. Parsed from `Config::discogs_auto_match`; GUI
+/// policy over the popularity counts every search hit already carries, so
+/// picking costs no extra API requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseAutoMatch {
+    /// The release the most Discogs users own — the default, and the strongest
+    /// signal for "the normal pressing" over promos and limited variants.
+    MostCollected,
+    /// The release the most Discogs users want.
+    MostWanted,
+    /// The earliest year — usually the original release.
+    Oldest,
+    /// Discogs's own first search result.
+    TopHit,
+}
+
+impl ReleaseAutoMatch {
+    /// Parse a config string; anything unrecognized falls back to `MostCollected`.
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "most_wanted" => ReleaseAutoMatch::MostWanted,
+            "oldest" => ReleaseAutoMatch::Oldest,
+            "top_hit" => ReleaseAutoMatch::TopHit,
+            _ => ReleaseAutoMatch::MostCollected,
+        }
+    }
+
+    /// Stable lowercase key stored in the config TOML.
+    pub fn key(self) -> &'static str {
+        match self {
+            ReleaseAutoMatch::MostCollected => "most_collected",
+            ReleaseAutoMatch::MostWanted => "most_wanted",
+            ReleaseAutoMatch::Oldest => "oldest",
+            ReleaseAutoMatch::TopHit => "top_hit",
+        }
+    }
+
+    /// Label shown in the settings picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            ReleaseAutoMatch::MostCollected => "Most popular",
+            ReleaseAutoMatch::MostWanted => "Most wanted",
+            ReleaseAutoMatch::Oldest => "Earliest release",
+            ReleaseAutoMatch::TopHit => "Best search match",
+        }
+    }
+
+    /// One line of hover help per rule.
+    pub fn hint(self) -> &'static str {
+        match self {
+            ReleaseAutoMatch::MostCollected => "The release most Discogs users own",
+            ReleaseAutoMatch::MostWanted => "The release most Discogs users want",
+            ReleaseAutoMatch::Oldest => "The oldest pressing, usually the original",
+            ReleaseAutoMatch::TopHit => "The top Discogs search result",
+        }
+    }
+
+    /// All rules, in picker order.
+    pub const ALL: [ReleaseAutoMatch; 4] = [
+        ReleaseAutoMatch::MostCollected,
+        ReleaseAutoMatch::MostWanted,
+        ReleaseAutoMatch::Oldest,
+        ReleaseAutoMatch::TopHit,
+    ];
 }
 
 /// A physical (or digital) carrier a Discogs release can come on, used to filter
@@ -536,6 +620,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             discogs_token: String::new(),
+            discogs_auto_fetch: true,
+            discogs_auto_match: default_discogs_auto_match(),
             discogs_username: String::new(),
             hidden_release_mediums: Vec::new(),
             library_root: None,
