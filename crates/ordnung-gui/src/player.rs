@@ -317,7 +317,10 @@ impl App {
                     let (art_rect, art_resp) =
                         ui.allocate_exact_size(art_sz, egui::Sense::click_and_drag());
                     let alt_drag = ui.input(|i| i.modifiers.alt);
-                    if art_resp.drag_started() && alt_drag {
+                    // Armed every dragged frame (not just drag start) so a
+                    // missed session start retries and a mid-drag ⌥ press
+                    // still promotes to the file drag-out.
+                    if (art_resp.drag_started() || art_resp.dragged()) && alt_drag {
                         native_drag = true;
                     }
                     if art_resp.dragged() && !alt_drag {
@@ -411,7 +414,7 @@ impl App {
                             );
                         }
                         let alt = ui.input(|i| i.modifiers.alt);
-                        if resp.drag_started() && alt {
+                        if (resp.drag_started() || resp.dragged()) && alt {
                             *native_drag = true;
                         }
                         if resp.dragged() && !alt {

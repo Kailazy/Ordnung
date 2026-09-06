@@ -10,6 +10,25 @@ use ordnung_rbdb::edit;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 impl App {
+    /// Resolve dragged track ids to their source files for the native
+    /// drag-out. The visible rows cover the common case; anything not in view
+    /// (e.g. a search-box hit dragged from another view) falls back to a
+    /// catalog lookup. Ids that resolve nowhere are skipped.
+    fn native_paths_for(&self, ids: &[Id]) -> Vec<PathBuf> {
+        let mut cat: Option<Option<Catalog>> = None;
+        ids.iter()
+            .filter_map(|&id| {
+                if let Some(r) = self.rows.iter().find(|r| r.id == id) {
+                    return Some(r.source_path.clone());
+                }
+                let cat = cat
+                    .get_or_insert_with(|| Catalog::open(&self.db_path).ok())
+                    .as_ref()?;
+                cat.get_track(id).ok().map(|t| PathBuf::from(t.source_path))
+            })
+            .collect()
+    }
+
     pub(crate) fn new(db_path: PathBuf, egui_ctx: egui::Context) -> Self {
         // Install the Inter font stack and push the design tokens into egui's
         // global style before any text is laid out, so every stock widget already
@@ -244,6 +263,7 @@ impl App {
             sort: None,
             now_playing: None,
             player_native_drag: None,
+            native_drag_spent: false,
             scrub: None,
             volume_dirty: false,
             wave_zoom_secs: crate::player::DEFAULT_ZOOM_SECS,
@@ -3156,24 +3176,59 @@ impl eframe::App for App {
             }
         }
 
-        // Native drag-out to rekordbox/Finder. A ⌥-drag begun in the table this
-        // frame (`draw_table` returned its files) starts an `NSDraggingSession`
-        // *now* — while the initiating mouse event is still live and the cursor is
-        // inside the view, the only moment AppKit accepts it. The session then
-        // tracks the drag itself all the way to the drop, with no dependence on
-        // egui noticing the cursor leave the window (the old, race-prone trigger).
-        // `begin_file_drag` blocks on AppKit's nested loop until the drop completes.
-        // A plain (non-⌥) drag never reaches here: it carries an egui payload for
-        // in-window reorder / drop onto a sidebar playlist instead.
+        // Native drag-out to rekordbox/Finder. A ⌥-drag in the table (any
+        // dragged frame — `draw_table` returned its files) starts an
+        // `NSDraggingSession` *now*, while a live mouse event AppKit accepts is
+        // in flight; a frame where none is available simply retries next frame,
+        // since the drag sources keep re-arming while the button is held. The
+        // session then tracks the drag itself all the way to the drop.
+        // `begin_file_drag` blocks on AppKit's nested loop until the drop
+        // completes, so at most one session starts per gesture (the `spent`
+        // latch below). A plain (non-⌥) drag carries an egui payload for
+        // in-window reorder / sidebar drops — until it leaves the window, at
+        // which point it too promotes to the native drag-out (see below).
         // The now-playing bar's artwork drag, taken from where `draw_player`
         // parked it earlier this frame. Same dispatch point as the table's, so
         // AppKit's nested loop is entered once, with no borrows outstanding.
+        // A fresh press begins a new gesture, so the previous session's
+        // "spent" latch no longer applies.
+        if ctx.input(|i| i.pointer.any_pressed()) {
+            self.native_drag_spent = false;
+        }
         let from_player = self.player_native_drag.take().map(|p| vec![p]);
-        let native_drag = native_drag.or(from_player);
+        let mut native_drag = native_drag.or(from_player);
+        // A plain (non-⌥) drag becomes the native file drag the moment it
+        // leaves the window: inside, the egui payload still serves the
+        // sidebar/reorder drops, but nothing in-app can accept a drop outside,
+        // so hand the gesture to AppKit carrying the tracks' files. This is
+        // what makes "drag a song into another app" work without knowing
+        // about ⌥. Polled via AppKit (`pointer_pos`) because egui's own
+        // pointer can go stale at the window edge.
+        if native_drag.is_none() && !self.native_drag_spent {
+            if let Some(payload) = egui::DragAndDrop::payload::<DraggedTracks>(ctx) {
+                let outside = macos_drag::pointer_pos(frame)
+                    .or_else(|| ctx.input(|i| i.pointer.latest_pos()))
+                    .is_some_and(|p| !ctx.screen_rect().expand(2.0).contains(p));
+                if outside && ctx.input(|i| i.pointer.primary_down()) {
+                    let paths = self.native_paths_for(&payload.0);
+                    if !paths.is_empty() {
+                        egui::DragAndDrop::clear_payload(ctx);
+                        native_drag = Some(paths);
+                    }
+                }
+            }
+        }
         if let Some(paths) = native_drag {
-            let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-            if !refs.is_empty() {
-                macos_drag::begin_file_drag(frame, &refs);
+            if !self.native_drag_spent {
+                let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+                if !refs.is_empty() && macos_drag::begin_file_drag(frame, &refs) {
+                    self.native_drag_spent = true;
+                } else {
+                    // No session this frame (the initiating mouse event wasn't
+                    // available). The drag sources re-arm while the button is
+                    // held, so ask for the next frame promptly and retry.
+                    ctx.request_repaint();
+                }
             }
         }
 

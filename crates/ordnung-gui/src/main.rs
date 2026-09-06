@@ -1513,6 +1513,12 @@ struct App {
     /// the frame's `begin_file_drag` dispatch, so the path parks here and is
     /// taken alongside the table's own drag (see `update`).
     player_native_drag: Option<PathBuf>,
+    /// True once a native drag-out session has run for the current mouse
+    /// gesture. The session's nested AppKit loop swallows the mouse-up, so
+    /// egui can keep reporting the drag as live afterwards; this latch stops
+    /// the (re-armed) drag sources from starting a second session. Cleared on
+    /// the next mouse press.
+    native_drag_spent: bool,
     /// Fraction `[0, 1]` the user is dragging the scrubber to, before release. The
     /// actual seek fires on release so we rebuild the audio sink once, not per
     /// frame; `None` when not scrubbing.

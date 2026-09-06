@@ -1399,9 +1399,17 @@ impl App {
                                         }
                                         if resp.drag_started() && !over_play_btn {
                                             drag = true;
-                                            if alt_drag {
-                                                native_drag_ids = Some(drag_ids.clone());
-                                            }
+                                        }
+                                        // Arm on every dragged frame, not only drag start:
+                                        // the AppKit session can miss its start frame (no
+                                        // matching currentEvent), and ⌥ pressed mid-drag
+                                        // should still promote to the file drag-out.
+                                        // Re-arming retries until the session begins.
+                                        if !over_play_btn
+                                            && alt_drag
+                                            && (resp.drag_started() || resp.dragged())
+                                        {
+                                            native_drag_ids = Some(drag_ids.clone());
                                         }
                                         if !over_play_btn && resp.dragged() && !alt_drag && !is_usb
                                         {
@@ -1543,9 +1551,12 @@ impl App {
                                     }
                                     if resp.drag_started() {
                                         drag = true;
-                                        if alt_drag {
-                                            native_drag_ids = Some(drag_ids.clone());
-                                        }
+                                    }
+                                    // Re-armed every dragged frame (see the cover cell):
+                                    // retries a missed session start and honours ⌥
+                                    // pressed after the drag began.
+                                    if alt_drag && (resp.drag_started() || resp.dragged()) {
+                                        native_drag_ids = Some(drag_ids.clone());
                                     }
                                     if resp.dragged() && !alt_drag {
                                         if is_usb {
