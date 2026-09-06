@@ -570,7 +570,7 @@ fn search_hit_row(
         },
     );
     if let Some(id) = track_id {
-        if resp.dragged() {
+        if resp.dragged() && !crate::drag_cancelled(ui.ctx()) {
             resp.dnd_set_drag_payload(DraggedTracks(vec![id]));
         }
     }

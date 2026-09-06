@@ -1174,6 +1174,9 @@ impl App {
                             // a ⌥-drag becomes the native macOS drag-out. They must never
                             // both fire, so the ⌥ branch suppresses the egui payload.
                             let alt_drag = ctx_clone.input(|i| i.modifiers.alt);
+                            // Esc dropped the grab: stop re-arming either drag
+                            // kind for the rest of the gesture.
+                            let cancelled = crate::drag_cancelled(&ctx_clone);
 
                             let mut clicked = false;
                             let mut dbl = false;
@@ -1407,11 +1410,16 @@ impl App {
                                         // Re-arming retries until the session begins.
                                         if !over_play_btn
                                             && alt_drag
+                                            && !cancelled
                                             && (resp.drag_started() || resp.dragged())
                                         {
                                             native_drag_ids = Some(drag_ids.clone());
                                         }
-                                        if !over_play_btn && resp.dragged() && !alt_drag && !is_usb
+                                        if !over_play_btn
+                                            && resp.dragged()
+                                            && !alt_drag
+                                            && !cancelled
+                                            && !is_usb
                                         {
                                             resp.dnd_set_drag_payload(DraggedTracks(
                                                 drag_ids.clone(),
@@ -1555,10 +1563,13 @@ impl App {
                                     // Re-armed every dragged frame (see the cover cell):
                                     // retries a missed session start and honours ⌥
                                     // pressed after the drag began.
-                                    if alt_drag && (resp.drag_started() || resp.dragged()) {
+                                    if alt_drag
+                                        && !cancelled
+                                        && (resp.drag_started() || resp.dragged())
+                                    {
                                         native_drag_ids = Some(drag_ids.clone());
                                     }
-                                    if resp.dragged() && !alt_drag {
+                                    if resp.dragged() && !alt_drag && !cancelled {
                                         if is_usb {
                                             // Device rows drag as their own payload
                                             // type: droppable on the Library source

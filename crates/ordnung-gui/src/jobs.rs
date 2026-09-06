@@ -230,7 +230,10 @@ impl App {
         // means dragging an image onto a song highlights the song instead of
         // darkening the whole window. The actual action on drop is still decided
         // by the dropped file's real path (image-on-row → cover, else import).
-        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        // Our own native drag-out hovering back over the window isn't an
+        // import in the making — don't shade the window or hint "drop to add".
+        let self_drag = !self.native_drag_paths.is_empty();
+        let hovering = !self_drag && ctx.input(|i| !i.raw.hovered_files.is_empty());
         if hovering {
             // winit fires no events while a file hovers (no `draggingUpdated:`), so
             // keep repainting ourselves — otherwise the frame loop stalls and the
@@ -288,6 +291,15 @@ impl App {
                 .collect()
         });
         if dropped.is_empty() {
+            return;
+        }
+        // A drop of exactly the files our own native drag-out carried is the
+        // user letting go back where they started — the tracks are already in
+        // the library, so re-importing (scan, analysis, the whole pipeline)
+        // would be pure noise. Ignore it. A drop that brings anything else
+        // (i.e. genuinely from Finder) still imports normally.
+        if self_drag && dropped.iter().all(|p| self.native_drag_paths.contains(p)) {
+            self.native_drag_paths.clear();
             return;
         }
         // A single image dropped onto a track row → offer to set it as that

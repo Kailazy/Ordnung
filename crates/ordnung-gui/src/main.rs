@@ -501,6 +501,19 @@ struct ColFilterPopup {
 #[derive(Clone)]
 struct DraggedTracks(Vec<Id>);
 
+/// True while the current drag gesture has been cancelled with Esc. Set in
+/// `App::update` when Esc lands during a live drag, cleared there on the next
+/// mouse press. Every payload / native-drag source checks this and stops
+/// re-arming, so the grab is dropped mid-gesture. Lives in egui temp memory
+/// (not on `App`) so free-function drag sources can read it too.
+pub(crate) fn drag_cancelled(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp(egui::Id::new("drag-cancelled")).unwrap_or(false))
+}
+
+pub(crate) fn set_drag_cancelled(ctx: &egui::Context, cancelled: bool) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("drag-cancelled"), cancelled));
+}
+
 /// Drag payload for rows from a mounted device (synthetic ids — see
 /// [`usb_track_id`]). A distinct type from [`DraggedTracks`] so catalog drop
 /// targets (playlists) can't accept device rows they have no ids for; the one
@@ -1519,6 +1532,11 @@ struct App {
     /// the (re-armed) drag sources from starting a second session. Cleared on
     /// the next mouse press.
     native_drag_spent: bool,
+    /// Files carried by the most recent native drag-out session. A drop of
+    /// (only) these back onto our own window is the user abandoning the drag,
+    /// not a Finder import — the tracks are already in the library — so
+    /// `handle_file_drop` ignores it. Cleared on the next mouse press.
+    native_drag_paths: Vec<PathBuf>,
     /// Fraction `[0, 1]` the user is dragging the scrubber to, before release. The
     /// actual seek fires on release so we rebuild the audio sink once, not per
     /// frame; `None` when not scrubbing.

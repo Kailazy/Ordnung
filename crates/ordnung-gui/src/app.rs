@@ -264,6 +264,7 @@ impl App {
             now_playing: None,
             player_native_drag: None,
             native_drag_spent: false,
+            native_drag_paths: Vec::new(),
             scrub: None,
             volume_dirty: false,
             wave_zoom_secs: crate::player::DEFAULT_ZOOM_SECS,
@@ -3190,13 +3191,28 @@ impl eframe::App for App {
         // The now-playing bar's artwork drag, taken from where `draw_player`
         // parked it earlier this frame. Same dispatch point as the table's, so
         // AppKit's nested loop is entered once, with no borrows outstanding.
-        // A fresh press begins a new gesture, so the previous session's
-        // "spent" latch no longer applies.
+        // A fresh press begins a new gesture, so the previous gesture's
+        // latches (session spent, Esc-cancelled, self-drop paths) no longer
+        // apply.
         if ctx.input(|i| i.pointer.any_pressed()) {
             self.native_drag_spent = false;
+            self.native_drag_paths.clear();
+            crate::set_drag_cancelled(ctx, false);
         }
         let from_player = self.player_native_drag.take().map(|p| vec![p]);
         let mut native_drag = native_drag.or(from_player);
+        // Esc abandons the grab: drop the egui payload (the drag sources check
+        // `drag_cancelled` and stop re-setting it) and disarm any native drag
+        // for the rest of the gesture.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+            && (egui::DragAndDrop::has_any_payload(ctx) || native_drag.is_some())
+        {
+            crate::set_drag_cancelled(ctx, true);
+            egui::DragAndDrop::clear_payload(ctx);
+        }
+        if crate::drag_cancelled(ctx) {
+            native_drag = None;
+        }
         // A plain (non-⌥) drag becomes the native file drag the moment it
         // leaves the window: inside, the egui payload still serves the
         // sidebar/reorder drops, but nothing in-app can accept a drop outside,
@@ -3221,13 +3237,22 @@ impl eframe::App for App {
         if let Some(paths) = native_drag {
             if !self.native_drag_spent {
                 let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-                if !refs.is_empty() && macos_drag::begin_file_drag(frame, &refs) {
+                if !refs.is_empty() {
+                    // Latch BEFORE starting: the session's nested AppKit loop
+                    // can re-enter update(), and the re-armed drag sources
+                    // must not start a second session from inside it. The
+                    // recorded paths also let handle_file_drop recognise (and
+                    // ignore) these files dropped back onto our own window.
                     self.native_drag_spent = true;
-                } else {
-                    // No session this frame (the initiating mouse event wasn't
-                    // available). The drag sources re-arm while the button is
-                    // held, so ask for the next frame promptly and retry.
-                    ctx.request_repaint();
+                    self.native_drag_paths = paths.clone();
+                    if !macos_drag::begin_file_drag(frame, &refs) {
+                        // No session this frame (the initiating mouse event
+                        // wasn't available): un-latch so the re-armed drag
+                        // retries, and ask for the next frame promptly.
+                        self.native_drag_spent = false;
+                        self.native_drag_paths.clear();
+                        ctx.request_repaint();
+                    }
                 }
             }
         }
