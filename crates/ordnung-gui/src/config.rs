@@ -100,6 +100,12 @@ pub struct Config {
     /// not a pixel width. Unknown values fall back to `"wide"`. See `NavDensity`.
     #[serde(default = "default_nav_density")]
     pub nav_density: String,
+    /// Whether the right-hand track inspector drawer is showing. Mirrors the
+    /// pull tab's toggle so the drawer comes back the way it was left. Off by
+    /// default (and for older configs that predate the field): a fresh install
+    /// opens on the full-width table, with the pull tab there to discover.
+    #[serde(default)]
+    pub inspector_open: bool,
     /// Which section the app opens on: `"library"` (Library, the default),
     /// `"vinyl"` (the vinyl collection), or `"recent"` (new imports). Unknown
     /// values fall back to `"library"`. See `StartupView`.
@@ -634,6 +640,7 @@ impl Default for Config {
             vinyl_sort_ascending: false,
             nav_primary: default_nav_primary(),
             nav_density: default_nav_density(),
+            inspector_open: false,
             startup_view: default_startup_view(),
             auto_analyze: true,
             auto_write_tags: true,

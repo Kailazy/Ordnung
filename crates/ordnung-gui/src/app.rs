@@ -199,7 +199,7 @@ impl App {
             col_filters: HashMap::new(),
             col_filter_open: None,
             tex_graveyard: TexGraveyard::default(),
-            inspector_open: true,
+            inspector_open: false,
             menu_installed: false,
             tour: None,
             settings_open: false,
@@ -302,6 +302,8 @@ impl App {
         };
         // Restore the sidebar to the width tier it was left at.
         app.nav_density = NavDensity::from_key(&app.config.nav_density);
+        // And the inspector drawer to the open/closed state it was left in.
+        app.inspector_open = app.config.inspector_open;
         app.load_column_layout();
         // Seed the initial sort from the user's saved default (e.g. "Added,
         // newest first") before the first load so it's applied on launch.
@@ -431,7 +433,13 @@ impl App {
         const TAB_W: f32 = 18.0;
         let stats = self.playlist_stats.get(&pid).copied().unwrap_or_default();
         let content = ui.max_rect();
-        let pos = egui::pos2(content.right() - TAB_W - 8.0 - D, content.top() + 6.0);
+        // Same scrollbar clearance as the pull tab, so the glyph keeps its 8px
+        // gap to the tab now that the tab sits clear of the table's scrollbar.
+        let scrollbar_clearance = ui.spacing().scroll.bar_width + 2.0;
+        let pos = egui::pos2(
+            content.right() - scrollbar_clearance - TAB_W - 8.0 - D,
+            content.top() + 6.0,
+        );
         egui::Area::new(egui::Id::new("playlist_info_glyph"))
             .order(egui::Order::Middle)
             .fixed_pos(pos)
@@ -2319,7 +2327,7 @@ impl eframe::App for App {
         // sidebar behaves. Dragging an edge to some in-between width only ever
         // produced a cramped, half-truncated panel, so that affordance is gone
         // and the pull tab below is the single way to show/hide it.
-        const INSPECTOR_W: f32 = 360.0;
+        const INSPECTOR_W: f32 = 320.0;
         // Animate the drawer's width instead of snapping it: egui eases this
         // 0→1 over the given duration and repaints until it settles, so the
         // panel slides out and the table reflows with it. Short enough to feel
