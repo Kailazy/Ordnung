@@ -961,7 +961,13 @@ impl App {
                     builder = builder.column(col.spec(COVER_PX, w, Some(max)));
                     x += w.unwrap_or_else(|| col.default_width(COVER_PX)) + col_spacing_x;
                 }
-                builder = builder.column(Column::remainder());
+                // Explicitly non-resizable: egui_extras freezes a *resizable*
+                // column at its stored width, so a resizable remainder spacer
+                // kept the width it was born with and rows stopped short of
+                // the right edge whenever the viewport later widened (window
+                // resize, inspector drawer closing). Only a non-resizable
+                // remainder is recomputed every frame to absorb the slack.
+                builder = builder.column(Column::remainder().resizable(false));
                 // After "Reset to default", drop egui_extras' own stored widths so
                 // the columns fall back to the (now-cleared) defaults this frame.
                 if reset_widths {
