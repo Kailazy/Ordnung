@@ -1462,14 +1462,26 @@ impl App {
                         .unwrap_or(0);
                     // A single-row dig keeps the strip at its old height; a web
                     // shows two rows at once and scrolls for the rest, so a
-                    // deep fork can't shove the shelf off the window.
-                    let max_h = if rows > 1 {
+                    // deep fork can't shove the shelf off the window — unless
+                    // the user has dragged the strip taller themselves.
+                    let min_h = CARD_H + 14.0;
+                    let content_h = rows as f32 * (CARD_H + GAP_Y) - GAP_Y + 14.0;
+                    let auto_h = if rows > 1 {
                         CARD_H * 2.0 + GAP_Y + 14.0
                     } else {
-                        CARD_H + 14.0
+                        min_h
                     };
+                    let max_h = self
+                        .dig_strip_h
+                        .unwrap_or(auto_h)
+                        .clamp(min_h, content_h.max(min_h));
                     egui::ScrollArea::both()
                         .max_height(max_h)
+                        // Fill the strip's full width even when the web is
+                        // narrower, so the vertical scroll bar lives at the
+                        // strip's right edge rather than hugging the last
+                        // column of cards mid-panel.
+                        .auto_shrink([false, true])
                         .show(ui, |ui| {
                             let grid = egui::vec2(
                                 cols as f32 * (COVER + GAP_X) - GAP_X,
@@ -1751,6 +1763,37 @@ impl App {
                             }
                         });
 
+                    // Once the web has forked there may be more rows than the
+                    // strip shows, so it grows a grab bar: drag to give the
+                    // web more (or less) of the window. The chosen height
+                    // sticks for the session, across digs.
+                    if rows > 1 {
+                        ui.add_space(2.0);
+                        let (bar, resp) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 9.0),
+                            egui::Sense::drag(),
+                        );
+                        let active = resp.hovered() || resp.dragged();
+                        if active {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                        }
+                        ui.painter().line_segment(
+                            [
+                                bar.center() - egui::vec2(18.0, 0.0),
+                                bar.center() + egui::vec2(18.0, 0.0),
+                            ],
+                            egui::Stroke::new(
+                                2.5,
+                                egui::Color32::from_gray(if active { 150 } else { 70 }),
+                            ),
+                        );
+                        if resp.dragged() {
+                            self.dig_strip_h = Some(
+                                (max_h + resp.drag_delta().y).clamp(min_h, content_h),
+                            );
+                        }
+                        resp.on_hover_note("Drag to resize the web");
+                    }
                     ui.add_space(8.0);
                     if let Some(e) = &error {
                         ui.label(

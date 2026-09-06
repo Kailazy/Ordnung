@@ -1162,6 +1162,9 @@ struct App {
     /// Cover-cache keys for the records digs were started from, so the strip can
     /// draw the one step that *is* in a list from the local cache.
     dig_start_keys: HashMap<u64, VinylCoverKey>,
+    /// Height the user dragged the dig web to, if they resized it. `None`
+    /// means the strip picks its own height from how many rows the web has.
+    dig_strip_h: Option<f32>,
     /// A track the table should scroll to and reveal on the next frame, set when
     /// jumping into the catalog from the vinyl grid. Cleared once honoured.
     scroll_to_track: Option<Id>,
