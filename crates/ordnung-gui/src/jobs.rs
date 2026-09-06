@@ -188,6 +188,28 @@ impl App {
         thread::spawn(move || run_export(db, dest, playlist_ids, replace, cancel, tx, ctx));
     }
 
+    /// Write an empty rekordbox export structure onto `dest` — the flow behind
+    /// the device view's "Set up for rekordbox" button, always via its
+    /// confirmation modal. This is the explicit commitment that turns a plain
+    /// volume into an export target; nothing else ever writes rekordbox
+    /// structure to a device that lacks one. Existing files on the volume are
+    /// untouched (the empty merge only creates folders and databases).
+    pub(crate) fn spawn_usb_setup(&mut self, ctx: egui::Context, dest: PathBuf) {
+        let (tx, rx) = mpsc::channel();
+        self.job_rx = Some(rx);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.job_cancel = Some(cancel.clone());
+        let name = dest
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dest.display().to_string());
+        self.status = format!("Setting up {name} for rekordbox…");
+        // Reuse the export-completion hook: when the job lands, the device
+        // view re-scans and the new (empty) rekordbox tree appears.
+        self.export_running_to = Some(dest.clone());
+        thread::spawn(move || run_usb_setup(dest, name, cancel, tx, ctx));
+    }
+
     /// Import paths dropped onto the window from Finder (folders are walked,
     /// individual audio files taken as-is). Behaves exactly like "Add songs…".
     pub(crate) fn spawn_import(&mut self, ctx: egui::Context, paths: Vec<PathBuf>) {
@@ -678,6 +700,29 @@ pub(crate) fn run_scan(
     }
     let outcome = import_files(&catalog, &files, &cancel, &tx, &ctx);
     finish_import(&catalog, outcome, &follow, &cancel, &tx, &ctx);
+}
+
+/// Write a valid empty rekordbox export onto `dest` — see
+/// [`App::spawn_usb_setup`]. `setup_device` creates the folder skeleton
+/// (`/Contents`, `/PIONEER/rekordbox`, `/PIONEER/USBANLZ`) and writes
+/// empty-but-valid databases, going through the exporter's own atomic
+/// placement and validation, so a device is never left half set up.
+fn run_usb_setup(
+    dest: PathBuf,
+    name: String,
+    cancel: Arc<AtomicBool>,
+    tx: Sender<JobMsg>,
+    ctx: egui::Context,
+) {
+    let result = ordnung_rbdb::export::setup_device(&dest, &cancel);
+    let msg = match result {
+        Ok(_) => JobMsg::Done(format!(
+            "{name} is now a rekordbox device. Exports can target it."
+        )),
+        Err(e) => JobMsg::Failed(format!("setting up {name}: {e}")),
+    };
+    let _ = tx.send(msg);
+    ctx.request_repaint();
 }
 
 /// Build a native rekordbox export of the whole catalog onto `dest`.

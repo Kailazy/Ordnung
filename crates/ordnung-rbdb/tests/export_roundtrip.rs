@@ -10,7 +10,7 @@ use ordnung_core::model::{
     Analysis, AudioProperties, Beat, Beatgrid, Format, Playlist, Tags, Track,
 };
 use ordnung_core::model::key::{Key, Mode, PitchClass};
-use ordnung_rbdb::export::{export_usb, ExportError, ExportMode};
+use ordnung_rbdb::export::{export_usb, setup_device, ExportError, ExportMode};
 use ordnung_rbdb::{dlp, pdb};
 
 fn temp_root(tag: &str) -> PathBuf {
@@ -431,6 +431,45 @@ fn cancel_aborts_before_completion() {
         !usb.join("PIONEER/rekordbox/export.pdb").exists(),
         "no database written after cancel"
     );
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&usb);
+}
+
+/// The GUI's "Set up for rekordbox" button runs an empty Merge export to turn
+/// a plain volume into a rekordbox device without touching its files. That
+/// only works if an empty selection yields a valid, empty device — and one a
+/// later real export can merge onto.
+#[test]
+fn empty_merge_sets_up_a_valid_device() {
+    let usb = temp_root("setup-usb");
+    // A bystander file stands in for the user's existing music bank: setup
+    // must leave it exactly where it is.
+    let bystander = audio_file(&usb, "keep me.mp3", 1_234);
+
+    let cancel = AtomicBool::new(false);
+    let report = setup_device(&usb, &cancel).expect("empty setup export succeeds");
+    assert_eq!(report.tracks_exported, 0);
+    assert_eq!(report.playlists_exported, 0);
+
+    // The structure players look for exists, and the databases parse.
+    assert!(usb.join("Contents").is_dir());
+    assert!(usb.join("PIONEER/USBANLZ").is_dir());
+    let export = pdb::read_export(&usb.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    assert!(export.tracks.is_empty());
+    assert!(export.playlists.is_empty());
+    let dlp = dlp::read_playlists(&usb.join("PIONEER/rekordbox/exportLibrary.db")).unwrap();
+    assert!(dlp.playlists.is_empty());
+    assert_eq!(std::fs::metadata(&bystander).unwrap().len(), 1_234);
+
+    // A later real export merges onto the fresh device cleanly.
+    let src = temp_root("setup-src");
+    let a = audio_file(&src, "first.mp3", 3_000);
+    let tracks = vec![track(1, &a, Format::Mp3, "First", "Someone")];
+    export_usb(&usb, &tracks, &[], ExportMode::Merge, &mut |_| {}, &cancel)
+        .expect("merge after setup succeeds");
+    let export = pdb::read_export(&usb.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    assert_eq!(export.tracks.len(), 1);
+
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&usb);
 }

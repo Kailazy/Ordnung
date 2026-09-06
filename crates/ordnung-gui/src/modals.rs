@@ -1982,6 +1982,65 @@ selection.",
         }
     }
 
+    /// "Set up this volume as a rekordbox device?" confirmation. This is the
+    /// only path that ever converts plain storage into an export target, so it
+    /// spells out exactly what gets written before anything touches the device.
+    pub(crate) fn draw_usb_setup_confirm(&mut self, ctx: &egui::Context) {
+        let Some(dest) = self.usb_setup_confirm.clone() else {
+            return;
+        };
+        let name = dest
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dest.display().to_string());
+        let mut open = true;
+        egui::Window::new(format!("Set up {name} for rekordbox?"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.set_max_width(440.0);
+                ui.label(format!(
+                    "Creates the rekordbox/CDJ structure on {name}: a PIONEER folder \
+with empty databases, plus Contents for exported audio. Players will then recognize the \
+device, and Ordnung's export menus can target it."
+                ));
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Everything already on the volume is left exactly as it is — no \
+files are moved, changed, or reformatted. Music you export later is copied into /Contents; \
+files elsewhere on the device stay plain storage.",
+                    )
+                    .weak(),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    let busy = self.is_busy();
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("⇪ Set up device"))
+                        .clicked()
+                    {
+                        self.usb_setup_confirm = None;
+                        self.spawn_usb_setup(ctx.clone(), dest.clone());
+                    }
+                    if busy {
+                        ui.label(egui::RichText::new("another job is running").weak());
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.usb_setup_confirm = None;
+                        }
+                    });
+                });
+            });
+        if !open {
+            self.usb_setup_confirm = None;
+        }
+    }
+
     pub(crate) fn draw_failure_report(&mut self, ctx: &egui::Context) {
         if !self.show_failure_report {
             return;

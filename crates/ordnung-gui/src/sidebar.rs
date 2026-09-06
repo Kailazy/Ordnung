@@ -310,14 +310,29 @@ fn export_menu_items(
         ui.add_enabled(false, egui::Button::new("Export to device (none mounted)"));
         return;
     }
+    // Only devices already set up for rekordbox are export targets. A plain
+    // volume (someone's hard-drive music bank) is listed but disabled, so the
+    // distinction is visible and an export can never quietly write rekordbox
+    // structure onto it — that takes the device view's explicit
+    // "Set up for rekordbox" commitment first.
     for v in volumes {
-        if ui
-            .button(format!("⇪ Export to {}…", v.name))
-            .on_hover_note("Write this selection to the stick as a native rekordbox export")
-            .clicked()
-        {
-            *action = Some(SidebarAction::ExportPlaylist(id, v.path.clone()));
-            ui.close_menu();
+        if v.is_rekordbox_export {
+            if ui
+                .button(format!("⇪ Export to {}…", v.name))
+                .on_hover_note("Write this selection to the device as a native rekordbox export")
+                .clicked()
+            {
+                *action = Some(SidebarAction::ExportPlaylist(id, v.path.clone()));
+                ui.close_menu();
+            }
+        } else {
+            ui.add_enabled(
+                false,
+                egui::Button::new(format!("Export to {} (plain storage)", v.name)),
+            )
+            .on_disabled_hover_text(crate::ui::hover::note(
+                "Not a rekordbox device. Open it and click Set up for rekordbox first",
+            ));
         }
     }
 }

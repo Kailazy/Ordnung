@@ -1328,6 +1328,11 @@ struct App {
     /// USB export pending confirmation. The modal either spawns the export
     /// job or clears this.
     export_confirm: Option<ExportConfirm>,
+    /// Plain volume waiting for the "set up as rekordbox device?" confirmation
+    /// (its mount path). Only setting up a device — an explicit, per-device
+    /// commitment — makes it an export target; until then a volume is plain
+    /// storage that exports never touch.
+    usb_setup_confirm: Option<PathBuf>,
     /// Title of the failure report (which job produced it).
     failure_report_title: String,
     /// Per-item failures `(item name, reason)` from the last job that had any.

@@ -484,6 +484,38 @@ pub fn export_usb(
     progress: &mut dyn FnMut(ExportProgress),
     cancel: &AtomicBool,
 ) -> Result<ExportReport> {
+    export_impl(dest_root, tracks, playlists, mode, progress, cancel, false)
+}
+
+/// Turn plain storage into a rekordbox device: write a valid **empty** export
+/// onto `dest_root` — the folder skeleton plus empty-but-parseable databases —
+/// leaving every file already on the volume untouched. The one sanctioned
+/// empty export: [`export_usb`] itself refuses an empty result
+/// ([`ExportError::NoTracks`]) so a selection whose sources are all missing
+/// can't silently produce a bare device. Runs as a Merge, so calling it on a
+/// device that already carries an export preserves that export in full.
+pub fn setup_device(dest_root: &Path, cancel: &AtomicBool) -> Result<ExportReport> {
+    export_impl(
+        dest_root,
+        &[],
+        &[],
+        ExportMode::Merge,
+        &mut |_| {},
+        cancel,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_impl(
+    dest_root: &Path,
+    tracks: &[Track],
+    playlists: &[Playlist],
+    mode: ExportMode,
+    progress: &mut dyn FnMut(ExportProgress),
+    cancel: &AtomicBool,
+    allow_empty: bool,
+) -> Result<ExportReport> {
     if !dest_root.is_dir() {
         return Err(ExportError::BadDestination(dest_root.to_path_buf()));
     }
@@ -690,7 +722,7 @@ pub fn export_usb(
         carried.push(row);
     }
 
-    if resolved.is_empty() && carried.is_empty() {
+    if resolved.is_empty() && carried.is_empty() && !allow_empty {
         return Err(ExportError::NoTracks);
     }
 

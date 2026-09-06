@@ -2106,6 +2106,17 @@ impl App {
             _ => None,
         };
 
+        // Whether this volume already carries a rekordbox export. Read from the
+        // polled volume list (kept live every 2s) so a just-finished setup or
+        // export flips the header without a manual rescan; an unlisted path
+        // (ORDNUNG_FAKE_USB race) falls back to checking the disk directly.
+        let is_rb = self
+            .usb_volumes
+            .iter()
+            .find(|v| v.path == vol)
+            .map(|v| v.is_rekordbox_export)
+            .unwrap_or_else(|| ordnung_core::usb::is_rekordbox_export(vol));
+
         let mut rescan = false;
         let mut eject = false;
         ui.add_space(6.0);
@@ -2114,6 +2125,17 @@ impl App {
                 Some(pl) => ui.heading(format!("⏏  {name}  ▸  ♪ {pl}")),
                 None => ui.heading(format!("⏏  {name}")),
             };
+            // Say plainly which kind of device this is — the whole export
+            // machinery hinges on the distinction, so it shouldn't be invisible.
+            ui.label(
+                egui::RichText::new(if is_rb { "rekordbox device" } else { "plain storage" })
+                    .weak(),
+            )
+            .on_hover_note(if is_rb {
+                "Carries a rekordbox export. CDJs read it, and library exports can target it"
+            } else {
+                "Just files. Exports never touch it unless you set it up for rekordbox"
+            });
             if !self.usb_loading {
                 ui.label(egui::RichText::new(format!("{} track(s)", self.rows.len())).weak());
                 // The instant pdb-built view is already browsable while the
@@ -2144,6 +2166,22 @@ impl App {
                     .clicked()
                 {
                     rescan = true;
+                }
+                // The commitment point for a plain volume: only this button
+                // (via its confirmation) ever writes rekordbox structure onto
+                // a device. Until it's used, a music bank on a hard drive
+                // stays exactly as it is and export menus won't target it.
+                if crate::USB_EXPORT
+                    && !is_rb
+                    && ui
+                        .button("⇪ Set up for rekordbox…")
+                        .on_hover_note(
+                            "Write the rekordbox folder structure so this device \
+                             can receive exports and play on CDJs",
+                        )
+                        .clicked()
+                {
+                    self.usb_setup_confirm = Some(vol.to_path_buf());
                 }
             });
         });
