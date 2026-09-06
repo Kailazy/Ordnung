@@ -1103,11 +1103,12 @@ pub(crate) fn import_files(
                     items: skips,
                 });
             }
+            let existing = updated + unchanged;
             return ImportOutcome {
                 touched,
                 summary: format!(
-                    "Scan cancelled after {i}/{total}: {added} added, {updated} updated, \
-                     {unchanged} unchanged, {failed} skipped."
+                    "Scan cancelled after {i}/{total}: {added} added, \
+                     {existing} already in your library, {failed} skipped."
                 ),
                 cancelled: true,
             };
@@ -1163,16 +1164,28 @@ pub(crate) fn import_files(
             items: skips,
         });
     }
-    let unchanged_note = if unchanged > 0 {
-        format!(", {unchanged} unchanged")
+    // "Already in your library" instead of the old "updated"/"unchanged"
+    // split: to the user both mean the same thing — this song exists — and
+    // "updated" read as if something new had been imported. A re-add of only
+    // known songs says so outright rather than burying it in counters.
+    let existing = updated + unchanged;
+    let summary = if added == 0 && failed == 0 && existing == total as u64 {
+        if total == 1 {
+            "That song is already in your library.".to_string()
+        } else {
+            format!("All {total} songs are already in your library.")
+        }
     } else {
-        String::new()
+        let existing_note = if existing > 0 {
+            format!(", {existing} already in your library")
+        } else {
+            String::new()
+        };
+        format!("Scanned {total} file(s): {added} added{existing_note}, {failed} skipped.")
     };
     ImportOutcome {
         touched,
-        summary: format!(
-            "Scanned {total} file(s): {added} added, {updated} updated{unchanged_note}, {failed} skipped."
-        ),
+        summary,
         cancelled: false,
     }
 }
