@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help app app-only run
+.PHONY: help app app-only run genredb-publish
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -16,3 +16,12 @@ app-only: ## Build + sign the local Ordnung.app, don't touch /Applications
 
 run: ## Run the GUI from source (debug, no bundle, dev features)
 	@cargo run -p ordnung-gui --features usb-export
+
+genredb-publish: ## Rebuild the prebuilt genre DB from the Discogs dump (~10 GB stream) and publish it to the rolling `genredb` release. Needs a residential connection; Cloudflare blocks datacenter IPs (see .github/workflows/genredb.yml).
+	@cargo run --release -p ordnung-core --example build_genredb -- /tmp/discogs-genres.db
+	@gzip -9f /tmp/discogs-genres.db
+	@gh release view genredb >/dev/null 2>&1 || gh release create genredb --prerelease \
+		--title "Discogs genre database" \
+		--notes "Rolling prebuilt genre database, regenerated from the Discogs data dump (CC0). Downloaded automatically by Ordnung's genre-database import."
+	@gh release upload genredb /tmp/discogs-genres.db.gz --clobber
+	@echo "Published: https://github.com/Kailazy/Ordnung/releases/download/genredb/discogs-genres.db.gz"

@@ -2,13 +2,19 @@ name: Genre DB
 
 # Build the prebuilt Discogs genre database and publish it as a release asset,
 # so the app downloads a few hundred MB instead of the ~10 GB monthly dump.
-# The dump is CC0, so redistributing this derived table is fine. Runs monthly
-# a few days after Discogs publishes each dump (dated the 1st), and by hand.
-# The asset lives on the rolling `genredb` prerelease tag, always at:
+# The dump is CC0, so redistributing this derived table is fine. The asset
+# lives on the rolling `genredb` prerelease tag, always at:
 #   https://github.com/Kailazy/Ordnung/releases/download/genredb/discogs-genres.db.gz
+#
+# Manual-only, and currently expected to FAIL from GitHub runners: Cloudflare
+# serves data.discogs.com's downloads a JS challenge on datacenter IPs
+# (cf-mitigated: challenge), which no plain HTTP client passes, and the S3
+# bucket behind it denies anonymous reads. Until Discogs offers a
+# datacenter-reachable source, refresh the asset from a residential
+# connection with `make genredb-publish` instead. Kept as dispatch-only so
+# the probe can be retried cheaply if that ever changes — a monthly cron
+# here would just be a monthly red X.
 on:
-  schedule:
-    - cron: '17 4 5 * *'
   workflow_dispatch:
 
 permissions:
