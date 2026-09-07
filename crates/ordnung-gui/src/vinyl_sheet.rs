@@ -829,6 +829,23 @@ impl App {
             .vinyl_sheet
             .as_ref()
             .and_then(|s| s.local_cover.clone());
+        // Every genre tag on the release: Discogs' coarse genres plus its finer
+        // styles, deduplicated — "Electronic · House · Deep House". Arrives with
+        // the fetched detail, so the line simply appears once that lands.
+        let genre_line = self
+            .vinyl_sheet
+            .as_ref()
+            .and_then(|s| s.detail.as_ref())
+            .map(|d| {
+                let mut tags: Vec<&str> = d.genres.iter().map(String::as_str).collect();
+                for style in &d.styles {
+                    if !tags.iter().any(|t| t.eq_ignore_ascii_case(style)) {
+                        tags.push(style);
+                    }
+                }
+                tags.join(" · ")
+            })
+            .filter(|l| !l.is_empty());
         let cover = match cached {
             Some(t) => Some(t),
             None => cover_url
@@ -1039,6 +1056,9 @@ impl App {
                         );
                         if !sub.is_empty() {
                             ui.label(egui::RichText::new(&sub).weak());
+                        }
+                        if let Some(line) = &genre_line {
+                            ui.label(egui::RichText::new(line).small().weak());
                         }
                         // What it costs, right under what it is — the sheet is
                         // where the buy decision happens.
