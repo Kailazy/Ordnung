@@ -1163,15 +1163,15 @@ impl App {
         // search narrows both tabs and you can see which shelf holds the hits
         // without switching to it.
         let query = self.vinyl_filter.trim().to_lowercase();
-        // Selected genre tags are OR'd: a record shows if it carries any of
-        // them, so stacking Techno + House + IDM widens the net.
+        // Selected genre tags are AND'd: a record must carry every one of
+        // them, so stacking Techno + Ambient narrows to the intersection —
+        // each added tag refines the dig rather than widening the net.
         let genres_sel = self.vinyl_genres.clone();
         let keep = |v: &&VinylRecord| {
             (query.is_empty() || vinyl_matches(v, &query))
-                && (genres_sel.is_empty()
-                    || v.genres
-                        .iter()
-                        .any(|t| genres_sel.iter().any(|g| t.eq_ignore_ascii_case(g))))
+                && genres_sel.iter().all(|g| {
+                    v.genres.iter().any(|t| t.eq_ignore_ascii_case(g))
+                })
         };
         let owned_recs: Vec<VinylRecord> = self.vinyl.iter().filter(keep).cloned().collect();
         let wanted_recs: Vec<VinylRecord> = self.wantlist.iter().filter(keep).cloned().collect();
@@ -1370,9 +1370,11 @@ impl App {
                     });
             })
             .response
-            .on_hover_note("Filter this view by genre or style tags, any of them matching");
+            .on_hover_note(
+                "Filter this view by genre or style tags; each added tag narrows further",
+            );
             // The active tags as pills beside the menu, each one click to
-            // drop — so widening or narrowing the net never reopens the menu.
+            // drop — so adjusting the filter never reopens the menu.
             for tag in genres_sel.iter() {
                 if ui
                     .small_button(format!("{tag} ✖"))

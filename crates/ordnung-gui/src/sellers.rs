@@ -338,8 +338,10 @@ impl App {
                 (query.is_empty() || listing_matches(&self.seller_hay[*i], query))
                     && (genres_sel.is_empty()
                         || self.seller_genres.get(&l.release_id).is_some_and(|tags| {
-                            tags.iter().any(|t| {
-                                genres_sel.iter().any(|g| t.eq_ignore_ascii_case(g))
+                            // AND across the selected tags: every one must be
+                            // on the record, so each pick narrows the crates.
+                            genres_sel.iter().all(|g| {
+                                tags.iter().any(|t| t.eq_ignore_ascii_case(g))
                             })
                         }))
             })
@@ -376,11 +378,11 @@ impl App {
         if filtered.is_empty() {
             ui.add_space(30.0);
             ui.vertical_centered(|ui| {
-                // "Techno, House or IDM" — the OR the filter actually applies.
+                // "Techno and Ambient" — the AND the filter actually applies.
                 let tags_named = match genres_sel.as_slice() {
                     [] => String::new(),
                     [one] => one.clone(),
-                    [head @ .., last] => format!("{} or {last}", head.join(", ")),
+                    [head @ .., last] => format!("{} and {last}", head.join(", ")),
                 };
                 let msg = match (genres_sel.is_empty(), query.is_empty()) {
                     (false, true) => format!("Nothing in the crates is tagged {tags_named}."),
