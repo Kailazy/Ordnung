@@ -25,6 +25,32 @@ enum SellerAct {
     Want(usize),
     /// Start a crate dig from the listing's release — see [`crate::dig`].
     Dig(usize),
+    /// Flip the listing in or out of the local cart.
+    ToggleCart(usize),
+}
+
+/// One seller's slice of the cart, summarized for a chip: how many of their
+/// listings are carted plus the formatted price total (one figure per
+/// currency, `+`-joined in the rare mixed-currency shop). `None` when nothing
+/// of theirs is in the cart — the chips and the crates' cart controls only
+/// appear when there is something to show.
+fn cart_summary(lines: &[CartLine], seller: &str) -> Option<(u64, String)> {
+    let mine: Vec<&CartLine> = lines.iter().filter(|l| l.seller == seller).collect();
+    if mine.is_empty() {
+        return None;
+    }
+    let count = mine.iter().map(|l| l.count).sum();
+    let total = mine
+        .iter()
+        .map(|l| {
+            crate::vinyl_sheet::fmt_market_price(&discogs::MarketPrice {
+                value: l.total,
+                currency: l.currency.clone(),
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" + ");
+    Some((count, total))
 }
 
 /// A seller username, out of either a bare name or a pasted discogs.com URL
@@ -196,8 +222,21 @@ impl App {
         ui.horizontal(|ui| {
             for shop in &self.sellers {
                 let active = self.seller_current.as_deref() == Some(shop.username.as_str());
-                let chip = ui.selectable_label(active, &shop.username);
-                let chip = chip.on_hover_note("Browse this seller's crates");
+                // A seller with carted records wears the count on their chip,
+                // so a purchase plan spread over several shops stays visible
+                // from the row itself.
+                let cart = cart_summary(&self.cart_lines, &shop.username);
+                let label = match &cart {
+                    Some((n, _)) => format!("{} 🛒{n}", shop.username),
+                    None => shop.username.clone(),
+                };
+                let chip = ui.selectable_label(active, label);
+                let chip = match &cart {
+                    Some((n, total)) => chip.on_hover_note(format!(
+                        "Browse this seller's crates. {n} in cart, {total}"
+                    )),
+                    None => chip.on_hover_note("Browse this seller's crates"),
+                };
                 if chip.clicked() {
                     switch_to = Some(shop.username.clone());
                 }
@@ -227,8 +266,7 @@ impl App {
             if add_btn.clicked() {
                 ui.memory_mut(|m| m.toggle_popup(popup_id));
             }
-            let just_opened =
-                add_btn.clicked() && ui.memory(|m| m.is_popup_open(popup_id));
+            let just_opened = add_btn.clicked() && ui.memory(|m| m.is_popup_open(popup_id));
             egui::popup::popup_below_widget(
                 ui,
                 popup_id,
@@ -245,8 +283,8 @@ impl App {
                         if just_opened {
                             edit.request_focus();
                         }
-                        let submitted = edit.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let submitted =
+                            edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if ui
                             .small_button("Add")
                             .on_hover_note("Save this seller")
@@ -307,8 +345,7 @@ impl App {
                     }
                 }
                 None => {
-                    self.status =
-                        "That doesn't look like a Discogs username or seller URL.".into();
+                    self.status = "That doesn't look like a Discogs username or seller URL.".into();
                 }
             }
         }
@@ -382,7 +419,15 @@ impl App {
         // for a row it can't check.
         let flt = self.vinyl_flt.clone();
         let active = flt.active(true);
-        let unfiltered = query.is_empty() && active == 0;
+        // The cart lens only makes sense while this shop has carted records;
+        // clearing it when they don't means it can never strand the crates
+        // empty behind a control that isn't on screen anymore.
+        let shop_cart = cart_summary(&self.cart_lines, &shop.username);
+        if shop_cart.is_none() {
+            self.seller_cart_only = false;
+        }
+        let cart_only = self.seller_cart_only;
+        let unfiltered = query.is_empty() && active == 0 && !cart_only;
         let price_cap = flt.price_cap();
         let filtered: Vec<usize> = self
             .seller_listings
@@ -406,6 +451,7 @@ impl App {
                     })
                     && !(flt.hide_owned && self.vinyl_owned.contains(&l.release_id))
                     && !(flt.hide_wanted && self.vinyl_wanted.contains(&l.release_id))
+                    && (!cart_only || self.cart_ids.contains(&l.listing_id))
             })
             .map(|(i, _)| i)
             .collect();
@@ -420,6 +466,24 @@ impl App {
                 None => meta.push_str(" · never updated"),
             }
             ui.label(egui::RichText::new(meta).weak());
+            // The cart itself, on the right: what's set aside from this shop
+            // and what it adds up to. Clicking lenses the crates down to just
+            // the carted records — the closest thing to a cart page without
+            // leaving the bins.
+            if let Some((n, total)) = &shop_cart {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = format!("🛒 {n} in cart · {total}");
+                    let resp = ui
+                        .selectable_label(self.seller_cart_only, label)
+                        .on_hover_note(
+                            "Show only the records in the cart. The cart is \
+                             local; checkout happens on discogs.com",
+                        );
+                    if resp.clicked() {
+                        self.seller_cart_only = !self.seller_cart_only;
+                    }
+                });
+            }
         });
         ui.add_space(4.0);
 
@@ -444,17 +508,30 @@ impl App {
                 // Ambient" — the AND actually applied); with year/price/
                 // condition bounds in play a generic line beats a paragraph.
                 let only_tags = active == flt.genres.len() && !flt.genres.is_empty();
-                let msg = match (only_tags, active > 0, query.is_empty()) {
-                    (true, _, true) => {
-                        let tags_named = match flt.genres.as_slice() {
-                            [one] => one.clone(),
-                            [head @ .., last] => format!("{} and {last}", head.join(", ")),
-                            [] => unreachable!(),
-                        };
-                        format!("Nothing in the crates is tagged {tags_named}.")
+                let msg = if cart_only {
+                    // The cart lens is on and nothing shows: with other
+                    // filters stacked on top, they're what's hiding the
+                    // carted records.
+                    if active > 0 || !query.is_empty() {
+                        "Nothing in the cart matches those filters.".to_string()
+                    } else {
+                        "Nothing from these crates is in the cart.".to_string()
                     }
-                    (_, true, _) => "Nothing in the crates matches those filters.".to_string(),
-                    (_, false, _) => "Nothing in the crates matches that search.".to_string(),
+                } else {
+                    match (only_tags, active > 0, query.is_empty()) {
+                        (true, _, true) => {
+                            let tags_named = match flt.genres.as_slice() {
+                                [one] => one.clone(),
+                                [head @ .., last] => {
+                                    format!("{} and {last}", head.join(", "))
+                                }
+                                [] => unreachable!(),
+                            };
+                            format!("Nothing in the crates is tagged {tags_named}.")
+                        }
+                        (_, true, _) => "Nothing in the crates matches those filters.".to_string(),
+                        (_, false, _) => "Nothing in the crates matches that search.".to_string(),
+                    }
                 };
                 ui.label(egui::RichText::new(msg).weak());
             });
@@ -552,7 +629,39 @@ impl App {
                     );
                 }
             }
+            Some(SellerAct::ToggleCart(idx)) => self.toggle_cart_listing(idx),
             None => {}
+        }
+    }
+
+    /// Flip a listing in or out of the local cart, then refresh the badge set
+    /// and the per-seller summaries the chips and the cart lens draw from.
+    fn toggle_cart_listing(&mut self, idx: usize) {
+        let Some(l) = self.seller_listings.get(idx) else {
+            return;
+        };
+        let listing_id = l.listing_id;
+        let label = format!("{} — {}", l.artist, l.title);
+        let was_in = self.cart_ids.contains(&listing_id);
+        let res = Catalog::open(&self.db_path).and_then(|c| {
+            if was_in {
+                c.cart_remove(listing_id)?;
+            } else {
+                c.cart_add(listing_id)?;
+            }
+            Ok((c.cart_listing_ids()?, c.cart_lines()?))
+        });
+        match res {
+            Ok((ids, lines)) => {
+                self.cart_ids = ids.into_iter().collect();
+                self.cart_lines = lines;
+                self.status = if was_in {
+                    format!("Removed from cart: {label}")
+                } else {
+                    format!("Added to cart: {label}")
+                };
+            }
+            Err(e) => self.status = format!("Couldn't update the cart: {e}"),
         }
     }
 
@@ -564,7 +673,19 @@ impl App {
         use crate::ui::tokens::color;
 
         // Snapshot the card's strings before `dig_cover` needs `self` mutably.
-        let (listing_id, release_id, artist, title, sub, price_line, thumb, owned, wanted, viewed) = {
+        let (
+            listing_id,
+            release_id,
+            artist,
+            title,
+            sub,
+            price_line,
+            thumb,
+            owned,
+            wanted,
+            viewed,
+            in_cart,
+        ) = {
             let l = self.seller_listings.get(idx)?;
             let sub = match (l.year, l.format.as_deref()) {
                 (Some(y), Some(f)) => format!("{y} · {f}"),
@@ -593,6 +714,7 @@ impl App {
                 self.vinyl_owned.contains(&l.release_id),
                 self.vinyl_wanted.contains(&l.release_id),
                 self.viewed_releases.contains(&l.release_id),
+                self.cart_ids.contains(&l.listing_id),
             )
         };
         let tex = thumb.as_deref().and_then(|u| self.dig_cover(u).cloned());
@@ -602,10 +724,8 @@ impl App {
             egui::vec2(cover_side, cover_side + 58.0),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                let (rect, resp) = ui.allocate_exact_size(
-                    egui::vec2(cover_side, cover_side),
-                    egui::Sense::click(),
-                );
+                let (rect, resp) = ui
+                    .allocate_exact_size(egui::vec2(cover_side, cover_side), egui::Sense::click());
                 let resp = resp
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .on_hover_note("Open the record — listen, wantlist, or buy");
@@ -653,28 +773,37 @@ impl App {
                         egui::Stroke::new(2.0, color::ACCENT),
                     );
                 }
-                // Membership chip: a record already on a shelf is the one
-                // thing worth knowing before the price — you either have it
-                // or you're already hunting it.
-                if owned || wanted {
-                    let text = if owned { "OWNED" } else { "WANT" };
+                // Membership chips: shelf state first — you either have the
+                // record or you're already hunting it — then the cart, since
+                // one you've set aside to buy reads differently from one
+                // you're still weighing.
+                let mut chip_x = rect.left() + 5.0;
+                for (show, text, fill) in [
+                    (owned, "OWNED", egui::Color32::from_rgb(40, 120, 70)),
+                    (
+                        !owned && wanted,
+                        "WANT",
+                        egui::Color32::from_rgb(120, 90, 30),
+                    ),
+                    (in_cart, "CART", egui::Color32::from_rgb(50, 90, 150)),
+                ] {
+                    if !show {
+                        continue;
+                    }
                     let font = egui::FontId::proportional(10.0);
                     let galley =
                         ui.painter()
                             .layout_no_wrap(text.into(), font, egui::Color32::WHITE);
                     let pad = egui::vec2(5.0, 3.0);
                     let chip = egui::Rect::from_min_size(
-                        rect.min + egui::vec2(5.0, 5.0),
+                        egui::pos2(chip_x, rect.top() + 5.0),
                         galley.size() + pad * 2.0,
                     );
-                    let fill = if owned {
-                        egui::Color32::from_rgb(40, 120, 70)
-                    } else {
-                        egui::Color32::from_rgb(120, 90, 30)
-                    };
                     ui.painter()
                         .rect_filled(chip, egui::Rounding::same(4.0), fill);
-                    ui.painter().galley(chip.min + pad, galley, egui::Color32::WHITE);
+                    ui.painter()
+                        .galley(chip.min + pad, galley, egui::Color32::WHITE);
+                    chip_x = chip.right() + 4.0;
                 }
                 // Viewed eye, top-right: you already pulled this record out
                 // and listened — the mark that stops a long dig from
@@ -734,11 +863,25 @@ impl App {
                         act = Some(SellerAct::Buy(idx));
                         ui.close_menu();
                     }
+                    let cart_label = if in_cart {
+                        "✖ Remove from cart"
+                    } else {
+                        "＋ Add to cart"
+                    };
+                    if ui
+                        .button(cart_label)
+                        .on_hover_note(
+                            "Set this record aside in a local cart; checkout \
+                             stays on discogs.com",
+                        )
+                        .clicked()
+                    {
+                        act = Some(SellerAct::ToggleCart(idx));
+                        ui.close_menu();
+                    }
                     if ui
                         .button("🔍  Dig from here")
-                        .on_hover_note(
-                            "Walk Discogs outward from this record, by artist or label",
-                        )
+                        .on_hover_note("Walk Discogs outward from this record, by artist or label")
                         .clicked()
                     {
                         act = Some(SellerAct::Dig(idx));
@@ -765,10 +908,8 @@ impl App {
                     ui.spacing_mut().item_spacing.y = 1.0;
                     ui.set_max_width(cover_side);
                     ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(clip(&artist)).small().strong(),
-                        )
-                        .truncate(),
+                        egui::Label::new(egui::RichText::new(clip(&artist)).small().strong())
+                            .truncate(),
                     );
                     let title_text = if sub.is_empty() {
                         title.clone()
@@ -776,8 +917,7 @@ impl App {
                         format!("{title} · {sub}")
                     };
                     ui.add(
-                        egui::Label::new(egui::RichText::new(title_text).small().weak())
-                            .truncate(),
+                        egui::Label::new(egui::RichText::new(title_text).small().weak()).truncate(),
                     );
                     ui.add(
                         egui::Label::new(
@@ -807,7 +947,19 @@ impl App {
 
         // Snapshot the row's strings before `dig_cover` needs `self` mutably
         // (same dance as the card).
-        let (listing_id, release_id, artist, title, sub, price_line, thumb, owned, wanted, viewed) = {
+        let (
+            listing_id,
+            release_id,
+            artist,
+            title,
+            sub,
+            price_line,
+            thumb,
+            owned,
+            wanted,
+            viewed,
+            in_cart,
+        ) = {
             let l = self.seller_listings.get(idx)?;
             let sub = match (l.year, l.format.as_deref()) {
                 (Some(y), Some(f)) => format!("{y} · {f}"),
@@ -836,14 +988,14 @@ impl App {
                 self.vinyl_owned.contains(&l.release_id),
                 self.vinyl_wanted.contains(&l.release_id),
                 self.viewed_releases.contains(&l.release_id),
+                self.cart_ids.contains(&l.listing_id),
             )
         };
         let tex = thumb.as_deref().and_then(|u| self.dig_cover(u).cloned());
 
         let mut act: Option<SellerAct> = None;
         let avail = ui.available_width();
-        let (rect, resp) =
-            ui.allocate_exact_size(egui::vec2(avail, row_h), egui::Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(avail, row_h), egui::Sense::click());
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         if resp.hovered() {
             ui.painter().rect_filled(
@@ -895,8 +1047,18 @@ impl App {
             egui::Color32::from_rgb(120, 200, 140),
         );
         let mut right_edge = rect.right() - TERMS_W;
-        if owned || wanted {
-            let text = if owned { "OWNED" } else { "WANT" };
+        for (show, text, fill) in [
+            (in_cart, "CART", egui::Color32::from_rgb(50, 90, 150)),
+            (
+                !owned && wanted,
+                "WANT",
+                egui::Color32::from_rgb(120, 90, 30),
+            ),
+            (owned, "OWNED", egui::Color32::from_rgb(40, 120, 70)),
+        ] {
+            if !show {
+                continue;
+            }
             let font = egui::FontId::proportional(10.0);
             let galley = ui
                 .painter()
@@ -908,11 +1070,6 @@ impl App {
                 size,
             );
             right_edge = chip.left() - 8.0;
-            let fill = if owned {
-                egui::Color32::from_rgb(40, 120, 70)
-            } else {
-                egui::Color32::from_rgb(120, 90, 30)
-            };
             ui.painter()
                 .rect_filled(chip, egui::Rounding::same(4.0), fill);
             ui.painter()
@@ -953,6 +1110,22 @@ impl App {
         resp.context_menu(|ui| {
             if ui.button("🛒 Buy on Discogs ↗").clicked() {
                 act = Some(SellerAct::Buy(idx));
+                ui.close_menu();
+            }
+            let cart_label = if in_cart {
+                "✖ Remove from cart"
+            } else {
+                "＋ Add to cart"
+            };
+            if ui
+                .button(cart_label)
+                .on_hover_note(
+                    "Set this record aside in a local cart; checkout stays on \
+                     discogs.com",
+                )
+                .clicked()
+            {
+                act = Some(SellerAct::ToggleCart(idx));
                 ui.close_menu();
             }
             if ui

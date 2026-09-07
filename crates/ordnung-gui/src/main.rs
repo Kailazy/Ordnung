@@ -21,8 +21,8 @@ mod modals;
 mod onboarding;
 mod player;
 mod records;
-mod sellers;
 mod search_box;
+mod sellers;
 mod sidebar;
 mod table;
 mod tex;
@@ -46,13 +46,12 @@ use ordnung_core::discogs;
 use ordnung_core::genredb;
 use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
-    Analysis, Format, Id, Playlist, SellerListing, SellerShop, Tags, Track, TranscodeVerdict,
-    VinylList, VinylRecord,
+    Analysis, CartLine, Format, Id, Playlist, SellerListing, SellerShop, Tags, Track,
+    TranscodeVerdict, VinylList, VinylRecord,
 };
 use ordnung_core::search::{ScoredHit, SearchHit};
 use ordnung_core::{
-    best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind, PlaylistStats,
-    ScannedTrack,
+    best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind, PlaylistStats, ScannedTrack,
 };
 use player::*;
 use rayon::prelude::*;
@@ -334,7 +333,12 @@ impl VinylFilters {
     }
 
     fn price_cap(&self) -> Option<f64> {
-        self.price_max.trim().replace(',', ".").parse().ok().filter(|p: &f64| *p > 0.0)
+        self.price_max
+            .trim()
+            .replace(',', ".")
+            .parse()
+            .ok()
+            .filter(|p: &f64| *p > 0.0)
     }
 
     /// Does a record's year pass the range? An unknown year fails a set bound:
@@ -1214,6 +1218,18 @@ struct App {
     /// marker; loaded from the `viewed_releases` table with the vinyl view
     /// and appended to live as songs play.
     viewed_releases: HashSet<u64>,
+    /// Marketplace listing ids in the local cart — the membership set the
+    /// crates' CART badge is drawn from. Loaded from the `cart_listings` table
+    /// with the vinyl view, updated in place as records are carted.
+    cart_ids: HashSet<u64>,
+    /// The cart summarized per seller (count + price total per currency),
+    /// loaded alongside `cart_ids`. Drives the cart marker on the shop chips.
+    cart_lines: Vec<CartLine>,
+    /// Show only carted records in the current seller's crates — toggled by
+    /// the cart summary chip above the grid. Cleared automatically when the
+    /// current seller has nothing in the cart, so it can never strand the
+    /// crates empty behind an invisible filter.
+    seller_cart_only: bool,
     /// Free-text filter for the vinyl view's search bar. Narrows both shelves by
     /// artist, title, year and format as you type. Not persisted: a search is
     /// about the record you're looking for right now, not a saved view.

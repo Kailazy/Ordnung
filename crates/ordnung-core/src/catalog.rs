@@ -6,12 +6,12 @@
 
 use crate::error::{Error, Result};
 use crate::model::key::{Key, Mode, PitchClass};
-use std::collections::HashMap;
 use crate::model::{
-    Analysis, AudioProperties, Beat, Beatgrid, Format, Id, Playlist, SellerListing, SellerShop,
-    Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
+    Analysis, AudioProperties, Beat, Beatgrid, CartLine, Format, Id, Playlist, SellerListing,
+    SellerShop, Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use std::collections::HashMap;
 use std::path::Path;
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
@@ -239,7 +239,11 @@ pub fn best_copy_index(tracks: &[Track]) -> Option<usize> {
                 )
             });
             let lossless = matches!(t.format, Format::Flac | Format::Wav | Format::Aiff);
-            let bitrate = t.properties.as_ref().and_then(|p| p.bitrate_kbps).unwrap_or(0);
+            let bitrate = t
+                .properties
+                .as_ref()
+                .and_then(|p| p.bitrate_kbps)
+                .unwrap_or(0);
             (clean as u8, lossless as u8, bitrate)
         })
         .map(|(i, _)| i)
@@ -295,7 +299,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 impl Catalog {
     /// Open (creating if needed) a catalog at `path` and ensure the schema exists.
@@ -346,7 +350,9 @@ impl Catalog {
     /// The version is stamped only after both steps succeed, so a migration that
     /// fails part-way is retried on the next open rather than being skipped.
     fn ensure_schema(&self) -> Result<()> {
-        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         // `>=`, not `==`: a catalog written by a *newer* build must not be stamped
         // back down to this build's generation, or that build would redo its own
         // migrations on the next open. The DDL is idempotent either way.
@@ -634,6 +640,18 @@ impl Catalog {
             CREATE TABLE IF NOT EXISTS viewed_releases (
                 release_id INTEGER PRIMARY KEY,
                 viewed_at  INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+
+            -- The local cart: listings the user has set aside to buy, keyed by
+            -- marketplace listing id. Local only — the Discogs API exposes no
+            -- cart, so checkout still happens on discogs.com. The cascade means
+            -- a record that a completed sweep no longer sees (sold, delisted)
+            -- leaves the cart with its listing, and removing a seller empties
+            -- their slice of it.
+            CREATE TABLE IF NOT EXISTS cart_listings (
+                listing_id INTEGER PRIMARY KEY
+                    REFERENCES seller_listings(listing_id) ON DELETE CASCADE,
+                added_at   INTEGER NOT NULL DEFAULT (unixepoch())
             );",
         )?;
         self.migrate()?;
@@ -833,7 +851,9 @@ impl Catalog {
         // backfill mirrors the old query's exclusion, so the set of songs still
         // pending review is unchanged — it just won't grow back if a field is
         // later cleared.
-        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version < 1 {
             self.conn.execute(
                 &format!(
@@ -856,9 +876,7 @@ impl Catalog {
     }
 
     fn has_column(&self, table: &str, column: &str) -> Result<bool> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
         let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
         for name in names {
             if name? == column {
@@ -943,12 +961,7 @@ impl Catalog {
             .query_row(
                 "SELECT src_size, src_mtime FROM tracks WHERE source_path = ?1",
                 params![source_path],
-                |r| {
-                    Ok((
-                        r.get::<_, Option<i64>>(0)?,
-                        r.get::<_, Option<i64>>(1)?,
-                    ))
-                },
+                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
             )
             .optional()?
             .map(|(s, m)| s == Some(size as i64) && m == Some(mtime))
@@ -1124,7 +1137,14 @@ impl Catalog {
                  png_bytes   = excluded.png_bytes,
                  full_bytes  = excluded.full_bytes,
                  fetched_at  = excluded.fetched_at",
-            params![track_id as i64, source, external_id, url, png_bytes, full_bytes],
+            params![
+                track_id as i64,
+                source,
+                external_id,
+                url,
+                png_bytes,
+                full_bytes
+            ],
         )?;
         // Embeddable (full-res) artwork is a pending source-file write, just like
         // a tag edit: flag the track so the GUI's bulk "write edits to files"
@@ -1132,8 +1152,10 @@ impl Catalog {
         // thumbnail-only rows (no `full_bytes`) carry nothing to embed, so they
         // don't dirty the track.
         if full_bytes.is_some() {
-            self.conn
-                .execute("UPDATE tracks SET user_edited=1 WHERE id=?1", params![track_id as i64])?;
+            self.conn.execute(
+                "UPDATE tracks SET user_edited=1 WHERE id=?1",
+                params![track_id as i64],
+            )?;
         }
         Ok(())
     }
@@ -1352,7 +1374,10 @@ impl Catalog {
     /// hasn't been fetched yet. A corrupt/old cached row (one that no longer
     /// deserializes) is treated as a miss, not an error, so a schema change to
     /// `ReleaseDetail` self-heals on the next fetch rather than wedging enrichment.
-    pub fn cached_release(&self, release_id: &str) -> Result<Option<crate::discogs::ReleaseDetail>> {
+    pub fn cached_release(
+        &self,
+        release_id: &str,
+    ) -> Result<Option<crate::discogs::ReleaseDetail>> {
         let json: Option<String> = self
             .conn
             .query_row(
@@ -1772,26 +1797,69 @@ impl Catalog {
              WHERE id=?1",
             params![
                 id as i64,
-                tags.title, tags.artist, tags.album, tags.genre, tags.label, tags.year,
-                tags.comment, tags.rating,
-                tags.track_number, tags.track_total, tags.disc_number, tags.disc_total,
-                tags.album_artist, tags.composer, tags.conductor, tags.remixer,
-                tags.producer, tags.lyricist, tags.arranger, tags.performer,
-                tags.mix_dj, tags.writer,
-                tags.recording_date, tags.release_date, tags.original_release_date,
-                tags.isrc, tags.barcode, tags.catalog_number, tags.publisher,
-                tags.copyright, tags.release_country,
-                tags.bpm_tag, tags.initial_key_tag, tags.mood, tags.grouping,
+                tags.title,
+                tags.artist,
+                tags.album,
+                tags.genre,
+                tags.label,
+                tags.year,
+                tags.comment,
+                tags.rating,
+                tags.track_number,
+                tags.track_total,
+                tags.disc_number,
+                tags.disc_total,
+                tags.album_artist,
+                tags.composer,
+                tags.conductor,
+                tags.remixer,
+                tags.producer,
+                tags.lyricist,
+                tags.arranger,
+                tags.performer,
+                tags.mix_dj,
+                tags.writer,
+                tags.recording_date,
+                tags.release_date,
+                tags.original_release_date,
+                tags.isrc,
+                tags.barcode,
+                tags.catalog_number,
+                tags.publisher,
+                tags.copyright,
+                tags.release_country,
+                tags.bpm_tag,
+                tags.initial_key_tag,
+                tags.mood,
+                tags.grouping,
                 tags.compilation.map(|b| b as i64),
-                tags.subtitle, tags.description, tags.language, tags.script,
-                tags.lyrics, tags.work, tags.movement, tags.movement_number, tags.movement_total,
-                tags.encoded_by, tags.encoder_software, tags.encoder_settings,
-                tags.original_artist, tags.original_album,
-                tags.musicbrainz_recording_id, tags.musicbrainz_track_id, tags.musicbrainz_release_id,
-                tags.musicbrainz_release_group_id, tags.musicbrainz_artist_id, tags.musicbrainz_release_artist_id,
-                tags.musicbrainz_work_id, tags.musicbrainz_release_type, tags.acoust_id,
-                tags.replay_gain_track_gain, tags.replay_gain_track_peak,
-                tags.replay_gain_album_gain, tags.replay_gain_album_peak,
+                tags.subtitle,
+                tags.description,
+                tags.language,
+                tags.script,
+                tags.lyrics,
+                tags.work,
+                tags.movement,
+                tags.movement_number,
+                tags.movement_total,
+                tags.encoded_by,
+                tags.encoder_software,
+                tags.encoder_settings,
+                tags.original_artist,
+                tags.original_album,
+                tags.musicbrainz_recording_id,
+                tags.musicbrainz_track_id,
+                tags.musicbrainz_release_id,
+                tags.musicbrainz_release_group_id,
+                tags.musicbrainz_artist_id,
+                tags.musicbrainz_release_artist_id,
+                tags.musicbrainz_work_id,
+                tags.musicbrainz_release_type,
+                tags.acoust_id,
+                tags.replay_gain_track_gain,
+                tags.replay_gain_track_peak,
+                tags.replay_gain_album_gain,
+                tags.replay_gain_album_peak,
                 tags.has_cover as i64,
             ],
         )?;
@@ -1811,8 +1879,10 @@ impl Catalog {
               LIMIT {limit}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let refs: Vec<&dyn rusqlite::ToSql> =
-            filter_params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let refs: Vec<&dyn rusqlite::ToSql> = filter_params
+            .iter()
+            .map(|p| p as &dyn rusqlite::ToSql)
+            .collect();
         let rows = stmt.query_map(refs.as_slice(), row_to_track)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -1845,8 +1915,10 @@ impl Catalog {
               ORDER BY added_at DESC, id DESC"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let refs: Vec<&dyn rusqlite::ToSql> =
-            filter_params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let refs: Vec<&dyn rusqlite::ToSql> = filter_params
+            .iter()
+            .map(|p| p as &dyn rusqlite::ToSql)
+            .collect();
         let rows = stmt.query_map(refs.as_slice(), row_to_track)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -1974,7 +2046,9 @@ impl Catalog {
         // id -> fingerprint for every track, loaded once.
         let mut fp_stmt = self.conn.prepare("SELECT id, fingerprint FROM tracks")?;
         let fp_of: std::collections::HashMap<i64, Option<String>> = fp_stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)))?
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
             .collect::<rusqlite::Result<_>>()?;
         drop(fp_stmt);
 
@@ -2000,7 +2074,11 @@ impl Catalog {
                 .iter()
                 .map(|id| self.get_track_with_analysis(*id as Id))
                 .collect::<Result<Vec<_>>>()?;
-            out.push(DuplicateGroup { kind: DuplicateKind::Identical, tracks, key });
+            out.push(DuplicateGroup {
+                kind: DuplicateKind::Identical,
+                tracks,
+                key,
+            });
         }
 
         // --- Same track, different files: same normalized artist + title. ---
@@ -2047,7 +2125,11 @@ impl Catalog {
                 .iter()
                 .map(|id| self.get_track_with_analysis(*id as Id))
                 .collect::<Result<Vec<_>>>()?;
-            out.push(DuplicateGroup { kind: DuplicateKind::SameTrack, tracks, key });
+            out.push(DuplicateGroup {
+                kind: DuplicateKind::SameTrack,
+                tracks,
+                key,
+            });
         }
 
         // --- Acoustic: same recording by perceptual fingerprint. ---
@@ -2089,7 +2171,11 @@ impl Catalog {
         let rows: Vec<(i64, i64, Vec<u32>)> = stmt
             .query_map([], |r| {
                 let bytes: Vec<u8> = r.get::<_, Option<Vec<u8>>>(2)?.unwrap_or_default();
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0), bytes))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    bytes,
+                ))
             })?
             .map(|r| r.map(|(id, dur, b)| (id, dur, fingerprint::from_bytes(&b))))
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2152,14 +2238,22 @@ impl Catalog {
             // Already reported as Identical? (every member shares one file fp.)
             let file_fps: Vec<Option<&str>> = ids
                 .iter()
-                .map(|id| fp_of.get(id).and_then(|o| o.as_deref()).filter(|s| !s.is_empty()))
+                .map(|id| {
+                    fp_of
+                        .get(id)
+                        .and_then(|o| o.as_deref())
+                        .filter(|s| !s.is_empty())
+                })
                 .collect();
             if file_fps[0].is_some() && file_fps.iter().all(|f| *f == file_fps[0]) {
                 continue;
             }
             let key = format!(
                 "acoustic\u{1f}{}",
-                ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+                ids.iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             );
             if ignored.contains(&key) {
                 continue;
@@ -2180,14 +2274,20 @@ impl Catalog {
             if first_at.is_some() && tracks.iter().all(|t| at_key(t) == first_at) {
                 continue;
             }
-            out.push(DuplicateGroup { kind: DuplicateKind::Acoustic, tracks, key });
+            out.push(DuplicateGroup {
+                kind: DuplicateKind::Acoustic,
+                tracks,
+                key,
+            });
         }
         Ok(out)
     }
 
     /// The set of group keys the user has marked "not a duplicate".
     fn ignored_duplicate_keys(&self) -> Result<std::collections::HashSet<String>> {
-        let mut stmt = self.conn.prepare("SELECT group_key FROM ignored_duplicates")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT group_key FROM ignored_duplicates")?;
         let keys = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<_>>()?;
@@ -2230,7 +2330,11 @@ impl Catalog {
         let mut stmt = self.conn.prepare(&sql)?;
         // playlist_id binds first (its `?` leads the statement), then the filter params.
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(playlist_id as i64)];
-        params.extend(filter_params.into_iter().map(|p| Box::new(p) as Box<dyn rusqlite::ToSql>));
+        params.extend(
+            filter_params
+                .into_iter()
+                .map(|p| Box::new(p) as Box<dyn rusqlite::ToSql>),
+        );
         let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
         let rows = stmt.query_map(refs.as_slice(), row_to_track)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2259,8 +2363,10 @@ impl Catalog {
     /// touch the source file — see the `tag` module for opt-in writeback.
     pub fn update_tags(&self, id: Id, tags: &Tags) -> Result<()> {
         self.write_all_tags(id, tags)?;
-        self.conn
-            .execute("UPDATE tracks SET user_edited=1 WHERE id=?1", params![id as i64])?;
+        self.conn.execute(
+            "UPDATE tracks SET user_edited=1 WHERE id=?1",
+            params![id as i64],
+        )?;
         Ok(())
     }
 
@@ -2344,7 +2450,13 @@ impl Catalog {
 
     /// Whether a track needs (re)analysis: missing row, stale analyzer version,
     /// or the source file changed size/mtime since last analysis.
-    pub fn needs_analysis(&self, id: Id, src_size: u64, src_mtime: i64, version: u32) -> Result<bool> {
+    pub fn needs_analysis(
+        &self,
+        id: Id,
+        src_size: u64,
+        src_mtime: i64,
+        version: u32,
+    ) -> Result<bool> {
         let row: Option<(i64, Option<i64>, Option<i64>)> = self
             .conn
             .query_row(
@@ -2356,9 +2468,7 @@ impl Catalog {
         Ok(match row {
             None => true,
             Some((v, size, mtime)) => {
-                v as u32 != version
-                    || size != Some(src_size as i64)
-                    || mtime != Some(src_mtime)
+                v as u32 != version || size != Some(src_size as i64) || mtime != Some(src_mtime)
             }
         })
     }
@@ -2370,13 +2480,7 @@ impl Catalog {
     /// survives: tempo, anchor and bar phase stay as the user placed them, and the
     /// freshly detected grid is parked in the `grid_auto_*` columns so
     /// [`reset_beatgrid`](Self::reset_beatgrid) reverts to the *latest* detection.
-    pub fn save_analysis(
-        &self,
-        id: Id,
-        a: &Analysis,
-        src_size: u64,
-        src_mtime: i64,
-    ) -> Result<()> {
+    pub fn save_analysis(&self, id: Id, a: &Analysis, src_size: u64, src_mtime: i64) -> Result<()> {
         let (tonic, mode) = match a.key {
             Some(k) => (Some(k.tonic.0 as i64), Some(mode_int(k.mode))),
             None => (None, None),
@@ -2429,8 +2533,7 @@ impl Catalog {
 
     /// The columns [`analysis_from_row`] reads, in the order it indexes them.
     /// Shared by the single-track and whole-table loads so they can't drift apart.
-    const ANALYSIS_COLS: &'static str =
-        "bpm, key_tonic, key_mode, beat_offset_ms, peak, loudness,
+    const ANALYSIS_COLS: &'static str = "bpm, key_tonic, key_mode, beat_offset_ms, peak, loudness,
          waveform, content_hash, analyzer_version, audio_fingerprint,
          lowpass_hz, lowpass_edge, waveform_bands, first_beat_number";
 
@@ -2443,10 +2546,7 @@ impl Catalog {
     /// blobs out rather than cloning them (they average ~31 KB each, so on a
     /// mid-sized library that copy alone was tens of MB per reload).
     pub fn analyses_by_track(&self) -> Result<HashMap<Id, Analysis>> {
-        let sql = format!(
-            "SELECT track_id, {} FROM analysis",
-            Self::ANALYSIS_COLS
-        );
+        let sql = format!("SELECT track_id, {} FROM analysis", Self::ANALYSIS_COLS);
         let mut stmt = self.conn.prepare(&sql)?;
         // Column 0 is `track_id`; `analysis_from_row` indexes from 0, so shift it.
         let rows = stmt.query_map([], |r| {
@@ -2464,10 +2564,7 @@ impl Catalog {
     /// the union of their tracks in playlist order, deduplicated. Unknown ids
     /// are ignored — callers wanting strict validation check first. Analyses
     /// are attached, since the export serializes beatgrids/keys/waveforms.
-    pub fn export_selection(
-        &self,
-        playlist_ids: &[Id],
-    ) -> Result<(Vec<Track>, Vec<Playlist>)> {
+    pub fn export_selection(&self, playlist_ids: &[Id]) -> Result<(Vec<Track>, Vec<Playlist>)> {
         let all = self.list_playlists()?;
         let (mut tracks, playlists) = if playlist_ids.is_empty() {
             (self.list_tracks(None, 0)?, all)
@@ -2492,8 +2589,11 @@ impl Catalog {
                     cur = all.iter().find(|p| p.id == pid).and_then(|p| p.parent);
                 }
             }
-            let playlists: Vec<Playlist> =
-                all.iter().filter(|p| keep.contains(&p.id)).cloned().collect();
+            let playlists: Vec<Playlist> = all
+                .iter()
+                .filter(|p| keep.contains(&p.id))
+                .cloned()
+                .collect();
             let mut tracks = Vec::new();
             let mut seen = std::collections::HashSet::new();
             for p in &playlists {
@@ -3211,6 +3311,61 @@ impl Catalog {
         Ok(rows.into_iter().map(|id| id as u64).collect())
     }
 
+    /// Put a listing in the local cart. Idempotent — re-adding keeps the
+    /// original added-at stamp. The cart is local (the Discogs API exposes no
+    /// cart); checkout happens on discogs.com.
+    pub fn cart_add(&self, listing_id: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO cart_listings (listing_id) VALUES (?1)",
+            params![listing_id as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Take a listing back out of the cart. Returns whether it was in there.
+    pub fn cart_remove(&self, listing_id: u64) -> Result<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM cart_listings WHERE listing_id=?1",
+            params![listing_id as i64],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Every listing id in the local cart — the membership set the crates'
+    /// CART badge is drawn from. Small (a purchase plan, not a shop), so it
+    /// loads whole.
+    pub fn cart_listing_ids(&self) -> Result<Vec<u64>> {
+        let mut stmt = self.conn.prepare("SELECT listing_id FROM cart_listings")?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.into_iter().map(|id| id as u64).collect())
+    }
+
+    /// The cart summarized per seller: count and price total, one line per
+    /// (seller, currency) — see [`CartLine`]. Drives the cart marker on the
+    /// Sellers tab's shop chips.
+    pub fn cart_lines(&self) -> Result<Vec<CartLine>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.seller, COUNT(*), SUM(l.price), l.currency
+             FROM cart_listings c
+             JOIN seller_listings l ON l.listing_id = c.listing_id
+             GROUP BY l.seller, l.currency
+             ORDER BY l.seller, l.currency",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(CartLine {
+                    seller: r.get(0)?,
+                    count: r.get::<_, i64>(1)? as u64,
+                    total: r.get(2)?,
+                    currency: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     // --- Playlists (Phase 3) -------------------------------------------------
 
     /// Create a playlist (or folder with `is_folder`) under an optional parent
@@ -3253,7 +3408,13 @@ impl Catalog {
             } else {
                 self.playlist_track_ids(id)?
             };
-            out.push(Playlist { id, name, parent, is_folder, track_ids });
+            out.push(Playlist {
+                id,
+                name,
+                parent,
+                is_folder,
+                track_ids,
+            });
         }
         Ok(out)
     }
@@ -3280,14 +3441,21 @@ impl Catalog {
         } else {
             self.playlist_track_ids(id)?
         };
-        Ok(Playlist { id, name, parent, is_folder, track_ids })
+        Ok(Playlist {
+            id,
+            name,
+            parent,
+            is_folder,
+            track_ids,
+        })
     }
 
     /// Rename a playlist or folder.
     pub fn rename_playlist(&self, id: Id, name: &str) -> Result<()> {
-        let n = self
-            .conn
-            .execute("UPDATE playlists SET name=?2 WHERE id=?1", params![id as i64, name])?;
+        let n = self.conn.execute(
+            "UPDATE playlists SET name=?2 WHERE id=?1",
+            params![id as i64, name],
+        )?;
         if n == 0 {
             return Err(Error::NotFound(format!("playlist {id}")));
         }
@@ -3473,11 +3641,15 @@ impl Catalog {
     }
 
     fn expect_track(&self, id: Id) -> Result<()> {
-        let exists: bool = self.conn.query_row(
-            "SELECT 1 FROM tracks WHERE id=?1",
-            params![id as i64],
-            |_| Ok(true),
-        ).optional()?.unwrap_or(false);
+        let exists: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM tracks WHERE id=?1",
+                params![id as i64],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
         if exists {
             Ok(())
         } else {
@@ -3663,7 +3835,10 @@ fn search_filter(query: Option<&str>, prefix: &str) -> (String, Vec<String>) {
     );
     let sql = vec![clause; terms.len()].join(" AND ");
     // Each term binds its `%term%` once per column (5 columns).
-    let params = terms.into_iter().flat_map(|t| std::iter::repeat(t).take(5)).collect();
+    let params = terms
+        .into_iter()
+        .flat_map(|t| std::iter::repeat(t).take(5))
+        .collect();
     (sql, params)
 }
 
@@ -3724,7 +3899,9 @@ fn row_to_track(r: &Row) -> rusqlite::Result<Track> {
             lyrics: r.get("lyrics")?,
             work: r.get("work")?,
             movement: r.get("movement")?,
-            movement_number: r.get::<_, Option<i64>>("movement_number")?.map(|v| v as u16),
+            movement_number: r
+                .get::<_, Option<i64>>("movement_number")?
+                .map(|v| v as u16),
             movement_total: r.get::<_, Option<i64>>("movement_total")?.map(|v| v as u16),
             encoded_by: r.get("encoded_by")?,
             encoder_software: r.get("encoder_software")?,
@@ -3788,7 +3965,11 @@ mod tests {
                 TranscodeVerdict::Suspect => (Some(20_000.0), Some(40.0)),     // steep, high
                 TranscodeVerdict::LikelyLossy => (Some(16_000.0), Some(40.0)), // steep, low
             };
-            Analysis { lowpass_hz, lowpass_edge_db_per_khz, ..Default::default() }
+            Analysis {
+                lowpass_hz,
+                lowpass_edge_db_per_khz,
+                ..Default::default()
+            }
         });
         Track {
             id: 0,
@@ -3849,12 +4030,20 @@ mod tests {
         cat.upsert_scanned(&a).unwrap();
 
         // Exact signature → unchanged (a rescan would skip it).
-        assert!(cat.track_unchanged("/lib/a.mp3", 4242, 1_700_000_000).unwrap());
+        assert!(cat
+            .track_unchanged("/lib/a.mp3", 4242, 1_700_000_000)
+            .unwrap());
         // A different size or mtime → changed (rescan).
-        assert!(!cat.track_unchanged("/lib/a.mp3", 4243, 1_700_000_000).unwrap());
-        assert!(!cat.track_unchanged("/lib/a.mp3", 4242, 1_700_000_001).unwrap());
+        assert!(!cat
+            .track_unchanged("/lib/a.mp3", 4243, 1_700_000_000)
+            .unwrap());
+        assert!(!cat
+            .track_unchanged("/lib/a.mp3", 4242, 1_700_000_001)
+            .unwrap());
         // Unknown path → not unchanged.
-        assert!(!cat.track_unchanged("/lib/missing.mp3", 4242, 1_700_000_000).unwrap());
+        assert!(!cat
+            .track_unchanged("/lib/missing.mp3", 4242, 1_700_000_000)
+            .unwrap());
 
         // A row whose signature was never recorded (NULL) reads as changed, so it
         // gets rescanned once to backfill the signature.
@@ -3918,7 +4107,8 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("ordnung-dupe-{tag}-{}-{n}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("ordnung-dupe-{tag}-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -3955,12 +4145,26 @@ mod tests {
         }
 
         let groups = cat.find_duplicates().unwrap();
-        let identical: Vec<_> = groups.iter().filter(|g| g.kind == DuplicateKind::Identical).collect();
-        let same: Vec<_> = groups.iter().filter(|g| g.kind == DuplicateKind::SameTrack).collect();
+        let identical: Vec<_> = groups
+            .iter()
+            .filter(|g| g.kind == DuplicateKind::Identical)
+            .collect();
+        let same: Vec<_> = groups
+            .iter()
+            .filter(|g| g.kind == DuplicateKind::SameTrack)
+            .collect();
 
-        assert_eq!(identical.len(), 1, "the two fp1 files are one identical group");
+        assert_eq!(
+            identical.len(),
+            1,
+            "the two fp1 files are one identical group"
+        );
         assert_eq!(identical[0].tracks.len(), 2);
-        assert_eq!(same.len(), 1, "all three 'Artist - Song' files are a same-track group");
+        assert_eq!(
+            same.len(),
+            1,
+            "all three 'Artist - Song' files are a same-track group"
+        );
         assert_eq!(same[0].tracks.len(), 3);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4002,17 +4206,28 @@ mod tests {
         cat.upsert_scanned(&b).unwrap();
 
         let groups = cat.find_duplicates().unwrap();
-        assert_eq!(groups.len(), 1, "the two 'Untitled' files report as one group");
+        assert_eq!(
+            groups.len(),
+            1,
+            "the two 'Untitled' files report as one group"
+        );
         let key = groups[0].key.clone();
 
         cat.ignore_duplicate_group(&key).unwrap();
-        assert!(cat.find_duplicates().unwrap().is_empty(), "dismissed group is hidden");
+        assert!(
+            cat.find_duplicates().unwrap().is_empty(),
+            "dismissed group is hidden"
+        );
         // Idempotent.
         cat.ignore_duplicate_group(&key).unwrap();
         assert!(cat.find_duplicates().unwrap().is_empty());
 
         cat.unignore_duplicate_group(&key).unwrap();
-        assert_eq!(cat.find_duplicates().unwrap().len(), 1, "un-dismiss restores it");
+        assert_eq!(
+            cat.find_duplicates().unwrap().len(),
+            1,
+            "un-dismiss restores it"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4031,7 +4246,12 @@ mod tests {
             .upsert_scanned(&scanned("/no/such/gone.mp3", "G", "House", 1000))
             .unwrap();
 
-        let missing: Vec<Id> = cat.missing_tracks().unwrap().into_iter().map(|t| t.id).collect();
+        let missing: Vec<Id> = cat
+            .missing_tracks()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
         assert!(missing.contains(&mid), "absent file reported");
         assert!(!missing.contains(&pid), "present file not reported");
         std::fs::remove_dir_all(&dir).ok();
@@ -4040,18 +4260,30 @@ mod tests {
     #[test]
     fn relink_prefix_repoints_a_moved_folder_at_boundaries() {
         let cat = Catalog::open(":memory:").unwrap();
-        let (a, _) = cat.upsert_scanned(&scanned("/Music/Old/x.mp3", "A", "House", 1000)).unwrap();
-        let (b, _) = cat.upsert_scanned(&scanned("/Music/Old/sub/y.mp3", "B", "House", 1000)).unwrap();
+        let (a, _) = cat
+            .upsert_scanned(&scanned("/Music/Old/x.mp3", "A", "House", 1000))
+            .unwrap();
+        let (b, _) = cat
+            .upsert_scanned(&scanned("/Music/Old/sub/y.mp3", "B", "House", 1000))
+            .unwrap();
         // Sibling whose name merely starts with "Old" — must NOT be touched.
-        let (c, _) = cat.upsert_scanned(&scanned("/Music/OldStuff/z.mp3", "C", "House", 1000)).unwrap();
+        let (c, _) = cat
+            .upsert_scanned(&scanned("/Music/OldStuff/z.mp3", "C", "House", 1000))
+            .unwrap();
 
-        let report = cat.relink_prefix("/Music/Old", "/Library/New", false).unwrap();
+        let report = cat
+            .relink_prefix("/Music/Old", "/Library/New", false)
+            .unwrap();
         assert_eq!(report.moved, 2);
         assert_eq!(report.skipped, 0);
         assert_eq!(cat.get_track(a).unwrap().source_path, "/Library/New/x.mp3");
-        assert_eq!(cat.get_track(b).unwrap().source_path, "/Library/New/sub/y.mp3");
         assert_eq!(
-            cat.get_track(c).unwrap().source_path, "/Music/OldStuff/z.mp3",
+            cat.get_track(b).unwrap().source_path,
+            "/Library/New/sub/y.mp3"
+        );
+        assert_eq!(
+            cat.get_track(c).unwrap().source_path,
+            "/Music/OldStuff/z.mp3",
             "sibling prefix left alone"
         );
     }
@@ -4059,7 +4291,9 @@ mod tests {
     #[test]
     fn relink_prefix_dry_run_previews_without_writing() {
         let cat = Catalog::open(":memory:").unwrap();
-        let (a, _) = cat.upsert_scanned(&scanned("/Music/Old/x.mp3", "A", "House", 1000)).unwrap();
+        let (a, _) = cat
+            .upsert_scanned(&scanned("/Music/Old/x.mp3", "A", "House", 1000))
+            .unwrap();
         let report = cat.relink_prefix("/Music/Old", "/New", true).unwrap();
         assert_eq!(report.moved, 1);
         assert_eq!(
@@ -4067,7 +4301,8 @@ mod tests {
             vec![("/Music/Old/x.mp3".to_string(), "/New/x.mp3".to_string())]
         );
         assert_eq!(
-            cat.get_track(a).unwrap().source_path, "/Music/Old/x.mp3",
+            cat.get_track(a).unwrap().source_path,
+            "/Music/Old/x.mp3",
             "dry run changed nothing"
         );
     }
@@ -4076,12 +4311,20 @@ mod tests {
     fn relink_prefix_skips_path_collisions() {
         let cat = Catalog::open(":memory:").unwrap();
         // Repointing /A/x.mp3 → /B/x.mp3 would collide with the existing /B/x.mp3.
-        let (_, _) = cat.upsert_scanned(&scanned("/A/x.mp3", "A", "House", 1000)).unwrap();
-        let (keep, _) = cat.upsert_scanned(&scanned("/B/x.mp3", "B", "House", 1000)).unwrap();
+        let (_, _) = cat
+            .upsert_scanned(&scanned("/A/x.mp3", "A", "House", 1000))
+            .unwrap();
+        let (keep, _) = cat
+            .upsert_scanned(&scanned("/B/x.mp3", "B", "House", 1000))
+            .unwrap();
         let report = cat.relink_prefix("/A", "/B", false).unwrap();
         assert_eq!(report.moved, 0);
         assert_eq!(report.skipped, 1);
-        assert_eq!(cat.get_track(keep).unwrap().source_path, "/B/x.mp3", "collision target intact");
+        assert_eq!(
+            cat.get_track(keep).unwrap().source_path,
+            "/B/x.mp3",
+            "collision target intact"
+        );
     }
 
     #[test]
@@ -4089,7 +4332,9 @@ mod tests {
         let cat = Catalog::open(":memory:").unwrap();
 
         // First scan.
-        let (id, inserted) = cat.upsert_scanned(&scanned("/a.mp3", "FromFile", "House", 1000)).unwrap();
+        let (id, inserted) = cat
+            .upsert_scanned(&scanned("/a.mp3", "FromFile", "House", 1000))
+            .unwrap();
         assert!(inserted);
 
         // User edits genre in the catalog (marks user_edited).
@@ -4105,9 +4350,21 @@ mod tests {
         assert!(!inserted2);
 
         let t = cat.get_track(id).unwrap();
-        assert_eq!(t.tags.genre.as_deref(), Some("Minimal"), "user edit preserved");
-        assert_eq!(t.tags.artist.as_deref(), Some("FromFile"), "user-edited row keeps catalog tags");
-        assert_eq!(t.properties.unwrap().duration_ms, 2000, "properties always refresh");
+        assert_eq!(
+            t.tags.genre.as_deref(),
+            Some("Minimal"),
+            "user edit preserved"
+        );
+        assert_eq!(
+            t.tags.artist.as_deref(),
+            Some("FromFile"),
+            "user-edited row keeps catalog tags"
+        );
+        assert_eq!(
+            t.properties.unwrap().duration_ms,
+            2000,
+            "properties always refresh"
+        );
     }
 
     #[test]
@@ -4172,10 +4429,20 @@ mod tests {
             .unwrap();
 
         let pending = |c: &Catalog| -> Vec<Id> {
-            c.tracks_missing_metadata().unwrap().into_iter().map(|m| m.id).collect()
+            c.tracks_missing_metadata()
+                .unwrap()
+                .into_iter()
+                .map(|m| m.id)
+                .collect()
         };
-        assert!(!pending(&cat).contains(&complete), "complete-at-add track is never queued");
-        assert!(pending(&cat).contains(&gappy), "incomplete-at-add track is queued");
+        assert!(
+            !pending(&cat).contains(&complete),
+            "complete-at-add track is never queued"
+        );
+        assert!(
+            pending(&cat).contains(&gappy),
+            "incomplete-at-add track is queued"
+        );
 
         // Clearing a field after the fact must NOT re-queue the track: the
         // missing-attributes check ran once, at add time. (The old query, which
@@ -4191,14 +4458,21 @@ mod tests {
         // Any fetch outcome (here: a release applied) marks the pending track
         // done — even though it's still missing year, it won't be offered again.
         cat.mark_metadata_fetched(gappy).unwrap();
-        assert!(pending(&cat).is_empty(), "fetched track is no longer pending");
+        assert!(
+            pending(&cat).is_empty(),
+            "fetched track is no longer pending"
+        );
     }
 
     #[test]
     fn clear_tracks_empties_catalog_and_cascades() {
         let cat = Catalog::open(":memory:").unwrap();
-        let (id1, _) = cat.upsert_scanned(&scanned("/a.mp3", "A1", "House", 1000)).unwrap();
-        let (id2, _) = cat.upsert_scanned(&scanned("/b.mp3", "A2", "Techno", 1000)).unwrap();
+        let (id1, _) = cat
+            .upsert_scanned(&scanned("/a.mp3", "A1", "House", 1000))
+            .unwrap();
+        let (id2, _) = cat
+            .upsert_scanned(&scanned("/b.mp3", "A2", "Techno", 1000))
+            .unwrap();
 
         // Children that should cascade away with their tracks.
         cat.set_external_artwork(id1, "discogs", None, None, Some(&[1, 2, 3]), None)
@@ -4209,21 +4483,33 @@ mod tests {
         let removed = cat.clear_tracks().unwrap();
         assert_eq!(removed, 2, "both tracks removed");
         assert_eq!(cat.count().unwrap(), 0, "catalog empty");
-        assert!(cat.get_external_artwork(id1).unwrap().is_none(), "artwork cascaded");
+        assert!(
+            cat.get_external_artwork(id1).unwrap().is_none(),
+            "artwork cascaded"
+        );
         // Playlist row survives but holds no tracks.
-        assert!(cat.get_playlist(pl).unwrap().track_ids.is_empty(), "playlist emptied");
+        assert!(
+            cat.get_playlist(pl).unwrap().track_ids.is_empty(),
+            "playlist emptied"
+        );
     }
 
     #[test]
     fn analysis_round_trips_bpm_and_downbeat() {
         let cat = Catalog::open(":memory:").unwrap();
-        let (id, _) = cat.upsert_scanned(&scanned("/a.mp3", "A", "Techno", 1000)).unwrap();
+        let (id, _) = cat
+            .upsert_scanned(&scanned("/a.mp3", "A", "Techno", 1000))
+            .unwrap();
 
         // First beat is bar position 3, i.e. the second beat is the downbeat "1".
         let a = Analysis {
             bpm: Some(128.0),
             beatgrid: Beatgrid {
-                beats: vec![Beat { number: 3, position_ms: 250, bpm: 128.0 }],
+                beats: vec![Beat {
+                    number: 3,
+                    position_ms: 250,
+                    bpm: 128.0,
+                }],
             },
             ..Default::default()
         };
@@ -4233,22 +4519,35 @@ mod tests {
         assert_eq!(got.bpm, Some(128.0));
         let b0 = got.beatgrid.beats.first().expect("anchor beat");
         assert_eq!(b0.position_ms, 250);
-        assert_eq!(b0.number, 3, "downbeat phase (first-beat bar number) persists");
+        assert_eq!(
+            b0.number, 3,
+            "downbeat phase (first-beat bar number) persists"
+        );
     }
 
     #[test]
     fn manual_beatgrid_survives_reanalysis_and_resets() {
         let cat = Catalog::open(":memory:").unwrap();
-        let (id, _) = cat.upsert_scanned(&scanned("/a.mp3", "A", "Techno", 1000)).unwrap();
+        let (id, _) = cat
+            .upsert_scanned(&scanned("/a.mp3", "A", "Techno", 1000))
+            .unwrap();
         let detected = |bpm: f32, off: u64, num: u32| Analysis {
             bpm: Some(bpm),
             beatgrid: Beatgrid {
-                beats: vec![Beat { number: num, position_ms: off, bpm }],
+                beats: vec![Beat {
+                    number: num,
+                    position_ms: off,
+                    bpm,
+                }],
             },
             ..Default::default()
         };
-        cat.save_analysis(id, &detected(128.0, 250, 1), 0, 0).unwrap();
-        assert!(!cat.beatgrid_is_manual(id).unwrap(), "detected grid isn't manual");
+        cat.save_analysis(id, &detected(128.0, 250, 1), 0, 0)
+            .unwrap();
+        assert!(
+            !cat.beatgrid_is_manual(id).unwrap(),
+            "detected grid isn't manual"
+        );
 
         // Nudge the grid 30 ms later and make the anchor the bar's third beat.
         cat.set_manual_beatgrid(id, 280, 3, 128.0).unwrap();
@@ -4267,7 +4566,10 @@ mod tests {
         assert_eq!((b0(&after).position_ms, b0(&after).number), (280, 3));
 
         // Reset falls back to the *latest* detection, not the stale first one.
-        assert!(cat.reset_beatgrid(id).unwrap(), "a manual grid was replaced");
+        assert!(
+            cat.reset_beatgrid(id).unwrap(),
+            "a manual grid was replaced"
+        );
         let reset = cat.get_analysis(id).unwrap().unwrap();
         assert_eq!(reset.bpm, Some(64.0));
         assert_eq!((b0(&reset).position_ms, b0(&reset).number), (900, 2));
@@ -4278,8 +4580,12 @@ mod tests {
     #[test]
     fn edited_tracks_are_tracked_then_cleared() {
         let cat = Catalog::open(":memory:").unwrap();
-        let (id, _) = cat.upsert_scanned(&scanned("/a.mp3", "A", "House", 1000)).unwrap();
-        let (other, _) = cat.upsert_scanned(&scanned("/b.mp3", "B", "Techno", 1000)).unwrap();
+        let (id, _) = cat
+            .upsert_scanned(&scanned("/a.mp3", "A", "House", 1000))
+            .unwrap();
+        let (other, _) = cat
+            .upsert_scanned(&scanned("/b.mp3", "B", "Techno", 1000))
+            .unwrap();
 
         // Fresh scans aren't "edited".
         assert_eq!(cat.count_edited().unwrap(), 0);
@@ -4303,18 +4609,33 @@ mod tests {
     #[test]
     fn embeddable_artwork_flags_track_edited() {
         let cat = Catalog::open(":memory:").unwrap();
-        let (id, _) = cat.upsert_scanned(&scanned("/a.mp3", "A", "House", 1000)).unwrap();
-        let (other, _) = cat.upsert_scanned(&scanned("/b.mp3", "B", "Techno", 1000)).unwrap();
+        let (id, _) = cat
+            .upsert_scanned(&scanned("/a.mp3", "A", "House", 1000))
+            .unwrap();
+        let (other, _) = cat
+            .upsert_scanned(&scanned("/b.mp3", "B", "Techno", 1000))
+            .unwrap();
         assert_eq!(cat.count_edited().unwrap(), 0);
 
         // A thumbnail-only row (no full_bytes) carries nothing to embed → not dirty.
         cat.set_external_artwork(other, "discogs", None, None, Some(&[1, 2, 3]), None)
             .unwrap();
-        assert_eq!(cat.count_edited().unwrap(), 0, "thumbnail-only art is not a pending write");
+        assert_eq!(
+            cat.count_edited().unwrap(),
+            0,
+            "thumbnail-only art is not a pending write"
+        );
 
         // Full-res (embeddable) art flags the track so the bulk-write button picks it up.
-        cat.set_external_artwork(id, "discogs", None, None, Some(&[1, 2, 3]), Some(&[4, 5, 6]))
-            .unwrap();
+        cat.set_external_artwork(
+            id,
+            "discogs",
+            None,
+            None,
+            Some(&[1, 2, 3]),
+            Some(&[4, 5, 6]),
+        )
+        .unwrap();
         assert_eq!(cat.count_edited().unwrap(), 1);
         assert_eq!(cat.list_edited_tracks().unwrap()[0].id, id);
     }
@@ -4351,14 +4672,23 @@ mod tests {
     #[test]
     fn prefer_external_artwork_round_trips() {
         let cat = Catalog::open(":memory:").unwrap();
-        let (id, _) = cat.upsert_scanned(&scanned("/a.mp3", "A", "House", 1000)).unwrap();
+        let (id, _) = cat
+            .upsert_scanned(&scanned("/a.mp3", "A", "House", 1000))
+            .unwrap();
 
         // No row yet → not preferred.
         assert!(!cat.prefers_external_artwork(id).unwrap());
 
         // A fetched cover defaults to *not* superseding the embedded art.
-        cat.set_external_artwork(id, "discogs", None, None, Some(&[1, 2, 3]), Some(&[4, 5, 6]))
-            .unwrap();
+        cat.set_external_artwork(
+            id,
+            "discogs",
+            None,
+            None,
+            Some(&[1, 2, 3]),
+            Some(&[4, 5, 6]),
+        )
+        .unwrap();
         assert!(!cat.prefers_external_artwork(id).unwrap());
 
         // Flagging it preferred (the overwrite path) flips it; clearing flips back.
@@ -4373,7 +4703,9 @@ mod tests {
         let cat = Catalog::open(":memory:").unwrap();
 
         // No embedded cover, no fetched art → no art.
-        let (bare, _) = cat.upsert_scanned(&scanned("/bare.mp3", "A", "House", 1000)).unwrap();
+        let (bare, _) = cat
+            .upsert_scanned(&scanned("/bare.mp3", "A", "House", 1000))
+            .unwrap();
         assert!(!cat.track_has_art(bare).unwrap());
 
         // Embedded cover counts.
@@ -4383,18 +4715,32 @@ mod tests {
         assert!(cat.track_has_art(embed).unwrap());
 
         // A fetched external cover counts even with no embedded art.
-        cat.set_external_artwork(bare, "discogs", None, None, Some(&[1, 2, 3]), Some(&[4, 5, 6]))
-            .unwrap();
+        cat.set_external_artwork(
+            bare,
+            "discogs",
+            None,
+            None,
+            Some(&[1, 2, 3]),
+            Some(&[4, 5, 6]),
+        )
+        .unwrap();
         assert!(cat.track_has_art(bare).unwrap());
     }
 
     #[test]
     fn rescan_refreshes_tags_when_not_user_edited() {
         let cat = Catalog::open(":memory:").unwrap();
-        let (id, _) = cat.upsert_scanned(&scanned("/b.mp3", "A1", "House", 1000)).unwrap();
-        cat.upsert_scanned(&scanned("/b.mp3", "A2", "Techno", 1000)).unwrap();
+        let (id, _) = cat
+            .upsert_scanned(&scanned("/b.mp3", "A1", "House", 1000))
+            .unwrap();
+        cat.upsert_scanned(&scanned("/b.mp3", "A2", "Techno", 1000))
+            .unwrap();
         let t = cat.get_track(id).unwrap();
-        assert_eq!(t.tags.genre.as_deref(), Some("Techno"), "non-edited tags refresh from file");
+        assert_eq!(
+            t.tags.genre.as_deref(),
+            Some("Techno"),
+            "non-edited tags refresh from file"
+        );
         assert_eq!(t.tags.artist.as_deref(), Some("A2"));
     }
 
@@ -4403,16 +4749,19 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "ordnung-test-{tag}-{}-{n}.db",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("ordnung-test-{tag}-{}-{n}.db", std::process::id()))
     }
 
     fn three_tracks(cat: &Catalog) -> (Id, Id, Id) {
-        let (a, _) = cat.upsert_scanned(&scanned("/1.mp3", "A", "House", 1000)).unwrap();
-        let (b, _) = cat.upsert_scanned(&scanned("/2.mp3", "B", "House", 1000)).unwrap();
-        let (c, _) = cat.upsert_scanned(&scanned("/3.mp3", "C", "House", 1000)).unwrap();
+        let (a, _) = cat
+            .upsert_scanned(&scanned("/1.mp3", "A", "House", 1000))
+            .unwrap();
+        let (b, _) = cat
+            .upsert_scanned(&scanned("/2.mp3", "B", "House", 1000))
+            .unwrap();
+        let (c, _) = cat
+            .upsert_scanned(&scanned("/3.mp3", "C", "House", 1000))
+            .unwrap();
         (a, b, c)
     }
 
@@ -4437,7 +4786,9 @@ mod tests {
         let cat = Catalog::open(":memory:").unwrap();
         let (mp3, t2, t3) = three_tracks(&cat);
         // The kept copy (e.g. an AIFF of the same song).
-        let (aiff, _) = cat.upsert_scanned(&scanned("/keep.aiff", "A", "House", 1000)).unwrap();
+        let (aiff, _) = cat
+            .upsert_scanned(&scanned("/keep.aiff", "A", "House", 1000))
+            .unwrap();
 
         // Playlist A holds the mp3 but not the aiff.
         let a = cat.create_playlist("A", None, false).unwrap();
@@ -4526,7 +4877,11 @@ mod tests {
         // failed this because no one column held the whole phrase.
         for q in ["apple dj pear", "pear apple", "DJ APPLE"] {
             let hits = cat.list_tracks(Some(q), 0).unwrap();
-            assert_eq!(hits.len(), 1, "query {q:?} should match only the Pear track");
+            assert_eq!(
+                hits.len(),
+                1,
+                "query {q:?} should match only the Pear track"
+            );
             assert_eq!(hits[0].id, apple, "query {q:?}");
         }
 
@@ -4575,7 +4930,11 @@ mod tests {
         let reloaded = cat.get_playlist(pl).unwrap();
         assert_eq!(reloaded.name, "Night");
         assert_eq!(reloaded.parent, Some(folder));
-        assert_eq!(reloaded.track_ids, vec![t2, t1], "order preserved across reload");
+        assert_eq!(
+            reloaded.track_ids,
+            vec![t2, t1],
+            "order preserved across reload"
+        );
 
         // Deleting the folder cascades to the nested playlist.
         cat.delete_playlist(folder).unwrap();
@@ -4617,7 +4976,8 @@ mod tests {
         let due = cat.vinyl_prices_to_refresh(own, 60).unwrap();
         assert_eq!(due, vec![(1, 9001), (2, 9002)]);
 
-        cat.set_vinyl_price(own, 1, Some(24.5), Some("USD")).unwrap();
+        cat.set_vinyl_price(own, 1, Some(24.5), Some("USD"))
+            .unwrap();
         // "Asked, nothing for sale" still counts as checked.
         cat.set_vinyl_price(own, 2, None, None).unwrap();
         assert!(cat.vinyl_prices_to_refresh(own, 60).unwrap().is_empty());
@@ -4674,20 +5034,28 @@ mod tests {
     fn vinyl_cache_roundtrips_upsert_cover_and_prune() {
         let cat = Catalog::open(":memory:").unwrap();
         let own = VinylList::Collection;
-        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One")).unwrap();
-        cat.upsert_vinyl(own, &vinyl(2, "Surgeon", "Force + Form")).unwrap();
+        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One"))
+            .unwrap();
+        cat.upsert_vinyl(own, &vinyl(2, "Surgeon", "Force + Form"))
+            .unwrap();
         assert_eq!(cat.vinyl_count(own).unwrap(), 2);
 
         // Ordered by artist, then title.
         let list = cat.list_vinyl(own).unwrap();
-        assert_eq!(list.iter().map(|v| v.instance_id).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(
+            list.iter().map(|v| v.instance_id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
         assert!(!list[0].has_cover);
 
         // Both records start out needing a cover; storing one flips its flag and
         // drops it from the missing-cover work list.
         assert_eq!(cat.vinyl_missing_covers(own).unwrap().len(), 2);
         cat.set_vinyl_cover(own, 1, &[1, 2, 3]).unwrap();
-        assert_eq!(cat.vinyl_cover(own, 1).unwrap().as_deref(), Some(&[1, 2, 3][..]));
+        assert_eq!(
+            cat.vinyl_cover(own, 1).unwrap().as_deref(),
+            Some(&[1, 2, 3][..])
+        );
         assert_eq!(cat.vinyl_missing_covers(own).unwrap().len(), 1);
         assert!(cat.list_vinyl(own).unwrap()[0].has_cover);
 
@@ -4695,7 +5063,10 @@ mod tests {
         let mut updated = vinyl(1, "Plastikman", "Sheet One");
         updated.year = Some(1993);
         cat.upsert_vinyl(own, &updated).unwrap();
-        assert_eq!(cat.vinyl_cover(own, 1).unwrap().as_deref(), Some(&[1, 2, 3][..]));
+        assert_eq!(
+            cat.vinyl_cover(own, 1).unwrap().as_deref(),
+            Some(&[1, 2, 3][..])
+        );
 
         // Pruning to the set still in the Discogs collection drops the rest.
         let removed = cat.prune_vinyl_not_in(own, &[1]).unwrap();
@@ -4740,12 +5111,18 @@ mod tests {
 
         cat.upsert_seller_listing("hardwax", &listing(1, "Monolake", "Cyan", "2024-01-02"))
             .unwrap();
-        cat.upsert_seller_listing("hardwax", &listing(2, "Porter Ricks", "Port Gentil", "2024-03-04"))
-            .unwrap();
+        cat.upsert_seller_listing(
+            "hardwax",
+            &listing(2, "Porter Ricks", "Port Gentil", "2024-03-04"),
+        )
+        .unwrap();
 
         // Newest posted first.
         let rows = cat.list_seller_listings("hardwax").unwrap();
-        assert_eq!(rows.iter().map(|l| l.listing_id).collect::<Vec<_>>(), vec![2, 1]);
+        assert_eq!(
+            rows.iter().map(|l| l.listing_id).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
         assert_eq!(rows[0].artist, "Porter Ricks");
         assert_eq!(rows[1].price, 14.0);
 
@@ -4765,7 +5142,10 @@ mod tests {
         assert!(shop.swept_at.is_some());
 
         // Pruning to what the sweep saw drops the sold record.
-        assert_eq!(cat.prune_seller_listings_not_in("hardwax", &[2]).unwrap(), 1);
+        assert_eq!(
+            cat.prune_seller_listings_not_in("hardwax", &[2]).unwrap(),
+            1
+        );
         assert_eq!(cat.list_seller_listings("hardwax").unwrap().len(), 1);
 
         // Removing the seller cascades their listings away.
@@ -4792,9 +5172,11 @@ mod tests {
     fn wantlist_cache_is_independent_of_the_collection() {
         let cat = Catalog::open(":memory:").unwrap();
         let (own, want) = (VinylList::Collection, VinylList::Wantlist);
-        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One")).unwrap();
+        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One"))
+            .unwrap();
         // Same id in the other list: the two caches never share a row.
-        cat.upsert_vinyl(want, &vinyl(1, "Surgeon", "Force + Form")).unwrap();
+        cat.upsert_vinyl(want, &vinyl(1, "Surgeon", "Force + Form"))
+            .unwrap();
         assert_eq!(cat.vinyl_count(own).unwrap(), 1);
         assert_eq!(cat.vinyl_count(want).unwrap(), 1);
         assert_eq!(cat.list_vinyl(want).unwrap()[0].artist, "Surgeon");
@@ -4813,7 +5195,8 @@ mod tests {
         let cat = Catalog::open(":memory:").unwrap();
         let (own, want) = (VinylList::Collection, VinylList::Wantlist);
         // A collection copy: instance 1, release 9001, with a cached cover.
-        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One")).unwrap();
+        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One"))
+            .unwrap();
         cat.set_vinyl_cover(own, 1, &[7, 7, 7]).unwrap();
 
         // Moving it to the wantlist re-keys it on the release id, the way a
@@ -4826,12 +5209,18 @@ mod tests {
         assert_eq!(cat.vinyl_count(own).unwrap(), 0, "left the collection");
         let list = cat.list_vinyl(want).unwrap();
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].instance_id, 9001, "keyed by release id in the wantlist");
+        assert_eq!(
+            list[0].instance_id, 9001,
+            "keyed by release id in the wantlist"
+        );
         assert_eq!(list[0].folder_id, None);
         // The cover came along, so the grid doesn't flash a placeholder and the
         // next sync has nothing to re-download.
         assert!(list[0].has_cover);
-        assert_eq!(cat.vinyl_cover(want, 9001).unwrap().as_deref(), Some(&[7, 7, 7][..]));
+        assert_eq!(
+            cat.vinyl_cover(want, 9001).unwrap().as_deref(),
+            Some(&[7, 7, 7][..])
+        );
 
         // And back again, this time landing on a fresh collection instance id.
         let mut owned = wanted.clone();
@@ -4857,20 +5246,35 @@ mod tests {
         a.tags.title = Some("Lessons".into());
         let (a, _) = cat.upsert_scanned(&a).unwrap();
         // Track B: linked by exact release id to a record in the wantlist.
-        let (b, _) = cat.upsert_scanned(&scanned("/m/b.mp3", "Surgeon", "Techno", 1000)).unwrap();
-        cat.set_external_artwork(b, "discogs", Some("7000"), None, Some(&[1]), None).unwrap();
+        let (b, _) = cat
+            .upsert_scanned(&scanned("/m/b.mp3", "Surgeon", "Techno", 1000))
+            .unwrap();
+        cat.set_external_artwork(b, "discogs", Some("7000"), None, Some(&[1]), None)
+            .unwrap();
         // Track C: linked by exact release id to a record in NEITHER list. It
         // must not leak into either answer.
-        let (c, _) = cat.upsert_scanned(&scanned("/m/c.mp3", "Jeff Mills", "Techno", 1000)).unwrap();
-        cat.set_external_artwork(c, "discogs", Some("8000"), None, Some(&[1]), None).unwrap();
+        let (c, _) = cat
+            .upsert_scanned(&scanned("/m/c.mp3", "Jeff Mills", "Techno", 1000))
+            .unwrap();
+        cat.set_external_artwork(c, "discogs", Some("8000"), None, Some(&[1]), None)
+            .unwrap();
 
-        cat.upsert_vinyl(own, &vinyl(1, "11:68PM", "Craft Services 001")).unwrap();
+        cat.upsert_vinyl(own, &vinyl(1, "11:68PM", "Craft Services 001"))
+            .unwrap();
         let mut wanted_rec = vinyl(2, "Surgeon", "Some EP");
         wanted_rec.release_id = 7000;
         cat.upsert_vinyl(want, &wanted_rec).unwrap();
 
-        assert_eq!(cat.vinyl_tracks_in(own).unwrap(), vec![a], "matched on album name alone");
-        assert_eq!(cat.vinyl_tracks_in(want).unwrap(), vec![b], "matched on release id");
+        assert_eq!(
+            cat.vinyl_tracks_in(own).unwrap(),
+            vec![a],
+            "matched on album name alone"
+        );
+        assert_eq!(
+            cat.vinyl_tracks_in(want).unwrap(),
+            vec![b],
+            "matched on release id"
+        );
         // Track c's release is in no list, so it belongs to neither answer.
         for list in [own, want] {
             assert!(!cat.vinyl_tracks_in(list).unwrap().contains(&c));
@@ -4884,10 +5288,13 @@ mod tests {
         // Two copies of one release (different instances) plus a second release.
         let mut second_copy = vinyl(2, "Plastikman", "Sheet One");
         second_copy.release_id = 9001; // same release as instance 1
-        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One")).unwrap();
+        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One"))
+            .unwrap();
         cat.upsert_vinyl(own, &second_copy).unwrap();
-        cat.upsert_vinyl(own, &vinyl(3, "Surgeon", "Force + Form")).unwrap();
-        cat.upsert_vinyl(want, &vinyl(4, "Jeff Mills", "Waveform")).unwrap();
+        cat.upsert_vinyl(own, &vinyl(3, "Surgeon", "Force + Form"))
+            .unwrap();
+        cat.upsert_vinyl(want, &vinyl(4, "Jeff Mills", "Waveform"))
+            .unwrap();
 
         let mut owned = cat.vinyl_release_ids(own).unwrap();
         owned.sort_unstable();
@@ -4899,7 +5306,8 @@ mod tests {
     fn delete_vinyl_reports_whether_a_row_was_there() {
         let cat = Catalog::open(":memory:").unwrap();
         let own = VinylList::Collection;
-        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One")).unwrap();
+        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One"))
+            .unwrap();
         assert!(cat.delete_vinyl(own, 1).unwrap());
         assert!(!cat.delete_vinyl(own, 1).unwrap(), "already gone");
         assert_eq!(cat.vinyl_count(own).unwrap(), 0);
@@ -4913,8 +5321,15 @@ mod tests {
             .unwrap();
 
         // A track that already has cached art from an earlier fetch.
-        cat.set_external_artwork(a, "discogs", Some("111"), Some("u"), Some(&[1, 2]), Some(&[3, 4]))
-            .unwrap();
+        cat.set_external_artwork(
+            a,
+            "discogs",
+            Some("111"),
+            Some("u"),
+            Some(&[1, 2]),
+            Some(&[3, 4]),
+        )
+        .unwrap();
 
         // Re-matching to another release without writing a cover: the link moves,
         // the images survive.
@@ -4940,21 +5355,31 @@ mod tests {
             .unwrap();
         // The regression: picking a release for a track that kept its embedded
         // art used to leave it linked to nothing, so it could never be wantlisted.
-        cat.set_external_release_link(a, "discogs", "4460898").unwrap();
+        cat.set_external_release_link(a, "discogs", "4460898")
+            .unwrap();
         assert_eq!(cat.release_track_links().unwrap(), vec![(4460898u64, a)]);
     }
 
     #[test]
     fn release_track_links_maps_numeric_release_ids_only() {
         let cat = Catalog::open(":memory:").unwrap();
-        let (a, _) = cat.upsert_scanned(&scanned("/m/a.mp3", "A", "Techno", 1000)).unwrap();
-        let (b, _) = cat.upsert_scanned(&scanned("/m/b.mp3", "B", "House", 1000)).unwrap();
-        let (c, _) = cat.upsert_scanned(&scanned("/m/c.mp3", "C", "House", 1000)).unwrap();
+        let (a, _) = cat
+            .upsert_scanned(&scanned("/m/a.mp3", "A", "Techno", 1000))
+            .unwrap();
+        let (b, _) = cat
+            .upsert_scanned(&scanned("/m/b.mp3", "B", "House", 1000))
+            .unwrap();
+        let (c, _) = cat
+            .upsert_scanned(&scanned("/m/c.mp3", "C", "House", 1000))
+            .unwrap();
 
         // a + b link to Discogs release 555; c has a non-numeric id (skipped).
-        cat.set_external_artwork(a, "discogs", Some("555"), None, Some(&[1]), None).unwrap();
-        cat.set_external_artwork(b, "discogs", Some("555"), None, Some(&[1]), None).unwrap();
-        cat.set_external_artwork(c, "discogs", Some("master-1"), None, Some(&[1]), None).unwrap();
+        cat.set_external_artwork(a, "discogs", Some("555"), None, Some(&[1]), None)
+            .unwrap();
+        cat.set_external_artwork(b, "discogs", Some("555"), None, Some(&[1]), None)
+            .unwrap();
+        cat.set_external_artwork(c, "discogs", Some("master-1"), None, Some(&[1]), None)
+            .unwrap();
 
         let mut links = cat.release_track_links().unwrap();
         links.sort();
@@ -4968,15 +5393,26 @@ mod tests {
     #[test]
     fn tracks_without_release_attempt_skips_matched_and_no_match_rows() {
         let cat = Catalog::open(":memory:").unwrap();
-        let (a, _) = cat.upsert_scanned(&scanned("/m/a.mp3", "A", "Techno", 1000)).unwrap();
-        let (b, _) = cat.upsert_scanned(&scanned("/m/b.mp3", "B", "House", 1000)).unwrap();
-        let (c, _) = cat.upsert_scanned(&scanned("/m/c.mp3", "C", "House", 1000)).unwrap();
+        let (a, _) = cat
+            .upsert_scanned(&scanned("/m/a.mp3", "A", "Techno", 1000))
+            .unwrap();
+        let (b, _) = cat
+            .upsert_scanned(&scanned("/m/b.mp3", "B", "House", 1000))
+            .unwrap();
+        let (c, _) = cat
+            .upsert_scanned(&scanned("/m/c.mp3", "C", "House", 1000))
+            .unwrap();
 
         // a: linked to a release. b: a no-match row (attempt, no id). c: untouched.
-        cat.set_external_artwork(a, "discogs", Some("555"), None, Some(&[1]), None).unwrap();
-        cat.set_external_artwork(b, "discogs", None, None, None, None).unwrap();
+        cat.set_external_artwork(a, "discogs", Some("555"), None, Some(&[1]), None)
+            .unwrap();
+        cat.set_external_artwork(b, "discogs", None, None, None, None)
+            .unwrap();
 
-        assert_eq!(cat.tracks_without_release_attempt(&[a, b, c]).unwrap(), vec![c]);
+        assert_eq!(
+            cat.tracks_without_release_attempt(&[a, b, c]).unwrap(),
+            vec![c]
+        );
     }
 
     /// The exact failure from the field: "Exos — Áttfalt" imported fine but no
@@ -5057,14 +5493,19 @@ mod tests {
         c.tags.album = Some("Force + Form".into());
         let (_c, _) = cat.upsert_scanned(&c).unwrap();
         // Track D: exact release-id link to record 7000.
-        let (d, _) = cat.upsert_scanned(&scanned("/m/d.mp3", "Lakker", "Techno", 1000)).unwrap();
-        cat.set_external_artwork(d, "discogs", Some("7000"), None, Some(&[1]), None).unwrap();
+        let (d, _) = cat
+            .upsert_scanned(&scanned("/m/d.mp3", "Lakker", "Techno", 1000))
+            .unwrap();
+        cat.set_external_artwork(d, "discogs", Some("7000"), None, Some(&[1]), None)
+            .unwrap();
 
         let rec_meta = vinyl(1, "Lakker", "Guardwatcher Pt 1"); // release_id 9001, no id link
         let mut rec_id = vinyl(2, "Lakker", "Some EP"); // matched by exact id only
         rec_id.release_id = 7000;
 
-        let mut links = cat.vinyl_catalog_links(&[rec_meta.clone(), rec_id]).unwrap();
+        let mut links = cat
+            .vinyl_catalog_links(&[rec_meta.clone(), rec_id])
+            .unwrap();
         links.sort();
         let mut expected = vec![
             (rec_meta.release_id, a), // album == title
@@ -5193,8 +5634,9 @@ mod tests {
         // A failed fetch propagates and stores nothing, so the next call retries.
         let err = cat.release_cached_or("7", || Err(Error::Network("boom".into())));
         assert!(err.is_err());
-        assert!(cat.cached_release("7").unwrap().is_none(), "failures aren't cached");
+        assert!(
+            cat.cached_release("7").unwrap().is_none(),
+            "failures aren't cached"
+        );
     }
 }
-
-

@@ -143,6 +143,9 @@ impl App {
             seller_hay: Vec::new(),
             seller_add: String::new(),
             viewed_releases: HashSet::new(),
+            cart_ids: HashSet::new(),
+            cart_lines: Vec::new(),
+            seller_cart_only: false,
             vinyl_filter: String::new(),
             vinyl_flt: VinylFilters::default(),
             vinyl_genre_fallback: HashMap::new(),
@@ -453,8 +456,7 @@ impl App {
             .order(egui::Order::Middle)
             .fixed_pos(pos)
             .show(ui.ctx(), |ui| {
-                let (rect, resp) =
-                    ui.allocate_exact_size(egui::vec2(D, D), egui::Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(D, D), egui::Sense::click());
                 let popup_id = egui::Id::new("playlist_info_popup");
                 if resp.clicked() {
                     ui.memory_mut(|m| m.toggle_popup(popup_id));
@@ -704,7 +706,9 @@ impl App {
                     .map(|r| r.release_id)
                     .collect();
                 if !still.is_empty() {
-                    if let Ok(Some(gdb)) = genredb::GenreDb::open(&genredb::default_path(&self.db_path)) {
+                    if let Ok(Some(gdb)) =
+                        genredb::GenreDb::open(&genredb::default_path(&self.db_path))
+                    {
                         if let Ok(map) = gdb.genres_for(&still) {
                             for r in self.vinyl.iter_mut().chain(self.wantlist.iter_mut()) {
                                 if r.genres.is_empty() {
@@ -733,6 +737,15 @@ impl App {
             self.viewed_releases = Catalog::open(&self.db_path)
                 .and_then(|c| c.viewed_releases())
                 .map(|ids| ids.into_iter().collect())
+                .unwrap_or_default();
+            // The cart is a purchase plan, not a shop — a handful of rows, so
+            // both the badge set and the per-seller summaries load whole.
+            self.cart_ids = Catalog::open(&self.db_path)
+                .and_then(|c| c.cart_listing_ids())
+                .map(|ids| ids.into_iter().collect())
+                .unwrap_or_default();
+            self.cart_lines = Catalog::open(&self.db_path)
+                .and_then(|c| c.cart_lines())
                 .unwrap_or_default();
             if let Some(cur) = &self.seller_current {
                 if !self.sellers.iter().any(|s| &s.username == cur) {
@@ -1143,10 +1156,7 @@ impl App {
         if rel_paths.is_empty() {
             return;
         }
-        self.usb_playlist_edit(edit::PlaylistOp::AddTracks {
-            id: pid,
-            rel_paths,
-        });
+        self.usb_playlist_edit(edit::PlaylistOp::AddTracks { id: pid, rel_paths });
     }
 
     /// Mirror a freshly written device export into the sidebar state:
@@ -1329,48 +1339,48 @@ impl App {
         let Some(pl) = self.playlists.iter().find(|p| p.id == id).cloned() else {
             return;
         };
-        let entries: Vec<util::TrackListEntry> = match Catalog::open(&self.db_path)
-            .and_then(|cat| {
+        let entries: Vec<util::TrackListEntry> =
+            match Catalog::open(&self.db_path).and_then(|cat| {
                 let mut tracks = cat.list_playlist_tracks(id, None)?;
                 cat.attach_analyses(&mut tracks)?;
                 Ok(tracks)
             }) {
-            Ok(tracks) => tracks
-                .iter()
-                .map(|t| {
-                    let file = Path::new(&t.source_path)
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    util::TrackListEntry {
-                        artist: t.tags.artist.clone().unwrap_or_default(),
-                        title: t.tags.title.clone().unwrap_or(file),
-                        album: t.tags.album.clone().unwrap_or_default(),
-                        bpm: t
-                            .analysis
-                            .as_ref()
-                            .and_then(|a| a.bpm)
-                            .map(|b| format!("{b:.1}"))
-                            .unwrap_or_default(),
-                        key: t
-                            .analysis
-                            .as_ref()
-                            .and_then(|a| a.key)
-                            .map(|k| k.camelot().label())
-                            .unwrap_or_default(),
-                        duration: t
-                            .properties
-                            .as_ref()
-                            .map(|p| crate::player::fmt_duration(p.duration_ms))
-                            .unwrap_or_default(),
-                    }
-                })
-                .collect(),
-            Err(e) => {
-                self.status = format!("error: {e}");
-                return;
-            }
-        };
+                Ok(tracks) => tracks
+                    .iter()
+                    .map(|t| {
+                        let file = Path::new(&t.source_path)
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        util::TrackListEntry {
+                            artist: t.tags.artist.clone().unwrap_or_default(),
+                            title: t.tags.title.clone().unwrap_or(file),
+                            album: t.tags.album.clone().unwrap_or_default(),
+                            bpm: t
+                                .analysis
+                                .as_ref()
+                                .and_then(|a| a.bpm)
+                                .map(|b| format!("{b:.1}"))
+                                .unwrap_or_default(),
+                            key: t
+                                .analysis
+                                .as_ref()
+                                .and_then(|a| a.key)
+                                .map(|k| k.camelot().label())
+                                .unwrap_or_default(),
+                            duration: t
+                                .properties
+                                .as_ref()
+                                .map(|p| crate::player::fmt_duration(p.duration_ms))
+                                .unwrap_or_default(),
+                        }
+                    })
+                    .collect(),
+                Err(e) => {
+                    self.status = format!("error: {e}");
+                    return;
+                }
+            };
         self.write_track_list(&pl.name, entries);
     }
 
@@ -1426,11 +1436,7 @@ impl App {
         };
         match std::fs::write(&path, util::track_list_text(name, &entries)) {
             Ok(()) => {
-                self.status = format!(
-                    "Saved {} track(s) to {}.",
-                    entries.len(),
-                    path.display()
-                )
+                self.status = format!("Saved {} track(s) to {}.", entries.len(), path.display())
             }
             Err(e) => self.status = format!("error writing track list: {e}"),
         }
@@ -2993,8 +2999,7 @@ impl eframe::App for App {
                 self.usb_add_to_library(ctx.clone(), ids);
             }
             Some(SidebarAction::ExportPlaylist(id, dest)) => {
-                let (playlist_ids, scope, n_tracks, n_playlists) =
-                    self.playlist_export_scope(id);
+                let (playlist_ids, scope, n_tracks, n_playlists) = self.playlist_export_scope(id);
                 self.export_confirm = Some(ExportConfirm {
                     dest,
                     playlist_ids,
@@ -3583,9 +3588,7 @@ impl eframe::App for App {
 fn usb_anlz_waveforms(vol: &Path, t: &ordnung_rbdb::pdb::RbTrack) -> (Vec<u8>, Vec<u8>) {
     t.analyze_path
         .as_deref()
-        .and_then(|ap| {
-            ordnung_rbdb::anlz::read_waveforms(&vol.join(ap.trim_start_matches('/')))
-        })
+        .and_then(|ap| ordnung_rbdb::anlz::read_waveforms(&vol.join(ap.trim_start_matches('/'))))
         .map(|w| (w.preview, w.bands))
         .unwrap_or_default()
 }
@@ -3853,7 +3856,10 @@ mod usb_scan_tests {
         std::fs::copy(fixture, rb.join("export.pdb")).unwrap();
 
         let scan = read_usb_pdb(&vol).expect("rekordbox stick has a fast path");
-        assert!(!scan.complete, "the pdb view is stage 1, not the final scan");
+        assert!(
+            !scan.complete,
+            "the pdb view is stage 1, not the final scan"
+        );
         assert_eq!(scan.tracks.len(), 3886);
         assert_eq!(scan.playlists.len(), 104);
         // Full playlist resolution straight from the database — the file scan
