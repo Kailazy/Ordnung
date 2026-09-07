@@ -1,0 +1,50 @@
+name: Genre DB
+
+# Build the prebuilt Discogs genre database and publish it as a release asset,
+# so the app downloads a few hundred MB instead of the ~10 GB monthly dump.
+# The dump is CC0, so redistributing this derived table is fine. Runs monthly
+# a few days after Discogs publishes each dump (dated the 1st), and by hand.
+# The asset lives on the rolling `genredb` prerelease tag, always at:
+#   https://github.com/Kailazy/Ordnung/releases/download/genredb/discogs-genres.db.gz
+on:
+  schedule:
+    - cron: '17 4 5 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create/refresh the `genredb` release and its asset
+
+jobs:
+  build-genredb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-genredb-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-genredb-
+
+      # Streams the ~10 GB dump (never written to disk) into the SQLite table.
+      - name: Build the genre database from the latest dump
+        run: cargo run --release -p ordnung-core --example build_genredb -- discogs-genres.db
+
+      - name: Compress
+        run: |
+          gzip -9 discogs-genres.db
+          ls -lh discogs-genres.db.gz
+
+      - name: Publish to the rolling `genredb` release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view genredb --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create genredb --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title "Discogs genre database" \
+              --notes "Rolling prebuilt genre database, regenerated monthly from the Discogs data dump (CC0). Downloaded automatically by Ordnung's genre-database import."
+          gh release upload genredb discogs-genres.db.gz --repo "$GITHUB_REPOSITORY" --clobber

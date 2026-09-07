@@ -2240,9 +2240,11 @@ pub(crate) fn run_sweep_seller(
     ctx.request_repaint();
 }
 
-/// Worker for [`App::spawn_import_genredb`]: download the newest dump and
-/// stream it into the genre database, relaying progress. Runs for a while
-/// (the dump is ~10 GB), so status updates are throttled to twice a second.
+/// Worker for [`App::spawn_import_genredb`]: fetch the prebuilt genre
+/// database (a few hundred MB, regenerated monthly by the repo's CI), and only
+/// when that's unreachable fall back to streaming the full ~10 GB Discogs dump
+/// locally — the burden of the raw dump should sit on CI, not on the user.
+/// Status updates are throttled to twice a second.
 pub(crate) fn run_import_genredb(
     path: PathBuf,
     cancel: Arc<AtomicBool>,
@@ -2250,48 +2252,59 @@ pub(crate) fn run_import_genredb(
     ctx: egui::Context,
 ) {
     let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
-    let result = genredb::import_latest(
+    let mut report = |what: &str, p: genredb::ImportProgress| {
+        if last.elapsed() < std::time::Duration::from_millis(500) {
+            return;
+        }
+        last = std::time::Instant::now();
+        let read_mb = p.read_bytes / (1024 * 1024);
+        let size = if p.total_bytes > 0 {
+            format!("{read_mb} of {} MB", p.total_bytes / (1024 * 1024))
+        } else {
+            format!("{read_mb} MB")
+        };
+        let tail = if p.seen > 0 {
+            format!(" ({}M releases read)", p.seen / 1_000_000)
+        } else {
+            String::new()
+        };
+        let _ = tx.send(JobMsg::Status(format!("{what}… {size}{tail}")));
+        if p.total_bytes > 0 {
+            let _ = tx.send(JobMsg::Progress {
+                done: p.read_bytes as usize,
+                total: p.total_bytes as usize,
+            });
+        }
+        ctx.request_repaint();
+    };
+
+    let result = genredb::import_prebuilt(
         &path,
-        &mut |p| {
-            if last.elapsed() < std::time::Duration::from_millis(500) {
-                return;
-            }
-            last = std::time::Instant::now();
-            let read_mb = p.read_bytes / (1024 * 1024);
-            let msg = if p.total_bytes > 0 {
-                let total_mb = p.total_bytes / (1024 * 1024);
-                format!(
-                    "Importing the Discogs genre database… {read_mb} of {total_mb} MB \
-                     ({}M releases read)",
-                    p.seen / 1_000_000
-                )
-            } else {
-                format!(
-                    "Importing the Discogs genre database… {read_mb} MB \
-                     ({}M releases read)",
-                    p.seen / 1_000_000
-                )
-            };
-            let _ = tx.send(JobMsg::Status(msg));
-            if p.total_bytes > 0 {
-                let _ = tx.send(JobMsg::Progress {
-                    done: p.read_bytes as usize,
-                    total: p.total_bytes as usize,
-                });
-            }
-            ctx.request_repaint();
-        },
+        &mut |p| report("Downloading the genre database", p),
         &cancel,
-    );
+    )
+    .or_else(|e| {
+        // No prebuilt asset (or it didn't survive the trip): the full dump
+        // still gets the user there, it's just the long way round.
+        let _ = tx.send(JobMsg::Status(format!(
+            "Prebuilt genre database unavailable ({e}); importing the full \
+             Discogs dump instead…"
+        )));
+        ctx.request_repaint();
+        genredb::import_latest(
+            &path,
+            &mut |p| report("Importing the full Discogs dump", p),
+            &cancel,
+        )
+    });
     let msg = match result {
         Ok(s) if s.completed => JobMsg::Done(format!(
             "Genre database ready: {} vinyl releases tagged (dump {})",
             s.kept, s.dump
         )),
-        Ok(s) => JobMsg::Done(format!(
-            "Import stopped — nothing changed ({} releases read; run it again to restart)",
-            s.seen
-        )),
+        Ok(_) => JobMsg::Done(
+            "Import stopped — nothing changed; run it again to restart".to_string(),
+        ),
         Err(e) => JobMsg::Failed(format!("importing the genre database: {e}")),
     };
     let _ = tx.send(msg);

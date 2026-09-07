@@ -1354,9 +1354,10 @@ impl App {
                                                 .small(),
                                         )
                                         .on_hover_note(
-                                            "Download Discogs's monthly database dump once \
-                                             (about 10 GB) so every release's genre tags \
-                                             resolve locally and instantly, for every seller",
+                                            "Download every vinyl release's genre tags once \
+                                             (a few hundred MB, prebuilt monthly from the \
+                                             Discogs dump) so tags resolve locally and \
+                                             instantly, for every seller",
                                         )
                                         .clicked()
                                     {

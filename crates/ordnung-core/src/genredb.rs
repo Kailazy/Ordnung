@@ -174,6 +174,101 @@ pub fn latest_dump(agent: &ureq::Agent) -> Result<(String, String)> {
     Ok((stamp, url))
 }
 
+/// Where the prebuilt genre database is published: a rolling release asset the
+/// repo's `genredb` CI workflow regenerates monthly from the Discogs dump
+/// (which is CC0, so the derived table can be redistributed). A few hundred MB
+/// against the dump's ~10 GB — the download users should get by default, with
+/// [`import_latest`] as the fallback when this asset is unreachable.
+pub const PREBUILT_URL: &str =
+    "https://github.com/Kailazy/Ordnung/releases/download/genredb/discogs-genres.db.gz";
+
+/// Download the prebuilt genre database from [`PREBUILT_URL`] into `db_path`:
+/// stream, gunzip to a temp file, verify it opens with its completion stamp,
+/// then rename into place. Progress carries bytes only (`seen`/`kept` stay 0
+/// until the finished database reports them). Cancelling removes the temp file
+/// and leaves any existing database untouched.
+pub fn import_prebuilt(
+    db_path: &Path,
+    progress: &mut dyn FnMut(ImportProgress),
+    cancel: &AtomicBool,
+) -> Result<ImportStats> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_read(std::time::Duration::from_secs(120))
+        .user_agent("Ordnung/0.1 +https://kailazy.github.io/Ordnung/")
+        .build();
+    let resp = agent
+        .get(PREBUILT_URL)
+        .call()
+        .map_err(|e| Error::Network(format!("downloading the prebuilt genre database: {e}")))?;
+    let total_bytes: u64 = resp
+        .header("Content-Length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let read = Arc::new(AtomicU64::new(0));
+    let counting = CountingReader {
+        inner: resp.into_reader(),
+        read: read.clone(),
+    };
+    let mut gz = flate2::read::GzDecoder::new(BufReader::with_capacity(1 << 20, counting));
+
+    let tmp: PathBuf = db_path.with_extension("db.download");
+    let _ = std::fs::remove_file(&tmp);
+    let io_err = |source: std::io::Error| Error::Io {
+        path: tmp.clone(),
+        source,
+    };
+    let mut out = std::io::BufWriter::new(std::fs::File::create(&tmp).map_err(io_err)?);
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            drop(out);
+            let _ = std::fs::remove_file(&tmp);
+            return Ok(ImportStats {
+                dump: String::new(),
+                seen: 0,
+                kept: 0,
+                completed: false,
+            });
+        }
+        let n = gz.read(&mut buf).map_err(|e| {
+            Error::Network(format!("downloading the prebuilt genre database: {e}"))
+        })?;
+        if n == 0 {
+            break;
+        }
+        std::io::Write::write_all(&mut out, &buf[..n]).map_err(io_err)?;
+        progress(ImportProgress {
+            read_bytes: read.load(Ordering::Relaxed),
+            total_bytes,
+            seen: 0,
+            kept: 0,
+        });
+    }
+    std::io::Write::flush(&mut out).map_err(io_err)?;
+    drop(out);
+
+    // Trust nothing about the download until the finished file proves itself:
+    // it must open as a genre database carrying the completion stamp.
+    let Some(db) = GenreDb::open(&tmp)? else {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::Network(
+            "the downloaded genre database is incomplete or corrupt".into(),
+        ));
+    };
+    let stats = ImportStats {
+        dump: db.dump_date().unwrap_or_default(),
+        seen: db.kept(),
+        kept: db.kept(),
+        completed: true,
+    };
+    drop(db);
+    std::fs::rename(&tmp, db_path).map_err(|source| Error::Io {
+        path: db_path.to_path_buf(),
+        source,
+    })?;
+    Ok(stats)
+}
+
 /// A reader that counts what passes through it, so the parse loop can report
 /// download progress without owning the network stream.
 struct CountingReader<R: Read> {
