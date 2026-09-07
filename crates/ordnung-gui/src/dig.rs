@@ -21,10 +21,14 @@ use super::*;
 use ordnung_core::discogs::{BrowsePage, BrowseRelease, BrowseThread};
 
 /// Which thread a step followed to get to its record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum DigThread {
     Artist,
     Label,
+    /// The release's Discogs style tag ("Deep House") — records that sound
+    /// like this one, from anyone, on any label. Searched by name rather than
+    /// browsed by id: styles are a closed vocabulary, so the name IS the id.
+    Style,
 }
 
 impl DigThread {
@@ -32,15 +36,52 @@ impl DigThread {
         match self {
             DigThread::Artist => "artist",
             DigThread::Label => "label",
+            DigThread::Style => "style",
+        }
+    }
+}
+
+/// What one step actually asks Discogs: an id browse down the artist or label
+/// thread, or a style search by tag name. Carried alongside the [`DigThread`]
+/// so the fetch worker doesn't have to re-derive which style was picked —
+/// a record lists several, and the button's menu chooses one.
+#[derive(Clone)]
+pub(crate) enum DigQuery {
+    Browse(BrowseThread, u64),
+    Style(String),
+}
+
+impl DigQuery {
+    /// The number that keys this query in [`DigPath::pages`] and
+    /// [`DigPath::ready`] — the Discogs id where there is one, and a stable
+    /// hash of the style name where there isn't. The two spaces can't collide
+    /// meaningfully because the thread is always part of the key.
+    fn entity(&self) -> u64 {
+        match self {
+            DigQuery::Browse(_, id) => *id,
+            DigQuery::Style(s) => style_entity(s),
         }
     }
 
-    fn browse(self) -> BrowseThread {
+    /// The style name this query searches, for the connector's caption.
+    fn style(&self) -> Option<String> {
         match self {
-            DigThread::Artist => BrowseThread::Artist,
-            DigThread::Label => BrowseThread::Label,
+            DigQuery::Style(s) => Some(s.clone()),
+            DigQuery::Browse(..) => None,
         }
     }
+}
+
+/// A stable 64-bit key for a style name (FNV-1a), standing in where the other
+/// threads have a Discogs id. Folded to lowercase so a tag that Discogs
+/// capitalizes inconsistently across releases still keys one thread.
+fn style_entity(style: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in style.trim().to_lowercase().bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    h
 }
 
 /// One record on the dig path.
@@ -60,6 +101,12 @@ pub(crate) struct DigStep {
     pub artist_ids: Vec<u64>,
     /// Discogs label ids, primary first. Same story as `artist_ids`.
     pub label_ids: Vec<u64>,
+    /// The release's style tags ("Deep House"), credit order — what the style
+    /// thread searches by. Same resolution story as the ids.
+    pub styles: Vec<String>,
+    /// True once the release detail has answered (even with empty fields), so
+    /// an empty `styles` can say "no style listed" instead of "looking it up".
+    pub detail_resolved: bool,
     /// Year and format, as the strip's caption line.
     pub sub: String,
     /// Cover thumbnail URL, downloaded lazily into [`App::dig_covers`].
@@ -85,6 +132,26 @@ pub(crate) struct DigStep {
     /// The child most recently dug or walked through, so the forward button
     /// retraces the branch the user was last on rather than always the first.
     pub last_child: Option<usize>,
+}
+
+impl DigStep {
+    /// The default query down `thread` from this record: the primary artist or
+    /// label id, or the first style tag. `None` while the detail is still
+    /// resolving (or when the release genuinely has none) — the buttons wait
+    /// on it either way.
+    fn query(&self, thread: DigThread) -> Option<DigQuery> {
+        match thread {
+            DigThread::Artist => self
+                .artist_ids
+                .first()
+                .map(|id| DigQuery::Browse(BrowseThread::Artist, *id)),
+            DigThread::Label => self
+                .label_ids
+                .first()
+                .map(|id| DigQuery::Browse(BrowseThread::Label, *id)),
+            DigThread::Style => self.styles.first().map(|s| DigQuery::Style(s.clone())),
+        }
+    }
 }
 
 /// An in-progress dig: the web of records visited, and which one is on screen.
@@ -113,14 +180,15 @@ pub(crate) struct DigPath {
     pub error: Option<String>,
     /// Page counts learned from Discogs, keyed by the query that produced them,
     /// so repeated digs down one thread walk deeper instead of re-rolling the
-    /// same page. Keyed by `(thread, folded name)`.
-    pub pages: HashMap<(bool, u64), u32>,
+    /// same page. Keyed by `(thread, entity)` — see [`DigQuery::entity`].
+    pub pages: HashMap<(DigThread, u64), u32>,
     /// Browses fetched speculatively for the record currently on screen, so the
     /// click that takes a thread doesn't wait on the network. Keyed by
-    /// `(release_id, artist?)` — the release is part of the key so a result that
-    /// lands after the user has moved on is recognisably stale and dropped
-    /// rather than applied to the wrong record.
-    pub ready: HashMap<(u64, bool), BrowsePage>,
+    /// `(release_id, thread, entity)` — the release is part of the key so a
+    /// result that lands after the user has moved on is recognisably stale and
+    /// dropped, and the entity distinguishes which style of a multi-style
+    /// record the page was speculated for.
+    pub ready: HashMap<(u64, DigThread, u64), BrowsePage>,
     /// The head the in-flight prefetch worker was started for, and which of the
     /// two threads it has yet to deliver. Empty set means nothing is in flight.
     /// Used to avoid starting a second worker for a head already being primed.
@@ -257,7 +325,7 @@ pub(crate) struct DigOpen {
 /// *then*, not as it was when the browse landed.
 pub(crate) struct DigPrimed {
     /// The release this browse was speculated from. A result whose head has
-    /// changed is dropped: the two threads out of a record are only meaningful
+    /// changed is dropped: the threads out of a record are only meaningful
     /// from that record.
     pub from: u64,
     pub thread: DigThread,
@@ -271,9 +339,12 @@ pub(crate) struct DigFetched {
     /// for a step the user has since navigated away from is dropped.
     pub from: u64,
     pub thread: DigThread,
-    /// The Discogs artist or label id that was browsed, to record the page
-    /// count against.
+    /// The Discogs artist/label id (or hashed style name) that was queried, to
+    /// record the page count against.
     pub entity: u64,
+    /// The style name that was searched, when the thread was the style one —
+    /// what the connector's caption shows for the find.
+    pub style: Option<String>,
     pub result: std::result::Result<BrowsePage, String>,
 }
 
@@ -598,6 +669,8 @@ mod tests {
             label: None,
             artist_ids: Vec::new(),
             label_ids: Vec::new(),
+            styles: Vec::new(),
+            detail_resolved: false,
             sub: String::new(),
             thumb_url: None,
             owned: false,
@@ -671,45 +744,48 @@ fn split_title(combined: &str) -> (String, String) {
 /// that ever rises; an explicit step passes one that never does.
 fn browse_step(
     client: &discogs::Client,
-    thread: DigThread,
-    entity: u64,
+    query: &DigQuery,
     page: u32,
     skip: &HashSet<u64>,
     cancel: &AtomicBool,
 ) -> std::result::Result<BrowsePage, String> {
-    client
-        .browse_by_id(thread.browse(), entity, page)
-        .map(|mut p| {
-            // Master rows carry no format, so "is this a record?" can't be
-            // answered from the listing alone. Resolve a bounded number of them
-            // here, on this worker, rather than handing the UI thread rows it
-            // can't judge — each costs one paced request, so only the rows that
-            // could still be picked are worth resolving.
-            let mut budget = MAX_FORMAT_LOOKUPS;
-            for r in p.releases.iter_mut() {
-                if r.format_known || budget == 0 {
-                    continue;
-                }
-                // Each lookup is another paced request. If a click is waiting,
-                // stop refining and give the pace back — a page with some rows
-                // still unresolved is usable, just slightly less pre-judged.
-                if cancel.load(Ordering::Relaxed) {
-                    break;
-                }
-                if skip.contains(&r.release_id) {
-                    continue;
-                }
-                budget -= 1;
-                if let Ok(f) = client.release_format(r.release_id) {
-                    r.format = f;
-                }
-                // Judged now either way: a lookup that failed leaves an empty
-                // format, which `is_vinyl` rejects.
-                r.format_known = true;
+    match query {
+        DigQuery::Browse(thread, entity) => client.browse_by_id(*thread, *entity, page),
+        // The style search filters to vinyl server-side and returns each row's
+        // format, so the resolution below is a no-op for nearly every row.
+        DigQuery::Style(style) => client.search_by_style(style, page),
+    }
+    .map(|mut p| {
+        // Master rows carry no format, so "is this a record?" can't be
+        // answered from the listing alone. Resolve a bounded number of them
+        // here, on this worker, rather than handing the UI thread rows it
+        // can't judge — each costs one paced request, so only the rows that
+        // could still be picked are worth resolving.
+        let mut budget = MAX_FORMAT_LOOKUPS;
+        for r in p.releases.iter_mut() {
+            if r.format_known || budget == 0 {
+                continue;
             }
-            p
-        })
-        .map_err(|e| e.to_string())
+            // Each lookup is another paced request. If a click is waiting,
+            // stop refining and give the pace back — a page with some rows
+            // still unresolved is usable, just slightly less pre-judged.
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            if skip.contains(&r.release_id) {
+                continue;
+            }
+            budget -= 1;
+            if let Ok(f) = client.release_format(r.release_id) {
+                r.format = f;
+            }
+            // Judged now either way: a lookup that failed leaves an empty
+            // format, which `is_vinyl` rejects.
+            r.format_known = true;
+        }
+        p
+    })
+    .map_err(|e| e.to_string())
 }
 
 impl App {
@@ -820,6 +896,8 @@ impl App {
                 label,
                 artist_ids: Vec::new(),
                 label_ids: Vec::new(),
+                styles: Vec::new(),
+                detail_resolved: false,
                 sub,
                 thumb_url,
                 owned,
@@ -844,40 +922,46 @@ impl App {
         self.dig_resolve_ids(release_id);
     }
 
-    /// Take `thread` out of the record on screen.
+    /// Take `thread` out of the record on screen, down its default query — the
+    /// primary artist or label id, or the first style tag.
     ///
-    /// If the speculative prefetch has already fetched this thread's page, the
-    /// step is taken from it immediately and no request is made at all — that
-    /// page was fetched for exactly this click, and the pick still runs against
-    /// collection membership as it is *now*, so a stale page can't offer a
-    /// record you've bought in the meantime.
+    /// If the speculative prefetch has already fetched this exact query's
+    /// page, the step is taken from it immediately and no request is made at
+    /// all — that page was fetched for exactly this click, and the pick still
+    /// runs against collection membership as it is *now*, so a stale page
+    /// can't offer a record you've bought in the meantime.
     pub(crate) fn dig_step(&mut self, thread: DigThread) {
-        if let Some(dig) = self.dig.as_ref() {
-            let key = (dig.head().release_id, thread == DigThread::Artist);
-            if dig.ready.contains_key(&key) {
-                let entity = match thread {
-                    DigThread::Artist => dig.head().artist_ids.first().copied(),
-                    DigThread::Label => dig.head().label_ids.first().copied(),
-                };
-                if let Some(entity) = entity {
-                    let page = self
-                        .dig
-                        .as_mut()
-                        .expect("checked above")
-                        .ready
-                        .remove(&key)
-                        .expect("checked above");
-                    self.apply_page(thread, entity, page);
-                    return;
-                }
-            }
-        }
-        self.dig_fetch_step(thread);
+        let Some(query) = self.dig.as_ref().and_then(|d| d.head().query(thread)) else {
+            // Nothing to query, so nothing will land to move an open sheet
+            // onto — it stays where it is.
+            self.sheet_follows_dig = false;
+            return;
+        };
+        self.dig_take(thread, query);
     }
 
-    /// Ask Discogs for the next record down `thread`. One search request, off
+    /// Take the style thread down one *specific* style — the pick made in the
+    /// style button's menu on a record that carries several tags.
+    pub(crate) fn dig_step_style(&mut self, style: String) {
+        self.dig_take(DigThread::Style, DigQuery::Style(style));
+    }
+
+    /// Take one concrete query out of the record on screen, spending the
+    /// primed page when this exact query was the one speculated.
+    fn dig_take(&mut self, thread: DigThread, query: DigQuery) {
+        if let Some(dig) = self.dig.as_mut() {
+            let key = (dig.head().release_id, thread, query.entity());
+            if let Some(page) = dig.ready.remove(&key) {
+                self.apply_page(thread, query.entity(), page, query.style());
+                return;
+            }
+        }
+        self.dig_fetch_step(thread, query);
+    }
+
+    /// Ask Discogs for the next record down `query`. One search request, off
     /// the UI thread; the reply is adopted by [`App::poll_dig`].
-    fn dig_fetch_step(&mut self, thread: DigThread) {
+    fn dig_fetch_step(&mut self, thread: DigThread, query: DigQuery) {
         let token = self.discogs_token();
         if token.trim().is_empty() {
             // No request goes out, so nothing will land to move an open sheet
@@ -892,22 +976,18 @@ impl App {
         }
         let Some(dig) = self.dig.as_ref() else { return };
         let head = dig.head();
-        // Browse by Discogs id, never by name: an `artist=Lawrence` *search*
-        // returns four unrelated Lawrences plus Steve Lawrence, and
-        // `label=Dial` returns the salsa label "Dial Record". An id names one
-        // entity, so a dig down the artist thread stays with that artist.
-        let Some(entity) = (match thread {
-            DigThread::Artist => head.artist_ids.first().copied(),
-            DigThread::Label => head.label_ids.first().copied(),
-        }) else {
-            self.sheet_follows_dig = false;
-            return;
-        };
+        // Artist and label queries carry a Discogs id, never a name: an
+        // `artist=Lawrence` *search* returns four unrelated Lawrences plus
+        // Steve Lawrence, and `label=Dial` returns the salsa label "Dial
+        // Record". An id names one entity, so a dig down the artist thread
+        // stays with that artist. (Styles are the exception — a closed
+        // vocabulary, where the name is exact.)
+        let entity = query.entity();
         let from = head.release_id;
         // Walk deeper on a thread already dug: page 1 is the famous pressings,
         // and re-reading it would keep offering the same records. Once Discogs
         // has told us how many pages exist, roll inside that range.
-        let known = dig.pages.get(&(thread == DigThread::Artist, entity));
+        let known = dig.pages.get(&(thread, entity));
         let page = match known {
             Some(&n) if n > 1 => 1 + self.dig_roll(n.min(20) as usize) as u32,
             _ => 1,
@@ -940,11 +1020,12 @@ impl App {
                 discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
             // An explicit step is never stood down: it's the request the user
             // is waiting on, so it runs to completion.
-            let result = browse_step(&client, thread, entity, page, &skip, &NEVER_CANCEL);
+            let result = browse_step(&client, &query, page, &skip, &NEVER_CANCEL);
             let _ = tx.send(DigFetched {
                 from,
                 thread,
                 entity,
+                style: query.style(),
                 result,
             });
             ctx.request_repaint();
@@ -977,7 +1058,7 @@ impl App {
             return;
         }
         let page = msg.result.expect("error returned above");
-        self.apply_page(msg.thread, msg.entity, page);
+        self.apply_page(msg.thread, msg.entity, page, msg.style);
     }
 
     /// Pick a fresh release out of `page` and append it to the path.
@@ -985,7 +1066,13 @@ impl App {
     /// Split out of [`App::poll_dig`] so a page that arrived speculatively can
     /// be spent through exactly the same filter as one fetched on demand — the
     /// membership snapshots are read here, at pick time, not at fetch time.
-    fn apply_page(&mut self, thread: DigThread, entity: u64, page: BrowsePage) {
+    fn apply_page(
+        &mut self,
+        thread: DigThread,
+        entity: u64,
+        page: BrowsePage,
+        style: Option<String>,
+    ) {
         // `dig_roll` reads `self`, so roll before taking the mutable borrow below
         // rather than in the middle of it. The value doesn't depend on the
         // result, only on how many fresh candidates it turns out to hold.
@@ -1002,8 +1089,7 @@ impl App {
         dig.pending = None;
         dig.error = None;
         let msg_thread = thread;
-        dig.pages
-            .insert((thread == DigThread::Artist, entity), page.pages);
+        dig.pages.insert((thread, entity), page.pages);
 
         // The whole point: drop anything already in the collection or wantlist,
         // and anything this dig has already passed through. Browsing by id has
@@ -1082,6 +1168,8 @@ impl App {
                     pick.label.clone()
                 }
             }
+            // The tag that was searched — the row itself carries no styles.
+            DigThread::Style => style.unwrap_or_default(),
         };
         let step = DigStep {
             release_id,
@@ -1094,6 +1182,8 @@ impl App {
             // fetched next so this step's own branches are ready to take.
             artist_ids: Vec::new(),
             label_ids: Vec::new(),
+            styles: Vec::new(),
+            detail_resolved: false,
             sub,
             thumb_url: (!pick.thumb_url.trim().is_empty()).then(|| pick.thumb_url.clone()),
             owned: false,
@@ -1162,7 +1252,7 @@ impl App {
             let _ = tx.send((
                 release_id,
                 detail
-                    .map(|d| (d.artist_ids, d.label_ids, d.label))
+                    .map(|d| (d.artist_ids, d.label_ids, d.label, d.styles))
                     .unwrap_or_default(),
             ));
             ctx.request_repaint();
@@ -1197,17 +1287,18 @@ impl App {
         let head = dig.head();
         let from = head.release_id;
         // Nothing to prime while this head is still resolving its own ids; the
-        // next frame after they land will catch it.
-        let mut want: Vec<(DigThread, u64)> = Vec::new();
-        for (thread, entity) in [
-            (DigThread::Artist, head.artist_ids.first().copied()),
-            (DigThread::Label, head.label_ids.first().copied()),
-        ] {
-            let Some(entity) = entity else { continue };
-            if dig.ready.contains_key(&(from, thread == DigThread::Artist)) {
+        // next frame after they land will catch it. The style thread primes
+        // its *default* pick (the first tag) — a menu pick of another style
+        // fetches on demand, which is the rarer path.
+        let mut want: Vec<(DigThread, DigQuery)> = Vec::new();
+        for thread in [DigThread::Artist, DigThread::Label, DigThread::Style] {
+            let Some(query) = head.query(thread) else {
+                continue;
+            };
+            if dig.ready.contains_key(&(from, thread, query.entity())) {
                 continue;
             }
-            want.push((thread, entity));
+            want.push((thread, query));
         }
         if want.is_empty() {
             return;
@@ -1221,13 +1312,13 @@ impl App {
         }
         // Pick the pages the same way an explicit step would, so a prefetched
         // browse walks just as deep into a thread already dug.
-        let jobs: Vec<(DigThread, u64, u32)> = want
+        let jobs: Vec<(DigThread, DigQuery, u32)> = want
             .iter()
             .enumerate()
-            .map(|(i, &(thread, entity))| {
-                let page = match dig.pages.get(&(thread == DigThread::Artist, entity)) {
-                    // Offset the roll per job so the two threads of one record
-                    // don't both land on the same page index.
+            .map(|(i, (thread, query))| {
+                let page = match dig.pages.get(&(*thread, query.entity())) {
+                    // Offset the roll per job so the threads of one record
+                    // don't all land on the same page index.
                     Some(&n) if n > 1 => {
                         1 + dig_roll_with(
                             self.dig_seed.wrapping_add(i as u64 * 0x9E37_79B9),
@@ -1236,7 +1327,7 @@ impl App {
                     }
                     _ => 1,
                 };
-                (thread, entity, page)
+                (*thread, query.clone(), page)
             })
             .collect();
         let mut skip = self.vinyl_owned.clone();
@@ -1257,15 +1348,15 @@ impl App {
         thread::spawn(move || {
             let client =
                 discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
-            for (thread, entity, page) in jobs {
-                // Checked before each browse rather than only at the top: the
-                // artist thread's page and the label thread's page are two
-                // separate trips through the shared pace, and the click that
-                // cancels usually arrives during the first.
+            for (thread, query, page) in jobs {
+                // Checked before each browse rather than only at the top: each
+                // thread's page is its own trip through the shared pace, and
+                // the click that cancels usually arrives during the first.
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
-                let result = browse_step(&client, thread, entity, page, &skip, &cancel);
+                let entity = query.entity();
+                let result = browse_step(&client, &query, page, &skip, &cancel);
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
@@ -1314,17 +1405,16 @@ impl App {
             };
             // Learn the page count even from a speculation, so the next roll
             // down this thread — prefetched or clicked — can walk deeper.
-            dig.pages
-                .insert((msg.thread == DigThread::Artist, msg.entity), page.pages);
-            dig.ready
-                .insert((msg.from, msg.thread == DigThread::Artist), page);
+            dig.pages.insert((msg.thread, msg.entity), page.pages);
+            dig.ready.insert((msg.from, msg.thread, msg.entity), page);
         }
     }
 
-    /// Adopt resolved artist/label ids onto the step they belong to.
+    /// Adopt resolved artist/label ids and style tags onto the step they
+    /// belong to.
     pub(crate) fn poll_dig_ids(&mut self) {
         let Some(rx) = &self.dig_ids_rx else { return };
-        let Ok((release_id, (artist_ids, label_ids, label))) = rx.try_recv() else {
+        let Ok((release_id, (artist_ids, label_ids, label, styles))) = rx.try_recv() else {
             return;
         };
         self.dig_ids_rx = None;
@@ -1332,6 +1422,8 @@ impl App {
         if let Some(step) = dig.steps.iter_mut().find(|s| s.release_id == release_id) {
             step.artist_ids = artist_ids;
             step.label_ids = label_ids;
+            step.styles = styles;
+            step.detail_resolved = true;
             // Browse rows usually omit the label name; the detail has it.
             if step.label.is_none() {
                 step.label = label.filter(|l| !l.trim().is_empty());
@@ -1457,6 +1549,8 @@ impl App {
             head_label,
             has_artist_id,
             has_label_id,
+            head_styles,
+            head_resolved,
             head_back,
             head_forward,
             since_opened,
@@ -1498,6 +1592,8 @@ impl App {
                 head.label.clone(),
                 !head.artist_ids.is_empty(),
                 !head.label_ids.is_empty(),
+                head.styles.clone(),
+                head.detail_resolved,
                 head.parent,
                 head.last_child,
                 dig.opened_at.elapsed().as_secs_f32(),
@@ -1506,6 +1602,7 @@ impl App {
 
         let mut open: Option<DigOpen> = None;
         let mut step: Option<DigThread> = None;
+        let mut step_style: Option<String> = None;
         let mut goto: Option<usize> = None;
         let mut end = false;
         // Set while laying out the web when it has forked past one row — the
@@ -1936,6 +2033,42 @@ impl App {
                             {
                                 step = Some(DigThread::Label);
                             }
+                            // The third thread: records that sound like this one.
+                            // One style digs on click; several open as a menu, so
+                            // a "Deep House / Dub Techno" record can be followed
+                            // down either sound.
+                            let can_style = !head_styles.is_empty();
+                            let style_tip = match head_styles.first() {
+                                Some(s) if head_styles.len() == 1 => {
+                                    format!("Find another {s} record on vinyl that you don't own")
+                                }
+                                Some(_) => "Find another record with one of this record's \
+                                        style tags"
+                                    .to_string(),
+                                None if head_resolved => {
+                                    "Discogs lists no style for this record".to_string()
+                                }
+                                None => "Looking up this record's styles on Discogs…".to_string(),
+                            };
+                            let style_btn = ui
+                                .add_enabled(
+                                    can_style && !busy,
+                                    egui::Button::new("  ◈  Dig the style  "),
+                                )
+                                .on_hover_note(style_tip.clone())
+                                .on_disabled_hover_text(crate::ui::hover::note(style_tip));
+                            if head_styles.len() > 1 {
+                                crate::ui::menu::dropdown(&style_btn, 200.0, |m| {
+                                    for s in &head_styles {
+                                        if m.selectable(false, s) {
+                                            step_style = Some(s.clone());
+                                            m.close();
+                                        }
+                                    }
+                                });
+                            } else if style_btn.clicked() {
+                                step = Some(DigThread::Style);
+                            }
                             if busy {
                                 ui.label(egui::RichText::new("Searching Discogs…").weak());
                             }
@@ -1990,6 +2123,8 @@ impl App {
             }
         } else if let Some(thread) = step {
             self.dig_step(thread);
+        } else if let Some(style) = step_style {
+            self.dig_step_style(style);
         }
         // Whichever way the head moved — a branch taken, a step back, a jump to
         // a card — everything speculated for the record we just left is now
@@ -2007,7 +2142,7 @@ impl App {
     fn dig_evict(&mut self) {
         let Some(dig) = self.dig.as_mut() else { return };
         let head = dig.head().release_id;
-        dig.ready.retain(|(id, _), _| *id == head);
+        dig.ready.retain(|(id, _, _), _| *id == head);
         if let Some((from, _)) = &dig.priming {
             if *from != head {
                 // Its results would be dropped on arrival anyway, so stop it

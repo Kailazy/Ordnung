@@ -939,6 +939,8 @@ impl App {
                     h.label.clone(),
                     !h.artist_ids.is_empty(),
                     !h.label_ids.is_empty(),
+                    h.styles.clone(),
+                    h.detail_resolved,
                     self.dig.as_ref().is_some_and(|d| d.pending.is_some()),
                 )),
                 _ => None,
@@ -1015,9 +1017,12 @@ impl App {
             PlayExtra(usize),
             Goto,
             Dig,
-            /// Take a thread out of the record on screen — the strip's two
+            /// Take a thread out of the record on screen — the strip's
             /// branch buttons, mirrored here.
             Branch(crate::dig::DigThread),
+            /// Take the style thread down one named style, picked from the
+            /// style button's menu on a multi-style record.
+            BranchStyle(String),
             /// Add this record to that list, or take it off if it's there.
             ToggleList(VinylList),
             /// Want a *different* pressing of the same record — the one that
@@ -1299,6 +1304,8 @@ impl App {
                                 head_label,
                                 has_artist_id,
                                 has_label_id,
+                                head_styles,
+                                head_resolved,
                                 busy,
                             )) = &branch
                             {
@@ -1378,6 +1385,48 @@ impl App {
                                     .clicked()
                                 {
                                     act = Some(Act::Branch(crate::dig::DigThread::Label));
+                                }
+                                // The style thread, same gating as the strip:
+                                // one style digs on click, several open as a
+                                // menu naming each sound.
+                                let can_style = !head_styles.is_empty();
+                                let style_tip = match head_styles.first() {
+                                    Some(s) if head_styles.len() == 1 => format!(
+                                        "Find another {s} record on vinyl that you \
+                                         don't own"
+                                    ),
+                                    Some(_) => "Find another record with one of this \
+                                                record's style tags"
+                                        .to_string(),
+                                    None if *head_resolved => {
+                                        "Discogs lists no style for this record".to_string()
+                                    }
+                                    None => {
+                                        "Looking up this record's styles on Discogs…".to_string()
+                                    }
+                                };
+                                let style_btn = ui
+                                    .add_enabled(
+                                        can_style && !busy,
+                                        egui::Button::new(
+                                            egui::RichText::new("◈  Dig the style")
+                                                .color(dig_text(can_style && !busy)),
+                                        )
+                                        .fill(dig_fill(can_style && !busy)),
+                                    )
+                                    .on_hover_note(style_tip.clone())
+                                    .on_disabled_hover_text(crate::ui::hover::note(style_tip));
+                                if head_styles.len() > 1 {
+                                    crate::ui::menu::dropdown(&style_btn, 200.0, |m| {
+                                        for s in head_styles {
+                                            if m.selectable(false, s) {
+                                                act = Some(Act::BranchStyle(s.clone()));
+                                                m.close();
+                                            }
+                                        }
+                                    });
+                                } else if style_btn.clicked() {
+                                    act = Some(Act::Branch(crate::dig::DigThread::Style));
                                 }
                             }
                         });
@@ -1639,6 +1688,12 @@ impl App {
                 self.stop_sheet_video();
                 self.sheet_follows_dig = true;
                 self.dig_step(thread);
+                return;
+            }
+            Some(Act::BranchStyle(style)) => {
+                self.stop_sheet_video();
+                self.sheet_follows_dig = true;
+                self.dig_step_style(style);
                 return;
             }
             Some(Act::Play(row)) => {

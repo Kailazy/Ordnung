@@ -442,9 +442,9 @@ impl ReleaseDetail {
                             && !exact_only
                             && pos.len() >= 2
                             && pos.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-                            && cands.iter().any(|c| {
-                                c == &pos || c.starts_with(&format!("{pos} "))
-                            });
+                            && cands
+                                .iter()
+                                .any(|c| c == &pos || c.starts_with(&format!("{pos} ")));
                         if title_hit || pos_hit {
                             hit = Some(i);
                             used[i] = true;
@@ -520,7 +520,13 @@ impl ReleaseDetail {
             overwrite,
             self.country.clone().unwrap_or_default(),
         );
-        push_fill(&mut out, FillField::Album, &tags.album, overwrite, self.title.clone());
+        push_fill(
+            &mut out,
+            FillField::Album,
+            &tags.album,
+            overwrite,
+            self.title.clone(),
+        );
         push_fill(
             &mut out,
             FillField::ReleaseDate,
@@ -530,7 +536,11 @@ impl ReleaseDetail {
         );
         if let Some(y) = self.year {
             // Write when empty, or (overwrite) when it differs from the current year.
-            let write = if overwrite { tags.year != Some(y) } else { tags.year.is_none() };
+            let write = if overwrite {
+                tags.year != Some(y)
+            } else {
+                tags.year.is_none()
+            };
             if write {
                 out.push(FieldFill {
                     field: FillField::Year,
@@ -780,7 +790,12 @@ impl Client {
     /// An empty or whitespace-only query returns an empty page without touching
     /// the network — a caller debouncing keystrokes shouldn't spend a request on
     /// a cleared search box.
-    pub fn search_records(&self, query: &str, page: u32, per_page: u32) -> Result<RecordSearchPage> {
+    pub fn search_records(
+        &self,
+        query: &str,
+        page: u32,
+        per_page: u32,
+    ) -> Result<RecordSearchPage> {
         let query = query.trim();
         if query.is_empty() {
             return Ok(RecordSearchPage {
@@ -887,9 +902,9 @@ impl Client {
                 .set("User-Agent", &self.user_agent)
                 .set("Authorization", &format!("Discogs token={}", self.token))
         })?;
-        let body: ReleaseResponse = resp.into_json().map_err(|e| {
-            Error::Network(format!("decoding Discogs release response: {e}"))
-        })?;
+        let body: ReleaseResponse = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs release response: {e}")))?;
         Ok(body.into_detail())
     }
 
@@ -921,9 +936,9 @@ impl Client {
                 .set("User-Agent", &self.user_agent)
                 .set("Authorization", &format!("Discogs token={}", self.token))
         })?;
-        let body: IdentityResponse = resp.into_json().map_err(|e| {
-            Error::Network(format!("decoding Discogs identity response: {e}"))
-        })?;
+        let body: IdentityResponse = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs identity response: {e}")))?;
         if body.username.trim().is_empty() {
             return Err(Error::Network(
                 "Discogs identity returned no username".into(),
@@ -946,9 +961,8 @@ impl Client {
     /// lookup. Use when the caller already resolved the username (e.g. to report
     /// it back to the UI) and doesn't want to spend a second API request on it.
     pub fn fetch_collection_for(&self, username: &str) -> Result<Vec<VinylRecord>> {
-        let base = format!(
-            "https://api.discogs.com/users/{username}/collection/folders/0/releases"
-        );
+        let base =
+            format!("https://api.discogs.com/users/{username}/collection/folders/0/releases");
         let mut out = Vec::new();
         let mut page = 1u32;
         loop {
@@ -1002,9 +1016,9 @@ impl Client {
                     .query("sort", "added")
                     .query("sort_order", "desc")
             })?;
-            let body: WantlistResponse = resp.into_json().map_err(|e| {
-                Error::Network(format!("decoding Discogs wantlist response: {e}"))
-            })?;
+            let body: WantlistResponse = resp
+                .into_json()
+                .map_err(|e| Error::Network(format!("decoding Discogs wantlist response: {e}")))?;
             for item in body.wants {
                 if let Some(rec) = item.into_record() {
                     out.push(rec);
@@ -1104,7 +1118,9 @@ impl Client {
             .into_iter()
             .filter(|v| {
                 // Records only, matching the rest of the vinyl view.
-                v.major_formats.iter().any(|f| f.eq_ignore_ascii_case("Vinyl"))
+                v.major_formats
+                    .iter()
+                    .any(|f| f.eq_ignore_ascii_case("Vinyl"))
             })
             .map(|v| MasterVersion {
                 release_id: v.id,
@@ -1407,6 +1423,68 @@ impl Client {
         })
     }
 
+    /// Browse releases by Discogs **style** tag ("Deep House", "Dub Techno"),
+    /// for the dig's style thread — records that sound like this one, from
+    /// anyone, on any label.
+    ///
+    /// Unlike the artist/label browses this rides the search endpoint, which
+    /// takes a `style` facet and a `format` filter — so the rows come back
+    /// vinyl-only and carrying their format string, and the caller's format
+    /// resolution has nothing left to do on most pages. Style names come from
+    /// [`ReleaseDetail::styles`]; the facet matches the tag exactly, so a name
+    /// is as precise as an id is for an artist.
+    ///
+    /// `page` is 1-based; the caller learns the real page count from
+    /// [`BrowsePage::pages`]. One API request per call, paced by the shared
+    /// throttle.
+    pub fn search_by_style(&self, style: &str, page: u32) -> Result<BrowsePage> {
+        let style = style.trim();
+        if style.is_empty() {
+            return Ok(BrowsePage::default());
+        }
+        let page = page.max(1).to_string();
+        let resp = self.call_with_retry(|| {
+            self.agent
+                .get(SEARCH_URL)
+                .set("User-Agent", &self.user_agent)
+                .set("Authorization", &format!("Discogs token={}", self.token))
+                .query("style", style)
+                .query("format", "Vinyl")
+                .query("type", "release")
+                .query("per_page", "100")
+                .query("page", &page)
+        })?;
+        let body: SearchResponse = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs search response: {e}")))?;
+        Ok(BrowsePage {
+            pages: body.pagination.pages.max(1),
+            items: body.pagination.items,
+            releases: body
+                .results
+                .into_iter()
+                .map(|h| {
+                    let (artist, title) = split_artist_title(&h.title);
+                    let format = h.format.join(", ");
+                    BrowseRelease {
+                        release_id: h.id,
+                        format_known: !format.trim().is_empty(),
+                        title,
+                        artist,
+                        year: h.year.trim().parse::<u16>().ok().filter(|y| *y > 0),
+                        format,
+                        label: h.label.into_iter().next().unwrap_or_default(),
+                        catno: h.catno,
+                        thumb_url: h.thumb,
+                        // Search hits carry no credit role; every row is a
+                        // full match for the style that found it.
+                        main: true,
+                    }
+                })
+                .collect(),
+        })
+    }
+
     fn search_release(&self, params: &[(&str, &str)]) -> Result<Vec<SearchHit>> {
         let resp = self.call_with_retry(|| {
             let mut req = self
@@ -1419,9 +1497,9 @@ impl Client {
             }
             req
         })?;
-        let body: SearchResponse = resp.into_json().map_err(|e| {
-            Error::Network(format!("decoding Discogs search response: {e}"))
-        })?;
+        let body: SearchResponse = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs search response: {e}")))?;
         Ok(body.results)
     }
 
@@ -1814,9 +1892,7 @@ impl InventoryItem {
             sleeve_condition: none_if_empty(self.sleeve_condition),
             ships_from: none_if_empty(self.ships_from),
             shipping_price: self.shipping_price.as_ref().map(|p| p.value),
-            shipping_currency: self
-                .shipping_price
-                .and_then(|p| none_if_empty(p.currency)),
+            shipping_currency: self.shipping_price.and_then(|p| none_if_empty(p.currency)),
             allow_offers: self.allow_offers,
             uri: none_if_empty(self.uri),
             posted: none_if_empty(self.posted),
@@ -1841,8 +1917,12 @@ struct CollectionFormat {
 impl CollectionItem {
     /// Build a [`VinylRecord`], or `None` if this item isn't a vinyl pressing.
     fn into_record(self) -> Option<VinylRecord> {
-        self.basic_information
-            .into_record(self.instance_id, self.id, Some(self.folder_id), self.date_added)
+        self.basic_information.into_record(
+            self.instance_id,
+            self.id,
+            Some(self.folder_id),
+            self.date_added,
+        )
     }
 }
 
@@ -2112,11 +2192,7 @@ impl ReleaseResponse {
     /// user just added to their collection. `None` when the release isn't
     /// vinyl. Mirrors `BasicInformation::into_record`, but reads the release
     /// endpoint's own shape.
-    fn into_vinyl_record(
-        self,
-        instance_id: u64,
-        folder_id: Option<u32>,
-    ) -> Option<VinylRecord> {
+    fn into_vinyl_record(self, instance_id: u64, folder_id: Option<u32>) -> Option<VinylRecord> {
         if !self
             .formats
             .iter()
@@ -2132,7 +2208,10 @@ impl ReleaseResponse {
             .collect::<Vec<_>>()
             .join(", ");
         let (label, catalog_number) = match self.labels.first() {
-            Some(l) => (none_if_empty(l.name.clone()), none_if_empty(l.catno.clone())),
+            Some(l) => (
+                none_if_empty(l.name.clone()),
+                none_if_empty(l.catno.clone()),
+            ),
             None => (None, None),
         };
         let format = none_if_empty(self.format_summary());
@@ -2173,7 +2252,12 @@ impl ReleaseResponse {
 
     fn into_detail(self) -> ReleaseDetail {
         // Discogs lists labels in release order; the first is the primary one.
-        let label_ids: Vec<u64> = self.labels.iter().map(|l| l.id).filter(|i| *i > 0).collect();
+        let label_ids: Vec<u64> = self
+            .labels
+            .iter()
+            .map(|l| l.id)
+            .filter(|i| *i > 0)
+            .collect();
         let (label, catalog_number) = match self.labels.into_iter().next() {
             Some(l) => (none_if_empty(l.name), none_if_empty(l.catno)),
             None => (None, None),
@@ -2263,7 +2347,11 @@ fn join_credits(artists: &[ReleaseArtist]) -> Option<String> {
     }
     // A trailing connector (Discogs sometimes leaves one on the last credit)
     // would otherwise read as a dangling "A &".
-    let out = out.trim().trim_end_matches([',', ';', '&', '/']).trim().to_string();
+    let out = out
+        .trim()
+        .trim_end_matches([',', ';', '&', '/'])
+        .trim()
+        .to_string();
     (!out.is_empty()).then_some(out)
 }
 
@@ -2423,13 +2511,20 @@ mod tests {
     }
 
     fn credit(name: &str, join: &str) -> ReleaseArtist {
-        ReleaseArtist { id: 0, name: name.into(), join: join.into() }
+        ReleaseArtist {
+            id: 0,
+            name: name.into(),
+            join: join.into(),
+        }
     }
 
     /// A single credit is just the name; nothing to join.
     #[test]
     fn join_credits_renders_a_lone_artist() {
-        assert_eq!(join_credits(&[credit("Herbert", "")]), Some("Herbert".into()));
+        assert_eq!(
+            join_credits(&[credit("Herbert", "")]),
+            Some("Herbert".into())
+        );
     }
 
     /// Discogs writes the connector bare, so it needs spaces on both sides —
@@ -2506,7 +2601,9 @@ mod tests {
             "tracklist": [{"type_": null, "position": "A1", "title": "Ma", "duration": null}],
             "videos": [{"uri": "https://youtu.be/abc", "title": null, "duration": null, "embed": null}]
         }"#;
-        let detail: ReleaseDetail = serde_json::from_str::<ReleaseResponse>(json).unwrap().into_detail();
+        let detail: ReleaseDetail = serde_json::from_str::<ReleaseResponse>(json)
+            .unwrap()
+            .into_detail();
         assert_eq!(detail.country, None);
         assert_eq!(detail.released, None);
         assert_eq!(detail.catalog_number, None);
@@ -2523,11 +2620,23 @@ mod tests {
     #[test]
     fn youtube_ids_parse_from_every_form_discogs_stores() {
         let id = |u: &str| video(u, "").youtube_id().map(str::to_string);
-        assert_eq!(id("https://www.youtube.com/watch?v=dQw4w9WgXcQ").as_deref(), Some("dQw4w9WgXcQ"));
-        assert_eq!(id("http://youtube.com/watch?v=abc_-123&t=42").as_deref(), Some("abc_-123"));
+        assert_eq!(
+            id("https://www.youtube.com/watch?v=dQw4w9WgXcQ").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(
+            id("http://youtube.com/watch?v=abc_-123&t=42").as_deref(),
+            Some("abc_-123")
+        );
         // The `v=` parameter isn't always first.
-        assert_eq!(id("https://www.youtube.com/watch?t=9&v=xyz789").as_deref(), Some("xyz789"));
-        assert_eq!(id("https://youtu.be/dQw4w9WgXcQ?t=30").as_deref(), Some("dQw4w9WgXcQ"));
+        assert_eq!(
+            id("https://www.youtube.com/watch?t=9&v=xyz789").as_deref(),
+            Some("xyz789")
+        );
+        assert_eq!(
+            id("https://youtu.be/dQw4w9WgXcQ?t=30").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
         // Anything that isn't YouTube has no embeddable id.
         assert_eq!(id("https://vimeo.com/12345"), None);
         assert_eq!(id("https://www.youtube.com/watch?list=PL123"), None);
@@ -2553,7 +2662,11 @@ mod tests {
         // leading pressing position all resolve.
         assert_eq!(m, vec![Some(1), Some(0), Some(2), None]);
         // The album rip claimed by no track stays available on its own.
-        let left: Vec<&str> = d.unmatched_videos().iter().map(|(_, v)| v.uri.as_str()).collect();
+        let left: Vec<&str> = d
+            .unmatched_videos()
+            .iter()
+            .map(|(_, v)| v.uri.as_str())
+            .collect();
         assert_eq!(left, vec!["https://youtu.be/v4"]);
     }
 
@@ -2568,9 +2681,18 @@ mod tests {
             track("B2", "Break2 (KW Refix)"),
         ];
         d.videos = vec![
-            video("https://youtu.be/v1", "DIFF006 • Skudge - Meadow | A1 Meadow"),
-            video("https://youtu.be/v2", "DIFF006 • Skudge - Meadow | B1 Break2"),
-            video("https://youtu.be/v3", "DIFF006 • Skudge - Meadow | B2 Break2 KW Refix"),
+            video(
+                "https://youtu.be/v1",
+                "DIFF006 • Skudge - Meadow | A1 Meadow",
+            ),
+            video(
+                "https://youtu.be/v2",
+                "DIFF006 • Skudge - Meadow | B1 Break2",
+            ),
+            video(
+                "https://youtu.be/v3",
+                "DIFF006 • Skudge - Meadow | B2 Break2 KW Refix",
+            ),
         ];
         assert_eq!(d.video_matches(), vec![Some(0), Some(1), Some(2)]);
         assert!(d.unmatched_videos().is_empty());
@@ -2650,8 +2772,8 @@ mod tests {
     #[test]
     fn overwrite_replaces_existing_values_but_skips_identical() {
         let mut tags = Tags {
-            genre: Some("House".into()),       // differs → replaced
-            year: Some(2001),                  // differs → replaced
+            genre: Some("House".into()),         // differs → replaced
+            year: Some(2001),                    // differs → replaced
             album: Some("Plastikman EP".into()), // identical → no-op, not counted
             ..Tags::default()
         };
@@ -2697,13 +2819,28 @@ mod tests {
 
     #[test]
     fn strips_original_mix_markers() {
-        assert_eq!(strip_original_mix("Strings Of Life (Original Mix)"), "Strings Of Life");
-        assert_eq!(strip_original_mix("Strings Of Life [ORIGINAL MIX]"), "Strings Of Life");
-        assert_eq!(strip_original_mix("Strings Of Life - Original Mix"), "Strings Of Life");
-        assert_eq!(strip_original_mix("Voodoo Ray (Original Version)"), "Voodoo Ray");
+        assert_eq!(
+            strip_original_mix("Strings Of Life (Original Mix)"),
+            "Strings Of Life"
+        );
+        assert_eq!(
+            strip_original_mix("Strings Of Life [ORIGINAL MIX]"),
+            "Strings Of Life"
+        );
+        assert_eq!(
+            strip_original_mix("Strings Of Life - Original Mix"),
+            "Strings Of Life"
+        );
+        assert_eq!(
+            strip_original_mix("Voodoo Ray (Original Version)"),
+            "Voodoo Ray"
+        );
         assert_eq!(strip_original_mix("Voodoo Ray (Original)"), "Voodoo Ray");
         // Stacked markers all come off.
-        assert_eq!(strip_original_mix("Track (Original Mix) [Original]"), "Track");
+        assert_eq!(
+            strip_original_mix("Track (Original Mix) [Original]"),
+            "Track"
+        );
         // Remix/edit credits are part of the real title and stay.
         assert_eq!(
             strip_original_mix("Age Of Love (Jam & Spoon Remix)"),
@@ -2734,7 +2871,9 @@ mod tests {
                 year: Some(1993),
                 thumb: "https://img/thumb.jpg".into(),
                 cover_image: "https://img/cover.jpg".into(),
-                artists: vec![CollectionArtist { name: "Plastikman (2)".into() }],
+                artists: vec![CollectionArtist {
+                    name: "Plastikman (2)".into(),
+                }],
                 labels: vec![ReleaseLabel {
                     id: 385,
                     name: "Plus 8".into(),

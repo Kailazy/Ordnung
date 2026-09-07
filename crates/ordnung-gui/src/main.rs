@@ -1349,9 +1349,11 @@ struct App {
     /// draws, so taking the same branch twice from one record lands somewhere
     /// else rather than repeating.
     dig_seed: u64,
-    /// Receives a dug release's Discogs artist and label ids, which are what its
-    /// own two branches browse by. `(release_id, (artist_ids, label_ids))`.
-    dig_ids_rx: Option<Receiver<(u64, (Vec<u64>, Vec<u64>, Option<String>))>>,
+    /// Receives a dug release's Discogs artist/label ids and style tags,
+    /// which are what its own branches query by.
+    /// `(release_id, (artist_ids, label_ids, label, styles))`.
+    #[allow(clippy::type_complexity)]
+    dig_ids_rx: Option<Receiver<(u64, (Vec<u64>, Vec<u64>, Option<String>, Vec<String>))>>,
     /// Receives the finished Discogs browse for the step being dug.
     dig_rx: Option<Receiver<dig::DigFetched>>,
     /// Receives speculative browses for the two threads out of the record on
