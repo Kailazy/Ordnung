@@ -30,9 +30,31 @@ jobs:
           key: ${{ runner.os }}-genredb-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-genredb-
 
+      # Resolve the newest dump by probing recent month stamps (dumps are dated
+      # the 1st) and checking for the gzip magic bytes. Done in shell so a
+      # blocked or redirected response is visible in the log, not a bare error.
+      - name: Find the latest dump
+        run: |
+          set -uo pipefail
+          for m in 0 1 2 3; do
+            stamp=$(date -u -d "$(date -u +%Y-%m-15) -$m month" +%Y%m01)
+            year=${stamp:0:4}
+            url="https://data.discogs.com/?download=data%2F${year}%2Fdiscogs_${stamp}_releases.xml.gz"
+            magic=$(curl -sL --max-time 30 "$url" 2>/dev/null | head -c 2 | xxd -p || true)
+            echo "probe $stamp -> magic=${magic:-none}"
+            if [ "$magic" = "1f8b" ]; then
+              echo "DUMP_STAMP=$stamp" >> "$GITHUB_ENV"
+              echo "DUMP_URL=$url" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          done
+          echo "no dump reachable; response to the listing page for diagnosis:"
+          curl -s -D - --max-time 30 "https://data.discogs.com/?prefix=data%2F$(date -u +%Y)%2F" | head -c 2000
+          exit 1
+
       # Streams the ~10 GB dump (never written to disk) into the SQLite table.
       - name: Build the genre database from the latest dump
-        run: cargo run --release -p ordnung-core --example build_genredb -- discogs-genres.db
+        run: cargo run --release -p ordnung-core --example build_genredb -- discogs-genres.db "$DUMP_STAMP" "$DUMP_URL"
 
       - name: Compress
         run: |

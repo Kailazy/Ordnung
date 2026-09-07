@@ -301,9 +301,26 @@ pub fn import_latest(
         .user_agent("Ordnung/0.1 +https://kailazy.github.io/Ordnung/")
         .build();
     let (stamp, url) = latest_dump(&agent)?;
+    import_from(db_path, &stamp, &url, progress, cancel)
+}
 
+/// [`import_latest`] with the dump named explicitly, skipping discovery — the
+/// CI builder resolves the URL in shell (where a failed probe leaves readable
+/// diagnostics) and hands it in.
+pub fn import_from(
+    db_path: &Path,
+    stamp: &str,
+    url: &str,
+    progress: &mut dyn FnMut(ImportProgress),
+    cancel: &AtomicBool,
+) -> Result<ImportStats> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_read(std::time::Duration::from_secs(120))
+        .user_agent("Ordnung/0.1 +https://kailazy.github.io/Ordnung/")
+        .build();
+    let stamp = stamp.to_string();
     let resp = agent
-        .get(&url)
+        .get(url)
         .call()
         .map_err(|e| Error::Network(format!("downloading the Discogs dump: {e}")))?;
     let total_bytes: u64 = resp
