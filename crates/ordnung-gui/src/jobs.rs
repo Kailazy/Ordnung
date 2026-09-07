@@ -564,6 +564,25 @@ impl App {
         thread::spawn(move || run_fetch_seller_genres(db, token, username, cancel, tx, ctx));
     }
 
+    /// Import the Discogs genre database: one ~10 GB monthly-dump download,
+    /// streamed straight into a local table of every vinyl release's tags (see
+    /// [`genredb`]). Needs no Discogs token — the dumps are public. After it,
+    /// genre tags resolve locally for every seller and every dig; the paced
+    /// per-release fetch remains only for releases newer than the dump.
+    pub(crate) fn spawn_import_genredb(&mut self, ctx: egui::Context) {
+        if self.is_busy() {
+            self.status = "Busy — wait for the current job to finish.".into();
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.job_rx = Some(rx);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.job_cancel = Some(cancel.clone());
+        self.status = "Downloading the Discogs genre database…".into();
+        let path = genredb::default_path(&self.db_path);
+        thread::spawn(move || run_import_genredb(path, cancel, tx, ctx));
+    }
+
     /// Run one user-requested change to a Discogs list — the vinyl grid's
     /// move/remove actions and the library's "Add to Discogs wantlist". Writes
     /// to the user's Discogs account off the UI thread, then mirrors the change
@@ -2218,6 +2237,64 @@ pub(crate) fn run_sweep_seller(
     let _ = tx.send(JobMsg::Done(format!(
         "{username}: {kept} records in the crates{note}"
     )));
+    ctx.request_repaint();
+}
+
+/// Worker for [`App::spawn_import_genredb`]: download the newest dump and
+/// stream it into the genre database, relaying progress. Runs for a while
+/// (the dump is ~10 GB), so status updates are throttled to twice a second.
+pub(crate) fn run_import_genredb(
+    path: PathBuf,
+    cancel: Arc<AtomicBool>,
+    tx: Sender<JobMsg>,
+    ctx: egui::Context,
+) {
+    let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let result = genredb::import_latest(
+        &path,
+        &mut |p| {
+            if last.elapsed() < std::time::Duration::from_millis(500) {
+                return;
+            }
+            last = std::time::Instant::now();
+            let read_mb = p.read_bytes / (1024 * 1024);
+            let msg = if p.total_bytes > 0 {
+                let total_mb = p.total_bytes / (1024 * 1024);
+                format!(
+                    "Importing the Discogs genre database… {read_mb} of {total_mb} MB \
+                     ({}M releases read)",
+                    p.seen / 1_000_000
+                )
+            } else {
+                format!(
+                    "Importing the Discogs genre database… {read_mb} MB \
+                     ({}M releases read)",
+                    p.seen / 1_000_000
+                )
+            };
+            let _ = tx.send(JobMsg::Status(msg));
+            if p.total_bytes > 0 {
+                let _ = tx.send(JobMsg::Progress {
+                    done: p.read_bytes as usize,
+                    total: p.total_bytes as usize,
+                });
+            }
+            ctx.request_repaint();
+        },
+        &cancel,
+    );
+    let msg = match result {
+        Ok(s) if s.completed => JobMsg::Done(format!(
+            "Genre database ready: {} vinyl releases tagged (dump {})",
+            s.kept, s.dump
+        )),
+        Ok(s) => JobMsg::Done(format!(
+            "Import stopped — nothing changed ({} releases read; run it again to restart)",
+            s.seen
+        )),
+        Err(e) => JobMsg::Failed(format!("importing the genre database: {e}")),
+    };
+    let _ = tx.send(msg);
     ctx.request_repaint();
 }
 

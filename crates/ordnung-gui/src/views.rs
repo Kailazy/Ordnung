@@ -1226,6 +1226,9 @@ impl App {
             (v, tagged)
         };
 
+        // Set inside the genre menu; applied after the toolbar closes its
+        // borrows.
+        let mut import_genredb = false;
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             // Collection and wantlist are two shelves of the same kind, so they're
@@ -1311,25 +1314,57 @@ impl App {
                         }
                         if genre_options.is_empty() {
                             let hint = if seller_mode {
-                                "No genre tags known for these crates yet. \
-                                 Use Fetch tags to pull them from Discogs."
+                                "No genre tags known for these crates yet."
                             } else {
                                 "No genre tags yet. Refresh to pull them from \
                                  Discogs."
                             };
                             ui.label(egui::RichText::new(hint).weak());
-                        } else if seller_mode {
+                        }
+                        if seller_mode {
                             ui.separator();
                             let n = self.seller_listings.len();
-                            let note = if seller_tagged < n {
-                                format!(
-                                    "Tags known for {seller_tagged} of {n} records. \
-                                     Fetch tags pulls the rest."
-                                )
-                            } else {
-                                format!("Tags known for all {n} records")
-                            };
-                            ui.label(egui::RichText::new(note).weak().small());
+                            if !genre_options.is_empty() {
+                                let note = if seller_tagged < n {
+                                    format!("Tags known for {seller_tagged} of {n} records")
+                                } else {
+                                    format!("Tags known for all {n} records")
+                                };
+                                ui.label(egui::RichText::new(note).weak().small());
+                            }
+                            // The bulk answer to partial coverage: one dump
+                            // import tags (nearly) everything; until then the
+                            // paced per-release fetch is the fallback.
+                            match &self.genredb_info {
+                                Some((dump, kept)) => {
+                                    let m = kept / 1_000_000;
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "Genre database: dump {dump}, {m}M releases"
+                                        ))
+                                        .weak()
+                                        .small(),
+                                    );
+                                }
+                                None => {
+                                    if ui
+                                        .add_enabled(
+                                            !busy,
+                                            egui::Button::new("⬇ Import genre database")
+                                                .small(),
+                                        )
+                                        .on_hover_note(
+                                            "Download Discogs's monthly database dump once \
+                                             (about 10 GB) so every release's genre tags \
+                                             resolve locally and instantly, for every seller",
+                                        )
+                                        .clicked()
+                                    {
+                                        import_genredb = true;
+                                        ui.close_menu();
+                                    }
+                                }
+                            }
                         }
                     });
             })
@@ -1410,6 +1445,10 @@ impl App {
             }
         }
         ui.separator();
+
+        if import_genredb {
+            self.spawn_import_genredb(ctx.clone());
+        }
 
         // Other people's crates get their own body: seller picker, sweep
         // controls and a virtualized card grid (see `sellers.rs`).

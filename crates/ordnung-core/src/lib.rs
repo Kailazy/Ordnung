@@ -10,6 +10,7 @@ pub mod analysis;
 pub mod catalog;
 pub mod convert;
 pub mod discogs;
+pub mod genredb;
 pub mod error;
 pub mod model;
 pub mod scan;

@@ -43,6 +43,7 @@ use onboarding::Tour;
 use ordnung_core::analysis::{self, AnalysisParams, ANALYZER_VERSION, WAVEFORM_FULLTRACK_VERSION};
 use ordnung_core::convert::{self, ConvertSpec};
 use ordnung_core::discogs;
+use ordnung_core::genredb;
 use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
     Analysis, Format, Id, Playlist, SellerListing, SellerShop, Tags, Track, TranscodeVerdict,
@@ -1104,6 +1105,10 @@ struct App {
     /// sorted set of release ids still missing tags (`_for`).
     vinyl_genre_fallback: HashMap<u64, Vec<String>>,
     vinyl_genre_fallback_for: Vec<u64>,
+    /// The imported Discogs genre database's (dump date, rows), read from its
+    /// meta on reload — `None` when none has been imported. What the genre
+    /// menu shows, so it doesn't open SQLite every frame.
+    genredb_info: Option<(String, u64)>,
     /// Decoded vinyl cover textures keyed by list + Discogs `instance_id` (reuses
     /// `ThumbState`). Loaded lazily by the vinyl-cover worker as cells render,
     /// mirroring `cover_cache` for table rows. The list is part of the key because

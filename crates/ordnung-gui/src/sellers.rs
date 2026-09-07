@@ -126,6 +126,21 @@ impl App {
         self.seller_genres = Catalog::open(&self.db_path)
             .and_then(|c| c.release_genres(&ids))
             .unwrap_or_default();
+        // The bulk source: the imported Discogs genre database covers whatever
+        // the release-detail cache doesn't, which after one import is nearly
+        // everything.
+        if let Ok(Some(gdb)) = genredb::GenreDb::open(&genredb::default_path(&self.db_path)) {
+            let missing: Vec<u64> = ids
+                .iter()
+                .copied()
+                .filter(|id| !self.seller_genres.contains_key(id))
+                .collect();
+            if let Ok(map) = gdb.genres_for(&missing) {
+                for (id, tags) in map {
+                    self.seller_genres.entry(id).or_insert(tags);
+                }
+            }
+        }
         for r in self.vinyl.iter().chain(self.wantlist.iter()) {
             if !r.genres.is_empty() {
                 self.seller_genres

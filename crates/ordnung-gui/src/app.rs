@@ -146,6 +146,7 @@ impl App {
             vinyl_genres: Vec::new(),
             vinyl_genre_fallback: HashMap::new(),
             vinyl_genre_fallback_for: Vec::new(),
+            genredb_info: None,
             vinyl_covers: HashMap::new(),
             vinyl_cover_req_tx,
             vinyl_cover_rx,
@@ -691,7 +692,36 @@ impl App {
                         }
                     }
                 }
+                // Whatever is still untagged gets the bulk genre database, when
+                // one has been imported. Keyed lookups only — cheap enough to
+                // run un-memoized on every reload.
+                let still: Vec<u64> = self
+                    .vinyl
+                    .iter()
+                    .chain(self.wantlist.iter())
+                    .filter(|r| r.genres.is_empty())
+                    .map(|r| r.release_id)
+                    .collect();
+                if !still.is_empty() {
+                    if let Ok(Some(gdb)) = genredb::GenreDb::open(&genredb::default_path(&self.db_path)) {
+                        if let Ok(map) = gdb.genres_for(&still) {
+                            for r in self.vinyl.iter_mut().chain(self.wantlist.iter_mut()) {
+                                if r.genres.is_empty() {
+                                    if let Some(tags) = map.get(&r.release_id) {
+                                        r.genres = tags.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
+            // What the genre menu says about the bulk database: its dump date
+            // and row count, from its meta stamps (never a table scan).
+            self.genredb_info = genredb::GenreDb::open(&genredb::default_path(&self.db_path))
+                .ok()
+                .flatten()
+                .map(|db| (db.dump_date().unwrap_or_default(), db.kept()));
             // Saved sellers are a handful of rows; their (potentially huge)
             // listing caches load lazily in the Sellers tab, not here.
             self.sellers = Catalog::open(&self.db_path)

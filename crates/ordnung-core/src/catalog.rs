@@ -39,9 +39,9 @@ fn vinyl_table(list: VinylList) -> &'static str {
 /// delimit them because Discogs genre names contain commas ("Folk, World, &
 /// Country"). `None` (not an empty string) when there are no tags, so the
 /// upsert's COALESCE can tell "no data" from "no tags cleared on purpose".
-const GENRE_SEP: char = '\u{1F}';
+pub(crate) const GENRE_SEP: char = '\u{1F}';
 
-fn join_genres(genres: &[String]) -> Option<String> {
+pub(crate) fn join_genres(genres: &[String]) -> Option<String> {
     if genres.is_empty() {
         None
     } else {
@@ -49,7 +49,7 @@ fn join_genres(genres: &[String]) -> Option<String> {
     }
 }
 
-fn split_genres(joined: Option<String>) -> Vec<String> {
+pub(crate) fn split_genres(joined: Option<String>) -> Vec<String> {
     joined
         .unwrap_or_default()
         .split(GENRE_SEP)

@@ -36,4 +36,6 @@ thiserror = "2.0.18"
 # font can't render (tofu) and that break byte-wise search/dedup.
 unicode-normalization = "0.1"
 walkdir = "2.5.0"
+flate2 = "1"
+quick-xml = "0.37"
 # Phase 1+: symphonia, lofty, rusqlite, rustfft, rayon (see PLAN.md).
