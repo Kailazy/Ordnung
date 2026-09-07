@@ -191,8 +191,21 @@ shared search box filters the crates, card click opens the record sheet
 carrying that seller's concrete offer (`VinylSheet::offer` — price, grading,
 Buy ↗ to the listing), context menu buys/wantlists. Purchase itself stays on
 discogs.com (the API has no cart). Groundwork + endpoint findings in
-`docs/design/bulk-sellers-spike.md`; still open from that plan: filters/sort,
-session basket, sweep deltas, wantlist-intersection ranking (Phases B/C).
+`docs/design/bulk-sellers-spike.md`; still open from that plan: sweep deltas.
+
+**Seller cart + shipping (v0.83.5–v0.85.0, Phases B/C of that plan).** The
+"session basket" landed as a persistent local cart (`cart_listings`, schema
+v6): a cart disc on every seller card/row and a context-menu toggle set a
+listing aside, shop chips wear per-seller cart counts (hover shows the price
+total), a cart chip over the crates lenses them to carted records, and carted
+records wear a CART badge beside OWNED/WANT. Checkout stays on discogs.com.
+The wantlist-intersection ranking landed as the **wantlist watch** (62542f7):
+`Catalog::wantlist_offers` joins the wantlist against every swept shop,
+cheapest first. Shipping quotes (schema v8, `shipping_price`/`shipping_currency`
+on `seller_listings` from the inventory endpoint's location-specific
+`shipping_price`; absent for policy-only sellers — absence is never "free")
+surface as a per-seller "shipping from" line in the shop chip's hover popup
+and on the record sheet's offer line.
 
 **Record lookup (v0.36.0).** The toolbar search box now has a **Library / Discogs**
 scope toggle on its right. In Discogs mode the same box searches the whole Discogs
