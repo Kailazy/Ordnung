@@ -120,6 +120,9 @@ pub(crate) struct SellerOffer {
     pub price: discogs::MarketPrice,
     pub condition: Option<String>,
     pub sleeve_condition: Option<String>,
+    /// Per-record shipping as Discogs quotes it for this account's location;
+    /// `None` when the seller publishes only a free-text policy.
+    pub shipping: Option<discogs::MarketPrice>,
     /// The listing's own discogs.com page; the release page is the fallback.
     pub uri: Option<String>,
 }
@@ -375,7 +378,10 @@ impl App {
                     .join(" · ")
             })
             .unwrap_or_default();
-        let cover_url = cat.as_ref().and_then(|c| c.external_cover_url(id).ok()).flatten();
+        let cover_url = cat
+            .as_ref()
+            .and_then(|c| c.external_cover_url(id).ok())
+            .flatten();
         let source_path = track.as_ref().map(|t| t.source_path.clone());
         self.open_release_sheet(release_id, artist, title, sub, cover_url, ctx);
         // Remember which local track opened this, so the sheet can fall back
@@ -963,9 +969,13 @@ impl App {
                     (Some(m), None) => format!(" · {}", short(m)),
                     _ => String::new(),
                 };
+                let shipping = match &o.shipping {
+                    Some(s) => format!(" +{} shipping", fmt_market_price(s)),
+                    None => String::new(),
+                };
                 (
                     format!(
-                        "{}{grade} from {}",
+                        "{}{grade}{shipping} from {}",
                         fmt_market_price(&o.price),
                         o.seller
                     ),
@@ -1104,9 +1114,7 @@ impl App {
                                     .clicked()
                                 {
                                     let url = offer_uri.clone().unwrap_or_else(|| {
-                                        format!(
-                                            "https://www.discogs.com/release/{release_id}"
-                                        )
+                                        format!("https://www.discogs.com/release/{release_id}")
                                     });
                                     open_url(&url);
                                 }

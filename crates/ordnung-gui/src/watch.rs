@@ -285,6 +285,13 @@ impl App {
                     },
                     condition: l.condition.clone(),
                     sleeve_condition: l.sleeve_condition.clone(),
+                    shipping: l.shipping_price.map(|value| discogs::MarketPrice {
+                        value,
+                        currency: l
+                            .shipping_currency
+                            .clone()
+                            .unwrap_or_else(|| l.currency.clone()),
+                    }),
                     uri: l.uri.clone(),
                 });
             }

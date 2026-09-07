@@ -1736,6 +1736,10 @@ struct InventoryItem {
     sleeve_condition: String,
     #[serde(default, deserialize_with = "null_as_default")]
     ships_from: String,
+    /// Per-record shipping as Discogs quotes it for the requesting account's
+    /// location. Absent when the seller only publishes a free-text policy.
+    #[serde(default)]
+    shipping_price: Option<StatsPrice>,
     #[serde(default, deserialize_with = "null_as_default")]
     allow_offers: bool,
     #[serde(default, deserialize_with = "null_as_default")]
@@ -1809,6 +1813,10 @@ impl InventoryItem {
             condition: none_if_empty(self.condition),
             sleeve_condition: none_if_empty(self.sleeve_condition),
             ships_from: none_if_empty(self.ships_from),
+            shipping_price: self.shipping_price.as_ref().map(|p| p.value),
+            shipping_currency: self
+                .shipping_price
+                .and_then(|p| none_if_empty(p.currency)),
             allow_offers: self.allow_offers,
             uri: none_if_empty(self.uri),
             posted: none_if_empty(self.posted),

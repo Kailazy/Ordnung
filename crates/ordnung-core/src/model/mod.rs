@@ -420,6 +420,13 @@ pub struct SellerListing {
     pub condition: Option<String>,
     pub sleeve_condition: Option<String>,
     pub ships_from: Option<String>,
+    /// Per-record shipping the seller quotes for this listing, as Discogs
+    /// computes it for the API account's own location. `None` when the seller
+    /// publishes only a free-text shipping policy (common), so absence means
+    /// "not published", never "free".
+    pub shipping_price: Option<f64>,
+    /// Currency code `shipping_price` is quoted in; `None` alongside it.
+    pub shipping_currency: Option<String>,
     pub allow_offers: bool,
     /// The listing's own page on discogs.com — where a purchase happens.
     pub uri: Option<String>,

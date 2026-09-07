@@ -231,12 +231,27 @@ impl App {
                     None => shop.username.clone(),
                 };
                 let chip = ui.selectable_label(active, label);
-                let chip = match &cart {
-                    Some((n, total)) => chip.on_hover_note(format!(
-                        "Browse this seller's crates. {n} in cart, {total}"
+                // The chip's hover popup is the shop's info card: the cart
+                // slice, then the shipping floor. Quotes are per record and
+                // location-specific; a seller publishing only a free-text
+                // policy has none, and that absence never reads as free.
+                let mut note = String::from("Browse this seller's crates");
+                if let Some((n, total)) = &cart {
+                    note.push_str(&format!(". {n} in cart, {total}"));
+                }
+                match self.seller_shipping.get(&shop.username) {
+                    Some((price, currency)) => note.push_str(&format!(
+                        ". Shipping from {} per record",
+                        crate::vinyl_sheet::fmt_market_price(&discogs::MarketPrice {
+                            value: *price,
+                            currency: currency.clone(),
+                        })
                     )),
-                    None => chip.on_hover_note("Browse this seller's crates"),
-                };
+                    None => note.push_str(
+                        ". Shipping not quoted yet, update the crates to fetch it",
+                    ),
+                }
+                let chip = chip.on_hover_note(note);
                 if chip.clicked() {
                     switch_to = Some(shop.username.clone());
                 }
@@ -743,7 +758,19 @@ impl App {
                     egui::Sense::click(),
                 );
                 let dig_hovered = dig_hit.hovered();
-                let card_hovered = resp.hovered() || dig_hovered;
+                // Cart disc to the dig disc's left: the shop's one-click
+                // "put it aside", claimed early for the same hover-reveal.
+                let cart_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.right() - 2.0 * D - 12.0, rect.bottom() - D - 6.0),
+                    egui::vec2(D, D),
+                );
+                let cart_hit = ui.interact(
+                    cart_rect,
+                    ui.id().with(("seller-cart", listing_id)),
+                    egui::Sense::click(),
+                );
+                let cart_hovered = cart_hit.hovered();
+                let card_hovered = resp.hovered() || dig_hovered || cart_hovered;
                 match &tex {
                     Some(h) => {
                         egui::Image::new(h)
@@ -855,7 +882,42 @@ impl App {
                         act = Some(SellerAct::Dig(idx));
                     }
                 }
-                if resp.clicked() && !dig_clicked {
+                // Cart disc: hover-revealed like the dig disc, but also kept
+                // on screen while the record is carted so taking it back out
+                // is the same one click.
+                let mut cart_clicked = false;
+                if card_hovered || in_cart {
+                    let bg = match (in_cart, cart_hovered) {
+                        (true, true) => egui::Color32::from_rgb(190, 80, 70),
+                        (true, false) => egui::Color32::from_rgb(50, 90, 150),
+                        (false, true) => egui::Color32::from_rgb(110, 160, 235),
+                        (false, false) => egui::Color32::from_black_alpha(190),
+                    };
+                    let fg = if cart_hovered {
+                        egui::Color32::from_gray(20)
+                    } else {
+                        egui::Color32::from_gray(240)
+                    };
+                    ui.painter().circle_filled(cart_rect.center(), D / 2.0, bg);
+                    ui.painter().text(
+                        cart_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        if in_cart && cart_hovered { "✖" } else { "🛒" },
+                        egui::FontId::proportional(13.0),
+                        fg,
+                    );
+                    let cart_hit = cart_hit.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    let note = if in_cart {
+                        "Remove from the cart"
+                    } else {
+                        "Add to the cart; checkout stays on discogs.com"
+                    };
+                    if cart_hit.on_hover_note(note).clicked() {
+                        cart_clicked = true;
+                        act = Some(SellerAct::ToggleCart(idx));
+                    }
+                }
+                if resp.clicked() && !dig_clicked && !cart_clicked {
                     act = Some(SellerAct::Open(idx));
                 }
                 resp.context_menu(|ui| {
@@ -1082,6 +1144,54 @@ impl App {
             crate::records::draw_eye(ui.painter(), c, 5.5, egui::Color32::from_gray(150), true);
             right_edge = c.x - 9.0 - 8.0;
         }
+        // Cart disc, left of the marker column: the same one-click "put it
+        // aside" the card carries, revealed on hover and kept on screen while
+        // the record is carted.
+        const CART_D: f32 = 22.0;
+        let cart_rect = egui::Rect::from_min_size(
+            egui::pos2(right_edge - CART_D, rect.center().y - CART_D / 2.0),
+            egui::vec2(CART_D, CART_D),
+        );
+        let cart_hit = ui.interact(
+            cart_rect,
+            ui.id().with(("seller-row-cart", listing_id)),
+            egui::Sense::click(),
+        );
+        let cart_hovered = cart_hit.hovered();
+        let mut cart_clicked = false;
+        if resp.hovered() || cart_hovered || in_cart {
+            let bg = match (in_cart, cart_hovered) {
+                (true, true) => egui::Color32::from_rgb(190, 80, 70),
+                (true, false) => egui::Color32::from_rgb(50, 90, 150),
+                (false, true) => egui::Color32::from_rgb(110, 160, 235),
+                (false, false) => egui::Color32::from_black_alpha(190),
+            };
+            let fg = if cart_hovered {
+                egui::Color32::from_gray(20)
+            } else {
+                egui::Color32::from_gray(240)
+            };
+            ui.painter()
+                .circle_filled(cart_rect.center(), CART_D / 2.0, bg);
+            ui.painter().text(
+                cart_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                if in_cart && cart_hovered { "✖" } else { "🛒" },
+                egui::FontId::proportional(11.0),
+                fg,
+            );
+            let cart_hit = cart_hit.on_hover_cursor(egui::CursorIcon::PointingHand);
+            let note = if in_cart {
+                "Remove from the cart"
+            } else {
+                "Add to the cart; checkout stays on discogs.com"
+            };
+            if cart_hit.on_hover_note(note).clicked() {
+                cart_clicked = true;
+                act = Some(SellerAct::ToggleCart(idx));
+            }
+        }
+        right_edge = cart_rect.left() - 8.0;
         // Artist over title · year · format, truncated between the thumb and
         // the terms column.
         let text_rect = egui::Rect::from_min_max(
@@ -1104,7 +1214,7 @@ impl App {
         text_ui.add(egui::Label::new(egui::RichText::new(line2).weak()).truncate());
 
         let resp = resp.on_hover_note("Open the record — listen, wantlist, or buy");
-        if resp.clicked() {
+        if resp.clicked() && !cart_clicked {
             act = Some(SellerAct::Open(idx));
         }
         resp.context_menu(|ui| {
@@ -1194,6 +1304,13 @@ impl App {
                     },
                     condition: l.condition.clone(),
                     sleeve_condition: l.sleeve_condition.clone(),
+                    shipping: l.shipping_price.map(|value| discogs::MarketPrice {
+                        value,
+                        currency: l
+                            .shipping_currency
+                            .clone()
+                            .unwrap_or_else(|| l.currency.clone()),
+                    }),
                     uri: l.uri.clone(),
                 });
             }

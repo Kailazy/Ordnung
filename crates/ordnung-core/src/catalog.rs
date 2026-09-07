@@ -299,7 +299,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 8;
 
 impl Catalog {
     /// Open (creating if needed) a catalog at `path` and ensure the schema exists.
@@ -625,6 +625,8 @@ impl Catalog {
                 condition      TEXT,
                 sleeve_condition TEXT,
                 ships_from     TEXT,
+                shipping_price REAL,
+                shipping_currency TEXT,
                 allow_offers   INTEGER NOT NULL DEFAULT 0,
                 uri            TEXT,
                 posted         TEXT,
@@ -632,6 +634,8 @@ impl Catalog {
             );
             CREATE INDEX IF NOT EXISTS idx_seller_listings_seller
                 ON seller_listings(seller);
+            CREATE INDEX IF NOT EXISTS idx_seller_listings_release
+                ON seller_listings(release_id);
 
             -- Releases the user has auditioned while digging: opened from a
             -- seller card and actually played a song from. Keyed by release
@@ -841,6 +845,12 @@ impl Catalog {
         // analyzer v10. Empty on older catalogs until re-analyzed; the version
         // bump invalidates the cache so the next `analyze` fills it.
         self.add_column_if_missing("analysis", "waveform_bands", "BLOB")?;
+
+        // Per-listing shipping quote (schema v8). NULL on rows cached before
+        // this column existed — filled in by the next inventory update, since
+        // absence means "not published", never "free".
+        self.add_column_if_missing("seller_listings", "shipping_price", "REAL")?;
+        self.add_column_if_missing("seller_listings", "shipping_currency", "TEXT")?;
 
         // One-time data migration (user_version 0 → 1): adopt the "decide once,
         // at add time" model for the Discogs picker. Songs that were already
@@ -3178,9 +3188,10 @@ impl Catalog {
             "INSERT INTO seller_listings
                  (listing_id, seller, release_id, title, artist, year, label,
                   catalog_number, format, thumb_url, price, currency, condition,
-                  sleeve_condition, ships_from, allow_offers, uri, posted, fetched_at)
+                  sleeve_condition, ships_from, shipping_price, shipping_currency,
+                  allow_offers, uri, posted, fetched_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                     ?15, ?16, ?17, ?18, unixepoch())
+                     ?15, ?16, ?17, ?18, ?19, ?20, unixepoch())
              ON CONFLICT(listing_id) DO UPDATE SET
                  seller          = excluded.seller,
                  release_id      = excluded.release_id,
@@ -3196,6 +3207,8 @@ impl Catalog {
                  condition       = excluded.condition,
                  sleeve_condition = excluded.sleeve_condition,
                  ships_from      = excluded.ships_from,
+                 shipping_price  = excluded.shipping_price,
+                 shipping_currency = excluded.shipping_currency,
                  allow_offers    = excluded.allow_offers,
                  uri             = excluded.uri,
                  posted          = excluded.posted,
@@ -3216,6 +3229,8 @@ impl Catalog {
                 l.condition,
                 l.sleeve_condition,
                 l.ships_from,
+                l.shipping_price,
+                l.shipping_currency,
                 l.allow_offers as i64,
                 l.uri,
                 l.posted,
@@ -3255,7 +3270,8 @@ impl Catalog {
         let mut stmt = self.conn.prepare(
             "SELECT listing_id, release_id, title, artist, year, label,
                     catalog_number, format, thumb_url, price, currency, condition,
-                    sleeve_condition, ships_from, allow_offers, uri, posted
+                    sleeve_condition, ships_from, shipping_price, shipping_currency,
+                    allow_offers, uri, posted
              FROM seller_listings
              WHERE seller=?1
              ORDER BY posted IS NULL, posted DESC, listing_id DESC",
@@ -3277,9 +3293,11 @@ impl Catalog {
                     condition: r.get(11)?,
                     sleeve_condition: r.get(12)?,
                     ships_from: r.get(13)?,
-                    allow_offers: r.get::<_, i64>(14)? != 0,
-                    uri: r.get(15)?,
-                    posted: r.get(16)?,
+                    shipping_price: r.get(14)?,
+                    shipping_currency: r.get(15)?,
+                    allow_offers: r.get::<_, i64>(16)? != 0,
+                    uri: r.get(17)?,
+                    posted: r.get(18)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -3298,7 +3316,8 @@ impl Catalog {
             "SELECT l.seller, l.listing_id, l.release_id, l.title, l.artist,
                     l.year, l.label, l.catalog_number, l.format, l.thumb_url,
                     l.price, l.currency, l.condition, l.sleeve_condition,
-                    l.ships_from, l.allow_offers, l.uri, l.posted
+                    l.ships_from, l.shipping_price, l.shipping_currency,
+                    l.allow_offers, l.uri, l.posted
              FROM seller_listings l
              WHERE l.release_id IN (SELECT release_id FROM vinyl_wantlist)
              ORDER BY l.price ASC, l.artist ASC, l.listing_id ASC",
@@ -3322,9 +3341,11 @@ impl Catalog {
                         condition: r.get(12)?,
                         sleeve_condition: r.get(13)?,
                         ships_from: r.get(14)?,
-                        allow_offers: r.get::<_, i64>(15)? != 0,
-                        uri: r.get(16)?,
-                        posted: r.get(17)?,
+                        shipping_price: r.get(15)?,
+                        shipping_currency: r.get(16)?,
+                        allow_offers: r.get::<_, i64>(17)? != 0,
+                        uri: r.get(18)?,
+                        posted: r.get(19)?,
                     },
                 ))
             })?
@@ -3408,6 +3429,25 @@ impl Catalog {
                     currency: r.get(3)?,
                 })
             })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The cheapest per-record shipping each seller quotes across their
+    /// cached listings, as `(seller, price, currency)` — the "shipping from"
+    /// figure the shop chips surface. Quotes are whatever Discogs computed
+    /// for this account's own location at the last inventory update; a seller
+    /// publishing only a free-text shipping policy has no row here.
+    pub fn seller_shipping_floor(&self) -> Result<Vec<(String, f64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seller, MIN(shipping_price),
+                    COALESCE(shipping_currency, currency)
+             FROM seller_listings
+             WHERE shipping_price IS NOT NULL
+             GROUP BY seller",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -5142,6 +5182,8 @@ mod tests {
                 condition: Some("Very Good Plus (VG+)".into()),
                 sleeve_condition: Some("Generic".into()),
                 ships_from: Some("Germany".into()),
+                shipping_price: Some(6.5),
+                shipping_currency: Some("EUR".into()),
                 allow_offers: true,
                 uri: Some("https://www.discogs.com/sell/item/1".into()),
                 posted: Some(posted.into()),
@@ -5222,6 +5264,8 @@ mod tests {
                 condition: Some("Very Good Plus (VG+)".into()),
                 sleeve_condition: None,
                 ships_from: Some("Germany".into()),
+                shipping_price: Some(6.5),
+                shipping_currency: Some("EUR".into()),
                 allow_offers: false,
                 uri: None,
                 posted: None,
@@ -5236,12 +5280,19 @@ mod tests {
         cat.add_seller("rushhour").unwrap();
         // Two shops stock the want at different prices; a third listing is a
         // record the user never wanted and must not appear.
-        cat.upsert_seller_listing("hardwax", &listing(1, 9001, 14.0)).unwrap();
-        cat.upsert_seller_listing("rushhour", &listing(2, 9001, 9.5)).unwrap();
-        cat.upsert_seller_listing("hardwax", &listing(3, 7777, 4.0)).unwrap();
+        cat.upsert_seller_listing("hardwax", &listing(1, 9001, 14.0))
+            .unwrap();
+        cat.upsert_seller_listing("rushhour", &listing(2, 9001, 9.5))
+            .unwrap();
+        cat.upsert_seller_listing("hardwax", &listing(3, 7777, 4.0))
+            .unwrap();
 
         let offers = cat.wantlist_offers().unwrap();
-        assert_eq!(offers.len(), 2, "one row per offer, unwanted records dropped");
+        assert_eq!(
+            offers.len(),
+            2,
+            "one row per offer, unwanted records dropped"
+        );
         // Cheapest first, each row naming the shop that stocks it.
         assert_eq!(offers[0].0, "rushhour");
         assert_eq!(offers[0].1.price, 9.5);

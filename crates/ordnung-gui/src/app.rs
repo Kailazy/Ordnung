@@ -145,6 +145,7 @@ impl App {
             viewed_releases: HashSet::new(),
             cart_ids: HashSet::new(),
             cart_lines: Vec::new(),
+            seller_shipping: HashMap::new(),
             seller_cart_only: false,
             wantlist_watch: Vec::new(),
             show_watch: false,
@@ -740,12 +741,6 @@ impl App {
                 .and_then(|c| c.viewed_releases())
                 .map(|ids| ids.into_iter().collect())
                 .unwrap_or_default();
-            // The wantlist watch is a keyed join of the wantlist against the
-            // swept listings — bounded by the wantlist's size, so cheap enough
-            // to rebuild here where every sweep and wantlist edit refreshes it.
-            self.wantlist_watch = Catalog::open(&self.db_path)
-                .and_then(|c| c.wantlist_offers())
-                .unwrap_or_default();
             // The cart is a purchase plan, not a shop — a handful of rows, so
             // both the badge set and the per-seller summaries load whole.
             self.cart_ids = Catalog::open(&self.db_path)
@@ -754,6 +749,22 @@ impl App {
                 .unwrap_or_default();
             self.cart_lines = Catalog::open(&self.db_path)
                 .and_then(|c| c.cart_lines())
+                .unwrap_or_default();
+            // One aggregate row per seller, so this too loads whole; sellers
+            // updated before shipping was cached simply have no entry.
+            self.seller_shipping = Catalog::open(&self.db_path)
+                .and_then(|c| c.seller_shipping_floor())
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|(seller, price, currency)| (seller, (price, currency)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // The wantlist watch is a keyed join of the wantlist against the
+            // swept listings — bounded by the wantlist's size, so cheap enough
+            // to rebuild here where every sweep and wantlist edit refreshes it.
+            self.wantlist_watch = Catalog::open(&self.db_path)
+                .and_then(|c| c.wantlist_offers())
                 .unwrap_or_default();
             if let Some(cur) = &self.seller_current {
                 if !self.sellers.iter().any(|s| &s.username == cur) {
