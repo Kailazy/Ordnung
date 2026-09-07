@@ -3294,6 +3294,7 @@ mod usb_transfer_tests {
             tx,
             egui::Context::default(),
             FollowUps {
+                auto_convert: None,
                 auto_analyze: false,
                 auto_match: None,
             },
