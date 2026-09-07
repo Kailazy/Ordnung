@@ -207,6 +207,23 @@ on `seller_listings` from the inventory endpoint's location-specific
 surface as a per-seller "shipping from" line in the shop chip's hover popup
 and on the record sheet's offer line.
 
+**Digging expansion (v0.86.0–v0.88.0).** Three moves from the digging
+proposal landed together. The dig grew a **style thread** (v0.86.0):
+◈ Dig the style follows one of the record's Discogs style tags via
+`discogs::search_by_style` (search endpoint, vinyl-filtered), a multi-style
+record opens the button as a menu, and the sheet mirrors it; style tags ride
+the release detail the dig already fetches, and the thread primes/pages like
+the other two (`DigQuery` in `dig.rs`). The **crate of interest** (v0.87.0,
+`interest_crate` table, schema v9) is a local holding shelf between a dig and
+the wantlist — its own Crate tab in the vinyl view, ☆ Crate on the record
+sheet (remembering the dig thread that found the record), seller-card menu
+entry, promote-to-wantlist/remove triage on each card, and crated releases
+excluded from future dig finds like both shelves. The **label page**
+(v0.88.0, `label_page.rs`) reads an imprint's whole run as a paged list —
+`GET /labels/{id}/releases`, vinyl-filtered and pressing-deduplicated, shelf
+membership marked per row, want/crate/dig on each — opened from ⌂ Label on
+the record sheet or "Browse the label" on shelf and seller cards.
+
 **Record lookup (v0.36.0).** The toolbar search box now has a **Library / Discogs**
 scope toggle on its right. In Discogs mode the same box searches the whole Discogs
 release database via `discogs::search_records` (the free-text lookup the older

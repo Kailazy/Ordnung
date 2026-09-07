@@ -952,6 +952,14 @@ impl App {
         let in_collection = self.vinyl_owned.contains(&release_id);
         let in_wantlist = self.vinyl_wanted.contains(&release_id);
         let in_crate = self.interest_ids.contains(&release_id);
+        // The imprint, once the detail names it — what the ⌂ Label button
+        // opens the label page with.
+        let sheet_label = self
+            .vinyl_sheet
+            .as_ref()
+            .and_then(|s| s.detail.as_ref())
+            .and_then(|d| d.label.clone())
+            .filter(|l| !l.trim().is_empty());
         let price_line = match &self.vinyl_sheet.as_ref().map(|s| &s.price) {
             Some(PriceState::Ready(Some(p))) => Some(format!("From {}", fmt_market_price(p))),
             Some(PriceState::Ready(None)) => Some("No copies for sale".to_string()),
@@ -1029,6 +1037,8 @@ impl App {
             /// Flip the record in or out of the crate of interest — the local
             /// undecided shelf between a dig and the wantlist.
             ToggleCrate,
+            /// Open the label page — this record's imprint, front to back.
+            LabelPage,
             /// Want a *different* pressing of the same record — the one that
             /// has copies for sale.
             WantAlternative(u64),
@@ -1242,6 +1252,20 @@ impl App {
                                 .clicked()
                             {
                                 open_url(&format!("https://www.discogs.com/release/{release_id}"));
+                            }
+                            // The deliberate label move: not one random pull
+                            // down the thread, the whole run as a list.
+                            let label_page_tip = match &sheet_label {
+                                Some(l) => format!("Read {l}'s whole run, your shelves marked"),
+                                None => "Looking up this record's label…".to_string(),
+                            };
+                            if ui
+                                .add_enabled(sheet_label.is_some(), egui::Button::new("⌂ Label"))
+                                .on_hover_note(label_page_tip.clone())
+                                .on_disabled_hover_text(crate::ui::hover::note(label_page_tip))
+                                .clicked()
+                            {
+                                act = Some(Act::LabelPage);
                             }
                             // Collection and wantlist, each showing this
                             // record's actual state — so one button always says
@@ -1612,6 +1636,9 @@ impl App {
         }
 
         match act {
+            Some(Act::LabelPage) => {
+                self.open_label_page(release_id, sheet_label.clone());
+            }
             Some(Act::ToggleCrate) => {
                 if self.interest_ids.contains(&release_id) {
                     self.uncrate_record(release_id);

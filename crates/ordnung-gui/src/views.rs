@@ -405,6 +405,9 @@ enum VinylGridAction {
     /// List every other pressing of this record, to swap one in — see
     /// [`crate::versions`].
     Versions(VinylCoverKey),
+    /// Open the label page — the record's imprint, front to back. See
+    /// [`crate::label_page`].
+    Label(VinylCoverKey),
 }
 
 /// The right-click menu for one shelf record, shared by the cover wall and the
@@ -443,6 +446,14 @@ fn vinyl_cell_menu(
         .clicked()
     {
         *action = Some(VinylGridAction::Versions(c.key));
+        ui.close_menu();
+    }
+    if ui
+        .button("⌂  Browse the label")
+        .on_hover_note("The label's whole run as a list, your shelves marked")
+        .clicked()
+    {
+        *action = Some(VinylGridAction::Label(c.key));
         ui.close_menu();
     }
     ui.separator();
@@ -1898,6 +1909,11 @@ impl App {
             Some(VinylGridAction::Open(key)) => self.open_vinyl_sheet(key, ctx),
             Some(VinylGridAction::Dig(key)) => self.start_dig(key),
             Some(VinylGridAction::Versions(key)) => self.open_versions(key, ctx),
+            Some(VinylGridAction::Label(key)) => {
+                if let Some(record) = self.vinyl_record(key) {
+                    self.open_label_page(record.release_id, record.label);
+                }
+            }
             Some(VinylGridAction::Play(key)) => {
                 // The tracklist may still be loading; the sheet starts playback
                 // itself once it has one (see `pending_play`).

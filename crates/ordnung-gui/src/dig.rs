@@ -469,7 +469,7 @@ const MAX_FORMAT_LOOKUPS: usize = 12;
 /// rejected: the alternative is showing the user a "record" that turns out to be
 /// a CD comp, and an artist's masters are nearly all duplicated by concrete
 /// release rows on the same pages anyway.
-fn is_vinyl(format: &str) -> bool {
+pub(crate) fn is_vinyl(format: &str) -> bool {
     let f = format.to_ascii_lowercase();
     if f.trim().is_empty() {
         return false;
@@ -554,7 +554,7 @@ const EDITION_WORDS: &[&str] = &[
 /// Deliberately not applied to the *artist* ids — `strip_disambiguator` handles
 /// display, and two genuinely different artists with the same release title
 /// (covers, split names) still fold apart because the artist is in the key.
-fn work_key(artist: &str, title: &str) -> String {
+pub(crate) fn work_key(artist: &str, title: &str) -> String {
     fn fold(s: &str) -> String {
         let lower = s.to_lowercase();
         // Drop bracketed asides wholesale: they're where Discogs parks the
@@ -713,7 +713,7 @@ mod tests {
 /// them. The label endpoint puts `Artist - Title` in `title`; the artist
 /// endpoint splits them already. Same rule the pick itself uses, factored out
 /// so the dedup folds exactly what the step will end up displaying.
-fn row_artist_title(r: &BrowseRelease) -> (String, String) {
+pub(crate) fn row_artist_title(r: &BrowseRelease) -> (String, String) {
     if r.artist.trim().is_empty() {
         split_title(&r.title)
     } else {

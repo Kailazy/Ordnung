@@ -20,6 +20,8 @@ enum SellerAct {
     /// Flip the listing's release in or out of the crate of interest — the
     /// undecided shelf, as against the cart's "set aside to buy".
     ToggleCrate(usize),
+    /// Open the label page for the listing's release.
+    LabelPage(usize),
     /// Open the record sheet, carrying this seller's concrete offer.
     Open(usize),
     /// Open the listing itself on discogs.com — where the purchase happens.
@@ -682,6 +684,11 @@ impl App {
                 }
             }
             Some(SellerAct::ToggleCart(idx)) => self.toggle_cart_listing(idx),
+            Some(SellerAct::LabelPage(idx)) => {
+                if let Some(l) = self.seller_listings.get(idx).cloned() {
+                    self.open_label_page(l.release_id, l.label);
+                }
+            }
             Some(SellerAct::ToggleCrate(idx)) => {
                 if let Some(l) = self.seller_listings.get(idx).cloned() {
                     if self.interest_ids.contains(&l.release_id) {
@@ -1036,6 +1043,14 @@ impl App {
                         .clicked()
                     {
                         act = Some(SellerAct::ToggleCrate(idx));
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("⌂  Browse the label")
+                        .on_hover_note("The label's whole run as a list, your shelves marked")
+                        .clicked()
+                    {
+                        act = Some(SellerAct::LabelPage(idx));
                         ui.close_menu();
                     }
                     if ui.button("↗ Open release page").clicked() {

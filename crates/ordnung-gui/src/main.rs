@@ -15,6 +15,7 @@ mod dig;
 mod inspector;
 mod interest;
 mod jobs;
+mod label_page;
 mod macos_drag;
 mod macos_menu;
 mod macos_pasteboard;
@@ -1338,6 +1339,14 @@ struct App {
             )>,
         )>,
     >,
+    /// The open label page — one imprint's discography as a paged list, with
+    /// the user's shelves marked on every row. `None` when closed. See
+    /// [`label_page`].
+    label_panel: Option<label_page::LabelPanel>,
+    /// Receives the open label page's fetches (the id resolution + first
+    /// page, then page turns). Tagged with the label id, so a reply for a
+    /// panel since re-pointed elsewhere is dropped.
+    label_rx: Option<Receiver<label_page::LabelFetched>>,
     /// The open "other pressings" panel — every release hanging off the same
     /// Discogs master as one record, and the swap that trades your copy for one
     /// of them. `None` when it isn't open. See [`versions`].
