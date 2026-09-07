@@ -35,6 +35,29 @@ fn vinyl_table(list: VinylList) -> &'static str {
     }
 }
 
+/// Genre tags are stored as one TEXT column, unit-separated — a comma can't
+/// delimit them because Discogs genre names contain commas ("Folk, World, &
+/// Country"). `None` (not an empty string) when there are no tags, so the
+/// upsert's COALESCE can tell "no data" from "no tags cleared on purpose".
+const GENRE_SEP: char = '\u{1F}';
+
+fn join_genres(genres: &[String]) -> Option<String> {
+    if genres.is_empty() {
+        None
+    } else {
+        Some(genres.join(&GENRE_SEP.to_string()))
+    }
+}
+
+fn split_genres(joined: Option<String>) -> Vec<String> {
+    joined
+        .unwrap_or_default()
+        .split(GENRE_SEP)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 fn mode_int(m: Mode) -> i64 {
     match m {
         Mode::Major => 0,
@@ -518,6 +541,7 @@ impl Catalog {
                 cover_png      BLOB,
                 added          TEXT,
                 folder_id      INTEGER,
+                genres         TEXT,
                 fetched_at     INTEGER NOT NULL DEFAULT (unixepoch())
             );
 
@@ -542,6 +566,7 @@ impl Catalog {
                 cover_png      BLOB,
                 added          TEXT,
                 folder_id      INTEGER,
+                genres         TEXT,
                 fetched_at     INTEGER NOT NULL DEFAULT (unixepoch())
             );
 
@@ -754,6 +779,14 @@ impl Catalog {
             self.add_column_if_missing(table, "price", "REAL")?;
             self.add_column_if_missing(table, "price_currency", "TEXT")?;
             self.add_column_if_missing(table, "price_checked_at", "INTEGER")?;
+        }
+
+        // Genre + style tags per record, unit-separated (Discogs genre names
+        // themselves contain commas: "Folk, World, & Country"). NULL on rows
+        // cached before this column existed; the next vinyl refresh fills them,
+        // and until then the GUI falls back to `release_genres`.
+        for table in ["vinyl_collection", "vinyl_wantlist"] {
+            self.add_column_if_missing(table, "genres", "TEXT")?;
         }
 
         // Which ReleaseDetail shape a cached release was stored under. Rows
@@ -1321,6 +1354,51 @@ impl Catalog {
             )
             .optional()?;
         Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// Genre + style tags for `release_ids`, mined from the cached release
+    /// details. Sparse by design: only releases fetched at least once appear,
+    /// and callers treat a missing id as "tags unknown". This is what gives the
+    /// Sellers tab genre data at all — the inventory endpoint carries none —
+    /// and what fills shelf rows cached before the `genres` column existed.
+    ///
+    /// Reads *any* cached detail version: genres/styles have been part of the
+    /// shape since v1, and stale-but-parseable tags beat none.
+    pub fn release_genres(&self, release_ids: &[u64]) -> Result<HashMap<u64, Vec<String>>> {
+        /// The two fields worth parsing out of `detail_json` here — a full
+        /// `ReleaseDetail` parse would drag in every tracklist and video.
+        #[derive(serde::Deserialize)]
+        struct GenresOnly {
+            #[serde(default)]
+            genres: Vec<String>,
+            #[serde(default)]
+            styles: Vec<String>,
+        }
+        let mut out = HashMap::new();
+        // SQLite caps bound parameters; chunk the id list well under it.
+        for chunk in release_ids.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT release_id, detail_json FROM release_cache
+                 WHERE release_id IN ({placeholders})"
+            ))?;
+            let params = rusqlite::params_from_iter(chunk.iter().map(|id| id.to_string()));
+            let rows = stmt.query_map(params, |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (id, json) = row?;
+                let Ok(id) = id.parse::<u64>() else { continue };
+                let Ok(d) = serde_json::from_str::<GenresOnly>(&json) else {
+                    continue;
+                };
+                let tags = crate::discogs::genre_tags(&d.genres, &d.styles);
+                if !tags.is_empty() {
+                    out.insert(id, tags);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Store a fetched [`ReleaseDetail`] in the release cache, replacing any prior
@@ -2586,8 +2664,8 @@ impl Catalog {
                 "INSERT INTO {table}
                  (instance_id, release_id, title, artist, year, label,
                   catalog_number, format, thumb_url, cover_url, added, folder_id,
-                  fetched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, unixepoch())
+                  genres, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, unixepoch())
              ON CONFLICT(instance_id) DO UPDATE SET
                  release_id     = excluded.release_id,
                  title          = excluded.title,
@@ -2600,6 +2678,7 @@ impl Catalog {
                  cover_url      = excluded.cover_url,
                  added          = excluded.added,
                  folder_id      = excluded.folder_id,
+                 genres         = COALESCE(excluded.genres, genres),
                  fetched_at     = excluded.fetched_at"
             ),
             params![
@@ -2615,6 +2694,7 @@ impl Catalog {
                 rec.cover_url,
                 rec.added,
                 rec.folder_id.map(|f| f as i64),
+                join_genres(&rec.genres),
             ],
         )?;
         Ok(())
@@ -2628,7 +2708,7 @@ impl Catalog {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT instance_id, release_id, title, artist, year, label,
                     catalog_number, format, thumb_url, cover_url, added, folder_id,
-                    cover_png IS NOT NULL, price, price_currency
+                    cover_png IS NOT NULL, price, price_currency, genres
              FROM {table}
              ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE, instance_id"
         ))?;
@@ -2650,6 +2730,7 @@ impl Catalog {
                     has_cover: r.get::<_, i64>(12)? != 0,
                     price: r.get(13)?,
                     price_currency: r.get(14)?,
+                    genres: split_genres(r.get::<_, Option<String>>(15)?),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -4457,6 +4538,7 @@ mod tests {
             has_cover: false,
             price: None,
             price_currency: None,
+            genres: vec!["Electronic".into(), "Techno".into()],
         }
     }
 
@@ -4491,6 +4573,39 @@ mod tests {
             .unwrap();
         assert_eq!(rec.price, Some(24.5));
         assert_eq!(rec.price_currency.as_deref(), Some("USD"));
+    }
+
+    #[test]
+    fn vinyl_genres_round_trip_and_survive_a_tagless_upsert() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let own = VinylList::Collection;
+        cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One"))
+            .unwrap();
+        let rec = &cat.list_vinyl(own).unwrap()[0];
+        assert_eq!(rec.genres, vec!["Electronic", "Techno"]);
+
+        // A caller that rebuilt the record without genre data (e.g. from a
+        // response that carries none) must not wipe the synced tags.
+        let mut bare = vinyl(1, "Plastikman", "Sheet One");
+        bare.genres = Vec::new();
+        cat.upsert_vinyl(own, &bare).unwrap();
+        let rec = &cat.list_vinyl(own).unwrap()[0];
+        assert_eq!(rec.genres, vec!["Electronic", "Techno"]);
+    }
+
+    #[test]
+    fn release_genres_mines_the_release_cache() {
+        let cat = Catalog::open(":memory:").unwrap();
+        cat.conn
+            .execute(
+                "INSERT INTO release_cache (release_id, detail_json, detail_version)
+                 VALUES ('42', ?1, 1)",
+                params![r#"{"genres":["Electronic"],"styles":["Dub Techno","electronic"]}"#],
+            )
+            .unwrap();
+        let map = cat.release_genres(&[42, 7]).unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map[&42], vec!["Electronic", "Dub Techno"]);
     }
 
     #[test]

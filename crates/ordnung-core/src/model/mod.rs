@@ -372,6 +372,10 @@ pub struct VinylRecord {
     /// Currency code the cached `price` is quoted in (e.g. `USD`), as Discogs
     /// reported it. `None` whenever `price` is.
     pub price_currency: Option<String>,
+    /// Every genre tag on the release — Discogs's coarse genres followed by its
+    /// finer styles, deduplicated (see [`crate::discogs::genre_tags`]). Empty on
+    /// rows cached before this field existed; a vinyl refresh backfills them.
+    pub genres: Vec<String>,
 }
 
 /// A Discogs marketplace seller whose inventory is cached locally — one "shop"

@@ -104,6 +104,7 @@ impl App {
         let Some(cur) = self.seller_current.clone() else {
             self.seller_listings = Vec::new();
             self.seller_hay = Vec::new();
+            self.seller_genres = HashMap::new();
             self.seller_listings_for = None;
             return;
         };
@@ -114,6 +115,24 @@ impl App {
             .and_then(|c| c.list_seller_listings(&cur))
             .unwrap_or_default();
         self.seller_hay = self.seller_listings.iter().map(listing_hay).collect();
+        // Genre tags for the crates. The inventory endpoint carries none, so
+        // mine the release-detail cache, then the user's own shelves for
+        // anything not fetched yet: a listed record you own or want is tagged
+        // by your own sync. Listings in neither stay unknown and drop out of a
+        // genre filter.
+        let mut ids: Vec<u64> = self.seller_listings.iter().map(|l| l.release_id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        self.seller_genres = Catalog::open(&self.db_path)
+            .and_then(|c| c.release_genres(&ids))
+            .unwrap_or_default();
+        for r in self.vinyl.iter().chain(self.wantlist.iter()) {
+            if !r.genres.is_empty() {
+                self.seller_genres
+                    .entry(r.release_id)
+                    .or_insert_with(|| r.genres.clone());
+            }
+        }
         self.seller_listings_for = Some(cur);
     }
 
@@ -274,20 +293,29 @@ impl App {
         };
 
         // --- Meta line: how fresh these crates are. ---------------------------
-        // Filter up front so the count in the meta line matches the grid.
-        let filtered: Vec<usize> = if query.is_empty() {
-            (0..self.seller_listings.len()).collect()
-        } else {
-            self.seller_hay
-                .iter()
-                .enumerate()
-                .filter(|(_, hay)| listing_matches(hay, query))
-                .map(|(i, _)| i)
-                .collect()
-        };
+        // Filter up front so the count in the meta line matches the grid. The
+        // genre filter reads `seller_genres`; a listing with no known tags
+        // can't match a tag, so it drops out (the genre menu says how many
+        // records have known tags at all).
+        let genre = self.vinyl_genre.clone();
+        let unfiltered = query.is_empty() && genre.is_none();
+        let filtered: Vec<usize> = self
+            .seller_listings
+            .iter()
+            .enumerate()
+            .filter(|(i, l)| {
+                (query.is_empty() || listing_matches(&self.seller_hay[*i], query))
+                    && genre.as_deref().map_or(true, |g| {
+                        self.seller_genres
+                            .get(&l.release_id)
+                            .is_some_and(|tags| tags.iter().any(|t| t.eq_ignore_ascii_case(g)))
+                    })
+            })
+            .map(|(i, _)| i)
+            .collect();
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let mut meta = match (query.is_empty(), shop.cached) {
+            let mut meta = match (unfiltered, shop.cached) {
                 (true, n) => format!("{n} records in the crates"),
                 (false, _) => format!("{} of {} records match", filtered.len(), shop.cached),
             };
@@ -316,7 +344,14 @@ impl App {
         if filtered.is_empty() {
             ui.add_space(30.0);
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("Nothing in the crates matches that search.").weak());
+                let msg = match (&genre, query.is_empty()) {
+                    (Some(g), true) => format!("Nothing in the crates is tagged {g}."),
+                    (Some(g), false) => {
+                        format!("Nothing tagged {g} in the crates matches that search.")
+                    }
+                    (None, _) => "Nothing in the crates matches that search.".to_string(),
+                };
+                ui.label(egui::RichText::new(msg).weak());
             });
             return;
         }

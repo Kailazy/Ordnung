@@ -139,9 +139,13 @@ impl App {
             seller_current: None,
             seller_listings: Vec::new(),
             seller_listings_for: None,
+            seller_genres: HashMap::new(),
             seller_hay: Vec::new(),
             seller_add: String::new(),
             vinyl_filter: String::new(),
+            vinyl_genre: None,
+            vinyl_genre_fallback: HashMap::new(),
+            vinyl_genre_fallback_for: Vec::new(),
             vinyl_covers: HashMap::new(),
             vinyl_cover_req_tx,
             vinyl_cover_rx,
@@ -659,6 +663,35 @@ impl App {
             self.wantlist = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_vinyl(VinylList::Wantlist))
                 .unwrap_or_default();
+            // Shelf rows synced before the genres column existed carry no tags
+            // until the next Discogs refresh; in the meantime, fill in whatever
+            // the release-detail cache already knows. Memoized on the missing
+            // set: this branch runs on every search keystroke, and the lookup
+            // parses a JSON detail per cached release.
+            let mut missing: Vec<u64> = self
+                .vinyl
+                .iter()
+                .chain(self.wantlist.iter())
+                .filter(|r| r.genres.is_empty())
+                .map(|r| r.release_id)
+                .collect();
+            missing.sort_unstable();
+            missing.dedup();
+            if !missing.is_empty() {
+                if missing != self.vinyl_genre_fallback_for {
+                    self.vinyl_genre_fallback = Catalog::open(&self.db_path)
+                        .and_then(|c| c.release_genres(&missing))
+                        .unwrap_or_default();
+                    self.vinyl_genre_fallback_for = missing;
+                }
+                for r in self.vinyl.iter_mut().chain(self.wantlist.iter_mut()) {
+                    if r.genres.is_empty() {
+                        if let Some(tags) = self.vinyl_genre_fallback.get(&r.release_id) {
+                            r.genres = tags.clone();
+                        }
+                    }
+                }
+            }
             // Saved sellers are a handful of rows; their (potentially huge)
             // listing caches load lazily in the Sellers tab, not here.
             self.sellers = Catalog::open(&self.db_path)
@@ -713,6 +746,7 @@ impl App {
             // lists; the Sellers tab re-reads it on the next visit.
             self.seller_listings = Vec::new();
             self.seller_hay = Vec::new();
+            self.seller_genres = HashMap::new();
             self.seller_listings_for = None;
             // Runs mid-frame when the grid's "in catalog" badge jumps to the
             // Library after painting these covers; safe because `Tex` defers

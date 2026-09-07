@@ -471,6 +471,12 @@ impl ReleaseDetail {
             .collect()
     }
 
+    /// Every genre tag on this release, for display and filtering — see
+    /// [`genre_tags`].
+    pub fn genre_tags(&self) -> Vec<String> {
+        genre_tags(&self.genres, &self.styles)
+    }
+
     /// The album-level fields this release *would* write onto `tags`, with their
     /// values. This is the single source of truth for both the preview UI and
     /// [`apply_to_tags`].
@@ -1661,6 +1667,10 @@ struct BasicInformation {
     labels: Vec<ReleaseLabel>,
     #[serde(default, deserialize_with = "null_as_default")]
     formats: Vec<CollectionFormat>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    genres: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    styles: Vec<String>,
 }
 
 /// Response to `POST .../collection/folders/{f}/releases/{r}`. Discogs echoes
@@ -1885,6 +1895,7 @@ impl BasicInformation {
             // and read back from the cache (see `Catalog::set_vinyl_price`).
             price: None,
             price_currency: None,
+            genres: genre_tags(&bi.genres, &bi.styles),
         })
     }
 }
@@ -2135,6 +2146,7 @@ impl ReleaseResponse {
             has_cover: false,
             price: None,
             price_currency: None,
+            genres: genre_tags(&self.genres, &self.styles),
         })
     }
 
@@ -2253,6 +2265,21 @@ fn none_if_empty(s: String) -> Option<String> {
     } else {
         Some(s)
     }
+}
+
+/// Every genre tag on a release as one flat list: Discogs's coarse genres
+/// ("Electronic") followed by its finer styles ("Deep House"), trimmed and
+/// deduplicated case-insensitively. The one shape the record sheet displays and
+/// the vinyl view's genre filter matches on, so the two always agree.
+pub fn genre_tags(genres: &[String], styles: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tag in genres.iter().chain(styles) {
+        let tag = tag.trim();
+        if !tag.is_empty() && !out.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+            out.push(tag.to_string());
+        }
+    }
+    out
 }
 
 /// Parse the `Retry-After` header Discogs sends on a 429 or a 503
@@ -2709,6 +2736,8 @@ mod tests {
                     name: "Vinyl".into(),
                     descriptions: vec!["12\"".into(), "45 RPM".into()],
                 }],
+                genres: vec!["Electronic".into()],
+                styles: vec!["Techno".into(), "Acid".into()],
             },
         }
     }
@@ -2726,6 +2755,17 @@ mod tests {
         assert_eq!(rec.format.as_deref(), Some("Vinyl, 12\", 45 RPM"));
         assert_eq!(rec.cover_url.as_deref(), Some("https://img/cover.jpg"));
         assert!(!rec.has_cover);
+        // Genres then styles, one flat tag list.
+        assert_eq!(rec.genres, vec!["Electronic", "Techno", "Acid"]);
+    }
+
+    #[test]
+    fn genre_tags_dedupe_case_insensitively() {
+        let tags = genre_tags(
+            &["Electronic".into(), "Folk, World, & Country".into()],
+            &["Techno".into(), "electronic".into(), " ".into()],
+        );
+        assert_eq!(tags, vec!["Electronic", "Folk, World, & Country", "Techno"]);
     }
 
     #[test]

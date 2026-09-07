@@ -302,6 +302,7 @@ mod tests {
             has_cover: false,
             price: None,
             price_currency: None,
+            genres: Vec::new(),
         }
     }
 

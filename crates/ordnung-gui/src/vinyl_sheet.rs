@@ -836,15 +836,7 @@ impl App {
             .vinyl_sheet
             .as_ref()
             .and_then(|s| s.detail.as_ref())
-            .map(|d| {
-                let mut tags: Vec<&str> = d.genres.iter().map(String::as_str).collect();
-                for style in &d.styles {
-                    if !tags.iter().any(|t| t.eq_ignore_ascii_case(style)) {
-                        tags.push(style);
-                    }
-                }
-                tags.join(" · ")
-            })
+            .map(|d| d.genre_tags().join(" · "))
             .filter(|l| !l.is_empty());
         let cover = match cached {
             Some(t) => Some(t),

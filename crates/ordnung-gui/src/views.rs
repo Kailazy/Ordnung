@@ -241,7 +241,14 @@ fn vinyl_sub(v: &VinylRecord) -> String {
 /// record (not the built cell) lets the toolbar count what the grid will show
 /// without building every cell.
 pub(crate) fn vinyl_matches(v: &VinylRecord, query: &str) -> bool {
-    let hay = format!("{} {} {}", v.artist, v.title, vinyl_sub(v)).to_lowercase();
+    let hay = format!(
+        "{} {} {} {}",
+        v.artist,
+        v.title,
+        vinyl_sub(v),
+        v.genres.join(" ")
+    )
+    .to_lowercase();
     query.split_whitespace().all(|term| hay.contains(term))
 }
 
@@ -1156,9 +1163,65 @@ impl App {
         // search narrows both tabs and you can see which shelf holds the hits
         // without switching to it.
         let query = self.vinyl_filter.trim().to_lowercase();
-        let keep = |v: &&VinylRecord| query.is_empty() || vinyl_matches(v, &query);
+        let genre = self.vinyl_genre.clone();
+        let keep = |v: &&VinylRecord| {
+            (query.is_empty() || vinyl_matches(v, &query))
+                && genre
+                    .as_deref()
+                    .map_or(true, |g| v.genres.iter().any(|t| t.eq_ignore_ascii_case(g)))
+        };
         let owned_recs: Vec<VinylRecord> = self.vinyl.iter().filter(keep).cloned().collect();
         let wanted_recs: Vec<VinylRecord> = self.wantlist.iter().filter(keep).cloned().collect();
+
+        // Every genre tag occurring in the current scope (the active shelf, or
+        // the current seller's crates), with how many records carry it — the
+        // genre menu's option list. Built from the unfiltered scope so picking
+        // a tag doesn't collapse the menu to itself. For sellers, also count
+        // how many listings have known tags at all: their tags come from caches
+        // (see `seller_genres`), and a filter that silently drops untagged
+        // records should say so.
+        let (genre_options, seller_tagged) = {
+            let mut counts: std::collections::BTreeMap<&str, usize> =
+                std::collections::BTreeMap::new();
+            let mut tagged = 0usize;
+            match self.vinyl_tab {
+                VinylTab::Shelf(list) => {
+                    let recs = match list {
+                        VinylList::Collection => &self.vinyl,
+                        VinylList::Wantlist => &self.wantlist,
+                    };
+                    for r in recs {
+                        for t in &r.genres {
+                            *counts.entry(t.as_str()).or_default() += 1;
+                        }
+                    }
+                }
+                VinylTab::Sellers => {
+                    for l in &self.seller_listings {
+                        if let Some(tags) = self.seller_genres.get(&l.release_id) {
+                            tagged += 1;
+                            for t in tags {
+                                *counts.entry(t.as_str()).or_default() += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            let mut v: Vec<(String, usize)> = counts
+                .into_iter()
+                .map(|(t, n)| (t.to_string(), n))
+                .collect();
+            // Biggest crates first; the tail is alphabetical for scanning.
+            v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            // Keep the active tag visible even when the current scope has no
+            // record carrying it, so it can be seen and cleared.
+            if let Some(g) = &genre {
+                if !v.iter().any(|(t, _)| t.eq_ignore_ascii_case(g)) {
+                    v.push((g.clone(), 0));
+                }
+            }
+            (v, tagged)
+        };
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -1201,6 +1264,63 @@ impl App {
             {
                 self.vinyl_filter.clear();
             }
+            // Genre filter, on all three tabs: every tag occurring in the
+            // current scope, biggest first. The button wears the active tag so
+            // a filtered view says what's filtering it.
+            ui.add_space(6.0);
+            let genre_label = genre.clone().unwrap_or_else(|| "All genres".to_string());
+            ui.menu_button(format!("♪ {genre_label}"), |ui| {
+                ui.set_min_width(200.0);
+                egui::ScrollArea::vertical()
+                    .max_height(340.0)
+                    .show(ui, |ui| {
+                        if ui
+                            .selectable_label(genre.is_none(), "All genres")
+                            .clicked()
+                        {
+                            self.vinyl_genre = None;
+                            ui.close_menu();
+                        }
+                        if !genre_options.is_empty() {
+                            ui.separator();
+                        }
+                        for (tag, n) in &genre_options {
+                            let selected = genre.as_deref() == Some(tag.as_str());
+                            if ui
+                                .selectable_label(selected, format!("{tag} ({n})"))
+                                .clicked()
+                            {
+                                // Clicking the active tag clears it.
+                                self.vinyl_genre =
+                                    (!selected).then(|| tag.clone());
+                                ui.close_menu();
+                            }
+                        }
+                        if genre_options.is_empty() {
+                            let hint = if seller_mode {
+                                "No genre tags known for these crates yet. Tags \
+                                 come from your shelves and from records opened \
+                                 once in Ordnung."
+                            } else {
+                                "No genre tags yet. Refresh to pull them from \
+                                 Discogs."
+                            };
+                            ui.label(egui::RichText::new(hint).weak());
+                        } else if seller_mode {
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Tags known for {seller_tagged} of {} records",
+                                    self.seller_listings.len()
+                                ))
+                                .weak()
+                                .small(),
+                            );
+                        }
+                    });
+            })
+            .response
+            .on_hover_note("Filter this view by genre or style tag");
             if seller_mode {
                 return;
             }
@@ -1353,15 +1473,27 @@ impl App {
                     VinylList::Collection => wanted_recs.len(),
                     VinylList::Wantlist => owned_recs.len(),
                 };
-                let msg = match (tab, query.is_empty(), other) {
-                    (VinylList::Collection, true, _) => "Nothing in your Discogs collection yet.",
-                    (VinylList::Wantlist, true, _) => "Nothing on your Discogs wantlist yet.",
-                    (_, false, 0) => "No records match that search.",
+                // What's narrowing the view decides the wording: the search,
+                // the genre filter, or both.
+                let what = match (query.is_empty(), self.vinyl_genre.is_some()) {
+                    (false, true) => "those filters",
+                    (false, false) => "that search",
+                    (true, _) => "that genre",
+                };
+                let filtering = !query.is_empty() || self.vinyl_genre.is_some();
+                let msg = match (tab, filtering, other) {
                     (VinylList::Collection, false, _) => {
-                        "Nothing in your collection matches that search."
+                        "Nothing in your Discogs collection yet.".to_string()
                     }
                     (VinylList::Wantlist, false, _) => {
-                        "Nothing on your wantlist matches that search."
+                        "Nothing on your Discogs wantlist yet.".to_string()
+                    }
+                    (_, true, 0) => format!("No records match {what}."),
+                    (VinylList::Collection, true, _) => {
+                        format!("Nothing in your collection matches {what}.")
+                    }
+                    (VinylList::Wantlist, true, _) => {
+                        format!("Nothing on your wantlist matches {what}.")
                     }
                 };
                 ui.label(egui::RichText::new(msg).weak());

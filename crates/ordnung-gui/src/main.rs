@@ -1077,6 +1077,11 @@ struct App {
     /// the rows belong to; a sweep finishing clears it to force a re-read.
     seller_listings: Vec<SellerListing>,
     seller_listings_for: Option<String>,
+    /// Genre tags per release id for the current seller's crates, loaded with
+    /// `seller_listings`. The inventory endpoint carries no genre data, so this
+    /// is mined from the release-detail cache plus the user's own shelves; a
+    /// listing missing here has unknown tags and drops out of a genre filter.
+    seller_genres: HashMap<u64, Vec<String>>,
     /// Pre-folded search haystack per listing (same indices as
     /// `seller_listings`), built once per load so a keystroke filters tens of
     /// thousands of rows without re-formatting them.
@@ -1088,6 +1093,15 @@ struct App {
     /// artist, title, year and format as you type. Not persisted: a search is
     /// about the record you're looking for right now, not a saved view.
     vinyl_filter: String,
+    /// Genre tag the whole vinyl view is filtered to, across all three tabs.
+    /// `None` shows everything. Session state like `vinyl_filter`.
+    vinyl_genre: Option<String>,
+    /// Release-cache genre tags for shelf rows synced before the `genres`
+    /// column existed (they carry none until the next Discogs refresh).
+    /// `release_genres` parses JSON per row, so the map is memoized on the
+    /// sorted set of release ids still missing tags (`_for`).
+    vinyl_genre_fallback: HashMap<u64, Vec<String>>,
+    vinyl_genre_fallback_for: Vec<u64>,
     /// Decoded vinyl cover textures keyed by list + Discogs `instance_id` (reuses
     /// `ThumbState`). Loaded lazily by the vinyl-cover worker as cells render,
     /// mirroring `cover_cache` for table rows. The list is part of the key because
