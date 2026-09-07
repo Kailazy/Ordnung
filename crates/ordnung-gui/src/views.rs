@@ -1163,12 +1163,15 @@ impl App {
         // search narrows both tabs and you can see which shelf holds the hits
         // without switching to it.
         let query = self.vinyl_filter.trim().to_lowercase();
-        let genre = self.vinyl_genre.clone();
+        // Selected genre tags are OR'd: a record shows if it carries any of
+        // them, so stacking Techno + House + IDM widens the net.
+        let genres_sel = self.vinyl_genres.clone();
         let keep = |v: &&VinylRecord| {
             (query.is_empty() || vinyl_matches(v, &query))
-                && genre
-                    .as_deref()
-                    .map_or(true, |g| v.genres.iter().any(|t| t.eq_ignore_ascii_case(g)))
+                && (genres_sel.is_empty()
+                    || v.genres
+                        .iter()
+                        .any(|t| genres_sel.iter().any(|g| t.eq_ignore_ascii_case(g))))
         };
         let owned_recs: Vec<VinylRecord> = self.vinyl.iter().filter(keep).cloned().collect();
         let wanted_recs: Vec<VinylRecord> = self.wantlist.iter().filter(keep).cloned().collect();
@@ -1213,9 +1216,9 @@ impl App {
                 .collect();
             // Biggest crates first; the tail is alphabetical for scanning.
             v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            // Keep the active tag visible even when the current scope has no
+            // Keep every active tag visible even when the current scope has no
             // record carrying it, so it can be seen and cleared.
-            if let Some(g) = &genre {
+            for g in &genres_sel {
                 if !v.iter().any(|(t, _)| t.eq_ignore_ascii_case(g)) {
                     v.push((g.clone(), 0));
                 }
@@ -1265,35 +1268,45 @@ impl App {
                 self.vinyl_filter.clear();
             }
             // Genre filter, on all three tabs: every tag occurring in the
-            // current scope, biggest first. The button wears the active tag so
-            // a filtered view says what's filtering it.
+            // current scope, biggest first. Multi-select, OR'd — the menu
+            // stays open while tags are toggled, because picking several is
+            // the point. The button carries the count so a filtered view says
+            // what's filtering it even when the pills don't fit.
             ui.add_space(6.0);
-            let genre_label = genre.clone().unwrap_or_else(|| "All genres".to_string());
+            let genre_label = match genres_sel.len() {
+                0 => "All genres".to_string(),
+                1 => genres_sel[0].clone(),
+                n => format!("{n} genres"),
+            };
             ui.menu_button(format!("♪ {genre_label}"), |ui| {
                 ui.set_min_width(200.0);
                 egui::ScrollArea::vertical()
                     .max_height(340.0)
                     .show(ui, |ui| {
                         if ui
-                            .selectable_label(genre.is_none(), "All genres")
+                            .selectable_label(genres_sel.is_empty(), "All genres")
                             .clicked()
                         {
-                            self.vinyl_genre = None;
+                            self.vinyl_genres.clear();
                             ui.close_menu();
                         }
                         if !genre_options.is_empty() {
                             ui.separator();
                         }
                         for (tag, n) in &genre_options {
-                            let selected = genre.as_deref() == Some(tag.as_str());
+                            let selected =
+                                genres_sel.iter().any(|g| g.eq_ignore_ascii_case(tag));
                             if ui
                                 .selectable_label(selected, format!("{tag} ({n})"))
                                 .clicked()
                             {
-                                // Clicking the active tag clears it.
-                                self.vinyl_genre =
-                                    (!selected).then(|| tag.clone());
-                                ui.close_menu();
+                                if selected {
+                                    self.vinyl_genres
+                                        .retain(|g| !g.eq_ignore_ascii_case(tag));
+                                } else {
+                                    self.vinyl_genres.push(tag.clone());
+                                }
+                                // No close_menu: keep toggling.
                             }
                         }
                         if genre_options.is_empty() {
@@ -1320,7 +1333,18 @@ impl App {
                     });
             })
             .response
-            .on_hover_note("Filter this view by genre or style tag");
+            .on_hover_note("Filter this view by genre or style tags, any of them matching");
+            // The active tags as pills beside the menu, each one click to
+            // drop — so widening or narrowing the net never reopens the menu.
+            for tag in genres_sel.iter() {
+                if ui
+                    .small_button(format!("{tag} ✖"))
+                    .on_hover_note("Remove this genre from the filter")
+                    .clicked()
+                {
+                    self.vinyl_genres.retain(|g| g != tag);
+                }
+            }
             if seller_mode {
                 return;
             }
@@ -1475,12 +1499,13 @@ impl App {
                 };
                 // What's narrowing the view decides the wording: the search,
                 // the genre filter, or both.
-                let what = match (query.is_empty(), self.vinyl_genre.is_some()) {
-                    (false, true) => "those filters",
-                    (false, false) => "that search",
-                    (true, _) => "that genre",
+                let what = match (query.is_empty(), self.vinyl_genres.len()) {
+                    (false, 0) => "that search",
+                    (false, _) => "those filters",
+                    (true, 1) => "that genre",
+                    (true, _) => "those genres",
                 };
-                let filtering = !query.is_empty() || self.vinyl_genre.is_some();
+                let filtering = !query.is_empty() || !self.vinyl_genres.is_empty();
                 let msg = match (tab, filtering, other) {
                     (VinylList::Collection, false, _) => {
                         "Nothing in your Discogs collection yet.".to_string()

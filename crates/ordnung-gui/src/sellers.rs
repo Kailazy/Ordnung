@@ -297,19 +297,20 @@ impl App {
         // genre filter reads `seller_genres`; a listing with no known tags
         // can't match a tag, so it drops out (the genre menu says how many
         // records have known tags at all).
-        let genre = self.vinyl_genre.clone();
-        let unfiltered = query.is_empty() && genre.is_none();
+        let genres_sel = self.vinyl_genres.clone();
+        let unfiltered = query.is_empty() && genres_sel.is_empty();
         let filtered: Vec<usize> = self
             .seller_listings
             .iter()
             .enumerate()
             .filter(|(i, l)| {
                 (query.is_empty() || listing_matches(&self.seller_hay[*i], query))
-                    && genre.as_deref().map_or(true, |g| {
-                        self.seller_genres
-                            .get(&l.release_id)
-                            .is_some_and(|tags| tags.iter().any(|t| t.eq_ignore_ascii_case(g)))
-                    })
+                    && (genres_sel.is_empty()
+                        || self.seller_genres.get(&l.release_id).is_some_and(|tags| {
+                            tags.iter().any(|t| {
+                                genres_sel.iter().any(|g| t.eq_ignore_ascii_case(g))
+                            })
+                        }))
             })
             .map(|(i, _)| i)
             .collect();
@@ -344,12 +345,18 @@ impl App {
         if filtered.is_empty() {
             ui.add_space(30.0);
             ui.vertical_centered(|ui| {
-                let msg = match (&genre, query.is_empty()) {
-                    (Some(g), true) => format!("Nothing in the crates is tagged {g}."),
-                    (Some(g), false) => {
-                        format!("Nothing tagged {g} in the crates matches that search.")
-                    }
-                    (None, _) => "Nothing in the crates matches that search.".to_string(),
+                // "Techno, House or IDM" — the OR the filter actually applies.
+                let tags_named = match genres_sel.as_slice() {
+                    [] => String::new(),
+                    [one] => one.clone(),
+                    [head @ .., last] => format!("{} or {last}", head.join(", ")),
+                };
+                let msg = match (genres_sel.is_empty(), query.is_empty()) {
+                    (false, true) => format!("Nothing in the crates is tagged {tags_named}."),
+                    (false, false) => format!(
+                        "Nothing tagged {tags_named} in the crates matches that search."
+                    ),
+                    (true, _) => "Nothing in the crates matches that search.".to_string(),
                 };
                 ui.label(egui::RichText::new(msg).weak());
             });

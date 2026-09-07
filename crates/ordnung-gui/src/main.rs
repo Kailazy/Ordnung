@@ -1093,9 +1093,11 @@ struct App {
     /// artist, title, year and format as you type. Not persisted: a search is
     /// about the record you're looking for right now, not a saved view.
     vinyl_filter: String,
-    /// Genre tag the whole vinyl view is filtered to, across all three tabs.
-    /// `None` shows everything. Session state like `vinyl_filter`.
-    vinyl_genre: Option<String>,
+    /// Genre tags the whole vinyl view is filtered to, across all three tabs.
+    /// A record shows if it carries *any* of them (OR), so "Techno" + "House"
+    /// widens rather than narrows. Empty shows everything. Session state like
+    /// `vinyl_filter`.
+    vinyl_genres: Vec<String>,
     /// Release-cache genre tags for shelf rows synced before the `genres`
     /// column existed (they carry none until the next Discogs refresh).
     /// `release_genres` parses JSON per row, so the map is memoized on the
