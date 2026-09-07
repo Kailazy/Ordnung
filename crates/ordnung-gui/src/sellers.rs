@@ -147,6 +147,7 @@ impl App {
         let mut switch_to: Option<String> = None;
         let mut remove: Option<String> = None;
         let mut sweep: Option<String> = None;
+        let mut fetch_tags: Option<String> = None;
         let mut add_clicked = false;
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -203,6 +204,18 @@ impl App {
                             .clicked()
                         {
                             sweep = Some(cur.clone());
+                        }
+                        if ui
+                            .button("♪ Fetch tags")
+                            .on_hover_note(
+                                "Pull genre tags for these crates from Discogs, one \
+                                 release lookup per record. Thousands of records take \
+                                 an hour or more; stopping keeps what's fetched and a \
+                                 later run continues from there",
+                            )
+                            .clicked()
+                        {
+                            fetch_tags = Some(cur.clone());
                         }
                     });
                     if ui
@@ -262,6 +275,9 @@ impl App {
         }
         if let Some(u) = sweep {
             self.spawn_sweep_seller(ctx.clone(), u);
+        }
+        if let Some(u) = fetch_tags {
+            self.spawn_fetch_seller_genres(ctx.clone(), u);
         }
 
         // --- Empty states. ----------------------------------------------------

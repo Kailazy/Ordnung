@@ -1311,9 +1311,8 @@ impl App {
                         }
                         if genre_options.is_empty() {
                             let hint = if seller_mode {
-                                "No genre tags known for these crates yet. Tags \
-                                 come from your shelves and from records opened \
-                                 once in Ordnung."
+                                "No genre tags known for these crates yet. \
+                                 Use Fetch tags to pull them from Discogs."
                             } else {
                                 "No genre tags yet. Refresh to pull them from \
                                  Discogs."
@@ -1321,14 +1320,16 @@ impl App {
                             ui.label(egui::RichText::new(hint).weak());
                         } else if seller_mode {
                             ui.separator();
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "Tags known for {seller_tagged} of {} records",
-                                    self.seller_listings.len()
-                                ))
-                                .weak()
-                                .small(),
-                            );
+                            let n = self.seller_listings.len();
+                            let note = if seller_tagged < n {
+                                format!(
+                                    "Tags known for {seller_tagged} of {n} records. \
+                                     Fetch tags pulls the rest."
+                                )
+                            } else {
+                                format!("Tags known for all {n} records")
+                            };
+                            ui.label(egui::RichText::new(note).weak().small());
                         }
                     });
             })

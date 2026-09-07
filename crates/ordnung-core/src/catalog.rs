@@ -1401,6 +1401,34 @@ impl Catalog {
         Ok(out)
     }
 
+    /// Of `release_ids`, the ones with no release-cache row at all — the fetch
+    /// list for a seller genre-tag run. Presence alone decides: a cached
+    /// release with no genre tags is genuinely untagged on Discogs, so
+    /// re-fetching it would spend a paced request to learn nothing new.
+    pub fn releases_not_cached(&self, release_ids: &[u64]) -> Result<Vec<u64>> {
+        let mut cached = std::collections::HashSet::new();
+        for chunk in release_ids.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT release_id FROM release_cache WHERE release_id IN ({placeholders})"
+            ))?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(chunk.iter().map(|id| id.to_string())),
+                |r| r.get::<_, String>(0),
+            )?;
+            for row in rows {
+                if let Ok(id) = row?.parse::<u64>() {
+                    cached.insert(id);
+                }
+            }
+        }
+        Ok(release_ids
+            .iter()
+            .copied()
+            .filter(|id| !cached.contains(id))
+            .collect())
+    }
+
     /// Store a fetched [`ReleaseDetail`] in the release cache, replacing any prior
     /// row for the same release. Release metadata is effectively immutable, so this
     /// is write-once in practice; the upsert just keeps a manual re-fetch idempotent.
