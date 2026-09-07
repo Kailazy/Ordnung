@@ -2794,7 +2794,7 @@ dependencies = [
 
 [[package]]
 name = "ordnung-cli"
-version = "0.83.5"
+version = "0.84.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2806,7 +2806,7 @@ dependencies = [
 
 [[package]]
 name = "ordnung-core"
-version = "0.83.5"
+version = "0.84.0"
 dependencies = [
  "flate2",
  "image",
@@ -2827,7 +2827,7 @@ dependencies = [
 
 [[package]]
 name = "ordnung-gui"
-version = "0.83.5"
+version = "0.84.0"
 dependencies = [
  "anyhow",
  "block2 0.5.1",
@@ -2854,7 +2854,7 @@ dependencies = [
 
 [[package]]
 name = "ordnung-rbdb"
-version = "0.83.5"
+version = "0.84.0"
 dependencies = [
  "image",
  "libc",
