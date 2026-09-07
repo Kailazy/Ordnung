@@ -936,6 +936,9 @@ impl App {
             /// Want a *different* pressing of the same record — the one that
             /// has copies for sale.
             WantAlternative(u64),
+            /// Look at that pressing here: swap the sheet over to it instead
+            /// of sending the user to discogs.com.
+            OpenAlternative,
         }
         let mut act: Option<Act> = None;
         // The transport bar's own action, kept apart from `act` so a scrub and
@@ -1030,11 +1033,11 @@ impl App {
                                         .color(egui::Color32::from_rgb(120, 200, 140)),
                                 );
                                 if ui
-                                    .small_button("Open ↗")
-                                    .on_hover_note("Open that pressing on discogs.com")
+                                    .small_button("View")
+                                    .on_hover_note("Show that pressing in this window")
                                     .clicked()
                                 {
-                                    open_url(&format!("https://www.discogs.com/release/{alt_id}"));
+                                    act = Some(Act::OpenAlternative);
                                 }
                                 // Want the pressing you can actually buy, not
                                 // the promo you happened to land on.
@@ -1423,6 +1426,35 @@ impl App {
                         label: format!("{artist} — {title}"),
                     },
                 );
+            }
+            Some(Act::OpenAlternative) => {
+                // Pull the version row out of the sheet before it's replaced.
+                // The pressing shares the record's artist; everything else in
+                // the header comes off the row itself.
+                let alt = self.vinyl_sheet.as_ref().and_then(|s| match &s.price {
+                    PriceState::Elsewhere { version, .. } => {
+                        Some((version.as_ref().clone(), s.artist.clone()))
+                    }
+                    _ => None,
+                });
+                if let Some((v, artist)) = alt {
+                    // `released` is a date only sometimes; the header line
+                    // wants just the year either way.
+                    let year = v.released.split('-').next().unwrap_or("").trim();
+                    let imprint = match (v.label.trim(), v.catno.trim()) {
+                        ("", "") => String::new(),
+                        (l, "") => l.to_string(),
+                        ("", c) => c.to_string(),
+                        (l, c) => format!("{l} {c}"),
+                    };
+                    let sub = [year, v.format.trim(), imprint.as_str()]
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    let cover = (!v.thumb_url.trim().is_empty()).then(|| v.thumb_url.clone());
+                    self.open_release_sheet(v.release_id, artist, v.title.clone(), sub, cover, ctx);
+                }
             }
             Some(Act::ToggleList(list)) => {
                 let present = match list {
