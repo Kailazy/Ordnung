@@ -387,6 +387,28 @@ impl App {
         }
     }
 
+    /// Note that the user actually listened to the open record while digging
+    /// a seller's crates — what flips the crates' viewed (eye) marker. Only a
+    /// sheet carrying a seller offer counts: playing records from your own
+    /// shelves isn't auditioning a shop's stock. Persisted by release id so
+    /// the record reads as heard in every shop that stocks it; the in-memory
+    /// set updates first so the eye appears without waiting on a reload.
+    fn mark_sheet_auditioned(&mut self) {
+        let Some(s) = self.vinyl_sheet.as_ref() else {
+            return;
+        };
+        if s.offer.is_none() {
+            return;
+        }
+        let id = s.release_id;
+        if !self.viewed_releases.insert(id) {
+            return;
+        }
+        if let Ok(cat) = Catalog::open(&self.db_path) {
+            let _ = cat.mark_release_viewed(id);
+        }
+    }
+
     /// The catalog tracks linked to `release_id`, with the analysis figures the
     /// sheet shows. One small read per linked track — a record is a handful of
     /// tracks, so this stays on the UI thread like the other inline reads.
@@ -1611,19 +1633,26 @@ impl App {
                 self.dig_step(thread);
                 return;
             }
-            Some(Act::Play(row)) => self.play_sheet_row(row, frame),
-            Some(Act::TogglePlay) => match record_play {
-                RecordPlay::Playing(PlayEngine::Video) | RecordPlay::Paused(PlayEngine::Video) => {
-                    webview::toggle_pause()
-                }
-                RecordPlay::Playing(PlayEngine::Audio) | RecordPlay::Paused(PlayEngine::Audio) => {
-                    if let Some(a) = self.audio.as_mut() {
-                        a.toggle_pause();
+            Some(Act::Play(row)) => {
+                self.mark_sheet_auditioned();
+                self.play_sheet_row(row, frame)
+            }
+            Some(Act::TogglePlay) => {
+                self.mark_sheet_auditioned();
+                match record_play {
+                    RecordPlay::Playing(PlayEngine::Video)
+                    | RecordPlay::Paused(PlayEngine::Video) => webview::toggle_pause(),
+                    RecordPlay::Playing(PlayEngine::Audio)
+                    | RecordPlay::Paused(PlayEngine::Audio) => {
+                        if let Some(a) = self.audio.as_mut() {
+                            a.toggle_pause();
+                        }
                     }
+                    RecordPlay::Stopped => self.play_sheet_from_start(frame),
                 }
-                RecordPlay::Stopped => self.play_sheet_from_start(frame),
-            },
+            }
             Some(Act::PlayExtra(v)) => {
+                self.mark_sheet_auditioned();
                 let (ids, title) = {
                     let s = self.vinyl_sheet.as_ref().unwrap();
                     let video = s.detail.as_ref().and_then(|d| d.videos.get(v));

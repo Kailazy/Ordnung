@@ -870,7 +870,7 @@ fn draw_sleeve(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, fil
 /// The lid is two mirrored quadratic arcs meeting at sharp corners — a plain
 /// ellipse reads as a coin, and the corners are what make it an eye. Sampled
 /// into one closed path so the outline and the fill describe the same shape.
-fn draw_eye(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, filled: bool) {
+pub(crate) fn draw_eye(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, filled: bool) {
     let hw = r * 1.15; // half-width, corner to corner
     let hh = r * 0.72; // how far the lids bow from the centre line
     const STEPS: usize = 14;

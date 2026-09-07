@@ -295,7 +295,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 impl Catalog {
     /// Open (creating if needed) a catalog at `path` and ensure the schema exists.
@@ -625,7 +625,16 @@ impl Catalog {
                 fetched_at     INTEGER NOT NULL DEFAULT (unixepoch())
             );
             CREATE INDEX IF NOT EXISTS idx_seller_listings_seller
-                ON seller_listings(seller);",
+                ON seller_listings(seller);
+
+            -- Releases the user has auditioned while digging: opened from a
+            -- seller card and actually played a song from. Keyed by release
+            -- (not listing) so a record reads as heard across every shop that
+            -- stocks it, and across sweeps. Drives the crates' viewed marker.
+            CREATE TABLE IF NOT EXISTS viewed_releases (
+                release_id INTEGER PRIMARY KEY,
+                viewed_at  INTEGER NOT NULL DEFAULT (unixepoch())
+            );",
         )?;
         self.migrate()?;
         Ok(())
@@ -3177,6 +3186,31 @@ impl Catalog {
         Ok(rows)
     }
 
+    /// Record that the user auditioned this release while digging (opened it
+    /// from a seller card and played a song). Re-listening restamps the time.
+    pub fn mark_release_viewed(&self, release_id: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO viewed_releases (release_id, viewed_at)
+             VALUES (?1, unixepoch())
+             ON CONFLICT(release_id) DO UPDATE SET viewed_at = excluded.viewed_at",
+            params![release_id as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Every release the user has auditioned from a seller's crates — the set
+    /// the viewed marker is drawn from. Small (it grows one row per record
+    /// actually listened to), so it loads whole.
+    pub fn viewed_releases(&self) -> Result<Vec<u64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT release_id FROM viewed_releases")?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.into_iter().map(|id| id as u64).collect())
+    }
+
     // --- Playlists (Phase 3) -------------------------------------------------
 
     /// Create a playlist (or folder with `is_folder`) under an optional parent
@@ -4739,6 +4773,19 @@ mod tests {
         assert!(cat.list_sellers().unwrap().is_empty());
         assert!(cat.list_seller_listings("hardwax").unwrap().is_empty());
         assert!(!cat.remove_seller("hardwax").unwrap());
+    }
+
+    #[test]
+    fn viewed_releases_roundtrip_and_restamp() {
+        let cat = Catalog::open(":memory:").unwrap();
+        assert!(cat.viewed_releases().unwrap().is_empty());
+        cat.mark_release_viewed(42).unwrap();
+        cat.mark_release_viewed(7).unwrap();
+        // Hearing it again is not a second row.
+        cat.mark_release_viewed(42).unwrap();
+        let mut viewed = cat.viewed_releases().unwrap();
+        viewed.sort_unstable();
+        assert_eq!(viewed, vec![7, 42]);
     }
 
     #[test]

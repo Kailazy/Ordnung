@@ -556,7 +556,7 @@ impl App {
         use crate::ui::tokens::color;
 
         // Snapshot the card's strings before `dig_cover` needs `self` mutably.
-        let (listing_id, release_id, artist, title, sub, price_line, thumb, owned, wanted) = {
+        let (listing_id, release_id, artist, title, sub, price_line, thumb, owned, wanted, viewed) = {
             let l = self.seller_listings.get(idx)?;
             let sub = match (l.year, l.format.as_deref()) {
                 (Some(y), Some(f)) => format!("{y} · {f}"),
@@ -584,6 +584,7 @@ impl App {
                 l.thumb_url.clone(),
                 self.vinyl_owned.contains(&l.release_id),
                 self.vinyl_wanted.contains(&l.release_id),
+                self.viewed_releases.contains(&l.release_id),
             )
         };
         let tex = thumb.as_deref().and_then(|u| self.dig_cover(u).cloned());
@@ -666,6 +667,21 @@ impl App {
                     ui.painter()
                         .rect_filled(chip, egui::Rounding::same(4.0), fill);
                     ui.painter().galley(chip.min + pad, galley, egui::Color32::WHITE);
+                }
+                // Viewed eye, top-right: you already pulled this record out
+                // and listened — the mark that stops a long dig from
+                // re-auditioning the same crates.
+                if viewed {
+                    let c = egui::pos2(rect.right() - 13.0, rect.top() + 13.0);
+                    ui.painter()
+                        .circle_filled(c, 10.0, egui::Color32::from_black_alpha(170));
+                    crate::records::draw_eye(
+                        ui.painter(),
+                        c,
+                        5.0,
+                        egui::Color32::from_gray(235),
+                        true,
+                    );
                 }
                 // Dig disc, bottom-right: start a crate dig from this listing.
                 // Hover-revealed like the shelf grid's, and its click never
@@ -783,7 +799,7 @@ impl App {
 
         // Snapshot the row's strings before `dig_cover` needs `self` mutably
         // (same dance as the card).
-        let (listing_id, release_id, artist, title, sub, price_line, thumb, owned, wanted) = {
+        let (listing_id, release_id, artist, title, sub, price_line, thumb, owned, wanted, viewed) = {
             let l = self.seller_listings.get(idx)?;
             let sub = match (l.year, l.format.as_deref()) {
                 (Some(y), Some(f)) => format!("{y} · {f}"),
@@ -811,6 +827,7 @@ impl App {
                 l.thumb_url.clone(),
                 self.vinyl_owned.contains(&l.release_id),
                 self.vinyl_wanted.contains(&l.release_id),
+                self.viewed_releases.contains(&l.release_id),
             )
         };
         let tex = thumb.as_deref().and_then(|u| self.dig_cover(u).cloned());
@@ -892,6 +909,13 @@ impl App {
                 .rect_filled(chip, egui::Rounding::same(4.0), fill);
             ui.painter()
                 .galley(chip.min + pad, galley, egui::Color32::WHITE);
+        }
+        // Viewed eye, left of the chip column: same audition marker the card
+        // wears in its corner.
+        if viewed {
+            let c = egui::pos2(right_edge - 9.0, rect.center().y);
+            crate::records::draw_eye(ui.painter(), c, 5.5, egui::Color32::from_gray(150), true);
+            right_edge = c.x - 9.0 - 8.0;
         }
         // Artist over title · year · format, truncated between the thumb and
         // the terms column.

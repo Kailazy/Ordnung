@@ -1209,6 +1209,11 @@ struct App {
     /// The "add a seller" input box in the Sellers tab (username or a pasted
     /// discogs.com seller/user URL).
     seller_add: String,
+    /// Releases the user has auditioned while digging — opened from a seller
+    /// card and actually played a song from. Drives the crates' small eye
+    /// marker; loaded from the `viewed_releases` table with the vinyl view
+    /// and appended to live as songs play.
+    viewed_releases: HashSet<u64>,
     /// Free-text filter for the vinyl view's search bar. Narrows both shelves by
     /// artist, title, year and format as you type. Not persisted: a search is
     /// about the record you're looking for right now, not a saved view.

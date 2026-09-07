@@ -142,6 +142,7 @@ impl App {
             seller_genres: HashMap::new(),
             seller_hay: Vec::new(),
             seller_add: String::new(),
+            viewed_releases: HashSet::new(),
             vinyl_filter: String::new(),
             vinyl_flt: VinylFilters::default(),
             vinyl_genre_fallback: HashMap::new(),
@@ -726,6 +727,12 @@ impl App {
             // listing caches load lazily in the Sellers tab, not here.
             self.sellers = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_sellers())
+                .unwrap_or_default();
+            // The auditioned-releases set is one row per record actually
+            // listened to, so it loads whole alongside.
+            self.viewed_releases = Catalog::open(&self.db_path)
+                .and_then(|c| c.viewed_releases())
+                .map(|ids| ids.into_iter().collect())
                 .unwrap_or_default();
             if let Some(cur) = &self.seller_current {
                 if !self.sellers.iter().any(|s| &s.username == cur) {
