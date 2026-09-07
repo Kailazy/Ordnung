@@ -390,6 +390,97 @@ enum VinylGridAction {
     Versions(VinylCoverKey),
 }
 
+/// The right-click menu for one shelf record, shared by the cover wall and the
+/// list rows so both layouts offer the same moves.
+fn vinyl_cell_menu(
+    ui: &mut egui::Ui,
+    c: &VinylCell,
+    release_url: &str,
+    action: &mut Option<VinylGridAction>,
+) {
+    let (list, _) = c.key;
+    ui.label(egui::RichText::new(&c.title).strong());
+    ui.label(egui::RichText::new(&c.artist).weak());
+    ui.separator();
+    if ui
+        .button("Open on Discogs ↗")
+        .on_hover_note("Open this release on discogs.com")
+        .clicked()
+    {
+        open_url(release_url);
+        ui.close_menu();
+    }
+    if ui
+        .button("🔍  Dig from here")
+        .on_hover_note("Walk the collection from this record, by artist or label")
+        .clicked()
+    {
+        *action = Some(VinylGridAction::Dig(c.key));
+        ui.close_menu();
+    }
+    // Which pressing you hold is the collector's question, and the answer often
+    // is "the wrong one". This lists the siblings and swaps one in.
+    if ui
+        .button("See other releases")
+        .on_hover_note("Other pressings of this record, to swap one in")
+        .clicked()
+    {
+        *action = Some(VinylGridAction::Versions(c.key));
+        ui.close_menu();
+    }
+    ui.separator();
+    let (move_label, move_tip, remove_label) = match list {
+        VinylList::Collection => (
+            "Move to wantlist",
+            "Give up this copy on Discogs and want it instead",
+            "Remove from collection",
+        ),
+        VinylList::Wantlist => (
+            "Move to collection",
+            "Mark this record as owned on Discogs",
+            "Remove from wantlist",
+        ),
+    };
+    // Already in both lists: the move has nothing to do, and running it would
+    // ask Discogs for a duplicate copy. Say where it already is instead.
+    let (move_label, move_tip) = if c.also_in_other {
+        match list {
+            VinylList::Collection => (
+                "✓  Already in your wantlist",
+                "This record is in both lists on Discogs",
+            ),
+            VinylList::Wantlist => (
+                "✓  Already in your collection",
+                "You already own this on Discogs",
+            ),
+        }
+    } else {
+        (move_label, move_tip)
+    };
+    if ui
+        .add_enabled(!c.also_in_other, egui::Button::new(move_label))
+        .on_hover_note(move_tip)
+        .on_disabled_hover_text(crate::ui::hover::note(move_tip))
+        .clicked()
+    {
+        *action = Some(VinylGridAction::Move(c.key));
+        ui.close_menu();
+    }
+    if ui
+        .button(remove_label)
+        .on_hover_note("Delete it from this Discogs list")
+        .clicked()
+    {
+        *action = Some(VinylGridAction::Remove(c.key));
+        ui.close_menu();
+    }
+    ui.separator();
+    if ui.button("Open on Discogs ↗").clicked() {
+        open_url(release_url);
+        ui.close_menu();
+    }
+}
+
 impl App {
     /// Recount tracks with a missing source file (drives the toolbar's relocate
     /// button). Kept out of `reload` so filter keystrokes don't stat the whole
@@ -1355,6 +1446,10 @@ impl App {
         // menu below can write it back without borrowing the config twice.
         let mut sort = VinylSort::from_key(&self.config.vinyl_sort);
         let mut ascending = self.config.vinyl_sort_ascending;
+        // Layout choice (wall of covers vs rows), persisted like the sort. The
+        // toggle writes the config directly; this snapshot decides whether to
+        // save once the toolbar's borrows are released.
+        let view_before = self.config.vinyl_view.clone();
 
         // Counts for the tab labels. They filter the same way the grids do, so a
         // search narrows both tabs and you can see which shelf holds the hits
@@ -1493,6 +1588,25 @@ impl App {
             .on_hover_note(
                 "Filter by year, format, genre and style; each added constraint narrows further",
             );
+            // Grid vs list: one layout choice for all three tabs, so it sits
+            // with the shared controls rather than the shelf-only ones. A wall
+            // of covers browses; rows compare — price, year and format line up.
+            ui.add_space(6.0);
+            let list_mode = self.config.vinyl_view == "list";
+            if ui
+                .selectable_label(!list_mode, "⊞")
+                .on_hover_note("Show records as a wall of covers")
+                .clicked()
+            {
+                self.config.vinyl_view = "grid".to_string();
+            }
+            if ui
+                .selectable_label(list_mode, "☰")
+                .on_hover_note("Show records as compact rows")
+                .clicked()
+            {
+                self.config.vinyl_view = "list".to_string();
+            }
             if seller_mode {
                 return;
             }
@@ -1546,7 +1660,10 @@ impl App {
         // The tab strip sits directly on the separator below, so the active tab's
         // underline and that hairline read as one baseline.
         ui.add_space(-2.0);
-        if sort.key() != self.config.vinyl_sort || ascending != self.config.vinyl_sort_ascending {
+        if sort.key() != self.config.vinyl_sort
+            || ascending != self.config.vinyl_sort_ascending
+            || self.config.vinyl_view != view_before
+        {
             self.config.vinyl_sort = sort.key().to_string();
             self.config.vinyl_sort_ascending = ascending;
             if let Err(e) = self.config.save() {
@@ -1672,8 +1789,17 @@ impl App {
                     }
                 };
                 ui.label(egui::RichText::new(msg).weak());
-            } else if let Some(a) = self.vinyl_grid(ui, &cells) {
-                action = Some(a);
+            } else {
+                // The same cells drawn either way; the toggle in the toolbar
+                // is a layout choice, not a different view.
+                let acted = if self.config.vinyl_view == "list" {
+                    self.vinyl_rows(ui, &cells)
+                } else {
+                    self.vinyl_grid(ui, &cells)
+                };
+                if let Some(a) = acted {
+                    action = Some(a);
+                }
             }
             ui.add_space(8.0);
         });
@@ -2105,92 +2231,8 @@ impl App {
                         // drop it. Both write straight to the user's Discogs
                         // account, so the wording says which list is which rather
                         // than a bare "Move".
-                        let (list, _) = c.key;
                         resp.context_menu(|ui| {
-                            ui.label(egui::RichText::new(&c.title).strong());
-                            ui.label(egui::RichText::new(&c.artist).weak());
-                            ui.separator();
-                            if ui
-                                .button("Open on Discogs ↗")
-                                .on_hover_note("Open this release on discogs.com")
-                                .clicked()
-                            {
-                                open_url(&release_url);
-                                ui.close_menu();
-                            }
-                            if ui
-                                .button("🔍  Dig from here")
-                                .on_hover_note(
-                                    "Walk the collection from this record, by artist or label",
-                                )
-                                .clicked()
-                            {
-                                action = Some(VinylGridAction::Dig(c.key));
-                                ui.close_menu();
-                            }
-                            // Which pressing you hold is the collector's
-                            // question, and the answer often is "the wrong one".
-                            // This lists the siblings and swaps one in.
-                            if ui
-                                .button("See other releases")
-                                .on_hover_note("Other pressings of this record, to swap one in")
-                                .clicked()
-                            {
-                                action = Some(VinylGridAction::Versions(c.key));
-                                ui.close_menu();
-                            }
-                            ui.separator();
-                            let (move_label, move_tip, remove_label) = match list {
-                                VinylList::Collection => (
-                                    "Move to wantlist",
-                                    "Give up this copy on Discogs and want it instead",
-                                    "Remove from collection",
-                                ),
-                                VinylList::Wantlist => (
-                                    "Move to collection",
-                                    "Mark this record as owned on Discogs",
-                                    "Remove from wantlist",
-                                ),
-                            };
-                            // Already in both lists: the move has nothing to do,
-                            // and running it would ask Discogs for a duplicate
-                            // copy. Say where it already is instead.
-                            let (move_label, move_tip) = if c.also_in_other {
-                                match list {
-                                    VinylList::Collection => (
-                                        "✓  Already in your wantlist",
-                                        "This record is in both lists on Discogs",
-                                    ),
-                                    VinylList::Wantlist => (
-                                        "✓  Already in your collection",
-                                        "You already own this on Discogs",
-                                    ),
-                                }
-                            } else {
-                                (move_label, move_tip)
-                            };
-                            if ui
-                                .add_enabled(!c.also_in_other, egui::Button::new(move_label))
-                                .on_hover_note(move_tip)
-                                .on_disabled_hover_text(crate::ui::hover::note(move_tip))
-                                .clicked()
-                            {
-                                action = Some(VinylGridAction::Move(c.key));
-                                ui.close_menu();
-                            }
-                            if ui
-                                .button(remove_label)
-                                .on_hover_note("Delete it from this Discogs list")
-                                .clicked()
-                            {
-                                action = Some(VinylGridAction::Remove(c.key));
-                                ui.close_menu();
-                            }
-                            ui.separator();
-                            if ui.button("Open on Discogs ↗").clicked() {
-                                open_url(&release_url);
-                                ui.close_menu();
-                            }
+                            vinyl_cell_menu(ui, c, &release_url, &mut action)
                         });
                         ui.set_max_width(cover_side);
                         ui.add_space(4.0);
@@ -2209,6 +2251,160 @@ impl App {
                         ui.add(egui::Label::new(egui::RichText::new(&c.artist).weak()).truncate());
                     },
                 );
+            }
+        });
+        action
+    }
+
+    /// Paint the shelf as compact rows: cover thumb, title and artist, the
+    /// caption fields inline and the price on the right edge, where a column
+    /// of them lines up for comparing. Same actions as the wall — a click
+    /// opens the record sheet, the catalog badge jumps to your digital copy,
+    /// and the right-click menu is shared with the grid cells.
+    fn vinyl_rows(&self, ui: &mut egui::Ui, cells: &[VinylCell]) -> Option<VinylGridAction> {
+        const THUMB: f32 = 44.0;
+        const ROW_H: f32 = 54.0;
+        /// Right-edge budget for the price column.
+        const PRICE_W: f32 = 86.0;
+
+        let mut action: Option<VinylGridAction> = None;
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for c in cells {
+                let avail = ui.available_width();
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(avail, ROW_H), egui::Sense::click());
+                // Rows scrolled out of view still reserve their space (so the
+                // scrollbar is honest) but skip painting and interaction.
+                if !ui.is_rect_visible(rect) {
+                    continue;
+                }
+                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resp.hovered() {
+                    ui.painter().rect_filled(
+                        rect,
+                        egui::Rounding::same(6.0),
+                        crate::ui::tokens::color::SURFACE,
+                    );
+                }
+                // Hairline under each row, inset past the thumb so the covers
+                // read as their own column.
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(rect.left() + THUMB + 14.0, rect.bottom()),
+                        egui::pos2(rect.right(), rect.bottom()),
+                    ],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(38)),
+                );
+                let thumb_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.left() + 4.0, rect.center().y - THUMB / 2.0),
+                    egui::vec2(THUMB, THUMB),
+                );
+                match self.vinyl_covers.get(&c.key) {
+                    Some(ThumbState::Ready(Some(t))) => {
+                        egui::Image::new(t)
+                            .fit_to_exact_size(egui::vec2(THUMB, THUMB))
+                            .rounding(egui::Rounding::same(4.0))
+                            .paint_at(ui, thumb_rect);
+                    }
+                    _ => {
+                        ui.painter().rect_filled(
+                            thumb_rect,
+                            egui::Rounding::same(4.0),
+                            egui::Color32::from_gray(34),
+                        );
+                        ui.painter().text(
+                            thumb_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "💿",
+                            egui::FontId::proportional(18.0),
+                            egui::Color32::from_gray(90),
+                        );
+                    }
+                }
+                // Catalog badge, left of the price: same jump as the wall's
+                // corner chip. Claimed via `interact` so it wins its click
+                // over the row underneath.
+                let mut badge_clicked = false;
+                let mut right_edge = rect.right() - PRICE_W;
+                if !c.linked.is_empty() {
+                    const B: f32 = 22.0;
+                    let badge_rect = egui::Rect::from_center_size(
+                        egui::pos2(right_edge - B / 2.0, rect.center().y),
+                        egui::vec2(B, B),
+                    );
+                    right_edge = badge_rect.left() - 8.0;
+                    let badge = ui.interact(
+                        badge_rect,
+                        ui.id().with(("vinyl-row-cat", c.key)),
+                        egui::Sense::click(),
+                    );
+                    let bg = if badge.hovered() {
+                        egui::Color32::from_rgb(120, 220, 150)
+                    } else {
+                        egui::Color32::from_rgb(90, 200, 120)
+                    };
+                    ui.painter()
+                        .rect_filled(badge_rect, egui::Rounding::same(5.0), bg);
+                    ui.painter().text(
+                        badge_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "♪",
+                        egui::FontId::proportional(14.0),
+                        egui::Color32::from_gray(20),
+                    );
+                    let n = c.linked.len();
+                    let tip = if n > 1 {
+                        format!("In your catalog ({n} tracks). Click to show.")
+                    } else {
+                        "In your catalog. Click to show.".to_string()
+                    };
+                    let badge = badge.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if badge.on_hover_note(tip).clicked() {
+                        badge_clicked = true;
+                        action = Some(VinylGridAction::Goto(c.title.clone(), c.linked.clone()));
+                    }
+                }
+                // Price, right-aligned so the column scans. Same "what the
+                // sort orders by" role as the wall's corner chip.
+                if let Some(p) = c.price {
+                    ui.painter().text(
+                        egui::pos2(rect.right() - 10.0, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        format_price(p, c.price_currency.as_deref(), false),
+                        crate::ui::tokens::font::callout(),
+                        egui::Color32::from_rgb(120, 200, 140),
+                    );
+                }
+                // Title over artist · year · format, truncated to the space
+                // between the thumb and the price column.
+                let text_rect = egui::Rect::from_min_max(
+                    egui::pos2(thumb_rect.right() + 10.0, rect.top() + 8.0),
+                    egui::pos2(right_edge - 6.0, rect.bottom() - 6.0),
+                );
+                let mut text_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(text_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min))
+                        .id_salt(("vinyl-row-text", c.key)),
+                );
+                text_ui.spacing_mut().item_spacing.y = 1.0;
+                text_ui.add(
+                    egui::Label::new(egui::RichText::new(&c.title).strong()).truncate(),
+                );
+                let line2 = if c.sub.is_empty() {
+                    c.artist.clone()
+                } else {
+                    format!("{} · {}", c.artist, c.sub)
+                };
+                text_ui.add(egui::Label::new(egui::RichText::new(line2).weak()).truncate());
+
+                let release_url =
+                    format!("https://www.discogs.com/release/{}", c.release_id);
+                if resp.clicked() && !badge_clicked {
+                    action = Some(VinylGridAction::Open(c.key));
+                }
+                resp.context_menu(|ui| vinyl_cell_menu(ui, c, &release_url, &mut action));
             }
         });
         action

@@ -23,6 +23,8 @@ enum SellerAct {
     Buy(usize),
     /// Add the listing's release to the Discogs wantlist.
     Want(usize),
+    /// Start a crate dig from the listing's release — see [`crate::dig`].
+    Dig(usize),
 }
 
 /// A seller username, out of either a bare name or a pasted discogs.com URL
@@ -322,6 +324,19 @@ impl App {
             self.spawn_fetch_seller_genres(ctx.clone(), u);
         }
 
+        // The dig strip works from the crates too: a listing seeds a dig the
+        // same way a shelf record does, and the web stays on screen while the
+        // tab underneath changes. Same placement contract as the shelf view —
+        // above the scrolling grid, so it never scrolls away under what it's
+        // steering. A record the strip asks to open goes through the ordinary
+        // release sheet.
+        if let Some(o) = self.draw_dig(ui) {
+            self.open_release_sheet(o.release_id, o.artist, o.title, o.sub, o.cover_url, ctx);
+        }
+        if self.dig.is_some() {
+            ui.add_space(8.0);
+        }
+
         // --- Empty states. ----------------------------------------------------
         if self.sellers.is_empty() {
             ui.add_space(40.0);
@@ -438,42 +453,59 @@ impl App {
             return;
         }
 
-        // --- The crates: a virtualized cover grid. ----------------------------
+        // --- The crates: a virtualized cover grid, or compact rows. -----------
         // Same sizing rules as the vinyl wall, but drawn through `show_rows` —
         // a swept shop can be tens of thousands of cards, and only the visible
-        // rows should cost layout (or a cover download).
-        const GAP: f32 = 14.0;
-        const MIN_COVER: f32 = 132.0;
-        const MAX_COVER: f32 = 170.0;
-        /// Caption budget under each cover: artist, title, price line.
-        const CAPTION_H: f32 = 58.0;
-        let avail = ui.available_width();
-        let cols = (((avail + GAP) / (MIN_COVER + GAP)).floor().max(1.0)) as usize;
-        let cover_side = ((avail - GAP * (cols as f32 - 1.0)) / cols as f32)
-            .floor()
-            .clamp(MIN_COVER.min(avail.max(1.0)), MAX_COVER);
-        let row_h = cover_side + CAPTION_H + GAP;
-        let n_rows = filtered.len().div_ceil(cols);
-
+        // rows should cost layout (or a cover download). The toolbar's grid/
+        // list toggle applies here too: rows put price and grade in a column,
+        // which is how a shop's crates get compared.
         let mut act: Option<SellerAct> = None;
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show_rows(ui, row_h, n_rows, |ui, rows| {
-                ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
-                for row in rows {
-                    ui.horizontal_top(|ui| {
-                        for slot in 0..cols {
-                            let Some(&idx) = filtered.get(row * cols + slot) else {
-                                break;
-                            };
-                            if let Some(a) = self.seller_card(ui, idx, cover_side) {
-                                act = Some(a);
-                            }
+        if self.config.vinyl_view == "list" {
+            const ROW_H: f32 = 54.0;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show_rows(ui, ROW_H, filtered.len(), |ui, rows| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for i in rows {
+                        let idx = filtered[i];
+                        if let Some(a) = self.seller_row(ui, idx, ROW_H) {
+                            act = Some(a);
                         }
-                    });
-                }
-                ui.add_space(8.0);
-            });
+                    }
+                });
+        } else {
+            const GAP: f32 = 14.0;
+            const MIN_COVER: f32 = 132.0;
+            const MAX_COVER: f32 = 170.0;
+            /// Caption budget under each cover: artist, title, price line.
+            const CAPTION_H: f32 = 58.0;
+            let avail = ui.available_width();
+            let cols = (((avail + GAP) / (MIN_COVER + GAP)).floor().max(1.0)) as usize;
+            let cover_side = ((avail - GAP * (cols as f32 - 1.0)) / cols as f32)
+                .floor()
+                .clamp(MIN_COVER.min(avail.max(1.0)), MAX_COVER);
+            let row_h = cover_side + CAPTION_H + GAP;
+            let n_rows = filtered.len().div_ceil(cols);
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show_rows(ui, row_h, n_rows, |ui, rows| {
+                    ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+                    for row in rows {
+                        ui.horizontal_top(|ui| {
+                            for slot in 0..cols {
+                                let Some(&idx) = filtered.get(row * cols + slot) else {
+                                    break;
+                                };
+                                if let Some(a) = self.seller_card(ui, idx, cover_side) {
+                                    act = Some(a);
+                                }
+                            }
+                        });
+                    }
+                    ui.add_space(8.0);
+                });
+        }
 
         match act {
             Some(SellerAct::Open(idx)) => self.open_seller_listing(idx, ctx),
@@ -492,6 +524,24 @@ impl App {
                         label: format!("{} — {}", l.artist, l.title),
                     };
                     self.request_vinyl_edit(ctx.clone(), edit);
+                }
+            }
+            Some(SellerAct::Dig(idx)) => {
+                if let Some(l) = self.seller_listings.get(idx).cloned() {
+                    let sub = match (l.year, l.format.as_deref()) {
+                        (Some(y), Some(f)) => format!("{y} · {f}"),
+                        (Some(y), None) => y.to_string(),
+                        (None, Some(f)) => f.to_string(),
+                        (None, None) => String::new(),
+                    };
+                    self.start_dig_release(
+                        l.release_id,
+                        l.artist,
+                        l.title,
+                        l.label,
+                        sub,
+                        l.thumb_url,
+                    );
                 }
             }
             None => {}
@@ -550,6 +600,21 @@ impl App {
                 let resp = resp
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .on_hover_note("Open the record — listen, wantlist, or buy");
+                // The dig disc's hit area is claimed before anything paints, so
+                // the cover's hover frame can see the disc's hover and the pair
+                // reveals together (same reasoning as the shelf grid).
+                const D: f32 = 30.0;
+                let dig_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.right() - D - 6.0, rect.bottom() - D - 6.0),
+                    egui::vec2(D, D),
+                );
+                let dig_hit = ui.interact(
+                    dig_rect,
+                    ui.id().with(("seller-dig", listing_id)),
+                    egui::Sense::click(),
+                );
+                let dig_hovered = dig_hit.hovered();
+                let card_hovered = resp.hovered() || dig_hovered;
                 match &tex {
                     Some(h) => {
                         egui::Image::new(h)
@@ -572,7 +637,7 @@ impl App {
                         );
                     }
                 }
-                if resp.hovered() {
+                if card_hovered {
                     ui.painter().rect_stroke(
                         rect,
                         egui::Rounding::same(6.0),
@@ -602,12 +667,57 @@ impl App {
                         .rect_filled(chip, egui::Rounding::same(4.0), fill);
                     ui.painter().galley(chip.min + pad, galley, egui::Color32::WHITE);
                 }
-                if resp.clicked() {
+                // Dig disc, bottom-right: start a crate dig from this listing.
+                // Hover-revealed like the shelf grid's, and its click never
+                // falls through to the cover underneath.
+                let mut dig_clicked = false;
+                if card_hovered {
+                    let bg = if dig_hovered {
+                        egui::Color32::from_rgb(120, 220, 150)
+                    } else {
+                        egui::Color32::from_black_alpha(190)
+                    };
+                    let fg = if dig_hovered {
+                        egui::Color32::from_gray(20)
+                    } else {
+                        egui::Color32::from_gray(240)
+                    };
+                    ui.painter().circle_filled(dig_rect.center(), D / 2.0, bg);
+                    ui.painter().text(
+                        dig_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "🔍",
+                        egui::FontId::proportional(14.0),
+                        fg,
+                    );
+                    let dig_hit = dig_hit.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if dig_hit
+                        .on_hover_note(
+                            "Dig from here: records like this on Discogs that \
+                             aren't in your collection",
+                        )
+                        .clicked()
+                    {
+                        dig_clicked = true;
+                        act = Some(SellerAct::Dig(idx));
+                    }
+                }
+                if resp.clicked() && !dig_clicked {
                     act = Some(SellerAct::Open(idx));
                 }
                 resp.context_menu(|ui| {
                     if ui.button("🛒 Buy on Discogs ↗").clicked() {
                         act = Some(SellerAct::Buy(idx));
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("🔍  Dig from here")
+                        .on_hover_note(
+                            "Walk Discogs outward from this record, by artist or label",
+                        )
+                        .clicked()
+                    {
+                        act = Some(SellerAct::Dig(idx));
                         ui.close_menu();
                     }
                     let already = owned || wanted;
@@ -659,6 +769,181 @@ impl App {
                 let _ = listing_id;
             },
         );
+        act
+    }
+
+    /// One row of the crates in list layout: thumb, credit, and the sale
+    /// terms pinned to the right edge, where a column of prices and grades
+    /// scans the way a wall of cards can't. Same actions as the card — click
+    /// opens the record, right-click buys, wantlists or digs.
+    fn seller_row(&mut self, ui: &mut egui::Ui, idx: usize, row_h: f32) -> Option<SellerAct> {
+        const THUMB: f32 = 44.0;
+        /// Right-edge budget for the price + grade column.
+        const TERMS_W: f32 = 150.0;
+
+        // Snapshot the row's strings before `dig_cover` needs `self` mutably
+        // (same dance as the card).
+        let (listing_id, release_id, artist, title, sub, price_line, thumb, owned, wanted) = {
+            let l = self.seller_listings.get(idx)?;
+            let sub = match (l.year, l.format.as_deref()) {
+                (Some(y), Some(f)) => format!("{y} · {f}"),
+                (Some(y), None) => y.to_string(),
+                (None, Some(f)) => f.to_string(),
+                (None, None) => String::new(),
+            };
+            let mut price_line = crate::vinyl_sheet::fmt_market_price(&discogs::MarketPrice {
+                value: l.price,
+                currency: l.currency.clone(),
+            });
+            if let Some(c) = l.condition.as_deref() {
+                price_line.push_str(&format!(" · {}", cond_short(c)));
+                if let Some(s) = l.sleeve_condition.as_deref() {
+                    price_line.push_str(&format!("/{}", cond_short(s)));
+                }
+            }
+            (
+                l.listing_id,
+                l.release_id,
+                l.artist.clone(),
+                l.title.clone(),
+                sub,
+                price_line,
+                l.thumb_url.clone(),
+                self.vinyl_owned.contains(&l.release_id),
+                self.vinyl_wanted.contains(&l.release_id),
+            )
+        };
+        let tex = thumb.as_deref().and_then(|u| self.dig_cover(u).cloned());
+
+        let mut act: Option<SellerAct> = None;
+        let avail = ui.available_width();
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(avail, row_h), egui::Sense::click());
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if resp.hovered() {
+            ui.painter().rect_filled(
+                rect,
+                egui::Rounding::same(6.0),
+                crate::ui::tokens::color::SURFACE,
+            );
+        }
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.left() + THUMB + 14.0, rect.bottom()),
+                egui::pos2(rect.right(), rect.bottom()),
+            ],
+            egui::Stroke::new(1.0, egui::Color32::from_gray(38)),
+        );
+        let thumb_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + 4.0, rect.center().y - THUMB / 2.0),
+            egui::vec2(THUMB, THUMB),
+        );
+        match &tex {
+            Some(h) => {
+                egui::Image::new(h)
+                    .fit_to_exact_size(egui::vec2(THUMB, THUMB))
+                    .rounding(egui::Rounding::same(4.0))
+                    .paint_at(ui, thumb_rect);
+            }
+            None => {
+                ui.painter().rect_filled(
+                    thumb_rect,
+                    egui::Rounding::same(4.0),
+                    egui::Color32::from_gray(34),
+                );
+                ui.painter().text(
+                    thumb_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "♪",
+                    egui::FontId::proportional(18.0),
+                    egui::Color32::from_gray(70),
+                );
+            }
+        }
+        // Sale terms on the right edge, then the membership chip to their
+        // left — a record already on a shelf changes what the price means.
+        ui.painter().text(
+            egui::pos2(rect.right() - 10.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            &price_line,
+            crate::ui::tokens::font::callout(),
+            egui::Color32::from_rgb(120, 200, 140),
+        );
+        let mut right_edge = rect.right() - TERMS_W;
+        if owned || wanted {
+            let text = if owned { "OWNED" } else { "WANT" };
+            let font = egui::FontId::proportional(10.0);
+            let galley = ui
+                .painter()
+                .layout_no_wrap(text.into(), font, egui::Color32::WHITE);
+            let pad = egui::vec2(5.0, 3.0);
+            let size = galley.size() + pad * 2.0;
+            let chip = egui::Rect::from_min_size(
+                egui::pos2(right_edge - size.x, rect.center().y - size.y / 2.0),
+                size,
+            );
+            right_edge = chip.left() - 8.0;
+            let fill = if owned {
+                egui::Color32::from_rgb(40, 120, 70)
+            } else {
+                egui::Color32::from_rgb(120, 90, 30)
+            };
+            ui.painter()
+                .rect_filled(chip, egui::Rounding::same(4.0), fill);
+            ui.painter()
+                .galley(chip.min + pad, galley, egui::Color32::WHITE);
+        }
+        // Artist over title · year · format, truncated between the thumb and
+        // the terms column.
+        let text_rect = egui::Rect::from_min_max(
+            egui::pos2(thumb_rect.right() + 10.0, rect.top() + 8.0),
+            egui::pos2(right_edge - 6.0, rect.bottom() - 6.0),
+        );
+        let mut text_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(text_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min))
+                .id_salt(("seller-row-text", listing_id)),
+        );
+        text_ui.spacing_mut().item_spacing.y = 1.0;
+        text_ui.add(egui::Label::new(egui::RichText::new(&artist).strong()).truncate());
+        let line2 = if sub.is_empty() {
+            title.clone()
+        } else {
+            format!("{title} · {sub}")
+        };
+        text_ui.add(egui::Label::new(egui::RichText::new(line2).weak()).truncate());
+
+        let resp = resp.on_hover_note("Open the record — listen, wantlist, or buy");
+        if resp.clicked() {
+            act = Some(SellerAct::Open(idx));
+        }
+        resp.context_menu(|ui| {
+            if ui.button("🛒 Buy on Discogs ↗").clicked() {
+                act = Some(SellerAct::Buy(idx));
+                ui.close_menu();
+            }
+            if ui
+                .button("🔍  Dig from here")
+                .on_hover_note("Walk Discogs outward from this record, by artist or label")
+                .clicked()
+            {
+                act = Some(SellerAct::Dig(idx));
+                ui.close_menu();
+            }
+            let already = owned || wanted;
+            if ui
+                .add_enabled(!already, egui::Button::new("＋ Add to wantlist"))
+                .clicked()
+            {
+                act = Some(SellerAct::Want(idx));
+                ui.close_menu();
+            }
+            if ui.button("↗ Open release page").clicked() {
+                open_url(&format!("https://www.discogs.com/release/{release_id}"));
+                ui.close_menu();
+            }
+        });
         act
     }
 
