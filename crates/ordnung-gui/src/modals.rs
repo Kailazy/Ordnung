@@ -1614,8 +1614,9 @@ impl App {
                                         ui.label(egui::RichText::new("Conversion").strong());
                                         ui.label(
                     egui::RichText::new(
-                        "Defaults used when you open a Convert dialog. You can still \
-                         change them per conversion.",
+                        "Defaults used when you open a Convert dialog (you can still \
+                         change them per conversion), and by auto-convert below when \
+                         it's enabled.",
                     )
                     .small()
                     .weak(),
@@ -1718,6 +1719,74 @@ impl App {
                                         egui::Color32::LIGHT_YELLOW,
                                         "In-place removes the original file on each conversion.",
                                     );
+                                        }
+                                        ui.add_space(10.0);
+                                        ui.label(
+                                            egui::RichText::new("Auto-convert").strong(),
+                                        );
+                                        if ui
+                                            .checkbox(
+                                                &mut self.config.auto_convert,
+                                                "Convert files automatically on import",
+                                            )
+                                            .on_hover_note(
+                                                "New files (scan, drag and drop, USB \
+                                                 transfer) are converted to the default \
+                                                 format above using these defaults.",
+                                            )
+                                            .changed()
+                                        {
+                                            convert_dirty = true;
+                                        }
+                                        if self.config.auto_convert {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label("Only these types:");
+                                                for &f in &[
+                                                    Format::Flac,
+                                                    Format::Wav,
+                                                    Format::Aiff,
+                                                    Format::Mp3,
+                                                    Format::Aac,
+                                                ] {
+                                                    let key = format_key(f);
+                                                    let mut on = self
+                                                        .config
+                                                        .auto_convert_sources
+                                                        .iter()
+                                                        .any(|k| k == key);
+                                                    if ui
+                                                        .checkbox(&mut on, format_label(f))
+                                                        .changed()
+                                                    {
+                                                        if on {
+                                                            self.config
+                                                                .auto_convert_sources
+                                                                .push(key.to_string());
+                                                        } else {
+                                                            self.config
+                                                                .auto_convert_sources
+                                                                .retain(|k| k != key);
+                                                        }
+                                                        convert_dirty = true;
+                                                    }
+                                                }
+                                            });
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Leave all unchecked to convert every \
+                                                     type. Files already in the target \
+                                                     format are always skipped.",
+                                                )
+                                                .small()
+                                                .weak(),
+                                            );
+                                            if self.config.convert_in_place {
+                                                ui.colored_label(
+                                                    egui::Color32::LIGHT_YELLOW,
+                                                    "With in-place on, originals are \
+                                                     replaced as files are imported.",
+                                                );
+                                            }
                                         }
                                         if convert_dirty {
                                             if let Err(e) = self.config.save() {

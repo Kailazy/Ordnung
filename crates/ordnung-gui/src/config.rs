@@ -155,6 +155,19 @@ pub struct Config {
     /// On by default, preserving the prior hard-coded behavior.
     #[serde(default = "default_true")]
     pub convert_in_place: bool,
+    /// Convert files automatically as they enter the library (scan, drag-drop,
+    /// USB transfer), using the convert defaults above. **Off by default** —
+    /// like `auto_analyze`/`auto_write_tags` this is GUI policy the user
+    /// switches on explicitly; core's convert engine stays explicit-only and
+    /// is only ever driven from here with a snapshotted spec.
+    #[serde(default)]
+    pub auto_convert: bool,
+    /// Which source formats auto-convert applies to, as stable lowercase keys
+    /// (see `util::format_key`). Empty — the default — means every format;
+    /// e.g. `["flac"]` converts only imported FLACs. Files already in the
+    /// target format are always skipped regardless of this filter.
+    #[serde(default)]
+    pub auto_convert_sources: Vec<String>,
     /// Master playback volume as a linear amplitude factor, `0.0`–`1.0`. Driven
     /// by the toolbar knob and restored at startup so the app comes back at the
     /// level it was left at.
@@ -649,6 +662,8 @@ impl Default for Config {
             convert_bitrate_kbps: String::new(),
             convert_out_dir: None,
             convert_in_place: true,
+            auto_convert: false,
+            auto_convert_sources: Vec::new(),
             volume: default_volume(),
             waveform_color_mode: default_waveform_color_mode(),
             waveform_height_exp: default_waveform_height_exp(),

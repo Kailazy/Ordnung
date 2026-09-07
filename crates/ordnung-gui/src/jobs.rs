@@ -105,10 +105,11 @@ impl App {
         thread::spawn(move || run_scan(db, dir, cancel, tx, ctx, follow));
     }
 
-    /// What runs after an import lands, per the user's settings: auto-analysis,
-    /// and the automatic Discogs release match (only when it's switched on AND a
-    /// token exists — without one the searches could only fail). Snapshotted at
-    /// spawn time so the worker never reads config off another thread.
+    /// What runs after an import lands, per the user's settings: auto-convert,
+    /// auto-analysis, and the automatic Discogs release match (only when it's
+    /// switched on AND a token exists — without one the searches could only
+    /// fail). Snapshotted at spawn time so the worker never reads config off
+    /// another thread.
     fn import_follow_ups(&self) -> FollowUps {
         let token = self.discogs_token().trim().to_string();
         let auto_match = if self.config.discogs_auto_fetch && !token.is_empty() {
@@ -120,7 +121,37 @@ impl App {
         } else {
             None
         };
+        // Auto-convert reuses the convert-dialog defaults wholesale; a bitrate
+        // that doesn't parse falls back to the per-format default rather than
+        // blocking the import.
+        let auto_convert = if self.config.auto_convert {
+            format_from_key(&self.config.convert_format).map(|target| {
+                let bitrate_kbps = match target {
+                    Format::Mp3 | Format::Aac => {
+                        self.config.convert_bitrate_kbps.trim().parse::<u32>().ok()
+                    }
+                    _ => None,
+                };
+                AutoConvertSpec {
+                    sources: self
+                        .config
+                        .auto_convert_sources
+                        .iter()
+                        .filter_map(|k| format_from_key(k))
+                        .collect(),
+                    spec: ConvertSpec {
+                        target,
+                        bitrate_kbps,
+                    },
+                    out_dir: self.config.convert_out_dir.clone(),
+                    in_place: self.config.convert_in_place,
+                }
+            })
+        } else {
+            None
+        };
         FollowUps {
+            auto_convert,
             auto_analyze: self.config.auto_analyze,
             auto_match,
         }
@@ -1191,12 +1222,24 @@ pub(crate) fn import_files(
 }
 
 /// The per-user follow-up policy an import spawn snapshots for its worker:
-/// whether to chain analysis, and whether (and how) to auto-match new tracks
-/// to Discogs releases. Both are GUI policy mirroring explicit actions; core
-/// stays explicit-only.
+/// whether to convert new files to the default target, whether to chain
+/// analysis, and whether (and how) to auto-match new tracks to Discogs
+/// releases. All are GUI policy mirroring explicit actions; core stays
+/// explicit-only.
 pub(crate) struct FollowUps {
+    pub auto_convert: Option<AutoConvertSpec>,
     pub auto_analyze: bool,
     pub auto_match: Option<AutoMatchSpec>,
+}
+
+/// Everything the automatic conversion needs off the UI thread: the source
+/// formats it applies to (empty = every format), and the same target spec /
+/// output folder / in-place choice the convert dialogs would use.
+pub(crate) struct AutoConvertSpec {
+    pub sources: Vec<Format>,
+    pub spec: ConvertSpec,
+    pub out_dir: Option<PathBuf>,
+    pub in_place: bool,
 }
 
 /// Everything the automatic Discogs match needs off the UI thread: the token,
@@ -1207,11 +1250,13 @@ pub(crate) struct AutoMatchSpec {
     pub hidden_mediums: Vec<String>,
 }
 
-/// Close out an import: report the tally, chaining auto-analysis and then the
-/// automatic Discogs release match onto this same job thread first when they're
-/// enabled — one progress flow, one terminal `Done` carrying the combined
-/// summary. The import's cancel flag stays live through every chained phase,
-/// so one Abort covers the whole run.
+/// Close out an import: report the tally, chaining auto-convert, auto-analysis
+/// and then the automatic Discogs release match onto this same job thread when
+/// they're enabled — one progress flow, one terminal `Done` carrying the
+/// combined summary. Conversion runs FIRST: an in-place convert relinks the
+/// catalog to the new file, and analyzing before that would key the analysis
+/// cache on a file about to disappear. The import's cancel flag stays live
+/// through every chained phase, so one Abort covers the whole run.
 fn finish_import(
     catalog: &Catalog,
     outcome: ImportOutcome,
@@ -1221,6 +1266,14 @@ fn finish_import(
     ctx: &egui::Context,
 ) {
     let mut summary = outcome.summary;
+    if !outcome.cancelled && !cancel.load(Ordering::Relaxed) && !outcome.touched.is_empty() {
+        if let Some(auto) = &follow.auto_convert {
+            let tally = auto_convert_tracks(catalog, auto, &outcome.touched, cancel, tx, ctx);
+            if !tally.is_empty() {
+                summary = format!("{summary} {tally}");
+            }
+        }
+    }
     if !outcome.cancelled && follow.auto_analyze && !outcome.touched.is_empty() {
         // Resolve the touched ids to tracks; skip any that vanished since the
         // scan. Lead the analysis tally with what was imported, so the combined
@@ -1245,6 +1298,79 @@ fn finish_import(
     }
     let _ = tx.send(JobMsg::Done(summary));
     ctx.request_repaint();
+}
+
+/// Convert freshly imported tracks to the user's default target, exactly as a
+/// batch Convert of the same selection would: one at a time through
+/// `convert_track` (tags + cover embedded, catalog relinked on in-place),
+/// cancellable between tracks, continuing past individual failures. Tracks
+/// already in the target format are skipped, as is anything outside the
+/// user's source-format filter (empty filter = every format). Returns a tally
+/// sentence for the combined `Done` line, empty when there was nothing to do.
+fn auto_convert_tracks(
+    catalog: &Catalog,
+    auto: &AutoConvertSpec,
+    ids: &[Id],
+    cancel: &AtomicBool,
+    tx: &Sender<JobMsg>,
+    ctx: &egui::Context,
+) -> String {
+    let tracks: Vec<Track> = ids
+        .iter()
+        .filter_map(|&id| catalog.get_track(id).ok())
+        .filter(|t| t.format != auto.spec.target && t.format != Format::Other)
+        .filter(|t| auto.sources.is_empty() || auto.sources.contains(&t.format))
+        .collect();
+    if tracks.is_empty() {
+        return String::new();
+    }
+    if let Some(dir) = &auto.out_dir {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return format!("Auto-convert skipped ({}: {e}).", dir.display());
+        }
+    }
+    let total = tracks.len();
+    let target_label = format_label(auto.spec.target);
+    let _ = tx.send(JobMsg::Status(format!(
+        "Converting {total} imported track(s) to {target_label}…"
+    )));
+    let _ = tx.send(JobMsg::Progress { done: 0, total });
+    ctx.request_repaint();
+    let (mut ok, mut failed) = (0usize, 0usize);
+    let mut fails: Vec<(String, String)> = Vec::new();
+    for (i, track) in tracks.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let _ = tx.send(JobMsg::Progress { done: i, total });
+        ctx.request_repaint();
+        match convert_track(catalog, track, &auto.spec, auto.out_dir.as_deref(), auto.in_place) {
+            Ok(_) => ok += 1,
+            Err(e) => {
+                failed += 1;
+                let name = Path::new(&track.source_path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| track.source_path.clone());
+                fails.push((name, e));
+            }
+        }
+    }
+    let _ = tx.send(JobMsg::Progress {
+        done: ok + failed,
+        total,
+    });
+    if !fails.is_empty() {
+        let _ = tx.send(JobMsg::Failures {
+            title: "Auto-convert".into(),
+            items: fails,
+        });
+    }
+    if failed > 0 {
+        format!("Converted {ok}/{total} to {target_label} ({failed} failed).")
+    } else {
+        format!("Converted {ok} track(s) to {target_label}.")
+    }
 }
 
 /// Match freshly imported tracks to a Discogs release with no picker: search
