@@ -19,6 +19,10 @@ impl App {
                     self.status = s;
                     finished = true;
                     reload = true;
+                    // A finished job may have been a seller sweep; the listing
+                    // cache loads lazily, so just mark it stale and let the
+                    // Sellers tab re-read on its next frame.
+                    self.seller_listings_for = None;
                 }
                 Ok(JobMsg::Failed(s)) => {
                     self.status = format!("error: {s}");
@@ -502,6 +506,33 @@ impl App {
         }
         let db = self.db_path.clone();
         thread::spawn(move || run_refresh_vinyl(db, token, cancel, quiet, tx, ctx));
+    }
+
+    /// Sweep one saved seller's Discogs inventory into the local cache — the
+    /// Sellers tab's explicit "Sweep" action, never run automatically. Pages
+    /// the whole shop at the shared throttle (a large distributor is minutes of
+    /// requests, which is why this is backgrounded, progress-reported and
+    /// cancellable).
+    pub(crate) fn spawn_sweep_seller(&mut self, ctx: egui::Context, username: String) {
+        if self.is_busy() {
+            self.status = "Busy — wait for the current job to finish.".into();
+            return;
+        }
+        let token = self.discogs_token();
+        if token.trim().is_empty() {
+            self.status = "No Discogs token set. Add one in Settings \
+                (https://www.discogs.com/settings/developers)."
+                .into();
+            self.settings_open = true;
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.job_rx = Some(rx);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.job_cancel = Some(cancel.clone());
+        self.status = format!("Sweeping {username}'s crates…");
+        let db = self.db_path.clone();
+        thread::spawn(move || run_sweep_seller(db, token, username, cancel, tx, ctx));
     }
 
     /// Run one user-requested change to a Discogs list — the vinyl grid's
@@ -2068,6 +2099,98 @@ fn analyze_tracks(
 /// routine sync only re-prices what's aged out. See
 /// [`Catalog::vinyl_prices_to_refresh`].
 const VINYL_PRICE_MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
+
+/// Page cap for a seller sweep: 100 listings per page, so 200 pages = 20,000
+/// listings ≈ 3½ minutes at the shared throttle. Inventory is fetched
+/// newest-listed first, so a capped sweep of a mega-distributor keeps the
+/// freshest slice of the crates; the Done message says when it was cut short.
+const SELLER_SWEEP_MAX_PAGES: u32 = 200;
+
+/// Sweep one seller's for-sale inventory into the `seller_listings` cache:
+/// page through `/users/{u}/inventory` newest first, upsert every vinyl
+/// listing, and prune rows the sweep didn't see (sold or delisted) — but only
+/// when it ran to the end, since pruning against a partial walk would delete
+/// everything past the cancel point. The completed-sweep stamp gates the same
+/// way, so a cancelled sweep still reads as stale in the tab header.
+pub(crate) fn run_sweep_seller(
+    db: PathBuf,
+    token: String,
+    username: String,
+    cancel: Arc<AtomicBool>,
+    tx: Sender<JobMsg>,
+    ctx: egui::Context,
+) {
+    let catalog = match Catalog::open(&db) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            ctx.request_repaint();
+            return;
+        }
+    };
+    let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
+
+    let mut keep: Vec<u64> = Vec::new();
+    let mut kept = 0usize;
+    let mut reported = 0u32;
+    let mut pages = 1u32;
+    let mut page = 1u32;
+    let mut stopped = false;
+    while page <= pages.min(SELLER_SWEEP_MAX_PAGES) {
+        if cancel.load(Ordering::Relaxed) {
+            stopped = true;
+            break;
+        }
+        let fetched = match client.seller_inventory(&username, page) {
+            Ok(p) => p,
+            Err(e) => {
+                // A partial sweep is still useful: everything upserted so far
+                // stays cached (unpruned), exactly like a cancel.
+                let _ = tx.send(JobMsg::Failed(format!(
+                    "sweeping {username} (page {page}): {e}"
+                )));
+                ctx.request_repaint();
+                return;
+            }
+        };
+        pages = fetched.pages;
+        reported = fetched.items;
+        for l in &fetched.listings {
+            let _ = catalog.upsert_seller_listing(&username, l);
+            keep.push(l.listing_id);
+        }
+        kept += fetched.listings.len();
+        let total = pages.min(SELLER_SWEEP_MAX_PAGES) as usize;
+        let _ = tx.send(JobMsg::Status(format!(
+            "Sweeping {username}'s crates… (page {page}/{total}, {kept} records)"
+        )));
+        let _ = tx.send(JobMsg::Progress {
+            done: page as usize,
+            total,
+        });
+        ctx.request_repaint();
+        page += 1;
+    }
+
+    let capped = pages > SELLER_SWEEP_MAX_PAGES;
+    if !stopped {
+        // The walk saw the whole shop (or its capped head): rows it didn't
+        // touch are sold or delisted. A capped sweep prunes too — everything
+        // beyond the cap was never cached in the first place, and stale rows
+        // lingering under fresh ones would misprice the crates.
+        let _ = catalog.prune_seller_listings_not_in(&username, &keep);
+        let _ = catalog.set_seller_swept(&username, reported as u64);
+    }
+    let note = match (stopped, capped) {
+        (true, _) => " (stopped early — swept so far kept, nothing pruned)",
+        (false, true) => " (large shop — capped at the newest 20,000 listings)",
+        (false, false) => "",
+    };
+    let _ = tx.send(JobMsg::Done(format!(
+        "{username}: {kept} records in the crates{note}"
+    )));
+    ctx.request_repaint();
+}
 
 /// Sync the local vinyl-collection cache from the user's Discogs collection.
 /// Fetches the full collection (paced by the Discogs client), upserts every

@@ -374,6 +374,56 @@ pub struct VinylRecord {
     pub price_currency: Option<String>,
 }
 
+/// A Discogs marketplace seller whose inventory is cached locally — one "shop"
+/// the user digs through in the Sellers tab of the vinyl view. Added explicitly
+/// by username; the cache fills only when the user runs a sweep.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SellerShop {
+    /// Discogs username — the key every inventory endpoint takes.
+    pub username: String,
+    /// Listings currently cached locally for this seller.
+    pub cached: u64,
+    /// Total for-sale listings Discogs reported at the last sweep. Larger than
+    /// `cached` when the sweep hit its page cap (or counts non-vinyl listings
+    /// the cache filters out). `None` before the first sweep.
+    pub reported: Option<u64>,
+    /// Unix time the last completed sweep finished; `None` if never swept.
+    pub swept_at: Option<i64>,
+}
+
+/// One for-sale listing from a seller's Discogs inventory, cached locally so
+/// the Sellers tab can be dug through — filtered, sorted, cross-referenced
+/// against the collection and wantlist — without touching the network.
+/// Keyed by Discogs's marketplace listing id, which is stable across sweeps.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SellerListing {
+    pub listing_id: u64,
+    /// The concrete pressing being sold.
+    pub release_id: u64,
+    pub title: String,
+    pub artist: String,
+    pub year: Option<u16>,
+    pub label: Option<String>,
+    pub catalog_number: Option<String>,
+    /// Format summary as Discogs lists it, e.g. `12", 45 RPM`.
+    pub format: Option<String>,
+    pub thumb_url: Option<String>,
+    /// Asking price in `currency` — every live listing carries one.
+    pub price: f64,
+    /// Currency code the price is quoted in, e.g. `EUR`.
+    pub currency: String,
+    /// Media condition, Discogs grading (`Very Good Plus (VG+)`).
+    pub condition: Option<String>,
+    pub sleeve_condition: Option<String>,
+    pub ships_from: Option<String>,
+    pub allow_offers: bool,
+    /// The listing's own page on discogs.com — where a purchase happens.
+    pub uri: Option<String>,
+    /// When the seller listed it, as Discogs writes it (ISO 8601) — sorts
+    /// correctly as text, which is what "newest in the crates first" uses.
+    pub posted: Option<String>,
+}
+
 /// Conversion target chosen explicitly by the user. Never applied automatically.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConvertRule {

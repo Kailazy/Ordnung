@@ -13,7 +13,7 @@
 //! [`ReleaseDetail::apply_to_tags`] and `docs/design/discogs-track-inspector.md`.
 
 use crate::error::{Error, Result};
-use crate::model::{Tags, VinylRecord};
+use crate::model::{SellerListing, Tags, VinylRecord};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use std::sync::Mutex;
@@ -208,6 +208,19 @@ pub struct BrowseRelease {
     /// False when the artist is credited as a remixer rather than the main
     /// artist, so a dig can prefer their own records.
     pub main: bool,
+}
+
+/// One page of a seller's marketplace inventory
+/// (`GET /users/{username}/inventory`). Non-vinyl listings are already filtered
+/// out of `listings`, so `items` (Discogs's total across every format) can
+/// exceed what paging to the end will actually yield.
+#[derive(Debug, Clone, Default)]
+pub struct InventoryPage {
+    /// Total pages available, at least 1.
+    pub pages: u32,
+    /// Total for-sale listings Discogs reports for this seller, all formats.
+    pub items: u32,
+    pub listings: Vec<SellerListing>,
 }
 
 /// Full detail for a single Discogs release (`GET /releases/{id}`), carrying the
@@ -1209,6 +1222,45 @@ impl Client {
         }))
     }
 
+    /// One page of a seller's for-sale inventory
+    /// (`GET /users/{username}/inventory`) — the only marketplace direction
+    /// Discogs still exposes: seller → stock. (The release → sellers endpoint
+    /// was removed; see `docs/design/bulk-sellers-spike.md`.) This is what the
+    /// Sellers tab's sweep pages through.
+    ///
+    /// Newest listings first (`sort=listed`), so a capped sweep keeps the
+    /// freshest part of the crates. Non-vinyl listings (CDs, cassettes, files)
+    /// are dropped here, matching the records-only vinyl view. `page` is
+    /// 1-based; the caller learns the real page count from
+    /// [`InventoryPage::pages`]. One rate-limited request per call, and
+    /// `per_page` is hard-capped at 100 by Discogs — a large shop takes one
+    /// request per hundred listings, which is why sweeps are explicit,
+    /// backgrounded and cancellable.
+    pub fn seller_inventory(&self, username: &str, page: u32) -> Result<InventoryPage> {
+        let page = page.max(1);
+        let url = format!("https://api.discogs.com/users/{username}/inventory");
+        let resp = self.call_with_retry(|| {
+            self.authed(self.agent.get(&url))
+                .query("status", "For Sale")
+                .query("per_page", "100")
+                .query("page", &page.to_string())
+                .query("sort", "listed")
+                .query("sort_order", "desc")
+        })?;
+        let body: InventoryResponse = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs inventory response: {e}")))?;
+        Ok(InventoryPage {
+            pages: body.pagination.pages.max(1),
+            items: body.pagination.items,
+            listings: body
+                .listings
+                .into_iter()
+                .filter_map(|l| l.into_listing())
+                .collect(),
+        })
+    }
+
     /// Attach the token + User-Agent every Discogs API request needs. The read
     /// paths above set these inline (alongside their query parameters); the
     /// writes carry no query string, so they share this one helper.
@@ -1567,7 +1619,7 @@ struct MarketplaceStats {
     blocked_from_sale: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct StatsPrice {
     #[serde(default, deserialize_with = "null_as_default")]
     value: f64,
@@ -1647,6 +1699,110 @@ impl WantItem {
     fn into_record(self) -> Option<VinylRecord> {
         self.basic_information
             .into_record(self.id, self.id, None, self.date_added)
+    }
+}
+
+/// One page of `GET /users/{username}/inventory`.
+#[derive(Debug, Deserialize)]
+struct InventoryResponse {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pagination: SearchPagination,
+    #[serde(default, deserialize_with = "null_as_default")]
+    listings: Vec<InventoryItem>,
+}
+
+/// One marketplace listing in a seller's inventory. Sale terms live on the
+/// item; the release being sold is a flat summary (not `basic_information` —
+/// this endpoint predates that shape and carries plain strings).
+#[derive(Debug, Deserialize)]
+struct InventoryItem {
+    #[serde(default, deserialize_with = "null_as_default")]
+    id: u64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    price: StatsPrice,
+    #[serde(default, deserialize_with = "null_as_default")]
+    condition: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    sleeve_condition: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    ships_from: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    allow_offers: bool,
+    #[serde(default, deserialize_with = "null_as_default")]
+    uri: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    posted: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    release: InventoryRelease,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct InventoryRelease {
+    #[serde(default, deserialize_with = "null_as_default")]
+    id: u64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    artist: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    title: String,
+    year: Option<u16>,
+    /// Format summary as a plain string (`12", 45 RPM`) — no `formats` array on
+    /// this endpoint, so the vinyl filter has to read this text.
+    #[serde(default, deserialize_with = "null_as_default")]
+    format: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    label: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    catalog_number: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    thumbnail: String,
+}
+
+/// Is this inventory format summary a record? The endpoint gives only a free
+/// text like `12"` / `LP, Album` / `CD, Compilation`, so this is a denylist of
+/// unambiguous non-vinyl tokens rather than a proof of vinyl — an unknown or
+/// empty format is kept, matching how the browse endpoints treat missing
+/// formats as "unknown", not "not a record".
+fn inventory_format_is_vinyl(format: &str) -> bool {
+    const NOT_VINYL: [&str; 14] = [
+        "cd", "cdr", "sacd", "hdcd", "cass", "cassette", "dvd", "dvdr", "vhs", "file", "files",
+        "minidisc", "dat", "shellac",
+    ];
+    !format
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .any(|t| NOT_VINYL.iter().any(|n| t.eq_ignore_ascii_case(n)))
+}
+
+impl InventoryItem {
+    /// Build a [`SellerListing`], or `None` for a listing that isn't a record
+    /// (or is malformed — a listing with no id or no release can't be keyed).
+    fn into_listing(self) -> Option<SellerListing> {
+        if self.id == 0 || self.release.id == 0 {
+            return None;
+        }
+        if !inventory_format_is_vinyl(&self.release.format) {
+            return None;
+        }
+        let r = self.release;
+        Some(SellerListing {
+            listing_id: self.id,
+            release_id: r.id,
+            title: r.title,
+            artist: strip_discogs_number(&r.artist),
+            year: r.year.filter(|y| *y > 0),
+            label: none_if_empty(r.label),
+            catalog_number: none_if_empty(r.catalog_number),
+            format: none_if_empty(r.format),
+            thumb_url: none_if_empty(r.thumbnail),
+            price: self.price.value,
+            currency: self.price.currency,
+            condition: none_if_empty(self.condition),
+            sleeve_condition: none_if_empty(self.sleeve_condition),
+            ships_from: none_if_empty(self.ships_from),
+            allow_offers: self.allow_offers,
+            uri: none_if_empty(self.uri),
+            posted: none_if_empty(self.posted),
+        })
     }
 }
 

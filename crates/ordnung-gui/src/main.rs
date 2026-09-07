@@ -21,6 +21,7 @@ mod modals;
 mod onboarding;
 mod player;
 mod records;
+mod sellers;
 mod search_box;
 mod sidebar;
 mod table;
@@ -44,7 +45,8 @@ use ordnung_core::convert::{self, ConvertSpec};
 use ordnung_core::discogs;
 use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
-    Analysis, Format, Id, Playlist, Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
+    Analysis, Format, Id, Playlist, SellerListing, SellerShop, Tags, Track, TranscodeVerdict,
+    VinylList, VinylRecord,
 };
 use ordnung_core::search::{ScoredHit, SearchHit};
 use ordnung_core::{
@@ -254,6 +256,17 @@ enum LibraryView {
     /// device, not in the catalog — rows are built from `usb_tracks` (with
     /// synthetic ids, see [`usb_track_id`]) and rendered in the normal table.
     Usb(PathBuf, Option<u32>),
+}
+
+/// Which tab of the vinyl view is showing. The two shelves (collection and
+/// wantlist) are the user's own lists and share the `VinylList`-keyed cache
+/// plumbing; Sellers is someone else's crates — a saved Discogs seller's
+/// swept inventory — so it sits beside that pair rather than inside it
+/// (widening `VinylList` would ripple into every list-keyed catalog query).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VinylTab {
+    Shelf(VinylList),
+    Sellers,
 }
 
 /// A sortable table column. The cover column isn't sortable, so it has no
@@ -1047,11 +1060,30 @@ struct App {
     /// Count of cached vinyl records, for the sidebar label. Kept fresh on reload
     /// so the badge is right even when the grid isn't the active view.
     vinyl_count: u64,
-    /// Which shelf the vinyl view is showing: the collection or the wantlist.
-    /// They're two shelves of the same size, so they're tabs rather than one
-    /// stacked scroll — with a big collection, the wantlist was a long way down.
-    /// Not persisted: the view opens on what you own.
-    vinyl_tab: VinylList,
+    /// Which tab the vinyl view is showing: one of the user's own shelves
+    /// (collection / wantlist) or a saved seller's crates. Shelves are tabs
+    /// rather than one stacked scroll — with a big collection, the wantlist was
+    /// a long way down. Not persisted: the view opens on what you own.
+    vinyl_tab: VinylTab,
+    /// Saved Discogs marketplace sellers (the Sellers tab's shops), from the
+    /// `sellers` table. Reloaded with the vinyl lists on every `reload`.
+    sellers: Vec<SellerShop>,
+    /// Which saved seller's crates the Sellers tab is browsing. `None` until a
+    /// seller is added or picked; kept valid against `sellers` on reload.
+    seller_current: Option<String>,
+    /// The current seller's cached listings, loaded lazily (a swept shop can
+    /// run to tens of thousands of rows, so this is NOT part of `reload`, which
+    /// runs on every search keystroke). `seller_listings_for` names the seller
+    /// the rows belong to; a sweep finishing clears it to force a re-read.
+    seller_listings: Vec<SellerListing>,
+    seller_listings_for: Option<String>,
+    /// Pre-folded search haystack per listing (same indices as
+    /// `seller_listings`), built once per load so a keystroke filters tens of
+    /// thousands of rows without re-formatting them.
+    seller_hay: Vec<String>,
+    /// The "add a seller" input box in the Sellers tab (username or a pasted
+    /// discogs.com seller/user URL).
+    seller_add: String,
     /// Free-text filter for the vinyl view's search bar. Narrows both shelves by
     /// artist, title, year and format as you type. Not persisted: a search is
     /// about the record you're looking for right now, not a saved view.

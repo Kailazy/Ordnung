@@ -134,7 +134,13 @@ impl App {
             vinyl: Vec::new(),
             wantlist: Vec::new(),
             vinyl_count: 0,
-            vinyl_tab: VinylList::Collection,
+            vinyl_tab: VinylTab::Shelf(VinylList::Collection),
+            sellers: Vec::new(),
+            seller_current: None,
+            seller_listings: Vec::new(),
+            seller_listings_for: None,
+            seller_hay: Vec::new(),
+            seller_add: String::new(),
             vinyl_filter: String::new(),
             vinyl_covers: HashMap::new(),
             vinyl_cover_req_tx,
@@ -652,6 +658,19 @@ impl App {
             self.wantlist = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_vinyl(VinylList::Wantlist))
                 .unwrap_or_default();
+            // Saved sellers are a handful of rows; their (potentially huge)
+            // listing caches load lazily in the Sellers tab, not here.
+            self.sellers = Catalog::open(&self.db_path)
+                .and_then(|c| c.list_sellers())
+                .unwrap_or_default();
+            if let Some(cur) = &self.seller_current {
+                if !self.sellers.iter().any(|s| &s.username == cur) {
+                    self.seller_current = None;
+                }
+            }
+            if self.seller_current.is_none() {
+                self.seller_current = self.sellers.first().map(|s| s.username.clone());
+            }
             // Evict cover textures for records no longer present (`Tex` makes
             // the mid-frame eviction safe — see `tex.rs`).
             let live: HashSet<VinylCoverKey> = self
@@ -689,6 +708,11 @@ impl App {
         } else if !self.vinyl.is_empty() || !self.wantlist.is_empty() {
             self.vinyl = Vec::new();
             self.wantlist = Vec::new();
+            // Drop the (potentially huge) seller listing cache with the record
+            // lists; the Sellers tab re-reads it on the next visit.
+            self.seller_listings = Vec::new();
+            self.seller_hay = Vec::new();
+            self.seller_listings_for = None;
             // Runs mid-frame when the grid's "in catalog" badge jumps to the
             // Library after painting these covers; safe because `Tex` defers
             // the frees to the next frame (see `tex.rs`).

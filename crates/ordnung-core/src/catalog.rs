@@ -8,8 +8,8 @@ use crate::error::{Error, Result};
 use crate::model::key::{Key, Mode, PitchClass};
 use std::collections::HashMap;
 use crate::model::{
-    Analysis, AudioProperties, Beat, Beatgrid, Format, Id, Playlist, Tags, Track, TranscodeVerdict,
-    VinylList, VinylRecord,
+    Analysis, AudioProperties, Beat, Beatgrid, Format, Id, Playlist, SellerListing, SellerShop,
+    Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
@@ -272,7 +272,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 impl Catalog {
     /// Open (creating if needed) a catalog at `path` and ensure the schema exists.
@@ -557,7 +557,50 @@ impl Catalog {
                 detail_json    TEXT NOT NULL,
                 detail_version INTEGER NOT NULL DEFAULT 1,
                 fetched_at     INTEGER NOT NULL DEFAULT (unixepoch())
-            );",
+            );
+
+            -- Discogs marketplace sellers the user digs through (the Sellers
+            -- tab of the vinyl view). Saved explicitly by username; swept_at is
+            -- stamped only when a full inventory sweep completes, so a
+            -- cancelled sweep still reads as stale. Deliberately NOT part of
+            -- the vinyl_collection/vinyl_wantlist pair: those are the user's
+            -- own shelves and share ~30 cache queries keyed by VinylList —
+            -- a seller's stock is someone else's crates with its own shape.
+            CREATE TABLE IF NOT EXISTS sellers (
+                username       TEXT PRIMARY KEY,
+                reported_items INTEGER,
+                swept_at       INTEGER,
+                added_at       INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+
+            -- One seller's cached for-sale listings, keyed by Discogs's
+            -- marketplace listing id (stable across sweeps). No cover blob
+            -- column on purpose: a large shop runs to tens of thousands of
+            -- listings, so covers load on demand from thumb_url through the
+            -- GUI's URL-keyed cache instead of being bulk-downloaded.
+            CREATE TABLE IF NOT EXISTS seller_listings (
+                listing_id     INTEGER PRIMARY KEY,
+                seller         TEXT NOT NULL REFERENCES sellers(username) ON DELETE CASCADE,
+                release_id     INTEGER NOT NULL,
+                title          TEXT NOT NULL,
+                artist         TEXT NOT NULL,
+                year           INTEGER,
+                label          TEXT,
+                catalog_number TEXT,
+                format         TEXT,
+                thumb_url      TEXT,
+                price          REAL NOT NULL,
+                currency       TEXT NOT NULL,
+                condition      TEXT,
+                sleeve_condition TEXT,
+                ships_from     TEXT,
+                allow_offers   INTEGER NOT NULL DEFAULT 0,
+                uri            TEXT,
+                posted         TEXT,
+                fetched_at     INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE INDEX IF NOT EXISTS idx_seller_listings_seller
+                ON seller_listings(seller);",
         )?;
         self.migrate()?;
         Ok(())
@@ -2854,6 +2897,177 @@ impl Catalog {
         Ok(n)
     }
 
+    // --- Sellers (Discogs marketplace inventory cache) -----------------------
+
+    /// Save a seller to dig through. Idempotent — re-adding an existing seller
+    /// keeps their sweep state and cached listings.
+    pub fn add_seller(&self, username: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO sellers (username) VALUES (?1)",
+            params![username],
+        )?;
+        Ok(())
+    }
+
+    /// Drop a seller and (via cascade) every listing cached for them. Returns
+    /// whether the seller was there to remove.
+    pub fn remove_seller(&self, username: &str) -> Result<bool> {
+        let n = self
+            .conn
+            .execute("DELETE FROM sellers WHERE username=?1", params![username])?;
+        Ok(n > 0)
+    }
+
+    /// Every saved seller with their cached listing count and sweep state,
+    /// oldest-added first so the picker order stays put as sellers are added.
+    pub fn list_sellers(&self) -> Result<Vec<SellerShop>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.username, s.reported_items, s.swept_at,
+                    (SELECT COUNT(*) FROM seller_listings l WHERE l.seller = s.username)
+             FROM sellers s
+             ORDER BY s.added_at, s.username",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(SellerShop {
+                    username: r.get(0)?,
+                    reported: r.get::<_, Option<i64>>(1)?.map(|n| n as u64),
+                    swept_at: r.get(2)?,
+                    cached: r.get::<_, i64>(3)? as u64,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Stamp a completed sweep: when it finished and how many for-sale listings
+    /// Discogs reported in total (all formats — see
+    /// [`SellerShop::reported`]). Called only when a sweep ran to the end, so
+    /// a cancelled one leaves the seller reading as stale.
+    pub fn set_seller_swept(&self, username: &str, reported_items: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sellers SET reported_items=?2, swept_at=unixepoch() WHERE username=?1",
+            params![username, reported_items as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Insert or update one listing in a seller's cache. Keyed on the
+    /// marketplace listing id; a sweep re-runs this for everything it pages
+    /// through, refreshing price and condition in place.
+    pub fn upsert_seller_listing(&self, seller: &str, l: &SellerListing) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO seller_listings
+                 (listing_id, seller, release_id, title, artist, year, label,
+                  catalog_number, format, thumb_url, price, currency, condition,
+                  sleeve_condition, ships_from, allow_offers, uri, posted, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                     ?15, ?16, ?17, ?18, unixepoch())
+             ON CONFLICT(listing_id) DO UPDATE SET
+                 seller          = excluded.seller,
+                 release_id      = excluded.release_id,
+                 title           = excluded.title,
+                 artist          = excluded.artist,
+                 year            = excluded.year,
+                 label           = excluded.label,
+                 catalog_number  = excluded.catalog_number,
+                 format          = excluded.format,
+                 thumb_url       = excluded.thumb_url,
+                 price           = excluded.price,
+                 currency        = excluded.currency,
+                 condition       = excluded.condition,
+                 sleeve_condition = excluded.sleeve_condition,
+                 ships_from      = excluded.ships_from,
+                 allow_offers    = excluded.allow_offers,
+                 uri             = excluded.uri,
+                 posted          = excluded.posted,
+                 fetched_at      = excluded.fetched_at",
+            params![
+                l.listing_id as i64,
+                seller,
+                l.release_id as i64,
+                l.title,
+                l.artist,
+                l.year.map(|y| y as i64),
+                l.label,
+                l.catalog_number,
+                l.format,
+                l.thumb_url,
+                l.price,
+                l.currency,
+                l.condition,
+                l.sleeve_condition,
+                l.ships_from,
+                l.allow_offers as i64,
+                l.uri,
+                l.posted,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Drop cached listings for `seller` that a completed sweep didn't see —
+    /// records sold or delisted since last time. Call ONLY after a sweep that
+    /// ran to the end: pruning against a partial page walk would delete
+    /// everything the walk hadn't reached yet. `keep` empty clears the shop.
+    pub fn prune_seller_listings_not_in(&self, seller: &str, keep: &[u64]) -> Result<usize> {
+        if keep.is_empty() {
+            let n = self.conn.execute(
+                "DELETE FROM seller_listings WHERE seller=?1",
+                params![seller],
+            )?;
+            return Ok(n);
+        }
+        let ids = keep
+            .iter()
+            .map(|id| (*id as i64).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let n = self.conn.execute(
+            &format!("DELETE FROM seller_listings WHERE seller=?1 AND listing_id NOT IN ({ids})"),
+            params![seller],
+        )?;
+        Ok(n)
+    }
+
+    /// Every cached listing for one seller, newest in the crates first (the
+    /// order a sweep fetched them in) — `posted` is ISO 8601 so it sorts as
+    /// text, with undated listings sinking to the end.
+    pub fn list_seller_listings(&self, seller: &str) -> Result<Vec<SellerListing>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT listing_id, release_id, title, artist, year, label,
+                    catalog_number, format, thumb_url, price, currency, condition,
+                    sleeve_condition, ships_from, allow_offers, uri, posted
+             FROM seller_listings
+             WHERE seller=?1
+             ORDER BY posted IS NULL, posted DESC, listing_id DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![seller], |r| {
+                Ok(SellerListing {
+                    listing_id: r.get::<_, i64>(0)? as u64,
+                    release_id: r.get::<_, i64>(1)? as u64,
+                    title: r.get(2)?,
+                    artist: r.get(3)?,
+                    year: r.get::<_, Option<i64>>(4)?.map(|y| y as u16),
+                    label: r.get(5)?,
+                    catalog_number: r.get(6)?,
+                    format: r.get(7)?,
+                    thumb_url: r.get(8)?,
+                    price: r.get(9)?,
+                    currency: r.get(10)?,
+                    condition: r.get(11)?,
+                    sleeve_condition: r.get(12)?,
+                    ships_from: r.get(13)?,
+                    allow_offers: r.get::<_, i64>(14)? != 0,
+                    uri: r.get(15)?,
+                    posted: r.get(16)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     // --- Playlists (Phase 3) -------------------------------------------------
 
     /// Create a playlist (or folder with `is_folder`) under an optional parent
@@ -4314,6 +4528,74 @@ mod tests {
         // An empty keep-set clears the cache wholesale.
         assert_eq!(cat.prune_vinyl_not_in(own, &[]).unwrap(), 1);
         assert_eq!(cat.vinyl_count(own).unwrap(), 0);
+    }
+
+    #[test]
+    fn seller_cache_roundtrips_upsert_prune_and_cascade() {
+        fn listing(id: u64, artist: &str, title: &str, posted: &str) -> SellerListing {
+            SellerListing {
+                listing_id: id,
+                release_id: 9000 + id,
+                title: title.into(),
+                artist: artist.into(),
+                year: Some(1995),
+                label: Some("Chain Reaction".into()),
+                catalog_number: Some("CR-03".into()),
+                format: Some("12\"".into()),
+                thumb_url: Some("https://img/thumb.jpg".into()),
+                price: 14.0,
+                currency: "EUR".into(),
+                condition: Some("Very Good Plus (VG+)".into()),
+                sleeve_condition: Some("Generic".into()),
+                ships_from: Some("Germany".into()),
+                allow_offers: true,
+                uri: Some("https://www.discogs.com/sell/item/1".into()),
+                posted: Some(posted.into()),
+            }
+        }
+
+        let cat = Catalog::open(":memory:").unwrap();
+        cat.add_seller("hardwax").unwrap();
+        // Idempotent re-add keeps the row.
+        cat.add_seller("hardwax").unwrap();
+        assert_eq!(cat.list_sellers().unwrap().len(), 1);
+        assert!(cat.list_sellers().unwrap()[0].swept_at.is_none());
+
+        cat.upsert_seller_listing("hardwax", &listing(1, "Monolake", "Cyan", "2024-01-02"))
+            .unwrap();
+        cat.upsert_seller_listing("hardwax", &listing(2, "Porter Ricks", "Port Gentil", "2024-03-04"))
+            .unwrap();
+
+        // Newest posted first.
+        let rows = cat.list_seller_listings("hardwax").unwrap();
+        assert_eq!(rows.iter().map(|l| l.listing_id).collect::<Vec<_>>(), vec![2, 1]);
+        assert_eq!(rows[0].artist, "Porter Ricks");
+        assert_eq!(rows[1].price, 14.0);
+
+        // A re-sweep refreshes a row in place (price drop) without duplicating.
+        let mut cheaper = listing(1, "Monolake", "Cyan", "2024-01-02");
+        cheaper.price = 9.5;
+        cat.upsert_seller_listing("hardwax", &cheaper).unwrap();
+        let rows = cat.list_seller_listings("hardwax").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].price, 9.5);
+
+        // Completed-sweep bookkeeping.
+        cat.set_seller_swept("hardwax", 250).unwrap();
+        let shop = &cat.list_sellers().unwrap()[0];
+        assert_eq!(shop.cached, 2);
+        assert_eq!(shop.reported, Some(250));
+        assert!(shop.swept_at.is_some());
+
+        // Pruning to what the sweep saw drops the sold record.
+        assert_eq!(cat.prune_seller_listings_not_in("hardwax", &[2]).unwrap(), 1);
+        assert_eq!(cat.list_seller_listings("hardwax").unwrap().len(), 1);
+
+        // Removing the seller cascades their listings away.
+        assert!(cat.remove_seller("hardwax").unwrap());
+        assert!(cat.list_sellers().unwrap().is_empty());
+        assert!(cat.list_seller_listings("hardwax").unwrap().is_empty());
+        assert!(!cat.remove_seller("hardwax").unwrap());
     }
 
     #[test]

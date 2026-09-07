@@ -142,7 +142,7 @@ impl App {
         self.view = LibraryView::Vinyl;
         // Show the shelf the hit lives on, so closing the sheet lands on the
         // tab that holds the record rather than whichever tab was last open.
-        self.vinyl_tab = list;
+        self.vinyl_tab = VinylTab::Shelf(list);
         // The record is addressed directly by key, so the grid behind the sheet
         // is left unfiltered — closing the sheet lands on the whole collection
         // rather than a one-record grid.

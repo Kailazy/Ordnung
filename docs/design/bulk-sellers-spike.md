@@ -1,6 +1,12 @@
 # Spike: "Bulk Sellers" — surface sellers holding several wantlist records
 
-**Status:** investigation only, nothing implemented.
+**Status:** partially implemented. The inventory plumbing this spike scoped
+shipped as the vinyl view's **Sellers tab** ("seller crates", 2026-09-07):
+`Client::seller_inventory` + `SellerListing`, the `sellers`/`seller_listings`
+cache tables, and an explicit cancellable sweep job — plain seller browsing
+rather than this doc's wantlist-intersection ranking, which remains open and
+can now be built as a local join over the cached listings. The endpoint
+probing and cost figures below remain the reference.
 **Goal:** a new tab in the Vinyl view that answers *"who is selling more than one
 record I want, so I can combine an order and pay shipping once?"* — the local
 equivalent of Discogs's `/sell/mywants` seller facet.

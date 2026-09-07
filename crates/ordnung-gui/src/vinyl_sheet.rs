@@ -106,6 +106,22 @@ pub(crate) struct VinylSheet {
     /// `Loading` while the request is out, `Ready(None)` when nothing is for
     /// sale (or Discogs blocks the release from sale).
     pub price: PriceState,
+    /// The concrete copy this sheet was opened on, when it came from a seller
+    /// card: that seller's price, grading and listing link. Shown alongside
+    /// the market floor, because "£14 VG+ from this shop" is the number the
+    /// buy decision actually weighs. `None` everywhere else.
+    pub offer: Option<SellerOffer>,
+}
+
+/// One seller's concrete offer of the open record — see [`VinylSheet::offer`].
+#[derive(Clone)]
+pub(crate) struct SellerOffer {
+    pub seller: String,
+    pub price: discogs::MarketPrice,
+    pub condition: Option<String>,
+    pub sleeve_condition: Option<String>,
+    /// The listing's own discogs.com page; the release page is the fallback.
+    pub uri: Option<String>,
 }
 
 /// The sheet's marketplace price lookup.
@@ -166,7 +182,7 @@ fn sheet_alternative(
 
 /// Render a marketplace price for the sheet header — symbol where there is
 /// one, and always the exact figure: this is the number the user decides on.
-fn fmt_market_price(p: &discogs::MarketPrice) -> String {
+pub(crate) fn fmt_market_price(p: &discogs::MarketPrice) -> String {
     let code = p.currency.trim().to_uppercase();
     let symbol = match code.as_str() {
         "USD" | "CAD" | "AUD" | "NZD" => "$",
@@ -245,6 +261,7 @@ impl App {
                 }
                 _ => PriceState::Idle,
             },
+            offer: None,
         });
         self.spawn_sheet_fetch(record.release_id, ctx.clone());
         self.spawn_sheet_price(record.release_id, ctx.clone());
@@ -293,6 +310,7 @@ impl App {
             video_scrub: None,
             pending_play: false,
             price: PriceState::Idle,
+            offer: None,
         });
         self.spawn_sheet_fetch(release_id, ctx.clone());
         self.spawn_sheet_price(release_id, ctx.clone());
@@ -895,6 +913,29 @@ impl App {
             Some(PriceState::Loading) => Some("Checking price…".to_string()),
             _ => None,
         };
+        // The concrete copy this sheet was opened on (a seller card): what
+        // that shop wants for it, at what grading. Snapshot like `alt` so the
+        // window closure doesn't borrow the sheet.
+        let offer = self
+            .vinyl_sheet
+            .as_ref()
+            .and_then(|s| s.offer.clone())
+            .map(|o| {
+                let short = crate::sellers::cond_short;
+                let grade = match (o.condition.as_deref(), o.sleeve_condition.as_deref()) {
+                    (Some(m), Some(s)) => format!(" · {}/{}", short(m), short(s)),
+                    (Some(m), None) => format!(" · {}", short(m)),
+                    _ => String::new(),
+                };
+                (
+                    format!(
+                        "{}{grade} from {}",
+                        fmt_market_price(&o.price),
+                        o.seller
+                    ),
+                    o.uri,
+                )
+            });
         // A different pressing of the same record that *is* for sale. Snapshot
         // what the row needs so the window closure doesn't borrow the sheet.
         let alt = match self.vinyl_sheet.as_ref().map(|s| &s.price) {
@@ -1006,6 +1047,31 @@ impl App {
                                 egui::RichText::new(line)
                                     .color(egui::Color32::from_rgb(120, 200, 140)),
                             );
+                        }
+                        // The copy the user was actually looking at, when the
+                        // sheet was opened from a seller card: that shop's
+                        // price and grading, with the buy link one click away.
+                        if let Some((offer_line, offer_uri)) = &offer {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.label(
+                                    egui::RichText::new(offer_line)
+                                        .small()
+                                        .color(egui::Color32::from_rgb(120, 200, 140)),
+                                );
+                                if ui
+                                    .small_button("Buy ↗")
+                                    .on_hover_note("Open this listing on discogs.com")
+                                    .clicked()
+                                {
+                                    let url = offer_uri.clone().unwrap_or_else(|| {
+                                        format!(
+                                            "https://www.discogs.com/release/{release_id}"
+                                        )
+                                    });
+                                    open_url(&url);
+                                }
+                            });
                         }
                         // This pressing is a dead end, but another isn't. Say
                         // which one and offer it, rather than leaving "no copies

@@ -66,10 +66,11 @@ fn health_tabs(
 /// owns the switch.
 fn vinyl_tabs(
     ui: &mut egui::Ui,
-    current: VinylList,
+    current: VinylTab,
     owned: usize,
     wanted: usize,
-) -> Option<VinylList> {
+    sellers: usize,
+) -> Option<VinylTab> {
     use crate::ui::tokens::{color, font, radius, space};
 
     let tab = |ui: &mut egui::Ui, label: String, active: bool, tip: &str| -> bool {
@@ -139,18 +140,34 @@ fn vinyl_tabs(
     if tab(
         ui,
         format!("Collection ({owned})"),
-        current == VinylList::Collection,
+        current == VinylTab::Shelf(VinylList::Collection),
         "Records you own",
     ) {
-        clicked = Some(VinylList::Collection);
+        clicked = Some(VinylTab::Shelf(VinylList::Collection));
     }
     if tab(
         ui,
         format!("Wantlist ({wanted})"),
-        current == VinylList::Wantlist,
+        current == VinylTab::Shelf(VinylList::Wantlist),
         "Records you want but don't own yet",
     ) {
-        clicked = Some(VinylList::Wantlist);
+        clicked = Some(VinylTab::Shelf(VinylList::Wantlist));
+    }
+    // The third tab is other people's crates: saved Discogs sellers whose
+    // swept inventory can be dug through offline. Unlabelled by count until a
+    // seller is saved, so a fresh install reads as an invitation, not a zero.
+    let sellers_label = if sellers > 0 {
+        format!("Sellers ({sellers})")
+    } else {
+        "Sellers".to_string()
+    };
+    if tab(
+        ui,
+        sellers_label,
+        current == VinylTab::Sellers,
+        "Dig through a Discogs seller's crates",
+    ) {
+        clicked = Some(VinylTab::Sellers);
     }
     ui.spacing_mut().item_spacing.x = prev_spacing;
     clicked
@@ -1111,13 +1128,19 @@ impl App {
     pub(crate) fn draw_vinyl(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let busy = self.is_busy();
         let mut refresh = false;
+        // The Sellers tab is a different animal from the two shelves — someone
+        // else's crates, with its own header controls — so the shelf-specific
+        // toolbar pieces below are skipped for it.
+        let seller_mode = self.vinyl_tab == VinylTab::Sellers;
         // The user's Discogs collection page, known once a sync has resolved the
         // username. `None` until the first sync.
         // Whichever shelf is showing, its own Discogs page is what the link
         // opens — the button belongs to the tab, not to the view.
         let (list_path, list_tip) = match self.vinyl_tab {
-            VinylList::Collection => ("collection", "Open your collection on discogs.com"),
-            VinylList::Wantlist => ("wants", "Open your wantlist on discogs.com"),
+            VinylTab::Shelf(VinylList::Wantlist) => {
+                ("wants", "Open your wantlist on discogs.com")
+            }
+            _ => ("collection", "Open your collection on discogs.com"),
         };
         let collection_url = {
             let u = self.config.discogs_username.trim();
@@ -1142,19 +1165,34 @@ impl App {
             // Collection and wantlist are two shelves of the same kind, so they're
             // tabs: with a big collection the wantlist used to sit a full scroll
             // below, and neither shelf could be reached quickly from the other.
-            if let Some(tab) = vinyl_tabs(ui, self.vinyl_tab, owned_recs.len(), wanted_recs.len()) {
+            if let Some(tab) = vinyl_tabs(
+                ui,
+                self.vinyl_tab,
+                owned_recs.len(),
+                wanted_recs.len(),
+                self.sellers.len(),
+            ) {
                 self.vinyl_tab = tab;
             }
             // Search sits right of the tabs: it's the fastest way through
             // a wall of covers, so it shouldn't be hiding out with the utility
             // buttons on the far right.
             ui.add_space(10.0);
+            let hint = if seller_mode {
+                "Search the crates"
+            } else {
+                "Search vinyl"
+            };
             let search = ui.add(
                 egui::TextEdit::singleline(&mut self.vinyl_filter)
                     .desired_width(200.0)
-                    .hint_text("Search vinyl"),
+                    .hint_text(hint),
             );
-            search.on_hover_note("Filter both shelves by artist, title, year or format");
+            search.on_hover_note(if seller_mode {
+                "Filter the crates by artist, title, label, year or format"
+            } else {
+                "Filter both shelves by artist, title, year or format"
+            });
             if !self.vinyl_filter.is_empty()
                 && ui
                     .small_button("✖")
@@ -1162,6 +1200,9 @@ impl App {
                     .clicked()
             {
                 self.vinyl_filter.clear();
+            }
+            if seller_mode {
+                return;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_enabled_ui(!busy, |ui| {
@@ -1225,6 +1266,13 @@ impl App {
         }
         ui.separator();
 
+        // Other people's crates get their own body: seller picker, sweep
+        // controls and a virtualized card grid (see `sellers.rs`).
+        if seller_mode {
+            self.draw_sellers(ui, ctx, &query);
+            return;
+        }
+
         if self.vinyl.is_empty() && self.wantlist.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.vertical_centered(|ui| {
@@ -1263,7 +1311,11 @@ impl App {
         // lists while we read the cover cache. Kick off cover decodes up front
         // (the request is deduplicated, so doing it every frame is cheap).
         // Only the active tab's shelf is built: the other one isn't on screen.
-        let tab = self.vinyl_tab;
+        let tab = match self.vinyl_tab {
+            VinylTab::Shelf(list) => list,
+            // Unreachable: seller mode returned above.
+            VinylTab::Sellers => VinylList::Collection,
+        };
         let recs = match tab {
             VinylList::Collection => &owned_recs,
             VinylList::Wantlist => &wanted_recs,

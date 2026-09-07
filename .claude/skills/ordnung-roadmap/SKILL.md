@@ -179,6 +179,21 @@ intra-playlist track reordering by drag, multi-select batch conversion, waveform
 preview (inline table waveforms + full-track player lane with zoom/smoothing/band
 settings), and the multi-candidate Discogs release picker (below).
 
+**Seller crates (Phase A of the "browse a seller's catalog" plan).** A third
+**Sellers** tab beside Collection/Wantlist in the vinyl view: save Discogs
+sellers by username/URL, explicitly **Sweep** their for-sale inventory
+(`Client::seller_inventory` pages `/users/{u}/inventory` newest-first at the
+shared throttle, vinyl-only, capped at 200 pages; cancellable background job)
+into the `sellers` + `seller_listings` catalog tables (schema v3), then dig
+offline: virtualized card grid (price + condition per card, OWNED/WANT badges
+from the shelf membership sets, covers on demand via the dig cover cache),
+shared search box filters the crates, card click opens the record sheet
+carrying that seller's concrete offer (`VinylSheet::offer` — price, grading,
+Buy ↗ to the listing), context menu buys/wantlists. Purchase itself stays on
+discogs.com (the API has no cart). Groundwork + endpoint findings in
+`docs/design/bulk-sellers-spike.md`; still open from that plan: filters/sort,
+session basket, sweep deltas, wantlist-intersection ranking (Phases B/C).
+
 **Record lookup (v0.36.0).** The toolbar search box now has a **Library / Discogs**
 scope toggle on its right. In Discogs mode the same box searches the whole Discogs
 release database via `discogs::search_records` (the free-text lookup the older
