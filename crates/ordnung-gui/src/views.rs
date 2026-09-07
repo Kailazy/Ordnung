@@ -84,10 +84,21 @@ fn vinyl_tabs(
         };
         // Colour is overridden at paint time (hover lifts an inactive label), so
         // the galley is laid out in a placeholder ink.
-        let galley = ui.painter().layout_no_wrap(label, text_font, color::LABEL);
+        let galley = ui
+            .painter()
+            .layout_no_wrap(label.clone(), text_font, color::LABEL);
+        // The rect is sized from the bold variant whether or not this tab is
+        // active: bold runs a touch wider, and sizing each state from its own
+        // galley made the strip (and the search field right of it) shift a few
+        // pixels on every tab switch.
+        let bold = ui.painter().layout_no_wrap(
+            label,
+            font::strong(font::headline().size),
+            color::LABEL,
+        );
         let size = egui::vec2(
-            galley.size().x + space::S4 * 2.0,
-            galley.size().y + space::S3 * 2.0,
+            bold.size().x + space::S4 * 2.0,
+            bold.size().y + space::S3 * 2.0,
         );
         let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
 
@@ -1608,19 +1619,27 @@ impl App {
                     .desired_width(200.0)
                     .hint_text(hint),
             );
-            search.on_hover_note(if seller_mode {
+            let search = search.on_hover_note(if seller_mode {
                 "Filter the crates by artist, title, label, year or format"
             } else {
                 "Filter both shelves by artist, title, year or format"
             });
-            if !self.vinyl_filter.is_empty()
-                && ui
-                    .small_button("✖")
-                    .on_hover_note("Clear the search")
-                    .clicked()
-            {
-                self.vinyl_filter.clear();
-            }
+            // The ✖ keeps its slot even while hidden, so the Filters button and
+            // everything right of it stay put as a search is typed or cleared.
+            ui.allocate_ui_with_layout(
+                egui::vec2(22.0, search.rect.height()),
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                |ui| {
+                    if !self.vinyl_filter.is_empty()
+                        && ui
+                            .small_button("✖")
+                            .on_hover_note("Clear the search")
+                            .clicked()
+                    {
+                        self.vinyl_filter.clear();
+                    }
+                },
+            );
             // Every structured filter — year range, format, genre + style
             // tags, and the seller-only facets — lives behind this one popup,
             // so the toolbar stays a single row however many are active. The

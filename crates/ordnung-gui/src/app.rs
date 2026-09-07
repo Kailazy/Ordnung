@@ -1979,6 +1979,10 @@ impl eframe::App for App {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    // The window's horizontal center, captured before any group
+                    // lays out: the search field anchors to it further down, so
+                    // it sits in the same spot whichever view is showing.
+                    let toolbar_center_x = ui.max_rect().center().x;
                     let busy = self.is_busy();
                     // Every button in this left group acts on the digital
                     // library: importing files, analysis, conversion, tag
@@ -2304,14 +2308,29 @@ impl eframe::App for App {
                         // group left over. Rendered left-to-right inside the reserved
                         // remainder so it can never collide with the counts.
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            // Reserve room for the Clear-filters button so the text
-                            // field shrinks rather than pushing it past the edge of
-                            // this remainder.
                             // Room for the Clear-filters button *and* the
                             // scope toggle, so the field shrinks rather than
                             // pushing either past the edge of this remainder.
-                            let reserved = (if has_filters { 140.0 } else { 0.0 }) + SCOPE_TOGGLE_W;
+                            let gap = ui.spacing().item_spacing.x;
+                            let clear_w = if has_filters { 140.0 + gap } else { 0.0 };
+                            let reserved = clear_w + SCOPE_TOGGLE_W + gap;
                             let w = (ui.available_width() - reserved).clamp(120.0, 320.0);
+                            // Anchor the field + scope toggle to the window's
+                            // horizontal center rather than the left edge of
+                            // whatever space the other groups left over, so the
+                            // box holds one spot across views no matter which
+                            // buttons or counts surround it. The centering
+                            // ignores the Clear-filters button on purpose: it
+                            // comes and goes, and the field must not move when
+                            // it does. Only a window too narrow to fit pushes
+                            // the group off center.
+                            let avail = ui.available_rect_before_wrap();
+                            let group_w = w + gap + SCOPE_TOGGLE_W;
+                            let left = (toolbar_center_x - group_w / 2.0).clamp(
+                                avail.left(),
+                                (avail.right() - group_w - clear_w).max(avail.left()),
+                            );
+                            ui.add_space((left - avail.left()).max(0.0));
                             // egui's TextEdit defaults to a 4×2 inner margin, which
                             // leaves the caret and hint text jammed against the
                             // frame. Give the field real breathing room and a
