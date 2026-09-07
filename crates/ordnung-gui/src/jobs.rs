@@ -535,40 +535,12 @@ impl App {
         thread::spawn(move || run_sweep_seller(db, token, username, cancel, tx, ctx));
     }
 
-    /// Fetch genre tags for one seller's crates: a paced `GET /releases/{id}`
-    /// per listing that has no cached detail yet — the only source Discogs
-    /// offers, since the inventory endpoint carries no genre data. Slow by
-    /// nature (~1 request/second, so thousands of records take an hour or
-    /// more), but every fetch lands in the release cache permanently, so the
-    /// run is resumable: cancelling keeps everything fetched so far and a
-    /// later run continues where it stopped.
-    pub(crate) fn spawn_fetch_seller_genres(&mut self, ctx: egui::Context, username: String) {
-        if self.is_busy() {
-            self.status = "Busy — wait for the current job to finish.".into();
-            return;
-        }
-        let token = self.discogs_token();
-        if token.trim().is_empty() {
-            self.status = "No Discogs token set. Add one in Settings \
-                (https://www.discogs.com/settings/developers)."
-                .into();
-            self.settings_open = true;
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
-        self.status = format!("Fetching genre tags for {username}'s crates…");
-        let db = self.db_path.clone();
-        thread::spawn(move || run_fetch_seller_genres(db, token, username, cancel, tx, ctx));
-    }
-
     /// Import the Discogs genre database: one ~10 GB monthly-dump download,
     /// streamed straight into a local table of every vinyl release's tags (see
     /// [`genredb`]). Needs no Discogs token — the dumps are public. After it,
-    /// genre tags resolve locally for every seller and every dig; the paced
-    /// per-release fetch remains only for releases newer than the dump.
+    /// genre tags resolve locally for every seller and every dig; only
+    /// releases newer than the dump stay untagged until a record sheet caches
+    /// their detail.
     pub(crate) fn spawn_import_genredb(&mut self, ctx: egui::Context) {
         if self.is_busy() {
             self.status = "Busy — wait for the current job to finish.".into();
@@ -2308,111 +2280,6 @@ pub(crate) fn run_import_genredb(
         Err(e) => JobMsg::Failed(format!("importing the genre database: {e}")),
     };
     let _ = tx.send(msg);
-    ctx.request_repaint();
-}
-
-/// Worker for [`App::spawn_fetch_seller_genres`]: walk the seller's cached
-/// listings, fetch the release detail for every release not yet in the release
-/// cache, and store it. Genre tags then surface through `release_genres` on the
-/// reload the finished job triggers. Individual failures are tolerated (a
-/// listed release can be deleted from Discogs), but a run of consecutive ones
-/// reads as "offline or blocked" and aborts rather than grinding through
-/// thousands of doomed requests.
-pub(crate) fn run_fetch_seller_genres(
-    db: PathBuf,
-    token: String,
-    username: String,
-    cancel: Arc<AtomicBool>,
-    tx: Sender<JobMsg>,
-    ctx: egui::Context,
-) {
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
-    };
-    let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
-
-    let listings = match catalog.list_seller_listings(&username) {
-        Ok(l) => l,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("reading {username}'s crates: {e}")));
-            ctx.request_repaint();
-            return;
-        }
-    };
-    let mut ids: Vec<u64> = listings.iter().map(|l| l.release_id).collect();
-    ids.sort_unstable();
-    ids.dedup();
-    let missing = match catalog.releases_not_cached(&ids) {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("checking the release cache: {e}")));
-            ctx.request_repaint();
-            return;
-        }
-    };
-    if missing.is_empty() {
-        let _ = tx.send(JobMsg::Done(format!(
-            "{username}: all {} releases already have details cached",
-            ids.len()
-        )));
-        ctx.request_repaint();
-        return;
-    }
-
-    let total = missing.len();
-    let mut fetched = 0usize;
-    let mut failed = 0usize;
-    let mut fail_streak = 0usize;
-    let mut stopped = false;
-    for (i, id) in missing.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            stopped = true;
-            break;
-        }
-        match client.fetch_release(&id.to_string()) {
-            Ok(detail) => {
-                let _ = catalog.cache_release(&detail);
-                fetched += 1;
-                fail_streak = 0;
-            }
-            Err(_) => {
-                failed += 1;
-                fail_streak += 1;
-                if fail_streak >= 5 {
-                    let _ = tx.send(JobMsg::Failed(format!(
-                        "fetching tags for {username}: 5 releases in a row failed \
-                         (offline, or Discogs is limiting requests); \
-                         the {fetched} fetched so far are kept"
-                    )));
-                    ctx.request_repaint();
-                    return;
-                }
-            }
-        }
-        let _ = tx.send(JobMsg::Status(format!(
-            "Fetching genre tags for {username}'s crates… ({}/{total} releases)",
-            i + 1
-        )));
-        let _ = tx.send(JobMsg::Progress {
-            done: i + 1,
-            total,
-        });
-        ctx.request_repaint();
-    }
-
-    let note = match (stopped, failed) {
-        (true, _) => " (stopped early — fetched so far kept, run again to continue)",
-        (false, f) if f > 0 => " (some releases no longer exist on Discogs)",
-        _ => "",
-    };
-    let _ = tx.send(JobMsg::Done(format!(
-        "{username}: details fetched for {fetched} of {total} releases{note}"
-    )));
     ctx.request_repaint();
 }
 

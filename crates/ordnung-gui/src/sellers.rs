@@ -191,7 +191,6 @@ impl App {
         let mut switch_to: Option<String> = None;
         let mut remove: Option<String> = None;
         let mut sweep: Option<String> = None;
-        let mut fetch_tags: Option<String> = None;
         let mut add_clicked = false;
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -219,23 +218,46 @@ impl App {
             if !self.sellers.is_empty() {
                 ui.add_space(6.0);
             }
-            let add = ui
-                .add(
-                    egui::TextEdit::singleline(&mut self.seller_add)
-                        .desired_width(180.0)
-                        .hint_text("Seller username or URL"),
-                )
+            // The add box lives in a popup so the shop row stays a row of
+            // chips; the button toggles it, Enter or Add inside submits.
+            let add_btn = ui
+                .small_button("＋ Add seller")
                 .on_hover_note("Save a Discogs seller to dig through, by username or shop URL");
-            let submitted =
-                add.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui
-                .small_button("＋ Add")
-                .on_hover_note("Save this seller")
-                .clicked()
-                || submitted
-            {
-                add_clicked = true;
+            let popup_id = ui.make_persistent_id("seller-add-popup");
+            if add_btn.clicked() {
+                ui.memory_mut(|m| m.toggle_popup(popup_id));
             }
+            let just_opened =
+                add_btn.clicked() && ui.memory(|m| m.is_popup_open(popup_id));
+            egui::popup::popup_below_widget(
+                ui,
+                popup_id,
+                &add_btn,
+                egui::PopupCloseBehavior::CloseOnClickOutside,
+                |ui| {
+                    ui.set_min_width(220.0);
+                    ui.horizontal(|ui| {
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(&mut self.seller_add)
+                                .desired_width(180.0)
+                                .hint_text("Seller username or URL"),
+                        );
+                        if just_opened {
+                            edit.request_focus();
+                        }
+                        let submitted = edit.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui
+                            .small_button("Add")
+                            .on_hover_note("Save this seller")
+                            .clicked()
+                            || submitted
+                        {
+                            add_clicked = true;
+                        }
+                    });
+                },
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(cur) = self.seller_current.clone() {
                     ui.add_enabled_ui(!busy, |ui| {
@@ -248,18 +270,6 @@ impl App {
                             .clicked()
                         {
                             sweep = Some(cur.clone());
-                        }
-                        if ui
-                            .button("♪ Fetch tags")
-                            .on_hover_note(
-                                "Pull genre tags for these crates from Discogs, one \
-                                 release lookup per record. Thousands of records take \
-                                 an hour or more; stopping keeps what's fetched and a \
-                                 later run continues from there",
-                            )
-                            .clicked()
-                        {
-                            fetch_tags = Some(cur.clone());
                         }
                     });
                     if ui
@@ -290,6 +300,7 @@ impl App {
                             self.sellers = sellers;
                             self.seller_current = Some(name);
                             self.seller_add.clear();
+                            ctx.memory_mut(|m| m.close_popup());
                             self.ensure_seller_listings();
                         }
                         Err(e) => self.status = format!("Couldn't save seller: {e}"),
@@ -319,9 +330,6 @@ impl App {
         }
         if let Some(u) = sweep {
             self.spawn_sweep_seller(ctx.clone(), u);
-        }
-        if let Some(u) = fetch_tags {
-            self.spawn_fetch_seller_genres(ctx.clone(), u);
         }
 
         // The dig strip works from the crates too: a listing seeds a dig the
