@@ -81,6 +81,13 @@ pub fn dropdown(anchor: &egui::Response, min_width: f32, add: impl FnOnce(&mut M
 
     let opened_at: f64 = ctx.data(|d| d.get_temp(id.with("at")).unwrap_or(now));
     let since_open = (now - opened_at) as f32;
+    // Dismissal context, sampled before the content draws so this frame's own
+    // interactions can't muddy it: a focused text field means Esc is aimed at
+    // the field (unfocus), not the menu; an open popup (a combo box inside the
+    // menu) means a click on one of its options — which lands outside this
+    // Area — must not read as click-away.
+    let field_focused = ctx.memory(|m| m.focused().is_some());
+    let nested_popup_open = ctx.memory(|m| m.any_popup_open());
     // Rise and fade share the one `open_t` so the two halves of the motion can
     // never drift apart.
     let rise = RISE * (1.0 - open_t);
@@ -125,9 +132,9 @@ pub fn dropdown(anchor: &egui::Response, min_width: f32, add: impl FnOnce(&mut M
         open = false;
     }
     if open {
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if !field_focused && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             open = false;
-        } else if !anchor.clicked() && area.response.clicked_elsewhere() {
+        } else if !anchor.clicked() && !nested_popup_open && area.response.clicked_elsewhere() {
             // The anchor guard matters on the frame the menu opens: that click
             // is outside the area too, and without it the menu would dismiss
             // itself the moment it was summoned.
@@ -173,6 +180,44 @@ impl MenuUi<'_> {
     /// click; the caller decides whether that selects, toggles, or closes.
     pub fn selectable(&mut self, selected: bool, label: impl Into<String>) -> bool {
         self.row(Some(selected), label.into(), color::LABEL)
+    }
+
+    /// A section caption — small, semibold, quiet — for a menu that groups
+    /// rows under headings (facet pickers). Aligned to the row text inset.
+    pub fn header(&mut self, text: impl Into<String>) {
+        self.ui.add_space(space::S2);
+        self.ui.horizontal(|ui| {
+            ui.add_space(ROW_PAD);
+            ui.label(
+                egui::RichText::new(text.into())
+                    .font(font::strong(font::footnote().size))
+                    .color(color::LABEL_3),
+            );
+        });
+    }
+
+    /// A capped-height scrollable run of rows for long lists (style tags).
+    /// Rows inside keep their place in the entrance cascade, and a `close()`
+    /// from within still dismisses the menu.
+    pub fn scroll(&mut self, max_height: f32, add: impl FnOnce(&mut MenuUi)) {
+        let since_open = self.since_open;
+        let mut row = self.row;
+        let mut close = false;
+        egui::ScrollArea::vertical()
+            .max_height(max_height)
+            .show(self.ui, |ui| {
+                let mut m = MenuUi {
+                    ui,
+                    since_open,
+                    row,
+                    close: false,
+                };
+                add(&mut m);
+                row = m.row;
+                close = m.close;
+            });
+        self.row = row;
+        self.close |= close;
     }
 
     /// A hairline between row groups, inset from the panel edges.

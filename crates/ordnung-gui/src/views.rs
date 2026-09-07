@@ -1233,33 +1233,27 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     fn vinyl_filter_popup(
         &mut self,
-        ui: &mut egui::Ui,
+        m: &mut crate::ui::menu::MenuUi,
         seller_mode: bool,
         busy: bool,
         genre_options: &[(String, usize)],
         seller_tagged: usize,
         import_genredb: &mut bool,
     ) {
-        use crate::ui::tokens::font;
-        ui.set_min_width(260.0);
-        let header = |ui: &mut egui::Ui, text: &str| {
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new(text)
-                    .font(font::strong(font::footnote().size))
-                    .weak(),
-            );
-        };
+        // Free-form facet rows (inputs, chips) indent to the menu's row text
+        // inset so they align with the animated rows around them.
+        let pad = crate::ui::tokens::space::S3;
 
         if self.vinyl_flt.active(seller_mode) > 0 {
-            if ui.button("✖ Clear all filters").clicked() {
+            if m.item("✖ Clear all filters") {
                 self.vinyl_flt.clear();
             }
-            ui.separator();
+            m.separator();
         }
 
-        header(ui, "Year");
-        ui.horizontal(|ui| {
+        m.header("Year");
+        m.ui().horizontal(|ui| {
+            ui.add_space(pad);
             ui.add(
                 egui::TextEdit::singleline(&mut self.vinyl_flt.year_from)
                     .desired_width(48.0)
@@ -1273,8 +1267,9 @@ impl App {
             );
         });
 
-        header(ui, "Format");
-        ui.horizontal(|ui| {
+        m.header("Format");
+        m.ui().horizontal(|ui| {
+            ui.add_space(pad);
             for fam in FORMAT_FAMILIES {
                 let on = self.vinyl_flt.formats.contains(&fam);
                 if ui.selectable_label(on, fam).clicked() {
@@ -1288,8 +1283,9 @@ impl App {
         });
 
         if seller_mode {
-            header(ui, "This copy");
-            ui.horizontal(|ui| {
+            m.header("This copy");
+            m.ui().horizontal(|ui| {
+                ui.add_space(pad);
                 ui.label("Price up to");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.vinyl_flt.price_max)
@@ -1298,7 +1294,8 @@ impl App {
                 )
                 .on_hover_note("Ceiling in the shop's own listing currency");
             });
-            ui.horizontal(|ui| {
+            m.ui().horizontal(|ui| {
+                ui.add_space(pad);
                 ui.label("Condition");
                 let current = self.vinyl_flt.min_grade;
                 let label = current
@@ -1322,8 +1319,12 @@ impl App {
                         }
                     });
             });
-            ui.checkbox(&mut self.vinyl_flt.hide_owned, "Hide records I own");
-            ui.checkbox(&mut self.vinyl_flt.hide_wanted, "Hide wantlist records");
+            if m.selectable(self.vinyl_flt.hide_owned, "Hide records I own") {
+                self.vinyl_flt.hide_owned = !self.vinyl_flt.hide_owned;
+            }
+            if m.selectable(self.vinyl_flt.hide_wanted, "Hide wantlist records") {
+                self.vinyl_flt.hide_wanted = !self.vinyl_flt.hide_wanted;
+            }
         }
 
         // Genres and styles, split back out of the merged tag census: the
@@ -1333,16 +1334,13 @@ impl App {
         let (genres, styles): (Vec<&(String, usize)>, Vec<&(String, usize)>) = genre_options
             .iter()
             .partition(|(t, _)| DISCOGS_GENRES.iter().any(|g| g.eq_ignore_ascii_case(t)));
-        let mut tag_row = |ui: &mut egui::Ui, tag: &str, n: usize| {
+        let mut tag_row = |m: &mut crate::ui::menu::MenuUi, tag: &str, n: usize| {
             let selected = self
                 .vinyl_flt
                 .genres
                 .iter()
                 .any(|g| g.eq_ignore_ascii_case(tag));
-            if ui
-                .selectable_label(selected, format!("{tag} ({n})"))
-                .clicked()
-            {
+            if m.selectable(selected, format!("{tag} ({n})")) {
                 if selected {
                     self.vinyl_flt
                         .genres
@@ -1353,67 +1351,67 @@ impl App {
             }
         };
         if !genres.is_empty() {
-            header(ui, "Genres");
+            m.header("Genres");
             for (tag, n) in &genres {
-                tag_row(ui, tag, *n);
+                tag_row(m, tag, *n);
             }
         }
         if !styles.is_empty() {
-            header(ui, "Styles");
-            egui::ScrollArea::vertical()
-                .max_height(220.0)
-                .show(ui, |ui| {
-                    for (tag, n) in &styles {
-                        tag_row(ui, tag, *n);
-                    }
-                });
+            m.header("Styles");
+            m.scroll(220.0, |m| {
+                for (tag, n) in &styles {
+                    tag_row(m, tag, *n);
+                }
+            });
         }
         if genre_options.is_empty() {
-            header(ui, "Genres");
-            let hint = if seller_mode {
+            m.header("Genres");
+            m.note(if seller_mode {
                 "No genre tags known for these crates yet."
             } else {
                 "No genre tags yet. Refresh to pull them from Discogs."
-            };
-            ui.label(egui::RichText::new(hint).weak());
+            });
         }
 
         if seller_mode {
-            ui.separator();
+            m.separator();
             let n = self.seller_listings.len();
             if !genre_options.is_empty() {
-                let note = if seller_tagged < n {
+                m.note(if seller_tagged < n {
                     format!("Tags known for {seller_tagged} of {n} records")
                 } else {
                     format!("Tags known for all {n} records")
-                };
-                ui.label(egui::RichText::new(note).weak().small());
+                });
             }
             // The bulk answer to partial coverage: one dump import tags
             // (nearly) everything; until then the paced per-release fetch is
             // the fallback.
             match &self.genredb_info {
                 Some((dump, kept)) => {
-                    let m = kept / 1_000_000;
-                    ui.label(
-                        egui::RichText::new(format!("Genre database: dump {dump}, {m}M releases"))
-                            .weak()
-                            .small(),
-                    );
+                    let millions = kept / 1_000_000;
+                    m.note(format!("Genre database: dump {dump}, {millions}M releases"));
                 }
                 None => {
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("⬇ Import genre database").small())
-                        .on_hover_note(
-                            "Download every vinyl release's genre tags once \
-                             (a few hundred MB, prebuilt monthly from the \
-                             Discogs dump) so tags resolve locally and \
-                             instantly, for every seller",
-                        )
-                        .clicked()
-                    {
+                    let clicked = m
+                        .ui()
+                        .horizontal(|ui| {
+                            ui.add_space(pad);
+                            ui.add_enabled(
+                                !busy,
+                                egui::Button::new("⬇ Import genre database").small(),
+                            )
+                            .on_hover_note(
+                                "Download every vinyl release's genre tags once \
+                                 (a few hundred MB, prebuilt monthly from the \
+                                 Discogs dump) so tags resolve locally and \
+                                 instantly, for every seller",
+                            )
+                            .clicked()
+                        })
+                        .inner;
+                    if clicked {
                         *import_genredb = true;
-                        ui.close_menu();
+                        m.close();
                     }
                 }
             }
@@ -1574,20 +1572,19 @@ impl App {
             } else {
                 format!("⚟ Filters ({active})")
             };
-            ui.menu_button(flt_label, |ui| {
+            let flt_btn = ui.button(flt_label).on_hover_note(
+                "Filter by year, format, genre and style; each added constraint narrows further",
+            );
+            crate::ui::menu::dropdown(&flt_btn, 260.0, |m| {
                 self.vinyl_filter_popup(
-                    ui,
+                    m,
                     seller_mode,
                     busy,
                     &genre_options,
                     seller_tagged,
                     &mut import_genredb,
                 );
-            })
-            .response
-            .on_hover_note(
-                "Filter by year, format, genre and style; each added constraint narrows further",
-            );
+            });
             // Grid vs list: one layout choice for all three tabs, so it sits
             // with the shared controls rather than the shelf-only ones. A wall
             // of covers browses; rows compare — price, year and format line up.
