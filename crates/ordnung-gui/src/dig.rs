@@ -316,8 +316,8 @@ const CARD_H: f32 = COVER + 60.0;
 const GAP_X: f32 = 34.0;
 const GAP_Y: f32 = 14.0;
 
-/// The little rect a connector's arrowhead occupies, just left of a card's
-/// cover — also the hover target that names the thread that was followed.
+/// The little rect a connector's arrowhead lands in, just left of a card's
+/// cover — the hover target that names the thread that was followed.
 fn connector_glyph_rect(card_slot: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(
         egui::pos2(card_slot.left() - 10.0, card_slot.top() + COVER * 0.5),
@@ -325,10 +325,11 @@ fn connector_glyph_rect(card_slot: egui::Rect) -> egui::Rect {
     )
 }
 
-/// The line from a record to one dug out of it. On the same row the arrowhead
-/// alone reads as the thread, like the single-chain strip always drew; a
-/// branch on a lower row gets an elbow down from its parent, so a fork is
-/// visible as a fork rather than two rows that happen to line up.
+/// The line from a record to one dug out of it: a shaft ending in a small
+/// filled arrowhead at the child's cover. On the same row it's a straight
+/// thread through the gap; a branch on a lower row bends down from its parent
+/// through a round-cornered elbow, so a fork is visible as a fork rather than
+/// two rows that happen to line up.
 fn draw_connector(
     painter: &egui::Painter,
     from: egui::Rect,
@@ -337,17 +338,53 @@ fn draw_connector(
 ) {
     let pcy = from.top() + COVER * 0.5;
     let ccy = to.top() + COVER * 0.5;
-    if (pcy - ccy).abs() < 0.5 {
-        return;
-    }
-    let xm = (from.right() + to.left()) * 0.5;
+    let start = egui::pos2(from.right() + 5.0, pcy);
+    let tip = egui::pos2(to.left() - 5.0, ccy);
     let stroke = egui::Stroke::new(1.5, color);
-    painter.line_segment([egui::pos2(from.right() + 2.0, pcy), egui::pos2(xm, pcy)], stroke);
-    painter.line_segment([egui::pos2(xm, pcy), egui::pos2(xm, ccy)], stroke);
-    painter.line_segment(
-        [egui::pos2(xm, ccy), egui::pos2(to.left() - 19.0, ccy)],
-        stroke,
-    );
+    // The shaft stops short of the tip so it never pokes out of the head.
+    let shaft_end = egui::pos2(tip.x - 6.0, ccy);
+    if (pcy - ccy).abs() < 0.5 {
+        painter.line_segment([start, shaft_end], stroke);
+    } else {
+        let xm = (from.right() + to.left()) * 0.5;
+        let dir = (ccy - pcy).signum();
+        let r = 6.0f32.min((ccy - pcy).abs() * 0.5);
+        painter.line_segment([start, egui::pos2(xm - r, pcy)], stroke);
+        painter.add(egui::epaint::QuadraticBezierShape::from_points_stroke(
+            [
+                egui::pos2(xm - r, pcy),
+                egui::pos2(xm, pcy),
+                egui::pos2(xm, pcy + r * dir),
+            ],
+            false,
+            egui::Color32::TRANSPARENT,
+            stroke,
+        ));
+        painter.line_segment(
+            [egui::pos2(xm, pcy + r * dir), egui::pos2(xm, ccy - r * dir)],
+            stroke,
+        );
+        painter.add(egui::epaint::QuadraticBezierShape::from_points_stroke(
+            [
+                egui::pos2(xm, ccy - r * dir),
+                egui::pos2(xm, ccy),
+                egui::pos2(xm + r, ccy),
+            ],
+            false,
+            egui::Color32::TRANSPARENT,
+            stroke,
+        ));
+        painter.line_segment([egui::pos2(xm + r, ccy), shaft_end], stroke);
+    }
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            tip,
+            egui::pos2(tip.x - 7.0, ccy - 3.5),
+            egui::pos2(tip.x - 7.0, ccy + 3.5),
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
 }
 
 /// A flag that is never raised, for the call sites that must not be cancelled.
@@ -1394,6 +1431,9 @@ impl App {
         let mut step: Option<DigThread> = None;
         let mut goto: Option<usize> = None;
         let mut end = false;
+        // Set while laying out the web when it has forked past one row — the
+        // (min, current, max) heights the edge resize handle clamps between.
+        let mut resize_limits: Option<(f32, f32, f32)> = None;
 
         // The strip's own entrance. `open_t` runs once per dig from the moment
         // it started; a settled strip clamps to 1.0 and pays for nothing.
@@ -1405,7 +1445,7 @@ impl App {
         // squeezed and opens to its resting value, which moves the whole strip
         // *and* the shelf below it rather than letting it overlap either.
         let rise = OPEN_RISE * (1.0 - open_t);
-        ui.scope(|ui| {
+        let strip_rect = ui.scope(|ui| {
             ui.multiply_opacity(open_t);
             egui::Frame::none()
                 .fill(egui::Color32::from_gray(26))
@@ -1517,13 +1557,6 @@ impl App {
                                 let cslot = slot_of(card.row, card.col);
                                 draw_connector(ui.painter(), pslot, cslot, color);
                                 let glyph = connector_glyph_rect(cslot);
-                                ui.painter().text(
-                                    glyph.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "→",
-                                    egui::FontId::proportional(16.0),
-                                    color,
-                                );
                                 ui.interact(
                                     glyph,
                                     ui.id().with(("dig-conn", i)),
@@ -1741,14 +1774,6 @@ impl App {
                                     let head_slot = slot_of(cards[at].row, cards[at].col);
                                     let color = egui::Color32::from_gray(120);
                                     draw_connector(ui.painter(), head_slot, slot, color);
-                                    let glyph = connector_glyph_rect(slot);
-                                    ui.painter().text(
-                                        glyph.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        "→",
-                                        egui::FontId::proportional(16.0),
-                                        color,
-                                    );
                                     let rect = egui::Rect::from_min_size(
                                         slot.min,
                                         egui::vec2(COVER, COVER),
@@ -1764,35 +1789,11 @@ impl App {
                         });
 
                     // Once the web has forked there may be more rows than the
-                    // strip shows, so it grows a grab bar: drag to give the
-                    // web more (or less) of the window. The chosen height
-                    // sticks for the session, across digs.
+                    // strip shows, so its bottom edge becomes a resize handle
+                    // (hung on the frame after it closes, below). Remember the
+                    // clamp range that handle needs.
                     if rows > 1 {
-                        ui.add_space(2.0);
-                        let (bar, resp) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), 9.0),
-                            egui::Sense::drag(),
-                        );
-                        let active = resp.hovered() || resp.dragged();
-                        if active {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-                        }
-                        ui.painter().line_segment(
-                            [
-                                bar.center() - egui::vec2(18.0, 0.0),
-                                bar.center() + egui::vec2(18.0, 0.0),
-                            ],
-                            egui::Stroke::new(
-                                2.5,
-                                egui::Color32::from_gray(if active { 150 } else { 70 }),
-                            ),
-                        );
-                        if resp.dragged() {
-                            self.dig_strip_h = Some(
-                                (max_h + resp.drag_delta().y).clamp(min_h, content_h),
-                            );
-                        }
-                        resp.on_hover_note("Drag to resize the web");
+                        resize_limits = Some((min_h, max_h, content_h));
                     }
                     ui.add_space(8.0);
                     if let Some(e) = &error {
@@ -1854,8 +1855,44 @@ impl App {
                             ui.label(egui::RichText::new("Searching Discogs…").weak());
                         }
                     });
-                });
-        });
+                })
+                .response
+                .rect
+        })
+        .inner;
+
+        // The resize handle lives on the strip's bottom edge, like a window
+        // border: the whole edge drags, and the affordance line runs along it
+        // rather than floating mid-panel. The chosen height sticks for the
+        // session, across digs.
+        if let Some((min_h, max_h, content_h)) = resize_limits {
+            let zone = egui::Rect::from_min_max(
+                egui::pos2(strip_rect.left(), strip_rect.bottom() - 7.0),
+                egui::pos2(strip_rect.right(), strip_rect.bottom() + 2.0),
+            );
+            let resp = ui.interact(zone, ui.id().with("dig-resize"), egui::Sense::drag());
+            let active = resp.hovered() || resp.dragged();
+            if active {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            }
+            // Inset past the frame's rounded corners so the line follows the
+            // straight run of the edge.
+            ui.painter().line_segment(
+                [
+                    egui::pos2(strip_rect.left() + 9.0, strip_rect.bottom() - 1.5),
+                    egui::pos2(strip_rect.right() - 9.0, strip_rect.bottom() - 1.5),
+                ],
+                egui::Stroke::new(
+                    2.0,
+                    egui::Color32::from_gray(if active { 150 } else { 48 }),
+                ),
+            );
+            if resp.dragged() {
+                self.dig_strip_h =
+                    Some((max_h + resp.drag_delta().y).clamp(min_h, content_h));
+            }
+            resp.on_hover_note("Drag to resize the web");
+        }
 
         // Vary the roll between clicks (see `dig_roll`).
         self.dig_seed = self.dig_seed.wrapping_add(0x2545_F491_4F6C_DD1D);
