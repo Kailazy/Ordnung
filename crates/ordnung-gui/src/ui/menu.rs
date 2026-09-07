@@ -52,8 +52,11 @@ const CHECK_W: f32 = 18.0;
 const ROW_PAD: f32 = space::S3;
 
 /// Attach an animated dropdown to `anchor`. Clicking the anchor toggles it;
-/// `min_width` keeps a sparse menu from collapsing to its longest label.
-pub fn dropdown(anchor: &egui::Response, min_width: f32, add: impl FnOnce(&mut MenuUi)) {
+/// `width` is the panel's fixed content width. Fixed, not a minimum: inside an
+/// `Area` the "available" width is the rest of the screen, so any row that
+/// filled it would drag the panel out to the window edge. A menu also shouldn't
+/// resize as rows come and go (a filter count appearing, a section toggling).
+pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuUi)) {
     let ctx = anchor.ctx.clone();
     let id = anchor.id.with("ord_dropdown");
     let mut open: bool = ctx.data(|d| d.get_temp(id).unwrap_or(false));
@@ -115,7 +118,12 @@ pub fn dropdown(anchor: &egui::Response, min_width: f32, add: impl FnOnce(&mut M
                     color: egui::Color32::from_black_alpha(90),
                 })
                 .show(ui, |ui| {
-                    ui.set_min_width(min_width);
+                    ui.set_min_width(width);
+                    ui.set_max_width(width);
+                    // Menu rows sit closer than the global spacing: the panel
+                    // should read as one composed surface, not a stack of
+                    // widgets with air between them.
+                    ui.spacing_mut().item_spacing.y = 2.0;
                     let mut m = MenuUi {
                         ui,
                         since_open,
@@ -167,33 +175,47 @@ pub struct MenuUi<'u> {
 impl MenuUi<'_> {
     /// A plain action row. Returns true on click.
     pub fn item(&mut self, label: impl Into<String>) -> bool {
-        self.row(None, label.into(), color::LABEL)
+        self.row(None, label.into(), None, color::LABEL)
     }
 
     /// An action row in the destructive red, for deletes and their kin.
     pub fn item_danger(&mut self, label: impl Into<String>) -> bool {
-        self.row(None, label.into(), color::RED)
+        self.row(None, label.into(), None, color::RED)
     }
 
     /// A row with a ✓ column — for single- or multi-select lists. All
     /// selectable rows share the column so their labels align. Returns true on
     /// click; the caller decides whether that selects, toggles, or closes.
     pub fn selectable(&mut self, selected: bool, label: impl Into<String>) -> bool {
-        self.row(Some(selected), label.into(), color::LABEL)
+        self.row(Some(selected), label.into(), None, color::LABEL)
     }
 
-    /// A section caption — small, semibold, quiet — for a menu that groups
-    /// rows under headings (facet pickers). Aligned to the row text inset.
+    /// A selectable row with a quiet right-aligned detail — a count, a
+    /// shortcut, a unit. Kept out of the label so the reading column stays
+    /// clean and the numbers line up against the panel edge.
+    pub fn selectable_detail(
+        &mut self,
+        selected: bool,
+        label: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> bool {
+        self.row(Some(selected), label.into(), Some(detail.into()), color::LABEL)
+    }
+
+    /// A section caption — small caps, semibold, quiet — for a menu that
+    /// groups rows under headings (facet pickers). Aligned to the row text
+    /// inset. Uppercased here so call sites write natural-case labels.
     pub fn header(&mut self, text: impl Into<String>) {
-        self.ui.add_space(space::S2);
+        self.ui.add_space(space::S3);
         self.ui.horizontal(|ui| {
             ui.add_space(ROW_PAD);
             ui.label(
-                egui::RichText::new(text.into())
-                    .font(font::strong(font::footnote().size))
+                egui::RichText::new(text.into().to_uppercase())
+                    .font(font::strong(font::caption().size))
                     .color(color::LABEL_3),
             );
         });
+        self.ui.add_space(space::S1);
     }
 
     /// A capped-height scrollable run of rows for long lists (style tags).
@@ -261,8 +283,14 @@ impl MenuUi<'_> {
     }
 
     /// One row: animated hover fill, staggered fade/slide entrance, optional
-    /// ✓ column, label in `text_color`.
-    fn row(&mut self, selected: Option<bool>, label: String, text_color: egui::Color32) -> bool {
+    /// ✓ column and right-aligned detail, label in `text_color`.
+    fn row(
+        &mut self,
+        selected: Option<bool>,
+        label: String,
+        detail: Option<String>,
+        text_color: egui::Color32,
+    ) -> bool {
         let i = self.row;
         self.row += 1;
         // This row's entrance, 0 → 1: rows trail each other by `ROW_STAGGER`
@@ -283,6 +311,16 @@ impl MenuUi<'_> {
             .ctx()
             .animate_bool_with_time(resp.id.with("hot"), resp.hovered(), HOVER_ANIM);
         let painter = self.ui.painter();
+        // A picked row wears a soft accent wash under everything else, so an
+        // active filter reads at a glance without shouting; the ✓ carries the
+        // saturated accent.
+        if selected == Some(true) {
+            painter.rect_filled(
+                rect,
+                egui::Rounding::same(radius::SM),
+                color::ACCENT_SOFT.gamma_multiply(0.45 * enter),
+            );
+        }
         if hot > 0.0 {
             let fill = if resp.is_pointer_button_down_on() {
                 color::SURFACE_ACTIVE
@@ -319,6 +357,15 @@ impl MenuUi<'_> {
             font::body(),
             text_color.gamma_multiply(enter),
         );
+        if let Some(detail) = detail {
+            painter.text(
+                egui::pos2(rect.right() - ROW_PAD, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                detail,
+                font::callout(),
+                color::LABEL_3.gamma_multiply(enter),
+            );
+        }
         resp.clicked()
     }
 }

@@ -1340,7 +1340,7 @@ impl App {
                 .genres
                 .iter()
                 .any(|g| g.eq_ignore_ascii_case(tag));
-            if m.selectable(selected, format!("{tag} ({n})")) {
+            if m.selectable_detail(selected, tag, n.to_string()) {
                 if selected {
                     self.vinyl_flt
                         .genres
