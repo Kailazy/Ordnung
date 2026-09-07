@@ -142,7 +142,6 @@ impl App {
             seller_genres: HashMap::new(),
             seller_hay: Vec::new(),
             seller_add: String::new(),
-            cart_import_text: String::new(),
             viewed_releases: HashSet::new(),
             cart_ids: HashSet::new(),
             cart_lines: Vec::new(),

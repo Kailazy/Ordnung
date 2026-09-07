@@ -58,68 +58,6 @@ fn cart_summary(lines: &[CartLine], seller: &str) -> Option<(u64, String)> {
     Some((count, total))
 }
 
-/// Match a pasted discogs.com cart page against the swept listings, since the
-/// Discogs API exposes no cart endpoint to read instead. The page groups items
-/// under "Order from <seller>" headings, and each item line reads
-/// "Artist - Title (format)" with its price nearby, so a block is matched by
-/// scanning that seller's cached listings for artist + title + exact price all
-/// appearing in the block's lowercased text (a short artist name must appear
-/// in the joined "artist - title" form, or it would match everywhere).
-///
-/// Returns the matched listing ids plus how many items the paste claims — its
-/// "Media:" grading lines, one per cart row — so the caller can say what
-/// didn't match (items from unsaved or not-yet-updated shops, mostly).
-fn match_cart_paste(
-    text: &str,
-    listings: &HashMap<String, Vec<SellerListing>>,
-) -> (Vec<u64>, usize) {
-    let expected = text.matches("Media:").count();
-    let lower = text.to_lowercase();
-    let mut ids: Vec<u64> = Vec::new();
-    let mut chunks = lower.split("order from");
-    chunks.next(); // whatever precedes the first block
-    for chunk in chunks {
-        let Some(seller) = chunk.split_whitespace().next().map(|t| {
-            t.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
-        }) else {
-            continue;
-        };
-        let Some(rows) = listings.get(seller) else {
-            continue;
-        };
-        for l in rows {
-            let artist = l.artist.to_lowercase();
-            let title = l.title.to_lowercase();
-            let joined = format!("{artist} - {title}");
-            let credited = chunk.contains(&joined)
-                || (artist.len() >= 4 && chunk.contains(&artist) && chunk.contains(&title));
-            if !credited {
-                continue;
-            }
-            // The price must sit just after the title (its grading line and
-            // price tag follow it on the page) — matched anywhere in the
-            // block, the Subtotal/Shipping/Total figures would claim look-
-            // alike listings the seller stocks at those prices.
-            let price = format!("{:.2}", l.price);
-            let priced = chunk.match_indices(&title).any(|(pos, _)| {
-                let from = pos + title.len();
-                let mut to = (from + 120).min(chunk.len());
-                // Never split a multi-byte character (€ signs abound here).
-                while !chunk.is_char_boundary(to) {
-                    to -= 1;
-                }
-                chunk[from..to].contains(&price)
-            });
-            if priced {
-                ids.push(l.listing_id);
-            }
-        }
-    }
-    ids.sort_unstable();
-    ids.dedup();
-    (ids, expected)
-}
-
 /// A seller username, out of either a bare name or a pasted discogs.com URL
 /// (`…/seller/NAME/profile`, `…/user/NAME`). `None` when nothing usable is in
 /// the box.
@@ -285,7 +223,6 @@ impl App {
         let mut remove: Option<String> = None;
         let mut sweep: Option<String> = None;
         let mut add_clicked = false;
-        let mut import_clicked = false;
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             for shop in &self.sellers {
@@ -427,64 +364,9 @@ impl App {
                         open_url(&format!("https://www.discogs.com/seller/{cur}/profile"));
                     }
                 }
-                // Import the real discogs.com cart by paste: the API exposes
-                // no cart endpoint, so the page itself is the only source.
-                if !self.sellers.is_empty() {
-                    let import_btn = ui.button("⇩ Import cart").on_hover_note(
-                        "Mirror your discogs.com cart here: open the cart page, \
-                         select all, copy, and paste. Items are matched against \
-                         your saved shops' updated crates",
-                    );
-                    let import_popup = ui.make_persistent_id("cart-import-popup");
-                    if import_btn.clicked() {
-                        ui.memory_mut(|m| m.toggle_popup(import_popup));
-                    }
-                    let just_opened =
-                        import_btn.clicked() && ui.memory(|m| m.is_popup_open(import_popup));
-                    egui::popup::popup_below_widget(
-                        ui,
-                        import_popup,
-                        &import_btn,
-                        egui::PopupCloseBehavior::CloseOnClickOutside,
-                        |ui| {
-                            ui.set_min_width(380.0);
-                            ui.label(
-                                egui::RichText::new(
-                                    "Open discogs.com/sell/cart, select all (⌘A), \
-                                     copy, and paste here.",
-                                )
-                                .weak(),
-                            );
-                            let edit = ui.add(
-                                egui::TextEdit::multiline(&mut self.cart_import_text)
-                                    .desired_rows(5)
-                                    .desired_width(370.0)
-                                    .hint_text("Paste your Discogs cart page"),
-                            );
-                            if just_opened {
-                                edit.request_focus();
-                            }
-                            ui.horizontal(|ui| {
-                                if ui.small_button("↗ Open cart page").clicked() {
-                                    open_url("https://www.discogs.com/sell/cart");
-                                }
-                                let ready = !self.cart_import_text.trim().is_empty();
-                                if ui
-                                    .add_enabled(ready, egui::Button::new("Import").small())
-                                    .clicked()
-                                {
-                                    import_clicked = true;
-                                }
-                            });
-                        },
-                    );
-                }
             });
         });
 
-        if import_clicked {
-            self.import_cart_paste(ctx);
-        }
         // Apply the shop-row asks now that `self.sellers` is free again.
         if let Some(u) = switch_to {
             self.seller_current = Some(u);
@@ -861,54 +743,6 @@ impl App {
                 };
             }
             Err(e) => self.status = format!("Couldn't update the cart: {e}"),
-        }
-    }
-
-    /// Mirror the pasted discogs.com cart page into the local cart: match its
-    /// per-seller blocks against every saved shop's cached listings (see
-    /// [`match_cart_paste`]), add what matched, and report what couldn't be —
-    /// items from shops that were never saved or updated, mostly. Additive on
-    /// purpose: an import never removes records set aside in the app.
-    pub(crate) fn import_cart_paste(&mut self, ctx: &egui::Context) {
-        let text = std::mem::take(&mut self.cart_import_text);
-        let mut by_seller: HashMap<String, Vec<SellerListing>> = HashMap::new();
-        if let Ok(cat) = Catalog::open(&self.db_path) {
-            for s in &self.sellers {
-                if let Ok(rows) = cat.list_seller_listings(&s.username) {
-                    by_seller.insert(s.username.to_lowercase(), rows);
-                }
-            }
-        }
-        let (matched, expected) = match_cart_paste(&text, &by_seller);
-        let res = Catalog::open(&self.db_path).and_then(|c| {
-            for id in &matched {
-                c.cart_add(*id)?;
-            }
-            Ok((c.cart_listing_ids()?, c.cart_lines()?))
-        });
-        match res {
-            Ok((ids, lines)) => {
-                self.cart_ids = ids.into_iter().collect();
-                self.cart_lines = lines;
-                let mut msg = format!("Imported {} of {expected} cart records", matched.len());
-                let unswept: Vec<&str> = self
-                    .sellers
-                    .iter()
-                    .filter(|s| s.swept_at.is_none())
-                    .map(|s| s.username.as_str())
-                    .collect();
-                if matched.len() < expected && !unswept.is_empty() {
-                    msg.push_str(&format!(
-                        " — update {} to match their items",
-                        unswept.join(", ")
-                    ));
-                } else if matched.len() < expected {
-                    msg.push_str(" — the rest are from shops not saved here");
-                }
-                self.status = msg;
-                ctx.memory_mut(|m| m.close_popup());
-            }
-            Err(e) => self.status = format!("Couldn't import the cart: {e}"),
         }
     }
 
@@ -1609,67 +1443,5 @@ mod tests {
         assert_eq!(cond_short("Very Good Plus (VG+)"), "VG+");
         assert_eq!(cond_short("Mint (M)"), "M");
         assert_eq!(cond_short("Generic"), "Generic");
-    }
-
-    /// A pasted cart page matches listings per seller block by artist, title
-    /// and exact price; totals and shipping figures never count as items, and
-    /// blocks from shops that aren't cached match nothing.
-    #[test]
-    fn cart_paste_matches_per_seller_blocks() {
-        fn listing(id: u64, artist: &str, title: &str, price: f64) -> SellerListing {
-            SellerListing {
-                listing_id: id,
-                release_id: 9000 + id,
-                title: title.into(),
-                artist: artist.into(),
-                year: Some(2020),
-                label: None,
-                catalog_number: None,
-                format: Some("12\"".into()),
-                thumb_url: None,
-                price,
-                currency: "EUR".into(),
-                condition: Some("Mint (M)".into()),
-                sleeve_condition: None,
-                ships_from: Some("Germany".into()),
-                shipping_price: None,
-                shipping_currency: None,
-                allow_offers: false,
-                uri: None,
-                posted: None,
-            }
-        }
-        let mut listings = HashMap::new();
-        listings.insert(
-            "black.round.twelve".to_string(),
-            vec![
-                listing(1, "Stefan Vincent", "The Auxiliary Phase", 10.0),
-                listing(2, "Various", "Night Drive EP", 10.0),
-                // Same shop, not in the cart: the price differs.
-                listing(3, "Stefan Vincent", "The Auxiliary Phase", 25.0),
-            ],
-        );
-        listings.insert(
-            "echoesinspace".to_string(),
-            vec![listing(4, "Cignol", "Impact Velocity", 12.5)],
-        );
-
-        // What a select-all copy of the cart page reads like, noise included.
-        let paste = "You have 3 items in your cart from 3 sellers.\n\
-             Order from  black.round.twelve  100.0% positive (6,522)\n\
-             Stefan Vincent - The Auxiliary Phase (12\")\n\
-             Media: Mint (M) / Sleeve: Generic\n€10.00 EUR\n\
-             Various - Night Drive EP (12\", EP)\n\
-             Media: Mint (M) / Sleeve: Generic\n€10.00 EUR\n\
-             Subtotal €20.00 EUR\nShipping €25.00 EUR\nTotal €49.00 EUR\n\
-             Order from echoesinspace 100.0% positive (258)\n\
-             Cignol - Impact Velocity (12\")\n\
-             Media: Mint (M) / Sleeve: Generic\n€12.50 EUR\n\
-             Order from some.other.shop\n\
-             Somebody - Something (LP)\nMedia: Mint (M)\n€7.00 EUR\n";
-        let (ids, expected) = match_cart_paste(paste, &listings);
-        assert_eq!(ids, vec![1, 2, 4]);
-        // Four "Media:" lines — the unmatched one is reported, not invented.
-        assert_eq!(expected, 4);
     }
 }
