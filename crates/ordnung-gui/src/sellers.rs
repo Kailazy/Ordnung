@@ -72,6 +72,33 @@ pub(crate) fn cond_short(s: &str) -> &str {
     }
 }
 
+/// Rank of a media grade for the condition-floor filter, higher = better:
+/// P=0, F=1, G=2, G+=3, VG=4, VG+=5, NM=6, M=7. `None` when the string isn't
+/// a recognizable grade — a floor filter drops those, since it can't vouch
+/// for them.
+pub(crate) fn grade_rank(condition: &str) -> Option<u8> {
+    match cond_short(condition) {
+        "M" => Some(7),
+        s if s.starts_with("NM") => Some(6), // Discogs writes "NM or M-"
+        "VG+" => Some(5),
+        "VG" => Some(4),
+        "G+" => Some(3),
+        "G" => Some(2),
+        "F" => Some(1),
+        "P" => Some(0),
+        _ => None,
+    }
+}
+
+/// The condition floors the Filters popup offers: label + minimum rank.
+pub(crate) const GRADE_FLOORS: [(&str, u8); 5] = [
+    ("G+ or better", 3),
+    ("VG or better", 4),
+    ("VG+ or better", 5),
+    ("NM or better", 6),
+    ("M only", 7),
+];
+
 /// Does a listing match the crates search? Same contract as
 /// [`vinyl_matches`](crate::views::vinyl_matches): every whitespace-separated
 /// term must appear somewhere in the folded haystack.
@@ -325,25 +352,37 @@ impl App {
 
         // --- Meta line: how fresh these crates are. ---------------------------
         // Filter up front so the count in the meta line matches the grid. The
-        // genre filter reads `seller_genres`; a listing with no known tags
-        // can't match a tag, so it drops out (the genre menu says how many
-        // records have known tags at all).
-        let genres_sel = self.vinyl_genres.clone();
-        let unfiltered = query.is_empty() && genres_sel.is_empty();
+        // genre facet reads `seller_genres`; a listing with no known tags
+        // can't match a tag, so it drops out (the Filters popup says how many
+        // records have known tags at all). Same rule for a year, format or
+        // condition bound the listing can't answer — a filter never vouches
+        // for a row it can't check.
+        let flt = self.vinyl_flt.clone();
+        let active = flt.active(true);
+        let unfiltered = query.is_empty() && active == 0;
+        let price_cap = flt.price_cap();
         let filtered: Vec<usize> = self
             .seller_listings
             .iter()
             .enumerate()
             .filter(|(i, l)| {
                 (query.is_empty() || listing_matches(&self.seller_hay[*i], query))
-                    && (genres_sel.is_empty()
-                        || self.seller_genres.get(&l.release_id).is_some_and(|tags| {
-                            // AND across the selected tags: every one must be
-                            // on the record, so each pick narrows the crates.
-                            genres_sel.iter().all(|g| {
-                                tags.iter().any(|t| t.eq_ignore_ascii_case(g))
-                            })
-                        }))
+                    && (flt.genres.is_empty()
+                        || self
+                            .seller_genres
+                            .get(&l.release_id)
+                            .is_some_and(|tags| flt.genres_keep(tags)))
+                    && flt.year_keep(l.year)
+                    && flt.format_keep(l.format.as_deref())
+                    && price_cap.is_none_or(|cap| l.price <= cap)
+                    && flt.min_grade.is_none_or(|floor| {
+                        l.condition
+                            .as_deref()
+                            .and_then(grade_rank)
+                            .is_some_and(|r| r >= floor)
+                    })
+                    && !(flt.hide_owned && self.vinyl_owned.contains(&l.release_id))
+                    && !(flt.hide_wanted && self.vinyl_wanted.contains(&l.release_id))
             })
             .map(|(i, _)| i)
             .collect();
@@ -378,18 +417,21 @@ impl App {
         if filtered.is_empty() {
             ui.add_space(30.0);
             ui.vertical_centered(|ui| {
-                // "Techno and Ambient" — the AND the filter actually applies.
-                let tags_named = match genres_sel.as_slice() {
-                    [] => String::new(),
-                    [one] => one.clone(),
-                    [head @ .., last] => format!("{} and {last}", head.join(", ")),
-                };
-                let msg = match (genres_sel.is_empty(), query.is_empty()) {
-                    (false, true) => format!("Nothing in the crates is tagged {tags_named}."),
-                    (false, false) => format!(
-                        "Nothing tagged {tags_named} in the crates matches that search."
-                    ),
-                    (true, _) => "Nothing in the crates matches that search.".to_string(),
+                // Name the tags when they're the whole filter ("Techno and
+                // Ambient" — the AND actually applied); with year/price/
+                // condition bounds in play a generic line beats a paragraph.
+                let only_tags = active == flt.genres.len() && !flt.genres.is_empty();
+                let msg = match (only_tags, active > 0, query.is_empty()) {
+                    (true, _, true) => {
+                        let tags_named = match flt.genres.as_slice() {
+                            [one] => one.clone(),
+                            [head @ .., last] => format!("{} and {last}", head.join(", ")),
+                            [] => unreachable!(),
+                        };
+                        format!("Nothing in the crates is tagged {tags_named}.")
+                    }
+                    (_, true, _) => "Nothing in the crates matches those filters.".to_string(),
+                    (_, false, _) => "Nothing in the crates matches that search.".to_string(),
                 };
                 ui.label(egui::RichText::new(msg).weak());
             });

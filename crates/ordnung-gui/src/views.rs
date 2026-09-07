@@ -1132,6 +1132,203 @@ impl App {
     /// local Discogs cache, with a Refresh button that re-syncs from Discogs.
     /// Records the user *wants* follow in their own Wantlist section below,
     /// rendered by the same grid from the same sync.
+    /// Body of the vinyl toolbar's Filters popup: year range, format
+    /// families, the seller-only facets, then the genre/style tag lists. One
+    /// popup instead of a control per facet, so the toolbar stays a single
+    /// row. Toggles don't close the menu — stacking several constraints is
+    /// the point. `genre_options` is the current scope's tag census;
+    /// `import_genredb` is handed back to the caller because the download job
+    /// must start after the toolbar releases its borrows.
+    #[allow(clippy::too_many_arguments)]
+    fn vinyl_filter_popup(
+        &mut self,
+        ui: &mut egui::Ui,
+        seller_mode: bool,
+        busy: bool,
+        genre_options: &[(String, usize)],
+        seller_tagged: usize,
+        import_genredb: &mut bool,
+    ) {
+        use crate::ui::tokens::font;
+        ui.set_min_width(260.0);
+        let header = |ui: &mut egui::Ui, text: &str| {
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(text)
+                    .font(font::strong(font::footnote().size))
+                    .weak(),
+            );
+        };
+
+        if self.vinyl_flt.active(seller_mode) > 0 {
+            if ui.button("✖ Clear all filters").clicked() {
+                self.vinyl_flt.clear();
+            }
+            ui.separator();
+        }
+
+        header(ui, "Year");
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.vinyl_flt.year_from)
+                    .desired_width(48.0)
+                    .hint_text("from"),
+            );
+            ui.label("–");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.vinyl_flt.year_to)
+                    .desired_width(48.0)
+                    .hint_text("to"),
+            );
+        });
+
+        header(ui, "Format");
+        ui.horizontal(|ui| {
+            for fam in FORMAT_FAMILIES {
+                let on = self.vinyl_flt.formats.contains(&fam);
+                if ui.selectable_label(on, fam).clicked() {
+                    if on {
+                        self.vinyl_flt.formats.retain(|f| *f != fam);
+                    } else {
+                        self.vinyl_flt.formats.push(fam);
+                    }
+                }
+            }
+        });
+
+        if seller_mode {
+            header(ui, "This copy");
+            ui.horizontal(|ui| {
+                ui.label("Price up to");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.vinyl_flt.price_max)
+                        .desired_width(56.0)
+                        .hint_text("any"),
+                )
+                .on_hover_note("Ceiling in the shop's own listing currency");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Condition");
+                let current = self.vinyl_flt.min_grade;
+                let label = current
+                    .and_then(|r| {
+                        crate::sellers::GRADE_FLOORS
+                            .iter()
+                            .find(|(_, g)| *g == r)
+                            .map(|(l, _)| *l)
+                    })
+                    .unwrap_or("Any");
+                egui::ComboBox::from_id_salt("vinyl-grade-floor")
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(current.is_none(), "Any").clicked() {
+                            self.vinyl_flt.min_grade = None;
+                        }
+                        for (l, rank) in crate::sellers::GRADE_FLOORS {
+                            if ui.selectable_label(current == Some(rank), l).clicked() {
+                                self.vinyl_flt.min_grade = Some(rank);
+                            }
+                        }
+                    });
+            });
+            ui.checkbox(&mut self.vinyl_flt.hide_owned, "Hide records I own");
+            ui.checkbox(&mut self.vinyl_flt.hide_wanted, "Hide wantlist records");
+        }
+
+        // Genres and styles, split back out of the merged tag census: the
+        // coarse Discogs vocabulary is a closed set, so a tag on it is a
+        // genre and everything else is a style. Both toggle into the same
+        // AND'd selection.
+        let (genres, styles): (Vec<&(String, usize)>, Vec<&(String, usize)>) = genre_options
+            .iter()
+            .partition(|(t, _)| DISCOGS_GENRES.iter().any(|g| g.eq_ignore_ascii_case(t)));
+        let mut tag_row = |ui: &mut egui::Ui, tag: &str, n: usize| {
+            let selected = self
+                .vinyl_flt
+                .genres
+                .iter()
+                .any(|g| g.eq_ignore_ascii_case(tag));
+            if ui
+                .selectable_label(selected, format!("{tag} ({n})"))
+                .clicked()
+            {
+                if selected {
+                    self.vinyl_flt
+                        .genres
+                        .retain(|g| !g.eq_ignore_ascii_case(tag));
+                } else {
+                    self.vinyl_flt.genres.push(tag.to_string());
+                }
+            }
+        };
+        if !genres.is_empty() {
+            header(ui, "Genres");
+            for (tag, n) in &genres {
+                tag_row(ui, tag, *n);
+            }
+        }
+        if !styles.is_empty() {
+            header(ui, "Styles");
+            egui::ScrollArea::vertical()
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    for (tag, n) in &styles {
+                        tag_row(ui, tag, *n);
+                    }
+                });
+        }
+        if genre_options.is_empty() {
+            header(ui, "Genres");
+            let hint = if seller_mode {
+                "No genre tags known for these crates yet."
+            } else {
+                "No genre tags yet. Refresh to pull them from Discogs."
+            };
+            ui.label(egui::RichText::new(hint).weak());
+        }
+
+        if seller_mode {
+            ui.separator();
+            let n = self.seller_listings.len();
+            if !genre_options.is_empty() {
+                let note = if seller_tagged < n {
+                    format!("Tags known for {seller_tagged} of {n} records")
+                } else {
+                    format!("Tags known for all {n} records")
+                };
+                ui.label(egui::RichText::new(note).weak().small());
+            }
+            // The bulk answer to partial coverage: one dump import tags
+            // (nearly) everything; until then the paced per-release fetch is
+            // the fallback.
+            match &self.genredb_info {
+                Some((dump, kept)) => {
+                    let m = kept / 1_000_000;
+                    ui.label(
+                        egui::RichText::new(format!("Genre database: dump {dump}, {m}M releases"))
+                            .weak()
+                            .small(),
+                    );
+                }
+                None => {
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("⬇ Import genre database").small())
+                        .on_hover_note(
+                            "Download every vinyl release's genre tags once \
+                             (a few hundred MB, prebuilt monthly from the \
+                             Discogs dump) so tags resolve locally and \
+                             instantly, for every seller",
+                        )
+                        .clicked()
+                    {
+                        *import_genredb = true;
+                        ui.close_menu();
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn draw_vinyl(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let busy = self.is_busy();
         let mut refresh = false;
@@ -1163,15 +1360,16 @@ impl App {
         // search narrows both tabs and you can see which shelf holds the hits
         // without switching to it.
         let query = self.vinyl_filter.trim().to_lowercase();
-        // Selected genre tags are AND'd: a record must carry every one of
-        // them, so stacking Techno + Ambient narrows to the intersection —
-        // each added tag refines the dig rather than widening the net.
-        let genres_sel = self.vinyl_genres.clone();
+        // Structured filters from the Filters popup. Genre tags are AND'd — a
+        // record must carry every one, so each pick narrows the dig — and the
+        // year/format facets AND alongside. Seller-only facets don't apply to
+        // the shelves.
+        let flt = self.vinyl_flt.clone();
         let keep = |v: &&VinylRecord| {
             (query.is_empty() || vinyl_matches(v, &query))
-                && genres_sel.iter().all(|g| {
-                    v.genres.iter().any(|t| t.eq_ignore_ascii_case(g))
-                })
+                && flt.genres_keep(&v.genres)
+                && flt.year_keep(v.year)
+                && flt.format_keep(v.format.as_deref())
         };
         let owned_recs: Vec<VinylRecord> = self.vinyl.iter().filter(keep).cloned().collect();
         let wanted_recs: Vec<VinylRecord> = self.wantlist.iter().filter(keep).cloned().collect();
@@ -1218,7 +1416,7 @@ impl App {
             v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             // Keep every active tag visible even when the current scope has no
             // record carrying it, so it can be seen and cleared.
-            for g in &genres_sel {
+            for g in &flt.genres {
                 if !v.iter().any(|(t, _)| t.eq_ignore_ascii_case(g)) {
                     v.push((g.clone(), 0));
                 }
@@ -1270,120 +1468,31 @@ impl App {
             {
                 self.vinyl_filter.clear();
             }
-            // Genre filter, on all three tabs: every tag occurring in the
-            // current scope, biggest first. Multi-select, OR'd — the menu
-            // stays open while tags are toggled, because picking several is
-            // the point. The button carries the count so a filtered view says
-            // what's filtering it even when the pills don't fit.
+            // Every structured filter — year range, format, genre + style
+            // tags, and the seller-only facets — lives behind this one popup,
+            // so the toolbar stays a single row however many are active. The
+            // button wears the active-constraint count in their place.
             ui.add_space(6.0);
-            let genre_label = match genres_sel.len() {
-                0 => "All genres".to_string(),
-                1 => genres_sel[0].clone(),
-                n => format!("{n} genres"),
+            let active = flt.active(seller_mode);
+            let flt_label = if active == 0 {
+                "⚟ Filters".to_string()
+            } else {
+                format!("⚟ Filters ({active})")
             };
-            ui.menu_button(format!("♪ {genre_label}"), |ui| {
-                ui.set_min_width(200.0);
-                egui::ScrollArea::vertical()
-                    .max_height(340.0)
-                    .show(ui, |ui| {
-                        if ui
-                            .selectable_label(genres_sel.is_empty(), "All genres")
-                            .clicked()
-                        {
-                            self.vinyl_genres.clear();
-                            ui.close_menu();
-                        }
-                        if !genre_options.is_empty() {
-                            ui.separator();
-                        }
-                        for (tag, n) in &genre_options {
-                            let selected =
-                                genres_sel.iter().any(|g| g.eq_ignore_ascii_case(tag));
-                            if ui
-                                .selectable_label(selected, format!("{tag} ({n})"))
-                                .clicked()
-                            {
-                                if selected {
-                                    self.vinyl_genres
-                                        .retain(|g| !g.eq_ignore_ascii_case(tag));
-                                } else {
-                                    self.vinyl_genres.push(tag.clone());
-                                }
-                                // No close_menu: keep toggling.
-                            }
-                        }
-                        if genre_options.is_empty() {
-                            let hint = if seller_mode {
-                                "No genre tags known for these crates yet."
-                            } else {
-                                "No genre tags yet. Refresh to pull them from \
-                                 Discogs."
-                            };
-                            ui.label(egui::RichText::new(hint).weak());
-                        }
-                        if seller_mode {
-                            ui.separator();
-                            let n = self.seller_listings.len();
-                            if !genre_options.is_empty() {
-                                let note = if seller_tagged < n {
-                                    format!("Tags known for {seller_tagged} of {n} records")
-                                } else {
-                                    format!("Tags known for all {n} records")
-                                };
-                                ui.label(egui::RichText::new(note).weak().small());
-                            }
-                            // The bulk answer to partial coverage: one dump
-                            // import tags (nearly) everything; until then the
-                            // paced per-release fetch is the fallback.
-                            match &self.genredb_info {
-                                Some((dump, kept)) => {
-                                    let m = kept / 1_000_000;
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "Genre database: dump {dump}, {m}M releases"
-                                        ))
-                                        .weak()
-                                        .small(),
-                                    );
-                                }
-                                None => {
-                                    if ui
-                                        .add_enabled(
-                                            !busy,
-                                            egui::Button::new("⬇ Import genre database")
-                                                .small(),
-                                        )
-                                        .on_hover_note(
-                                            "Download every vinyl release's genre tags once \
-                                             (a few hundred MB, prebuilt monthly from the \
-                                             Discogs dump) so tags resolve locally and \
-                                             instantly, for every seller",
-                                        )
-                                        .clicked()
-                                    {
-                                        import_genredb = true;
-                                        ui.close_menu();
-                                    }
-                                }
-                            }
-                        }
-                    });
+            ui.menu_button(flt_label, |ui| {
+                self.vinyl_filter_popup(
+                    ui,
+                    seller_mode,
+                    busy,
+                    &genre_options,
+                    seller_tagged,
+                    &mut import_genredb,
+                );
             })
             .response
             .on_hover_note(
-                "Filter this view by genre or style tags; each added tag narrows further",
+                "Filter by year, format, genre and style; each added constraint narrows further",
             );
-            // The active tags as pills beside the menu, each one click to
-            // drop — so adjusting the filter never reopens the menu.
-            for tag in genres_sel.iter() {
-                if ui
-                    .small_button(format!("{tag} ✖"))
-                    .on_hover_note("Remove this genre from the filter")
-                    .clicked()
-                {
-                    self.vinyl_genres.retain(|g| g != tag);
-                }
-            }
             if seller_mode {
                 return;
             }
@@ -1538,14 +1647,15 @@ impl App {
                     VinylList::Wantlist => owned_recs.len(),
                 };
                 // What's narrowing the view decides the wording: the search,
-                // the genre filter, or both.
-                let what = match (query.is_empty(), self.vinyl_genres.len()) {
+                // the Filters popup, or both.
+                let active = self.vinyl_flt.active(false);
+                let what = match (query.is_empty(), active) {
                     (false, 0) => "that search",
                     (false, _) => "those filters",
-                    (true, 1) => "that genre",
-                    (true, _) => "those genres",
+                    (true, 1) => "that filter",
+                    (true, _) => "those filters",
                 };
-                let filtering = !query.is_empty() || !self.vinyl_genres.is_empty();
+                let filtering = !query.is_empty() || active > 0;
                 let msg = match (tab, filtering, other) {
                     (VinylList::Collection, false, _) => {
                         "Nothing in your Discogs collection yet.".to_string()

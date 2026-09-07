@@ -143,7 +143,7 @@ impl App {
             seller_hay: Vec::new(),
             seller_add: String::new(),
             vinyl_filter: String::new(),
-            vinyl_genres: Vec::new(),
+            vinyl_flt: VinylFilters::default(),
             vinyl_genre_fallback: HashMap::new(),
             vinyl_genre_fallback_for: Vec::new(),
             genredb_info: None,

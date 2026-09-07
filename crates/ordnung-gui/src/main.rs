@@ -270,6 +270,125 @@ enum VinylTab {
     Sellers,
 }
 
+/// Discogs's coarse genre vocabulary — a small closed set, which is what lets
+/// the Filters popup split a record's merged tag list (see
+/// `discogs::genre_tags`) back into a Genres group and a Styles group: a tag
+/// on this list is a genre, everything else is a style.
+const DISCOGS_GENRES: [&str; 15] = [
+    "Electronic",
+    "Rock",
+    "Jazz",
+    "Funk / Soul",
+    "Hip Hop",
+    "Pop",
+    "Reggae",
+    "Latin",
+    "Classical",
+    "Folk, World, & Country",
+    "Blues",
+    "Non-Music",
+    "Stage & Screen",
+    "Brass & Military",
+    "Children's",
+];
+
+/// Record format families the Filters popup offers. Matched as substrings of
+/// the free-text Discogs format summary (`2xLP, Album`, `7", 45 RPM`), so the
+/// quote characters matter.
+const FORMAT_FAMILIES: [&str; 4] = ["12\"", "LP", "10\"", "7\""];
+
+/// The vinyl view's structured filters. Everything lives behind the toolbar's
+/// one Filters popup; the free-text search stays its own box. Facets AND
+/// together, and within the genre facet each tag ANDs too (every pick narrows
+/// the dig); within the format facet a record matches any selected family.
+/// The seller-only facets are ignored on the shelves.
+#[derive(Clone, Default, PartialEq)]
+struct VinylFilters {
+    /// Genre/style tags the record must ALL carry.
+    genres: Vec<String>,
+    /// Year bounds as typed (empty = unbounded). Kept as text so the boxes
+    /// edit naturally; parsed leniently on use.
+    year_from: String,
+    year_to: String,
+    /// Selected format families (see [`FORMAT_FAMILIES`]).
+    formats: Vec<&'static str>,
+    /// Sellers only: price ceiling as typed, in whatever currency the shop
+    /// lists in (a sweep is one seller, so listings share one currency).
+    price_max: String,
+    /// Sellers only: minimum media-condition rank (see
+    /// [`sellers::grade_rank`]); listings graded below it, or not gradable,
+    /// drop out.
+    min_grade: Option<u8>,
+    /// Sellers only: drop records already on the user's own shelves — the
+    /// "show me what I don't have yet" dig.
+    hide_owned: bool,
+    hide_wanted: bool,
+}
+
+impl VinylFilters {
+    fn year_bounds(&self) -> (Option<u16>, Option<u16>) {
+        (
+            self.year_from.trim().parse().ok(),
+            self.year_to.trim().parse().ok(),
+        )
+    }
+
+    fn price_cap(&self) -> Option<f64> {
+        self.price_max.trim().replace(',', ".").parse().ok().filter(|p: &f64| *p > 0.0)
+    }
+
+    /// Does a record's year pass the range? An unknown year fails a set bound:
+    /// a range filter that quietly keeps undated records would show exactly
+    /// the rows it can't vouch for.
+    fn year_keep(&self, year: Option<u16>) -> bool {
+        let (from, to) = self.year_bounds();
+        if from.is_none() && to.is_none() {
+            return true;
+        }
+        let Some(y) = year else { return false };
+        from.is_none_or(|f| y >= f) && to.is_none_or(|t| y <= t)
+    }
+
+    /// Does a record's format summary match the selected families (any of
+    /// them)? No selection keeps everything; an unknown format fails a set
+    /// selection, same reasoning as [`Self::year_keep`].
+    fn format_keep(&self, format: Option<&str>) -> bool {
+        if self.formats.is_empty() {
+            return true;
+        }
+        let Some(f) = format else { return false };
+        self.formats.iter().any(|fam| f.contains(fam))
+    }
+
+    /// Do a record's genre tags carry every selected tag?
+    fn genres_keep(&self, tags: &[String]) -> bool {
+        self.genres
+            .iter()
+            .all(|g| tags.iter().any(|t| t.eq_ignore_ascii_case(g)))
+    }
+
+    /// How many constraints are active, for the Filters button badge. Seller
+    /// facets only count in seller mode — on a shelf they aren't applied, and
+    /// a badge shouldn't claim filtering that isn't happening.
+    fn active(&self, seller_mode: bool) -> usize {
+        let (from, to) = self.year_bounds();
+        let mut n = self.genres.len()
+            + usize::from(from.is_some() || to.is_some())
+            + usize::from(!self.formats.is_empty());
+        if seller_mode {
+            n += usize::from(self.price_cap().is_some())
+                + usize::from(self.min_grade.is_some())
+                + usize::from(self.hide_owned)
+                + usize::from(self.hide_wanted);
+        }
+        n
+    }
+
+    fn clear(&mut self) {
+        *self = VinylFilters::default();
+    }
+}
+
 /// A sortable table column. The cover column isn't sortable, so it has no
 /// variant. Paired with a direction (`true` = ascending) in `App::sort`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1094,11 +1213,11 @@ struct App {
     /// artist, title, year and format as you type. Not persisted: a search is
     /// about the record you're looking for right now, not a saved view.
     vinyl_filter: String,
-    /// Genre tags the whole vinyl view is filtered to, across all three tabs.
-    /// A record shows if it carries *any* of them (OR), so "Techno" + "House"
-    /// widens rather than narrows. Empty shows everything. Session state like
+    /// The vinyl view's structured filters (year range, formats, genre/style
+    /// tags, and the seller-only facets), gathered behind one Filters popup so
+    /// the toolbar stays a single uncluttered row. Session state like
     /// `vinyl_filter`.
-    vinyl_genres: Vec<String>,
+    vinyl_flt: VinylFilters,
     /// Release-cache genre tags for shelf rows synced before the `genres`
     /// column existed (they carry none until the next Discogs refresh).
     /// `release_genres` parses JSON per row, so the map is memoized on the
