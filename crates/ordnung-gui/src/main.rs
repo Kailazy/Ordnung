@@ -1220,6 +1220,10 @@ struct App {
     /// The "add a seller" input box in the Sellers tab (username or a pasted
     /// discogs.com seller/user URL).
     seller_add: String,
+    /// The "import cart" paste box: the user's discogs.com cart page copied
+    /// wholesale, matched against the swept listings to mirror the real cart
+    /// locally (the Discogs API exposes no cart endpoint to read instead).
+    cart_import_text: String,
     /// Releases the user has auditioned while digging — opened from a seller
     /// card and actually played a song from. Drives the crates' small eye
     /// marker; loaded from the `viewed_releases` table with the vinyl view
