@@ -1430,9 +1430,7 @@ impl App {
         // Whichever shelf is showing, its own Discogs page is what the link
         // opens — the button belongs to the tab, not to the view.
         let (list_path, list_tip) = match self.vinyl_tab {
-            VinylTab::Shelf(VinylList::Wantlist) => {
-                ("wants", "Open your wantlist on discogs.com")
-            }
+            VinylTab::Shelf(VinylList::Wantlist) => ("wants", "Open your wantlist on discogs.com"),
             _ => ("collection", "Open your collection on discogs.com"),
         };
         let collection_url = {
@@ -1675,7 +1673,7 @@ impl App {
                         .selectable_label(self.show_watch, label)
                         .on_hover_note(
                             "Wantlist records for sale at your saved sellers, \
-                             cheapest first (sweep a shop to refresh its stock)",
+                             cheapest first (update a shop to refresh its stock)",
                         )
                         .clicked()
                     {
@@ -1782,54 +1780,54 @@ impl App {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-            ui.add_space(4.0);
-            if cells.is_empty() {
-                // The other tab's count decides the wording: with a search on,
-                // "no records match" only holds if neither shelf has a hit.
-                let other = match tab {
-                    VinylList::Collection => wanted_recs.len(),
-                    VinylList::Wantlist => owned_recs.len(),
-                };
-                // What's narrowing the view decides the wording: the search,
-                // the Filters popup, or both.
-                let active = self.vinyl_flt.active(false);
-                let what = match (query.is_empty(), active) {
-                    (false, 0) => "that search",
-                    (false, _) => "those filters",
-                    (true, 1) => "that filter",
-                    (true, _) => "those filters",
-                };
-                let filtering = !query.is_empty() || active > 0;
-                let msg = match (tab, filtering, other) {
-                    (VinylList::Collection, false, _) => {
-                        "Nothing in your Discogs collection yet.".to_string()
-                    }
-                    (VinylList::Wantlist, false, _) => {
-                        "Nothing on your Discogs wantlist yet.".to_string()
-                    }
-                    (_, true, 0) => format!("No records match {what}."),
-                    (VinylList::Collection, true, _) => {
-                        format!("Nothing in your collection matches {what}.")
-                    }
-                    (VinylList::Wantlist, true, _) => {
-                        format!("Nothing on your wantlist matches {what}.")
-                    }
-                };
-                ui.label(egui::RichText::new(msg).weak());
-            } else {
-                // The same cells drawn either way; the toggle in the toolbar
-                // is a layout choice, not a different view.
-                let acted = if self.config.vinyl_view == "list" {
-                    self.vinyl_rows(ui, &cells)
+                ui.add_space(4.0);
+                if cells.is_empty() {
+                    // The other tab's count decides the wording: with a search on,
+                    // "no records match" only holds if neither shelf has a hit.
+                    let other = match tab {
+                        VinylList::Collection => wanted_recs.len(),
+                        VinylList::Wantlist => owned_recs.len(),
+                    };
+                    // What's narrowing the view decides the wording: the search,
+                    // the Filters popup, or both.
+                    let active = self.vinyl_flt.active(false);
+                    let what = match (query.is_empty(), active) {
+                        (false, 0) => "that search",
+                        (false, _) => "those filters",
+                        (true, 1) => "that filter",
+                        (true, _) => "those filters",
+                    };
+                    let filtering = !query.is_empty() || active > 0;
+                    let msg = match (tab, filtering, other) {
+                        (VinylList::Collection, false, _) => {
+                            "Nothing in your Discogs collection yet.".to_string()
+                        }
+                        (VinylList::Wantlist, false, _) => {
+                            "Nothing on your Discogs wantlist yet.".to_string()
+                        }
+                        (_, true, 0) => format!("No records match {what}."),
+                        (VinylList::Collection, true, _) => {
+                            format!("Nothing in your collection matches {what}.")
+                        }
+                        (VinylList::Wantlist, true, _) => {
+                            format!("Nothing on your wantlist matches {what}.")
+                        }
+                    };
+                    ui.label(egui::RichText::new(msg).weak());
                 } else {
-                    self.vinyl_grid(ui, &cells)
-                };
-                if let Some(a) = acted {
-                    action = Some(a);
+                    // The same cells drawn either way; the toggle in the toolbar
+                    // is a layout choice, not a different view.
+                    let acted = if self.config.vinyl_view == "list" {
+                        self.vinyl_rows(ui, &cells)
+                    } else {
+                        self.vinyl_grid(ui, &cells)
+                    };
+                    if let Some(a) = acted {
+                        action = Some(a);
+                    }
                 }
-            }
-            ui.add_space(8.0);
-        });
+                ui.add_space(8.0);
+            });
 
         if refresh {
             self.spawn_refresh_vinyl(ctx.clone());
@@ -2016,8 +2014,10 @@ impl App {
                     |ui| {
                         // The cover is a link to the release page on Discogs —
                         // click-sensing, with a hand cursor on hover.
-                        let (rect, resp) =
-                            ui.allocate_exact_size(egui::vec2(cover_side, cover_side), egui::Sense::click());
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(cover_side, cover_side),
+                            egui::Sense::click(),
+                        );
                         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                         // Both corner discs claim their hit areas here, before
                         // anything is painted, so every element below can read
@@ -2258,9 +2258,7 @@ impl App {
                         // drop it. Both write straight to the user's Discogs
                         // account, so the wording says which list is which rather
                         // than a bare "Move".
-                        resp.context_menu(|ui| {
-                            vinyl_cell_menu(ui, c, &release_url, &mut action)
-                        });
+                        resp.context_menu(|ui| vinyl_cell_menu(ui, c, &release_url, &mut action));
                         ui.set_max_width(cover_side);
                         ui.add_space(4.0);
                         // Title doubles as the textual link to the release page.
@@ -2416,9 +2414,7 @@ impl App {
                         .id_salt(("vinyl-row-text", c.key)),
                 );
                 text_ui.spacing_mut().item_spacing.y = 1.0;
-                text_ui.add(
-                    egui::Label::new(egui::RichText::new(&c.title).strong()).truncate(),
-                );
+                text_ui.add(egui::Label::new(egui::RichText::new(&c.title).strong()).truncate());
                 let line2 = if c.sub.is_empty() {
                     c.artist.clone()
                 } else {
@@ -2426,8 +2422,7 @@ impl App {
                 };
                 text_ui.add(egui::Label::new(egui::RichText::new(line2).weak()).truncate());
 
-                let release_url =
-                    format!("https://www.discogs.com/release/{}", c.release_id);
+                let release_url = format!("https://www.discogs.com/release/{}", c.release_id);
                 if resp.clicked() && !badge_clicked {
                     action = Some(VinylGridAction::Open(c.key));
                 }
@@ -2710,8 +2705,12 @@ impl App {
             // Say plainly which kind of device this is — the whole export
             // machinery hinges on the distinction, so it shouldn't be invisible.
             ui.label(
-                egui::RichText::new(if is_rb { "rekordbox device" } else { "plain storage" })
-                    .weak(),
+                egui::RichText::new(if is_rb {
+                    "rekordbox device"
+                } else {
+                    "plain storage"
+                })
+                .weak(),
             )
             .on_hover_note(if is_rb {
                 "Carries a rekordbox export. CDJs read it, and library exports can target it"
