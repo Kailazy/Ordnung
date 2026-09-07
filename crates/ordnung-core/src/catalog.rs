@@ -7,7 +7,7 @@
 use crate::error::{Error, Result};
 use crate::model::key::{Key, Mode, PitchClass};
 use crate::model::{
-    Analysis, AudioProperties, Beat, Beatgrid, CartLine, Format, Id, InterestRecord, Playlist,
+    Analysis, AudioProperties, Beat, Beatgrid, CartLine, Format, Id, Playlist,
     SellerListing, SellerShop, Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -299,7 +299,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 impl Catalog {
     /// Open (creating if needed) a catalog at `path` and ensure the schema exists.
@@ -637,24 +637,10 @@ impl Catalog {
             CREATE INDEX IF NOT EXISTS idx_seller_listings_release
                 ON seller_listings(release_id);
 
-            -- The crate of interest: records dug up and set aside to think
-            -- about — a local holding shelf between a dig and the wantlist,
-            -- so the wantlist stays a curated list of records actually wanted
-            -- rather than a dumping ground for every promising find. Purely
-            -- local (never synced to Discogs); via records which thread found
-            -- it, for the card caption.
-            CREATE TABLE IF NOT EXISTS interest_crate (
-                release_id     INTEGER PRIMARY KEY,
-                title          TEXT NOT NULL,
-                artist         TEXT NOT NULL,
-                year           INTEGER,
-                label          TEXT,
-                catalog_number TEXT,
-                format         TEXT,
-                thumb_url      TEXT,
-                via            TEXT,
-                added_at       INTEGER NOT NULL DEFAULT (unixepoch())
-            );
+            -- The retired crate of interest (a local set-records-aside shelf,
+            -- removed as redundant with the wantlist). Dropped so upgraded
+            -- catalogs shed the orphan table; a no-op on fresh ones.
+            DROP TABLE IF EXISTS interest_crate;
 
             -- Releases the user has auditioned while digging: opened from a
             -- seller card and actually played a song from. Keyed by release
@@ -3372,74 +3358,6 @@ impl Catalog {
         Ok(rows)
     }
 
-    /// Put a record in the crate of interest. Upserts by release id — crating
-    /// a record again refreshes its metadata but keeps the original added-at
-    /// stamp, so the crate stays in the order things were found.
-    pub fn add_interest(&self, rec: &InterestRecord) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO interest_crate
-                 (release_id, title, artist, year, label, catalog_number,
-                  format, thumb_url, via)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(release_id) DO UPDATE SET
-                 title=excluded.title, artist=excluded.artist,
-                 year=excluded.year, label=excluded.label,
-                 catalog_number=excluded.catalog_number,
-                 format=excluded.format, thumb_url=excluded.thumb_url,
-                 via=COALESCE(excluded.via, via)",
-            params![
-                rec.release_id as i64,
-                rec.title,
-                rec.artist,
-                rec.year.map(|y| y as i64),
-                rec.label,
-                rec.catalog_number,
-                rec.format,
-                rec.thumb_url,
-                rec.via,
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Take a record out of the crate of interest — decided, either way.
-    /// Returns whether it was there.
-    pub fn remove_interest(&self, release_id: u64) -> Result<bool> {
-        let n = self.conn.execute(
-            "DELETE FROM interest_crate WHERE release_id=?1",
-            params![release_id as i64],
-        )?;
-        Ok(n > 0)
-    }
-
-    /// The whole crate of interest, newest find first. Small by nature — it
-    /// grows one row per deliberate ☆, so it loads whole.
-    pub fn list_interest(&self) -> Result<Vec<InterestRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT release_id, title, artist, year, label, catalog_number,
-                    format, thumb_url, via, added_at
-             FROM interest_crate
-             ORDER BY added_at DESC, release_id DESC",
-        )?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(InterestRecord {
-                    release_id: r.get::<_, i64>(0)? as u64,
-                    title: r.get(1)?,
-                    artist: r.get(2)?,
-                    year: r.get::<_, Option<i64>>(3)?.map(|y| y as u16),
-                    label: r.get(4)?,
-                    catalog_number: r.get(5)?,
-                    format: r.get(6)?,
-                    thumb_url: r.get(7)?,
-                    via: r.get(8)?,
-                    added_at: r.get(9)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
-    }
-
     /// Record that the user auditioned this release while digging (opened it
     /// from a seller card and played a song). Re-listening restamps the time.
     pub fn mark_release_viewed(&self, release_id: u64) -> Result<()> {
@@ -5389,49 +5307,6 @@ mod tests {
         // Buying it (the want leaves the wantlist) empties the watch.
         cat.prune_vinyl_not_in(VinylList::Wantlist, &[]).unwrap();
         assert!(cat.wantlist_offers().unwrap().is_empty());
-    }
-
-    /// The crate of interest holds one row per release, newest first; re-crating
-    /// refreshes metadata without duplicating or reordering, and removal says
-    /// whether anything was there.
-    #[test]
-    fn interest_crate_roundtrips() {
-        fn rec(release_id: u64, artist: &str, title: &str) -> InterestRecord {
-            InterestRecord {
-                release_id,
-                title: title.into(),
-                artist: artist.into(),
-                year: Some(1994),
-                label: Some("Basic Channel".into()),
-                catalog_number: Some("BC-04".into()),
-                format: Some("12\"".into()),
-                thumb_url: None,
-                via: Some("same label: Basic Channel".into()),
-                added_at: 0,
-            }
-        }
-
-        let cat = Catalog::open(":memory:").unwrap();
-        assert!(cat.list_interest().unwrap().is_empty());
-        cat.add_interest(&rec(1, "Quadrant", "Infinition")).unwrap();
-        cat.add_interest(&rec(2, "Cyrus", "Enforcement")).unwrap();
-        let list = cat.list_interest().unwrap();
-        assert_eq!(list.len(), 2);
-
-        // Re-crating refreshes the row in place, without a duplicate.
-        let mut again = rec(1, "Quadrant", "Infinition (Remix)");
-        again.via = None;
-        cat.add_interest(&again).unwrap();
-        let list = cat.list_interest().unwrap();
-        assert_eq!(list.len(), 2);
-        let one = list.iter().find(|r| r.release_id == 1).unwrap();
-        assert_eq!(one.title, "Infinition (Remix)");
-        // A crate entry keeps how it was found even when a later add has no via.
-        assert_eq!(one.via.as_deref(), Some("same label: Basic Channel"));
-
-        assert!(cat.remove_interest(1).unwrap());
-        assert!(!cat.remove_interest(1).unwrap());
-        assert_eq!(cat.list_interest().unwrap().len(), 1);
     }
 
     #[test]

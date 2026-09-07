@@ -61,8 +61,6 @@ enum Act {
     Open(usize),
     /// Add it to the Discogs wantlist.
     Want(usize),
-    /// Set it aside in the crate of interest.
-    Crate(usize),
     /// Start a dig from it.
     Dig(usize),
     /// Fetch another page of the run.
@@ -225,7 +223,6 @@ impl App {
         // (`dig_cover` needs `&mut self`, so two passes like the versions
         // panel).
         struct Row {
-            release_id: u64,
             cover: Option<Tex>,
             artist: String,
             title: String,
@@ -233,7 +230,6 @@ impl App {
             sub: String,
             owned: bool,
             wanted: bool,
-            crated: bool,
         }
         let specs: Vec<(String, u64, String, String, String)> = panel
             .releases
@@ -261,7 +257,6 @@ impl App {
         let mut rows: Vec<Row> = Vec::with_capacity(specs.len());
         for (thumb, release_id, artist, title, sub) in specs {
             rows.push(Row {
-                release_id,
                 cover: (!thumb.trim().is_empty())
                     .then(|| self.dig_cover(&thumb).cloned())
                     .flatten(),
@@ -270,7 +265,6 @@ impl App {
                 sub,
                 owned: self.vinyl_owned.contains(&release_id),
                 wanted: self.vinyl_wanted.contains(&release_id),
-                crated: self.interest_ids.contains(&release_id),
             });
         }
         let editing = self.is_busy();
@@ -373,7 +367,6 @@ impl App {
                                         for (show, text) in [
                                             (r.owned, "OWNED"),
                                             (!r.owned && r.wanted, "WANT"),
-                                            (r.crated, "CRATE"),
                                         ] {
                                             if show {
                                                 ui.label(
@@ -398,14 +391,7 @@ impl App {
                                         {
                                             act = Some(Act::Dig(i));
                                         }
-                                        let parked = r.owned || r.wanted || r.crated;
-                                        if ui
-                                            .add_enabled(!parked, egui::Button::new("☆").small())
-                                            .on_hover_note("Set aside in your crate of interest")
-                                            .clicked()
-                                        {
-                                            act = Some(Act::Crate(i));
-                                        }
+                                        let parked = r.owned || r.wanted;
                                         if ui
                                             .add_enabled(
                                                 !parked && !editing,
@@ -481,24 +467,6 @@ impl App {
                         label: format!("{artist} — {title}"),
                     };
                     self.request_vinyl_edit(ctx.clone(), edit);
-                }
-            }
-            Some(Act::Crate(i)) => {
-                if let Some(r) = row_of(i).cloned() {
-                    let (artist, title) = crate::dig::row_artist_title(&r);
-                    let label_name = self.label_panel.as_ref().map(|p| p.name.clone());
-                    self.crate_record(InterestRecord {
-                        release_id: r.release_id,
-                        title,
-                        artist,
-                        year: r.year.filter(|y| *y > 0),
-                        label: label_name.clone().filter(|n| n != "…"),
-                        catalog_number: (!r.catno.trim().is_empty()).then(|| r.catno.clone()),
-                        format: (!r.format.trim().is_empty()).then(|| r.format.clone()),
-                        thumb_url: (!r.thumb_url.trim().is_empty()).then(|| r.thumb_url.clone()),
-                        via: label_name.map(|n| format!("label page: {n}")),
-                        added_at: 0,
-                    });
                 }
             }
             Some(Act::Dig(i)) => {

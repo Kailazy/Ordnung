@@ -437,30 +437,6 @@ pub struct SellerListing {
 
 /// One seller's slice of the local cart: how many of their listings the user
 /// has set aside to buy and what those add up to. Grouped by currency, so a
-/// One record in the crate of interest: dug up, set aside, not yet decided
-/// on. A local holding shelf between a dig and the wantlist — the wantlist
-/// stays a curated list of records actually wanted, while every promising
-/// find can still be parked somewhere with one click. Never synced to
-/// Discogs.
-#[derive(Debug, Clone, PartialEq)]
-pub struct InterestRecord {
-    pub release_id: u64,
-    pub title: String,
-    pub artist: String,
-    pub year: Option<u16>,
-    pub label: Option<String>,
-    pub catalog_number: Option<String>,
-    /// Format summary as Discogs lists it, e.g. `12", 45 RPM`.
-    pub format: Option<String>,
-    pub thumb_url: Option<String>,
-    /// How this record was found, for the card caption — the dig thread that
-    /// led to it ("same style: Deep House"), or `None` when crated from a
-    /// sheet reached some other way.
-    pub via: Option<String>,
-    /// Unix time it was crated; the crate lists newest finds first.
-    pub added_at: i64,
-}
-
 /// shop quoting everything in EUR yields one line; mixed currencies (rare)
 /// yield one line each and the caller joins them for display.
 #[derive(Debug, Clone, PartialEq)]

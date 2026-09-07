@@ -13,7 +13,6 @@ mod config;
 mod covers;
 mod dig;
 mod inspector;
-mod interest;
 mod jobs;
 mod label_page;
 mod macos_drag;
@@ -49,7 +48,7 @@ use ordnung_core::discogs;
 use ordnung_core::genredb;
 use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
-    Analysis, CartLine, Format, Id, InterestRecord, Playlist, SellerListing, SellerShop, Tags,
+    Analysis, CartLine, Format, Id, Playlist, SellerListing, SellerShop, Tags,
     Track, TranscodeVerdict, VinylList, VinylRecord,
 };
 use ordnung_core::search::{ScoredHit, SearchHit};
@@ -270,10 +269,6 @@ enum LibraryView {
 enum VinylTab {
     Shelf(VinylList),
     Sellers,
-    /// The crate of interest — records dug up and set aside while deciding.
-    /// Local-only (never synced), so like Sellers it sits beside the
-    /// `VinylList` pair rather than inside it.
-    Interest,
 }
 
 /// Discogs's coarse genre vocabulary — a small closed set, which is what lets
@@ -1248,11 +1243,6 @@ struct App {
     /// (see `Catalog::wantlist_offers`), reloaded with the vinyl lists so a
     /// sweep or a wantlist edit refreshes it. See [`watch`].
     wantlist_watch: Vec<(String, SellerListing)>,
-    /// The crate of interest — records dug up and set aside while deciding —
-    /// newest find first, with the membership set the ☆ buttons and the dig's
-    /// exclusions read. Loaded with the vinyl view; see [`interest`].
-    interest: Vec<InterestRecord>,
-    interest_ids: HashSet<u64>,
     /// Whether the wantlist watch window is open. Session state, toggled by
     /// the wantlist tab's "In stock" button.
     show_watch: bool,

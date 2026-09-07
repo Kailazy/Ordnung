@@ -17,9 +17,6 @@ use crate::vinyl_sheet::SellerOffer;
 /// What a card click or context-menu pick asked for, applied after the grid
 /// releases its borrows.
 enum SellerAct {
-    /// Flip the listing's release in or out of the crate of interest — the
-    /// undecided shelf, as against the cart's "set aside to buy".
-    ToggleCrate(usize),
     /// Open the label page for the listing's release.
     LabelPage(usize),
     /// Open the record sheet, carrying this seller's concrete offer.
@@ -689,28 +686,6 @@ impl App {
                     self.open_label_page(l.release_id, l.label);
                 }
             }
-            Some(SellerAct::ToggleCrate(idx)) => {
-                if let Some(l) = self.seller_listings.get(idx).cloned() {
-                    if self.interest_ids.contains(&l.release_id) {
-                        self.uncrate_record(l.release_id);
-                        self.status = format!("Out of the crate: {} — {}", l.artist, l.title);
-                    } else {
-                        let via = self.seller_current.as_ref().map(|s| format!("seller: {s}"));
-                        self.crate_record(InterestRecord {
-                            release_id: l.release_id,
-                            title: l.title,
-                            artist: l.artist,
-                            year: l.year,
-                            label: l.label,
-                            catalog_number: l.catalog_number,
-                            format: l.format,
-                            thumb_url: l.thumb_url,
-                            via,
-                            added_at: 0,
-                        });
-                    }
-                }
-            }
             None => {}
         }
     }
@@ -1025,24 +1000,6 @@ impl App {
                         .clicked()
                     {
                         act = Some(SellerAct::Want(idx));
-                        ui.close_menu();
-                    }
-                    let in_crate = self.interest_ids.contains(&release_id);
-                    let crate_label = if in_crate {
-                        "✩ Remove from crate"
-                    } else {
-                        "☆ Set aside in crate"
-                    };
-                    if ui
-                        .add_enabled(in_crate || !already, egui::Button::new(crate_label))
-                        .on_hover_note(if in_crate {
-                            "Take it back out of your crate of interest"
-                        } else {
-                            "Park it in your crate of interest while you decide"
-                        })
-                        .clicked()
-                    {
-                        act = Some(SellerAct::ToggleCrate(idx));
                         ui.close_menu();
                     }
                     if ui
