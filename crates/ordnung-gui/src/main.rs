@@ -1189,6 +1189,13 @@ struct App {
     /// instance id: these records aren't in either list, so they have no local
     /// cache entry to key against.
     dig_covers: HashMap<String, ThumbState>,
+    /// Request order of `dig_covers`, for eviction. A dig only ever holds
+    /// dozens of covers, but the Sellers tab streams thousands of them through
+    /// this same cache as the crates scroll past — without a cap, a long
+    /// digging session pins hundreds of MB of textures. Oldest-requested are
+    /// evicted first (see [`App::dig_cover`]); an evicted cover that scrolls
+    /// back into view simply re-fetches.
+    dig_cover_order: VecDeque<String>,
     dig_cover_tx: Sender<(String, Option<egui::ColorImage>)>,
     dig_cover_rx: Receiver<(String, Option<egui::ColorImage>)>,
     /// Cover-cache keys for the records digs were started from, so the strip can

@@ -166,6 +166,7 @@ impl App {
             dig_prime_rx,
             dig_ids_rx: None,
             dig_covers: HashMap::new(),
+            dig_cover_order: VecDeque::new(),
             dig_cover_tx,
             dig_cover_rx,
             dig_start_keys: HashMap::new(),

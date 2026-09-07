@@ -1293,7 +1293,22 @@ impl App {
     /// Kicks off a download on first ask, deduplicated by URL — the strip and
     /// the sheet request the same cover and share the one fetch.
     pub(crate) fn dig_cover(&mut self, url: &str) -> Option<&Tex> {
+        /// Most covers this cache holds at once. Sized for a screen or two of
+        /// scrollback (a seller grid shows ~40 cards), not for a whole shop:
+        /// at ~100 KB of texture per thumbnail this bounds the cache around
+        /// 50 MB, where an uncapped crawl through a 20k-listing seller would
+        /// pin every cover it ever scrolled past.
+        const DIG_COVER_CAP: usize = 512;
         if !self.dig_covers.contains_key(url) {
+            // Evict oldest-requested first. `Tex` defers the actual free to
+            // the next frame, so dropping mid-render is safe (see `tex.rs`).
+            while self.dig_cover_order.len() >= DIG_COVER_CAP {
+                let Some(old) = self.dig_cover_order.pop_front() else {
+                    break;
+                };
+                self.dig_covers.remove(&old);
+            }
+            self.dig_cover_order.push_back(url.to_string());
             self.dig_covers.insert(url.to_string(), ThumbState::Loading);
             let (tx, url_owned) = (self.dig_cover_tx.clone(), url.to_string());
             let ctx = self.egui_ctx.clone();
@@ -1327,6 +1342,12 @@ impl App {
     /// alongside the other cover polls.
     pub(crate) fn poll_dig_covers(&mut self, ctx: &egui::Context) {
         while let Ok((url, img)) = self.dig_cover_rx.try_recv() {
+            // Evicted while in flight: nothing wants this cover any more, so
+            // don't re-insert it — that would leave an entry the eviction
+            // queue no longer tracks, i.e. an immortal texture.
+            if !self.dig_covers.contains_key(&url) {
+                continue;
+            }
             let tex = img.map(|img| {
                 self.tex_graveyard.wrap(ctx.load_texture(
                     "dig-cover",
