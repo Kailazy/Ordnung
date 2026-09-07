@@ -69,6 +69,7 @@ fn vinyl_tabs(
     current: VinylTab,
     owned: usize,
     wanted: usize,
+    crated: usize,
     sellers: usize,
 ) -> Option<VinylTab> {
     use crate::ui::tokens::{color, font, radius, space};
@@ -153,9 +154,25 @@ fn vinyl_tabs(
     ) {
         clicked = Some(VinylTab::Shelf(VinylList::Wantlist));
     }
-    // The third tab is other people's crates: saved Discogs sellers whose
-    // swept inventory can be dug through offline. Unlabelled by count until a
-    // seller is saved, so a fresh install reads as an invitation, not a zero.
+    // The crate of interest: records dug up and set aside while deciding.
+    // Unlabelled by count until something is crated, so a fresh install reads
+    // as an invitation, not a zero.
+    let crate_label = if crated > 0 {
+        format!("Crate ({crated})")
+    } else {
+        "Crate".to_string()
+    };
+    if tab(
+        ui,
+        crate_label,
+        current == VinylTab::Interest,
+        "Records dug up and set aside while you decide",
+    ) {
+        clicked = Some(VinylTab::Interest);
+    }
+    // Then other people's crates: saved Discogs sellers whose swept
+    // inventory can be dug through offline. Unlabelled by count until a
+    // seller is saved, for the same reason.
     let sellers_label = if sellers > 0 {
         format!("Sellers ({sellers})")
     } else {
@@ -1425,6 +1442,9 @@ impl App {
         // else's crates, with its own header controls — so the shelf-specific
         // toolbar pieces below are skipped for it.
         let seller_mode = self.vinyl_tab == VinylTab::Sellers;
+        // The Crate tab likewise: a local holding shelf with no Discogs sync,
+        // sort or price plumbing, so the shelf-only toolbar pieces skip it.
+        let interest_mode = self.vinyl_tab == VinylTab::Interest;
         // The user's Discogs collection page, known once a sync has resolved the
         // username. `None` until the first sync.
         // Whichever shelf is showing, its own Discogs page is what the link
@@ -1464,6 +1484,14 @@ impl App {
         };
         let owned_recs: Vec<VinylRecord> = self.vinyl.iter().filter(keep).cloned().collect();
         let wanted_recs: Vec<VinylRecord> = self.wantlist.iter().filter(keep).cloned().collect();
+        // The crate's tab count follows the search like the shelves' do; the
+        // structured filters don't apply to it (crated rows carry no genre
+        // tags), so only the free-text query narrows it.
+        let crated_hits = self
+            .interest
+            .iter()
+            .filter(|r| query.is_empty() || crate::interest::interest_matches(r, &query))
+            .count();
 
         // Every genre tag occurring in the current scope (the active shelf, or
         // the current seller's crates), with how many records carry it — the
@@ -1507,6 +1535,9 @@ impl App {
                         }
                     }
                 }
+                // Crated rows carry no genre tags; the menu shows nothing to
+                // pick rather than pretending to filter.
+                VinylTab::Interest => {}
             }
             let mut v: Vec<(String, usize)> = counts
                 .into_iter()
@@ -1537,6 +1568,7 @@ impl App {
                 self.vinyl_tab,
                 owned_recs.len(),
                 wanted_recs.len(),
+                crated_hits,
                 self.sellers.len(),
             ) {
                 self.vinyl_tab = tab;
@@ -1611,7 +1643,7 @@ impl App {
             {
                 self.config.vinyl_view = "list".to_string();
             }
-            if seller_mode {
+            if seller_mode || interest_mode {
                 return;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1707,6 +1739,11 @@ impl App {
             self.draw_sellers(ui, ctx, &query);
             return;
         }
+        // So does the crate of interest (see `interest.rs`).
+        if interest_mode {
+            self.draw_interest(ui, ctx, &query);
+            return;
+        }
 
         if self.vinyl.is_empty() && self.wantlist.is_empty() {
             ui.centered_and_justified(|ui| {
@@ -1748,8 +1785,8 @@ impl App {
         // Only the active tab's shelf is built: the other one isn't on screen.
         let tab = match self.vinyl_tab {
             VinylTab::Shelf(list) => list,
-            // Unreachable: seller mode returned above.
-            VinylTab::Sellers => VinylList::Collection,
+            // Unreachable: seller and crate modes returned above.
+            VinylTab::Sellers | VinylTab::Interest => VinylList::Collection,
         };
         let recs = match tab {
             VinylList::Collection => &owned_recs,

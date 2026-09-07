@@ -149,6 +149,8 @@ impl App {
             seller_cart_only: false,
             wantlist_watch: Vec::new(),
             show_watch: false,
+            interest: Vec::new(),
+            interest_ids: HashSet::new(),
             vinyl_filter: String::new(),
             vinyl_flt: VinylFilters::default(),
             vinyl_genre_fallback: HashMap::new(),
@@ -766,6 +768,12 @@ impl App {
             self.wantlist_watch = Catalog::open(&self.db_path)
                 .and_then(|c| c.wantlist_offers())
                 .unwrap_or_default();
+            // The crate of interest grows one row per deliberate ☆, so it
+            // loads whole; its id set feeds the dig's exclusions.
+            self.interest = Catalog::open(&self.db_path)
+                .and_then(|c| c.list_interest())
+                .unwrap_or_default();
+            self.interest_ids = self.interest.iter().map(|r| r.release_id).collect();
             if let Some(cur) = &self.seller_current {
                 if !self.sellers.iter().any(|s| &s.username == cur) {
                     self.seller_current = None;
@@ -818,6 +826,9 @@ impl App {
             self.seller_genres = HashMap::new();
             self.seller_listings_for = None;
             self.wantlist_watch = Vec::new();
+            self.interest = Vec::new();
+            // interest_ids stays: the sheet's ☆ button and the dig's
+            // exclusions read it from every view, not just the vinyl one.
             // Runs mid-frame when the grid's "in catalog" badge jumps to the
             // Library after painting these covers; safe because `Tex` defers
             // the frees to the next frame (see `tex.rs`).

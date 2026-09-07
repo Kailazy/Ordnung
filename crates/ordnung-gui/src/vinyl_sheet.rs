@@ -951,6 +951,7 @@ impl App {
         // behind it, and both update together on the reload an edit triggers.
         let in_collection = self.vinyl_owned.contains(&release_id);
         let in_wantlist = self.vinyl_wanted.contains(&release_id);
+        let in_crate = self.interest_ids.contains(&release_id);
         let price_line = match &self.vinyl_sheet.as_ref().map(|s| &s.price) {
             Some(PriceState::Ready(Some(p))) => Some(format!("From {}", fmt_market_price(p))),
             Some(PriceState::Ready(None)) => Some("No copies for sale".to_string()),
@@ -1025,6 +1026,9 @@ impl App {
             BranchStyle(String),
             /// Add this record to that list, or take it off if it's there.
             ToggleList(VinylList),
+            /// Flip the record in or out of the crate of interest — the local
+            /// undecided shelf between a dig and the wantlist.
+            ToggleCrate,
             /// Want a *different* pressing of the same record — the one that
             /// has copies for sale.
             WantAlternative(u64),
@@ -1281,6 +1285,36 @@ impl App {
                                 .clicked()
                             {
                                 act = Some(Act::ToggleList(VinylList::Wantlist));
+                            }
+                            // The crate of interest: park the record locally
+                            // while deciding, without committing it to the
+                            // synced wantlist. Removal is the same button; a
+                            // record already on a shelf has nothing to decide.
+                            let (crate_label, crate_tip, crate_on) = if in_crate {
+                                (
+                                    "✓ In crate",
+                                    "Take this record back out of your crate of interest",
+                                    true,
+                                )
+                            } else if in_collection {
+                                ("☆ Crate", "Already in your collection", false)
+                            } else if in_wantlist {
+                                ("☆ Crate", "Already on your wantlist", false)
+                            } else {
+                                (
+                                    "☆ Crate",
+                                    "Set this record aside in your crate of interest \
+                                     while you decide",
+                                    true,
+                                )
+                            };
+                            if ui
+                                .add_enabled(crate_on, egui::Button::new(crate_label))
+                                .on_hover_note(crate_tip)
+                                .on_disabled_hover_text(crate::ui::hover::note(crate_tip))
+                                .clicked()
+                            {
+                                act = Some(Act::ToggleCrate);
                             }
                             // Dig from here: search Discogs outward from this
                             // record for pressings you don't already have.
@@ -1578,6 +1612,35 @@ impl App {
         }
 
         match act {
+            Some(Act::ToggleCrate) => {
+                if self.interest_ids.contains(&release_id) {
+                    self.uncrate_record(release_id);
+                    self.status = format!("Out of the crate: {artist} — {title}");
+                } else {
+                    let detail = self.vinyl_sheet.as_ref().and_then(|s| s.detail.clone());
+                    // A record reached by the dig remembers the thread that
+                    // found it — the crate card's caption keeps that trail.
+                    let via = self.dig.as_ref().and_then(|d| {
+                        d.steps
+                            .iter()
+                            .find(|s| s.release_id == release_id)
+                            .and_then(|s| s.via.as_ref())
+                            .map(|(t, m)| format!("same {}: {m}", t.label()))
+                    });
+                    self.crate_record(InterestRecord {
+                        release_id,
+                        title: title.clone(),
+                        artist: artist.clone(),
+                        year: detail.as_ref().and_then(|d| d.year),
+                        label: detail.as_ref().and_then(|d| d.label.clone()),
+                        catalog_number: detail.as_ref().and_then(|d| d.catalog_number.clone()),
+                        format: None,
+                        thumb_url: cover_url.clone(),
+                        via,
+                        added_at: 0,
+                    });
+                }
+            }
             // Starting a dig closes the sheet: the strip it drives sits behind
             // this window, and the first thing a digger does is look at it.
             Some(Act::WantAlternative(id)) => {

@@ -32,7 +32,7 @@ pub(crate) enum DigThread {
 }
 
 impl DigThread {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             DigThread::Artist => "artist",
             DigThread::Label => "label",
@@ -1009,6 +1009,7 @@ impl App {
         // request resolving the format of a record you already have.
         let mut skip = self.vinyl_owned.clone();
         skip.extend(self.vinyl_wanted.iter().copied());
+        skip.extend(self.interest_ids.iter().copied());
         if let Some(dig) = self.dig.as_ref() {
             skip.extend(dig.seen.iter().copied());
         }
@@ -1081,6 +1082,9 @@ impl App {
         // make a dig a discovery tool rather than a shuffle of what you have.
         let owned = self.vinyl_owned.clone();
         let wanted = self.vinyl_wanted.clone();
+        // The crate of interest counts as saved too: a find already set aside
+        // isn't a discovery twice.
+        let crated = self.interest_ids.clone();
         // Taken here, before the borrow below: whether this page produces a
         // find or an error, the sheet's ride on the dig ends with this step. It
         // is spent at the bottom, on the branch that actually lands somewhere.
@@ -1102,7 +1106,11 @@ impl App {
             .iter()
             .filter(|r| {
                 let id = r.release_id;
-                if dig.seen.contains(&id) || owned.contains(&id) || wanted.contains(&id) {
+                if dig.seen.contains(&id)
+                    || owned.contains(&id)
+                    || wanted.contains(&id)
+                    || crated.contains(&id)
+                {
                     return false;
                 }
                 // Discogs lists some pressings twice on the same page.
@@ -1332,6 +1340,7 @@ impl App {
             .collect();
         let mut skip = self.vinyl_owned.clone();
         skip.extend(self.vinyl_wanted.iter().copied());
+        skip.extend(self.interest_ids.iter().copied());
         skip.extend(dig.seen.iter().copied());
 
         // A fresh flag per worker: the previous one may already be raised by
