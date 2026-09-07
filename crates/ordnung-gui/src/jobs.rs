@@ -509,7 +509,7 @@ impl App {
     }
 
     /// Sweep one saved seller's Discogs inventory into the local cache — the
-    /// Sellers tab's explicit "Sweep" action, never run automatically. Pages
+    /// Sellers tab's explicit "Update" action, never run automatically. Pages
     /// the whole shop at the shared throttle (a large distributor is minutes of
     /// requests, which is why this is backgrounded, progress-reported and
     /// cancellable).
@@ -530,7 +530,7 @@ impl App {
         self.job_rx = Some(rx);
         let cancel = Arc::new(AtomicBool::new(false));
         self.job_cancel = Some(cancel.clone());
-        self.status = format!("Sweeping {username}'s crates…");
+        self.status = format!("Updating {username}'s crates…");
         let db = self.db_path.clone();
         thread::spawn(move || run_sweep_seller(db, token, username, cancel, tx, ctx));
     }
@@ -2167,7 +2167,7 @@ pub(crate) fn run_sweep_seller(
                 // A partial sweep is still useful: everything upserted so far
                 // stays cached (unpruned), exactly like a cancel.
                 let _ = tx.send(JobMsg::Failed(format!(
-                    "sweeping {username} (page {page}): {e}"
+                    "updating {username} (page {page}): {e}"
                 )));
                 ctx.request_repaint();
                 return;
@@ -2182,7 +2182,7 @@ pub(crate) fn run_sweep_seller(
         kept += fetched.listings.len();
         let total = pages.min(SELLER_SWEEP_MAX_PAGES) as usize;
         let _ = tx.send(JobMsg::Status(format!(
-            "Sweeping {username}'s crates… (page {page}/{total}, {kept} records)"
+            "Updating {username}'s crates… (page {page}/{total}, {kept} records)"
         )));
         let _ = tx.send(JobMsg::Progress {
             done: page as usize,
@@ -2202,7 +2202,7 @@ pub(crate) fn run_sweep_seller(
         let _ = catalog.set_seller_swept(&username, reported as u64);
     }
     let note = match (stopped, capped) {
-        (true, _) => " (stopped early — swept so far kept, nothing pruned)",
+        (true, _) => " (stopped early — fetched so far kept, nothing pruned)",
         (false, true) => " (large shop — capped at the newest 20,000 listings)",
         (false, false) => "",
     };

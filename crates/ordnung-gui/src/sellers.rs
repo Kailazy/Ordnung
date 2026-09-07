@@ -3,7 +3,7 @@
 //!
 //! Sellers are saved by username (Discogs removed the release→sellers
 //! direction, so the shop is the only way in — see
-//! `docs/design/bulk-sellers-spike.md`). An explicit Sweep pages the shop's
+//! `docs/design/bulk-sellers-spike.md`). An explicit Update pages the shop's
 //! for-sale inventory into the `seller_listings` cache; from then on the
 //! crates browse offline — filtered, price/condition on every card, records
 //! you already own or want badged from the same membership sets the shelves
@@ -262,7 +262,7 @@ impl App {
                 if let Some(cur) = self.seller_current.clone() {
                     ui.add_enabled_ui(!busy, |ui| {
                         if ui
-                            .button("⟲ Sweep")
+                            .button("⟲ Update")
                             .on_hover_note(
                                 "Pull this seller's for-sale inventory from Discogs \
                                  (runs in the background; large shops take minutes)",
@@ -351,7 +351,7 @@ impl App {
             ui.vertical_centered(|ui| {
                 ui.heading("Dig through a seller's crates");
                 ui.add_space(6.0);
-                ui.label("Save a Discogs seller above, then sweep their inventory.");
+                ui.label("Save a Discogs seller above, then update their inventory.");
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(
@@ -416,8 +416,8 @@ impl App {
                 (false, _) => format!("{} of {} records match", filtered.len(), shop.cached),
             };
             match shop.swept_at {
-                Some(t) => meta.push_str(&format!(" · swept {}", fmt_ago(t))),
-                None => meta.push_str(" · never swept"),
+                Some(t) => meta.push_str(&format!(" · updated {}", fmt_ago(t))),
+                None => meta.push_str(" · never updated"),
             }
             ui.label(egui::RichText::new(meta).weak());
         });
@@ -428,7 +428,7 @@ impl App {
             ui.vertical_centered(|ui| {
                 if shop.swept_at.is_none() {
                     ui.label(format!(
-                        "Nothing cached for {} yet — sweep to pull their crates.",
+                        "Nothing cached for {} yet — update to pull their crates.",
                         shop.username
                     ));
                 } else {
