@@ -1661,6 +1661,27 @@ impl App {
                         m.close();
                     }
                 });
+                // The wantlist watch: which wants your swept sellers stock
+                // right now. Lives on the wantlist tab — it's a view of that
+                // shelf — and wears the count of records in stock.
+                if self.vinyl_tab == VinylTab::Shelf(VinylList::Wantlist) {
+                    let n = self.watch_record_count();
+                    let label = if n > 0 {
+                        format!("⛃ In stock ({n})")
+                    } else {
+                        "⛃ In stock".to_string()
+                    };
+                    if ui
+                        .selectable_label(self.show_watch, label)
+                        .on_hover_note(
+                            "Wantlist records for sale at your saved sellers, \
+                             cheapest first (sweep a shop to refresh its stock)",
+                        )
+                        .clicked()
+                    {
+                        self.show_watch = !self.show_watch;
+                    }
+                }
             });
         });
         // The tab strip sits directly on the separator below, so the active tab's

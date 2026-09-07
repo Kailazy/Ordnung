@@ -146,6 +146,8 @@ impl App {
             cart_ids: HashSet::new(),
             cart_lines: Vec::new(),
             seller_cart_only: false,
+            wantlist_watch: Vec::new(),
+            show_watch: false,
             vinyl_filter: String::new(),
             vinyl_flt: VinylFilters::default(),
             vinyl_genre_fallback: HashMap::new(),
@@ -738,6 +740,12 @@ impl App {
                 .and_then(|c| c.viewed_releases())
                 .map(|ids| ids.into_iter().collect())
                 .unwrap_or_default();
+            // The wantlist watch is a keyed join of the wantlist against the
+            // swept listings — bounded by the wantlist's size, so cheap enough
+            // to rebuild here where every sweep and wantlist edit refreshes it.
+            self.wantlist_watch = Catalog::open(&self.db_path)
+                .and_then(|c| c.wantlist_offers())
+                .unwrap_or_default();
             // The cart is a purchase plan, not a shop — a handful of rows, so
             // both the badge set and the per-seller summaries load whole.
             self.cart_ids = Catalog::open(&self.db_path)
@@ -798,6 +806,7 @@ impl App {
             self.seller_hay = Vec::new();
             self.seller_genres = HashMap::new();
             self.seller_listings_for = None;
+            self.wantlist_watch = Vec::new();
             // Runs mid-frame when the grid's "in catalog" badge jumps to the
             // Library after painting these covers; safe because `Tex` defers
             // the frees to the next frame (see `tex.rs`).
@@ -3539,6 +3548,7 @@ impl eframe::App for App {
         self.draw_vinyl_edit_confirm(ctx);
         self.draw_vinyl_sheet(ctx, frame);
         self.draw_versions(ctx);
+        self.draw_wantlist_watch(ctx);
         self.draw_failure_report(ctx);
         self.draw_export_confirm(ctx);
         self.draw_usb_setup_confirm(ctx);

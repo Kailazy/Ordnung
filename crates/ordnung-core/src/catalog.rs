@@ -3286,6 +3286,52 @@ impl Catalog {
         Ok(rows)
     }
 
+    /// Every cached seller listing whose release is on the wantlist — the
+    /// wantlist watch, and the payoff for sweeping shops: which of the user's
+    /// wants are in stock right now, and at what price. Each row pairs the
+    /// seller's username with the listing; a record stocked by several shops
+    /// appears once per offer. Cheapest first (prices are compared across
+    /// currencies as bare numbers, which is approximate but keeps the list
+    /// scannable), ties broken by artist for a stable order.
+    pub fn wantlist_offers(&self) -> Result<Vec<(String, SellerListing)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.seller, l.listing_id, l.release_id, l.title, l.artist,
+                    l.year, l.label, l.catalog_number, l.format, l.thumb_url,
+                    l.price, l.currency, l.condition, l.sleeve_condition,
+                    l.ships_from, l.allow_offers, l.uri, l.posted
+             FROM seller_listings l
+             WHERE l.release_id IN (SELECT release_id FROM vinyl_wantlist)
+             ORDER BY l.price ASC, l.artist ASC, l.listing_id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    SellerListing {
+                        listing_id: r.get::<_, i64>(1)? as u64,
+                        release_id: r.get::<_, i64>(2)? as u64,
+                        title: r.get(3)?,
+                        artist: r.get(4)?,
+                        year: r.get::<_, Option<i64>>(5)?.map(|y| y as u16),
+                        label: r.get(6)?,
+                        catalog_number: r.get(7)?,
+                        format: r.get(8)?,
+                        thumb_url: r.get(9)?,
+                        price: r.get(10)?,
+                        currency: r.get(11)?,
+                        condition: r.get(12)?,
+                        sleeve_condition: r.get(13)?,
+                        ships_from: r.get(14)?,
+                        allow_offers: r.get::<_, i64>(15)? != 0,
+                        uri: r.get(16)?,
+                        posted: r.get(17)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Record that the user auditioned this release while digging (opened it
     /// from a seller card and played a song). Re-listening restamps the time.
     pub fn mark_release_viewed(&self, release_id: u64) -> Result<()> {
@@ -5153,6 +5199,58 @@ mod tests {
         assert!(cat.list_sellers().unwrap().is_empty());
         assert!(cat.list_seller_listings("hardwax").unwrap().is_empty());
         assert!(!cat.remove_seller("hardwax").unwrap());
+    }
+
+    /// The wantlist watch is the join of the wantlist against every swept
+    /// shop: only listings whose release is wanted, cheapest first, one row
+    /// per offer even when two shops stock the same record.
+    #[test]
+    fn wantlist_offers_join_wants_against_swept_listings() {
+        fn listing(id: u64, release_id: u64, price: f64) -> SellerListing {
+            SellerListing {
+                listing_id: id,
+                release_id,
+                title: "Azure".into(),
+                artist: "Vainqueur".into(),
+                year: Some(1995),
+                label: Some("Chain Reaction".into()),
+                catalog_number: Some("CR-02".into()),
+                format: Some("12\"".into()),
+                thumb_url: None,
+                price,
+                currency: "EUR".into(),
+                condition: Some("Very Good Plus (VG+)".into()),
+                sleeve_condition: None,
+                ships_from: Some("Germany".into()),
+                allow_offers: false,
+                uri: None,
+                posted: None,
+            }
+        }
+
+        let cat = Catalog::open(":memory:").unwrap();
+        // Want the record behind release 9001; own nothing else relevant.
+        cat.upsert_vinyl(VinylList::Wantlist, &vinyl(1, "Vainqueur", "Elevation"))
+            .unwrap();
+        cat.add_seller("hardwax").unwrap();
+        cat.add_seller("rushhour").unwrap();
+        // Two shops stock the want at different prices; a third listing is a
+        // record the user never wanted and must not appear.
+        cat.upsert_seller_listing("hardwax", &listing(1, 9001, 14.0)).unwrap();
+        cat.upsert_seller_listing("rushhour", &listing(2, 9001, 9.5)).unwrap();
+        cat.upsert_seller_listing("hardwax", &listing(3, 7777, 4.0)).unwrap();
+
+        let offers = cat.wantlist_offers().unwrap();
+        assert_eq!(offers.len(), 2, "one row per offer, unwanted records dropped");
+        // Cheapest first, each row naming the shop that stocks it.
+        assert_eq!(offers[0].0, "rushhour");
+        assert_eq!(offers[0].1.price, 9.5);
+        assert_eq!(offers[1].0, "hardwax");
+        assert_eq!(offers[1].1.release_id, 9001);
+
+        // Buying it (the want leaves the wantlist) empties the watch.
+        cat.prune_vinyl_not_in(VinylList::Wantlist, &[]).unwrap();
+        assert!(cat.wantlist_offers().unwrap().is_empty());
     }
 
     #[test]

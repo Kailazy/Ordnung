@@ -30,6 +30,7 @@ mod ui;
 mod util;
 mod versions;
 mod views;
+mod watch;
 mod vinyl_sheet;
 mod webview;
 
@@ -1218,6 +1219,14 @@ struct App {
     /// marker; loaded from the `viewed_releases` table with the vinyl view
     /// and appended to live as songs play.
     viewed_releases: HashSet<u64>,
+    /// The wantlist watch: every swept seller listing whose release is on the
+    /// wantlist, cheapest first, as `(seller, listing)`. A pure local join
+    /// (see `Catalog::wantlist_offers`), reloaded with the vinyl lists so a
+    /// sweep or a wantlist edit refreshes it. See [`watch`].
+    wantlist_watch: Vec<(String, SellerListing)>,
+    /// Whether the wantlist watch window is open. Session state, toggled by
+    /// the wantlist tab's "In stock" button.
+    show_watch: bool,
     /// Marketplace listing ids in the local cart — the membership set the
     /// crates' CART badge is drawn from. Loaded from the `cart_listings` table
     /// with the vinyl view, updated in place as records are carted.
