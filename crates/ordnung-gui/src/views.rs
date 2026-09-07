@@ -1272,11 +1272,21 @@ impl App {
         // inset so they align with the animated rows around them.
         let pad = crate::ui::tokens::space::S3;
 
+        // Clear-all sits top right as a small button rather than a menu row:
+        // it's the popup's escape hatch, not one of the facets, and the
+        // corner placement keeps the facet list starting at the top.
         if self.vinyl_flt.active(seller_mode) > 0 {
-            if m.item("✖ Clear all filters") {
-                self.vinyl_flt.clear();
-            }
-            m.separator();
+            m.ui().horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("✖ Clear")
+                        .on_hover_note("Clear every filter")
+                        .clicked()
+                    {
+                        self.vinyl_flt.clear();
+                    }
+                });
+            });
         }
 
         m.header("Year");
