@@ -63,10 +63,7 @@ impl App {
             // no longer exists (ids are `BASE + index`, so they are reused).
             // Drop it rather than caching art against whatever now sits at that
             // index.
-            if msg
-                .usb_generation
-                .is_some_and(|g| g != self.usb_generation)
-            {
+            if msg.usb_generation.is_some_and(|g| g != self.usb_generation) {
                 self.cover_cache.remove(&msg.id);
                 continue;
             }

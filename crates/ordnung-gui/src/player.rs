@@ -213,9 +213,8 @@ impl App {
                 thread::spawn(move || {
                     // `pcm()` only hands out a finished buffer, so the read
                     // guard held for this (long) computation blocks no writer.
-                    let hires = pcm.with(|samples| {
-                        compute_hires_bands(samples, ch, sr, low_hz, mid_hz)
-                    });
+                    let hires =
+                        pcm.with(|samples| compute_hires_bands(samples, ch, sr, low_hz, mid_hz));
                     let _ = tx.send((np_id, hires));
                     ctx.request_repaint();
                 });

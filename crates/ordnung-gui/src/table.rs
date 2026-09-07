@@ -2006,9 +2006,7 @@ impl App {
                                 if resp.drag_started() {
                                     drag = true;
                                 }
-                                if alt_drag
-                                    && !cancelled
-                                    && (resp.drag_started() || resp.dragged())
+                                if alt_drag && !cancelled && (resp.drag_started() || resp.dragged())
                                 {
                                     native_drag_ids = Some(drag_ids.clone());
                                 }
@@ -2018,9 +2016,7 @@ impl App {
                                             drag_ids.clone(),
                                         ));
                                     } else {
-                                        resp.dnd_set_drag_payload(DraggedTracks(
-                                            drag_ids.clone(),
-                                        ));
+                                        resp.dnd_set_drag_payload(DraggedTracks(drag_ids.clone()));
                                     }
                                 }
                             });

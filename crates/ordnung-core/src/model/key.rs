@@ -178,7 +178,12 @@ impl Key {
             _ => (0i8, rest.as_str()),
         };
         let pc = PitchClass::new((base as i8 + accidental).rem_euclid(12) as u8);
-        let mode = match rest.trim().trim_start_matches(['-', ' ']).to_ascii_lowercase().as_str() {
+        let mode = match rest
+            .trim()
+            .trim_start_matches(['-', ' '])
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "" | "maj" | "major" => Mode::Major,
             "m" | "min" | "minor" => Mode::Minor,
             _ => return None,
@@ -247,7 +252,11 @@ mod tests {
         for pc in 0..12 {
             seen.insert(key(pc, Mode::Major).camelot().number);
         }
-        assert_eq!(seen.len(), 12, "all 12 Camelot numbers present for major keys");
+        assert_eq!(
+            seen.len(),
+            12,
+            "all 12 Camelot numbers present for major keys"
+        );
         assert!(seen.iter().all(|&n| (1..=12).contains(&n)));
     }
 

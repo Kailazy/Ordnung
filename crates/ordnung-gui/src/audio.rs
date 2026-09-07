@@ -55,7 +55,9 @@ enum DecodeMsg {
     },
     /// The decode ran to the end (possibly truncated by a mid-file error);
     /// the buffer is complete and the exact duration is knowable.
-    Finished { id: Id },
+    Finished {
+        id: Id,
+    },
     Failed {
         id: Id,
         error: String,
@@ -393,7 +395,13 @@ impl AudioEngine {
             };
             let result = decode_interleaved_chunks(
                 &path,
-                |start| format.set(Some((start.sample_rate, start.channels, start.total_frames))),
+                |start| {
+                    format.set(Some((
+                        start.sample_rate,
+                        start.channels,
+                        start.total_frames,
+                    )))
+                },
                 |chunk| {
                     if cancel.load(Ordering::Relaxed) {
                         return false;

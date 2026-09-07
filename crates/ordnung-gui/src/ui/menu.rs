@@ -199,7 +199,12 @@ impl MenuUi<'_> {
         label: impl Into<String>,
         detail: impl Into<String>,
     ) -> bool {
-        self.row(Some(selected), label.into(), Some(detail.into()), color::LABEL)
+        self.row(
+            Some(selected),
+            label.into(),
+            Some(detail.into()),
+            color::LABEL,
+        )
     }
 
     /// A section caption — small caps, semibold, quiet — for a menu that
@@ -306,10 +311,10 @@ impl MenuUi<'_> {
             return resp.clicked();
         }
 
-        let hot = self
-            .ui
-            .ctx()
-            .animate_bool_with_time(resp.id.with("hot"), resp.hovered(), HOVER_ANIM);
+        let hot =
+            self.ui
+                .ctx()
+                .animate_bool_with_time(resp.id.with("hot"), resp.hovered(), HOVER_ANIM);
         let painter = self.ui.painter();
         // A picked row wears a soft accent wash under everything else, so an
         // active filter reads at a glance without shouting; the ✓ carries the

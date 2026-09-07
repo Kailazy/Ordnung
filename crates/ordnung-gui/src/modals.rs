@@ -564,8 +564,7 @@ impl App {
             auto_dirty = true;
         }
         ui.add_enabled_ui(self.config.discogs_auto_fetch, |ui| {
-            let current =
-                config::ReleaseAutoMatch::from_key(&self.config.discogs_auto_match);
+            let current = config::ReleaseAutoMatch::from_key(&self.config.discogs_auto_match);
             let mut picked = current;
             ui.horizontal(|ui| {
                 ui.label("Prefer:");

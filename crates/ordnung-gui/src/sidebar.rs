@@ -702,7 +702,10 @@ pub(crate) fn draw_usb_playlist_nodes(
             );
             // Device tracks dragged over the row: same landing-zone outline as
             // the catalog tree, and the drop appends them on the stick.
-            if resp.dnd_hover_payload::<crate::DraggedUsbTracks>().is_some() {
+            if resp
+                .dnd_hover_payload::<crate::DraggedUsbTracks>()
+                .is_some()
+            {
                 ui.painter().rect_stroke(
                     resp.rect.shrink(1.0),
                     egui::Rounding::same(6.0),
@@ -711,7 +714,10 @@ pub(crate) fn draw_usb_playlist_nodes(
             }
             if let Some(payload) = resp.dnd_release_payload::<crate::DraggedUsbTracks>() {
                 if !payload.0.is_empty() {
-                    *action = Some(SidebarAction::AddUsbTracksToPlaylist(p.id, payload.0.clone()));
+                    *action = Some(SidebarAction::AddUsbTracksToPlaylist(
+                        p.id,
+                        payload.0.clone(),
+                    ));
                 }
             }
             if resp.clicked() {
@@ -829,9 +835,8 @@ pub(crate) fn source_tabs(
         // Truncate the label to this tab's share of the strip, the same way
         // playlist tiles do — a long volume name must not push "Library" out.
         let inner = budget - space::S3 * 2.0;
-        let text_w = |s: &str| {
-            ui.fonts(|f| s.chars().map(|c| f.glyph_width(&text_font, c)).sum::<f32>())
-        };
+        let text_w =
+            |s: &str| ui.fonts(|f| s.chars().map(|c| f.glyph_width(&text_font, c)).sum::<f32>());
         let shown = if text_w(label) <= inner {
             label.to_string()
         } else {
@@ -903,10 +908,7 @@ pub(crate) fn source_tabs(
             }
             // Device rows dragged over the tab: outline it as a landing zone,
             // and take the payload on release.
-            if lib
-                .dnd_hover_payload::<crate::DraggedUsbTracks>()
-                .is_some()
-            {
+            if lib.dnd_hover_payload::<crate::DraggedUsbTracks>().is_some() {
                 ui.painter().rect_stroke(
                     lib.rect,
                     egui::Rounding::same(radius::SM),

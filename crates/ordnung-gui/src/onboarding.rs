@@ -339,9 +339,7 @@ impl App {
                                 // exists, so it gets a framed block of its own.
                                 egui::Frame::none()
                                     .fill(ui.visuals().extreme_bg_color)
-                                    .rounding(egui::Rounding::same(
-                                        crate::ui::tokens::radius::SM,
-                                    ))
+                                    .rounding(egui::Rounding::same(crate::ui::tokens::radius::SM))
                                     .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.5)))
                                     .inner_margin(egui::Margin::symmetric(16.0, 14.0))
                                     .show(ui, |ui| {
@@ -467,9 +465,7 @@ impl App {
                                 // visual weight.
                                 egui::Frame::none()
                                     .fill(ui.visuals().extreme_bg_color)
-                                    .rounding(egui::Rounding::same(
-                                        crate::ui::tokens::radius::SM,
-                                    ))
+                                    .rounding(egui::Rounding::same(crate::ui::tokens::radius::SM))
                                     .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.5)))
                                     .inner_margin(egui::Margin::symmetric(16.0, 14.0))
                                     .show(ui, |ui| {
@@ -500,11 +496,11 @@ impl App {
                                                 }
                                                 None => {
                                                     ui.label(
-                                                        egui::RichText::new(
-                                                            "No folder chosen yet",
-                                                        )
-                                                        .font(crate::ui::tokens::font::body())
-                                                        .color(crate::ui::tokens::color::LABEL_3),
+                                                        egui::RichText::new("No folder chosen yet")
+                                                            .font(crate::ui::tokens::font::body())
+                                                            .color(
+                                                                crate::ui::tokens::color::LABEL_3,
+                                                            ),
                                                     );
                                                 }
                                             }
@@ -516,13 +512,11 @@ impl App {
                                             "Choose folder…"
                                         };
                                         let btn = egui::Button::new(
-                                            egui::RichText::new(label)
-                                                .color(egui::Color32::WHITE),
+                                            egui::RichText::new(label).color(egui::Color32::WHITE),
                                         )
                                         .fill(accent);
                                         if ui.add(btn).clicked() {
-                                            if let Some(dir) =
-                                                rfd::FileDialog::new().pick_folder()
+                                            if let Some(dir) = rfd::FileDialog::new().pick_folder()
                                             {
                                                 library_root = Some(dir);
                                             }
@@ -622,9 +616,7 @@ impl App {
                                 // thing the previous step promised them.
                                 egui::Frame::none()
                                     .fill(ui.visuals().extreme_bg_color)
-                                    .rounding(egui::Rounding::same(
-                                        crate::ui::tokens::radius::SM,
-                                    ))
+                                    .rounding(egui::Rounding::same(crate::ui::tokens::radius::SM))
                                     .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.5)))
                                     .inner_margin(egui::Margin::symmetric(16.0, 14.0))
                                     .show(ui, |ui| {
@@ -680,9 +672,7 @@ impl App {
                                         egui::ComboBox::from_id_salt("tour_auto_match_rule")
                                             .selected_text(auto_match.label())
                                             .show_ui(ui, |ui| {
-                                                for rule in
-                                                    crate::config::ReleaseAutoMatch::ALL
-                                                {
+                                                for rule in crate::config::ReleaseAutoMatch::ALL {
                                                     ui.selectable_value(
                                                         &mut auto_match,
                                                         rule,

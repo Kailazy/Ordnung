@@ -330,12 +330,7 @@ fn connector_glyph_rect(card_slot: egui::Rect) -> egui::Rect {
 /// thread through the gap; a branch on a lower row bends down from its parent
 /// through a round-cornered elbow, so a fork is visible as a fork rather than
 /// two rows that happen to line up.
-fn draw_connector(
-    painter: &egui::Painter,
-    from: egui::Rect,
-    to: egui::Rect,
-    color: egui::Color32,
-) {
+fn draw_connector(painter: &egui::Painter, from: egui::Rect, to: egui::Rect, color: egui::Color32) {
     let pcy = from.top() + COVER * 0.5;
     let ccy = to.top() + COVER * 0.5;
     let start = egui::pos2(from.right() + 5.0, pcy);
@@ -1527,153 +1522,161 @@ impl App {
         // squeezed and opens to its resting value, which moves the whole strip
         // *and* the shelf below it rather than letting it overlap either.
         let rise = OPEN_RISE * (1.0 - open_t);
-        let strip_rect = ui.scope(|ui| {
-            ui.multiply_opacity(open_t);
-            egui::Frame::none()
-                .fill(egui::Color32::from_gray(26))
-                .rounding(egui::Rounding::same(8.0))
-                .inner_margin(egui::Margin {
-                    left: 12.0,
-                    right: 12.0,
-                    top: 10.0 - rise * 0.5,
-                    bottom: 10.0 - rise * 0.5,
-                })
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("🔍  Digging").strong());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if crate::ui::icon::close_button(ui, "Stop digging and clear this path")
-                            {
-                                end = true;
-                            }
-                            // Forward only re-walks a branch already dug — a
-                            // new one is taken with the buttons below instead.
-                            if ui
-                                .add_enabled(head_forward.is_some(), egui::Button::new("→"))
-                                .on_hover_note("Forward, down the branch you were last on")
-                                .clicked()
-                            {
-                                goto = head_forward;
-                            }
-                            if ui
-                                .add_enabled(head_back.is_some(), egui::Button::new("←"))
-                                .on_hover_note("Back one record, to branch off from there")
-                                .clicked()
-                            {
-                                goto = head_back;
-                            }
-                        });
-                    });
-                    ui.add_space(6.0);
-
-                    // The web itself. One branch reads left to right like the
-                    // chain always did; a fork drops its extra branches to rows
-                    // below. Scrolls both ways once the dig outgrows the strip;
-                    // each card is clickable to move the cursor there.
-                    let rows = 1 + cards
-                        .iter()
-                        .map(|c| c.row)
-                        .chain(pending_slot.map(|(r, _)| r))
-                        .max()
-                        .unwrap_or(0);
-                    let cols = 1 + cards
-                        .iter()
-                        .map(|c| c.col)
-                        .chain(pending_slot.map(|(_, c)| c))
-                        .max()
-                        .unwrap_or(0);
-                    // A single-row dig keeps the strip at its old height; a web
-                    // shows two rows at once and scrolls for the rest, so a
-                    // deep fork can't shove the shelf off the window — unless
-                    // the user has dragged the strip taller themselves.
-                    let min_h = CARD_H + 14.0;
-                    let content_h = rows as f32 * (CARD_H + GAP_Y) - GAP_Y + 14.0;
-                    let auto_h = if rows > 1 {
-                        CARD_H * 2.0 + GAP_Y + 14.0
-                    } else {
-                        min_h
-                    };
-                    let max_h = self
-                        .dig_strip_h
-                        .unwrap_or(auto_h)
-                        .clamp(min_h, content_h.max(min_h));
-                    egui::ScrollArea::both()
-                        .max_height(max_h)
-                        // Fill the strip's full width even when the web is
-                        // narrower, so the vertical scroll bar lives at the
-                        // strip's right edge rather than hugging the last
-                        // column of cards mid-panel.
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            let grid = egui::vec2(
-                                cols as f32 * (COVER + GAP_X) - GAP_X,
-                                rows as f32 * (CARD_H + GAP_Y) - GAP_Y,
-                            );
-                            let (grid_rect, _) =
-                                ui.allocate_exact_size(grid, egui::Sense::hover());
-                            let slot_of = |row: usize, col: usize| {
-                                egui::Rect::from_min_size(
-                                    grid_rect.min
-                                        + egui::vec2(
-                                            col as f32 * (COVER + GAP_X),
-                                            row as f32 * (CARD_H + GAP_Y),
-                                        ),
-                                    egui::vec2(COVER, CARD_H),
-                                )
-                            };
-                            // Connectors first, so a card entering over one
-                            // paints on top of it. Each names the thread that
-                            // was followed, so a finished web explains itself.
-                            for (i, card) in cards.iter().enumerate() {
-                                let (Some(p), Some((thread, matched))) = (card.parent, &card.via)
-                                else {
-                                    continue;
-                                };
-                                let enter = card_enter_t(card.since_landed);
-                                let arrow = (enter * 1.6).min(1.0);
-                                // The head's own thread stays bright; the roads
-                                // not taken recede without disappearing.
-                                let tone = if card.on_lineage { 150 } else { 80 };
-                                let color = egui::Color32::from_gray(tone).gamma_multiply(arrow);
-                                let pslot = slot_of(cards[p].row, cards[p].col);
-                                let cslot = slot_of(card.row, card.col);
-                                draw_connector(ui.painter(), pslot, cslot, color);
-                                let glyph = connector_glyph_rect(cslot);
-                                ui.interact(
-                                    glyph,
-                                    ui.id().with(("dig-conn", i)),
-                                    egui::Sense::hover(),
-                                )
-                                .on_hover_note(format!("Same {}: {matched}", thread.label()));
-                            }
-                            for (i, card) in cards.iter().enumerate() {
-                                // How far into its arrival this card is. Every
-                                // card but a just-dug one is settled at 1.0, so
-                                // the web as a whole stays still while the new
-                                // find is the only thing moving.
-                                let enter = card_enter_t(card.since_landed);
-                                if enter < 1.0 {
-                                    ui.ctx().request_repaint();
-                                }
-                                let current = i == at;
-                                // A landing card slides in from the right of
-                                // its slot and fades up, like a sleeve being
-                                // pushed into the row. Only the contents move:
-                                // the slot keeps its full place in the grid
-                                // either way, so the rest of the web holds
-                                // still while the new find settles.
-                                let slot = slot_of(card.row, card.col);
-                                let shifted =
-                                    slot.translate(egui::vec2(CARD_SLIDE * (1.0 - enter), 0.0));
-                                let mut card_ui = ui.new_child(
-                                    egui::UiBuilder::new()
-                                        .max_rect(shifted)
-                                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                                );
-                                card_ui.multiply_opacity(enter);
-                                {
-                                    let ui = &mut card_ui;
+        let strip_rect = ui
+            .scope(|ui| {
+                ui.multiply_opacity(open_t);
+                egui::Frame::none()
+                    .fill(egui::Color32::from_gray(26))
+                    .rounding(egui::Rounding::same(8.0))
+                    .inner_margin(egui::Margin {
+                        left: 12.0,
+                        right: 12.0,
+                        top: 10.0 - rise * 0.5,
+                        bottom: 10.0 - rise * 0.5,
+                    })
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("🔍  Digging").strong());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if crate::ui::icon::close_button(
+                                        ui,
+                                        "Stop digging and clear this path",
+                                    ) {
+                                        end = true;
+                                    }
+                                    // Forward only re-walks a branch already dug — a
+                                    // new one is taken with the buttons below instead.
+                                    if ui
+                                        .add_enabled(head_forward.is_some(), egui::Button::new("→"))
+                                        .on_hover_note("Forward, down the branch you were last on")
+                                        .clicked()
                                     {
+                                        goto = head_forward;
+                                    }
+                                    if ui
+                                        .add_enabled(head_back.is_some(), egui::Button::new("←"))
+                                        .on_hover_note("Back one record, to branch off from there")
+                                        .clicked()
+                                    {
+                                        goto = head_back;
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(6.0);
+
+                        // The web itself. One branch reads left to right like the
+                        // chain always did; a fork drops its extra branches to rows
+                        // below. Scrolls both ways once the dig outgrows the strip;
+                        // each card is clickable to move the cursor there.
+                        let rows = 1 + cards
+                            .iter()
+                            .map(|c| c.row)
+                            .chain(pending_slot.map(|(r, _)| r))
+                            .max()
+                            .unwrap_or(0);
+                        let cols = 1 + cards
+                            .iter()
+                            .map(|c| c.col)
+                            .chain(pending_slot.map(|(_, c)| c))
+                            .max()
+                            .unwrap_or(0);
+                        // A single-row dig keeps the strip at its old height; a web
+                        // shows two rows at once and scrolls for the rest, so a
+                        // deep fork can't shove the shelf off the window — unless
+                        // the user has dragged the strip taller themselves.
+                        let min_h = CARD_H + 14.0;
+                        let content_h = rows as f32 * (CARD_H + GAP_Y) - GAP_Y + 14.0;
+                        let auto_h = if rows > 1 {
+                            CARD_H * 2.0 + GAP_Y + 14.0
+                        } else {
+                            min_h
+                        };
+                        let max_h = self
+                            .dig_strip_h
+                            .unwrap_or(auto_h)
+                            .clamp(min_h, content_h.max(min_h));
+                        egui::ScrollArea::both()
+                            .max_height(max_h)
+                            // Fill the strip's full width even when the web is
+                            // narrower, so the vertical scroll bar lives at the
+                            // strip's right edge rather than hugging the last
+                            // column of cards mid-panel.
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                let grid = egui::vec2(
+                                    cols as f32 * (COVER + GAP_X) - GAP_X,
+                                    rows as f32 * (CARD_H + GAP_Y) - GAP_Y,
+                                );
+                                let (grid_rect, _) =
+                                    ui.allocate_exact_size(grid, egui::Sense::hover());
+                                let slot_of = |row: usize, col: usize| {
+                                    egui::Rect::from_min_size(
+                                        grid_rect.min
+                                            + egui::vec2(
+                                                col as f32 * (COVER + GAP_X),
+                                                row as f32 * (CARD_H + GAP_Y),
+                                            ),
+                                        egui::vec2(COVER, CARD_H),
+                                    )
+                                };
+                                // Connectors first, so a card entering over one
+                                // paints on top of it. Each names the thread that
+                                // was followed, so a finished web explains itself.
+                                for (i, card) in cards.iter().enumerate() {
+                                    let (Some(p), Some((thread, matched))) =
+                                        (card.parent, &card.via)
+                                    else {
+                                        continue;
+                                    };
+                                    let enter = card_enter_t(card.since_landed);
+                                    let arrow = (enter * 1.6).min(1.0);
+                                    // The head's own thread stays bright; the roads
+                                    // not taken recede without disappearing.
+                                    let tone = if card.on_lineage { 150 } else { 80 };
+                                    let color =
+                                        egui::Color32::from_gray(tone).gamma_multiply(arrow);
+                                    let pslot = slot_of(cards[p].row, cards[p].col);
+                                    let cslot = slot_of(card.row, card.col);
+                                    draw_connector(ui.painter(), pslot, cslot, color);
+                                    let glyph = connector_glyph_rect(cslot);
+                                    ui.interact(
+                                        glyph,
+                                        ui.id().with(("dig-conn", i)),
+                                        egui::Sense::hover(),
+                                    )
+                                    .on_hover_note(format!("Same {}: {matched}", thread.label()));
+                                }
+                                for (i, card) in cards.iter().enumerate() {
+                                    // How far into its arrival this card is. Every
+                                    // card but a just-dug one is settled at 1.0, so
+                                    // the web as a whole stays still while the new
+                                    // find is the only thing moving.
+                                    let enter = card_enter_t(card.since_landed);
+                                    if enter < 1.0 {
+                                        ui.ctx().request_repaint();
+                                    }
+                                    let current = i == at;
+                                    // A landing card slides in from the right of
+                                    // its slot and fades up, like a sleeve being
+                                    // pushed into the row. Only the contents move:
+                                    // the slot keeps its full place in the grid
+                                    // either way, so the rest of the web holds
+                                    // still while the new find settles.
+                                    let slot = slot_of(card.row, card.col);
+                                    let shifted =
+                                        slot.translate(egui::vec2(CARD_SLIDE * (1.0 - enter), 0.0));
+                                    let mut card_ui = ui.new_child(
+                                        egui::UiBuilder::new()
+                                            .max_rect(shifted)
+                                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                                    );
+                                    card_ui.multiply_opacity(enter);
+                                    {
+                                        let ui = &mut card_ui;
+                                        {
                                             let (rect, resp) = ui.allocate_exact_size(
                                                 egui::vec2(COVER, COVER),
                                                 egui::Sense::click(),
@@ -1846,102 +1849,102 @@ impl App {
                                         }
                                     }
                                 }
-                            // The step being fetched, as a placeholder tile in
-                            // the slot where the find will land — so a dig in
-                            // flight looks like it's going somewhere, and the
-                            // card that arrives replaces the spinner in place.
-                            if pending.is_some() {
-                                if let Some((r, c)) = pending_slot {
-                                    let slot = slot_of(r, c);
-                                    let head_slot = slot_of(cards[at].row, cards[at].col);
-                                    let color = egui::Color32::from_gray(120);
-                                    draw_connector(ui.painter(), head_slot, slot, color);
-                                    let rect = egui::Rect::from_min_size(
-                                        slot.min,
-                                        egui::vec2(COVER, COVER),
-                                    );
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        egui::Rounding::same(5.0),
-                                        egui::Color32::from_gray(34),
-                                    );
-                                    ui.put(rect, egui::Spinner::new());
+                                // The step being fetched, as a placeholder tile in
+                                // the slot where the find will land — so a dig in
+                                // flight looks like it's going somewhere, and the
+                                // card that arrives replaces the spinner in place.
+                                if pending.is_some() {
+                                    if let Some((r, c)) = pending_slot {
+                                        let slot = slot_of(r, c);
+                                        let head_slot = slot_of(cards[at].row, cards[at].col);
+                                        let color = egui::Color32::from_gray(120);
+                                        draw_connector(ui.painter(), head_slot, slot, color);
+                                        let rect = egui::Rect::from_min_size(
+                                            slot.min,
+                                            egui::vec2(COVER, COVER),
+                                        );
+                                        ui.painter().rect_filled(
+                                            rect,
+                                            egui::Rounding::same(5.0),
+                                            egui::Color32::from_gray(34),
+                                        );
+                                        ui.put(rect, egui::Spinner::new());
+                                    }
                                 }
-                            }
-                        });
+                            });
 
-                    // Once the web has forked there may be more rows than the
-                    // strip shows, so its bottom edge becomes a resize handle
-                    // (hung on the frame after it closes, below). Remember the
-                    // clamp range that handle needs.
-                    if rows > 1 {
-                        resize_limits = Some((min_h, max_h, content_h));
-                    }
-                    ui.add_space(8.0);
-                    if let Some(e) = &error {
-                        ui.label(
-                            egui::RichText::new(e)
-                                .small()
-                                .color(egui::Color32::from_rgb(220, 160, 120)),
-                        );
-                        ui.add_space(6.0);
-                    }
-                    // The choice. Both threads are always shown — a disabled branch
-                    // with a reason teaches the shape of the record, where a hidden
-                    // one just looks broken.
-                    ui.horizontal(|ui| {
-                        let busy = pending.is_some();
-                        // Gated on the *id*, not the name: until the release
-                        // detail resolves there's nothing to browse by.
-                        let can_artist = has_artist_id;
-                        let artist_tip = if can_artist {
-                            format!(
+                        // Once the web has forked there may be more rows than the
+                        // strip shows, so its bottom edge becomes a resize handle
+                        // (hung on the frame after it closes, below). Remember the
+                        // clamp range that handle needs.
+                        if rows > 1 {
+                            resize_limits = Some((min_h, max_h, content_h));
+                        }
+                        ui.add_space(8.0);
+                        if let Some(e) = &error {
+                            ui.label(
+                                egui::RichText::new(e)
+                                    .small()
+                                    .color(egui::Color32::from_rgb(220, 160, 120)),
+                            );
+                            ui.add_space(6.0);
+                        }
+                        // The choice. Both threads are always shown — a disabled branch
+                        // with a reason teaches the shape of the record, where a hidden
+                        // one just looks broken.
+                        ui.horizontal(|ui| {
+                            let busy = pending.is_some();
+                            // Gated on the *id*, not the name: until the release
+                            // detail resolves there's nothing to browse by.
+                            let can_artist = has_artist_id;
+                            let artist_tip = if can_artist {
+                                format!(
                                 "Find another vinyl release by {head_artist} that you don't own"
                             )
-                        } else if head_artist.trim().is_empty() {
-                            "Discogs lists no artist for this record".to_string()
-                        } else {
-                            format!("Looking up {head_artist} on Discogs…")
-                        };
-                        if ui
-                            .add_enabled(
-                                can_artist && !busy,
-                                egui::Button::new("  ♪  Dig the artist  "),
-                            )
-                            .on_hover_note(artist_tip.clone())
-                            .on_disabled_hover_text(crate::ui::hover::note(artist_tip))
-                            .clicked()
-                        {
-                            step = Some(DigThread::Artist);
-                        }
-                        let can_label = has_label_id;
-                        let label_tip = match &head_label {
-                            Some(l) if can_label => {
-                                format!("Find another vinyl release on {l} that you don't own")
+                            } else if head_artist.trim().is_empty() {
+                                "Discogs lists no artist for this record".to_string()
+                            } else {
+                                format!("Looking up {head_artist} on Discogs…")
+                            };
+                            if ui
+                                .add_enabled(
+                                    can_artist && !busy,
+                                    egui::Button::new("  ♪  Dig the artist  "),
+                                )
+                                .on_hover_note(artist_tip.clone())
+                                .on_disabled_hover_text(crate::ui::hover::note(artist_tip))
+                                .clicked()
+                            {
+                                step = Some(DigThread::Artist);
                             }
-                            Some(l) => format!("Looking up {l} on Discogs…"),
-                            None => "Discogs lists no label for this record".to_string(),
-                        };
-                        if ui
-                            .add_enabled(
-                                can_label && !busy,
-                                egui::Button::new("  ⌂  Dig the label  "),
-                            )
-                            .on_hover_note(label_tip.clone())
-                            .on_disabled_hover_text(crate::ui::hover::note(label_tip))
-                            .clicked()
-                        {
-                            step = Some(DigThread::Label);
-                        }
-                        if busy {
-                            ui.label(egui::RichText::new("Searching Discogs…").weak());
-                        }
-                    });
-                })
-                .response
-                .rect
-        })
-        .inner;
+                            let can_label = has_label_id;
+                            let label_tip = match &head_label {
+                                Some(l) if can_label => {
+                                    format!("Find another vinyl release on {l} that you don't own")
+                                }
+                                Some(l) => format!("Looking up {l} on Discogs…"),
+                                None => "Discogs lists no label for this record".to_string(),
+                            };
+                            if ui
+                                .add_enabled(
+                                    can_label && !busy,
+                                    egui::Button::new("  ⌂  Dig the label  "),
+                                )
+                                .on_hover_note(label_tip.clone())
+                                .on_disabled_hover_text(crate::ui::hover::note(label_tip))
+                                .clicked()
+                            {
+                                step = Some(DigThread::Label);
+                            }
+                            if busy {
+                                ui.label(egui::RichText::new("Searching Discogs…").weak());
+                            }
+                        });
+                    })
+                    .response
+                    .rect
+            })
+            .inner;
 
         // The resize handle lives on the strip's bottom edge, like a window
         // border: the whole edge drags, and the affordance line runs along it
@@ -1964,14 +1967,10 @@ impl App {
                     egui::pos2(strip_rect.left() + 9.0, strip_rect.bottom() - 1.5),
                     egui::pos2(strip_rect.right() - 9.0, strip_rect.bottom() - 1.5),
                 ],
-                egui::Stroke::new(
-                    2.0,
-                    egui::Color32::from_gray(if active { 150 } else { 48 }),
-                ),
+                egui::Stroke::new(2.0, egui::Color32::from_gray(if active { 150 } else { 48 })),
             );
             if resp.dragged() {
-                self.dig_strip_h =
-                    Some((max_h + resp.drag_delta().y).clamp(min_h, content_h));
+                self.dig_strip_h = Some((max_h + resp.drag_delta().y).clamp(min_h, content_h));
             }
             resp.on_hover_note("Drag to resize the web");
         }

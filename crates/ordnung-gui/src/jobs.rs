@@ -1395,7 +1395,13 @@ fn auto_convert_tracks(
         }
         let _ = tx.send(JobMsg::Progress { done: i, total });
         ctx.request_repaint();
-        match convert_track(catalog, track, &auto.spec, auto.out_dir.as_deref(), auto.in_place) {
+        match convert_track(
+            catalog,
+            track,
+            &auto.spec,
+            auto.out_dir.as_deref(),
+            auto.in_place,
+        ) {
             Ok(_) => ok += 1,
             Err(e) => {
                 failed += 1;
@@ -2274,9 +2280,9 @@ pub(crate) fn run_import_genredb(
             "Genre database ready: {} vinyl releases tagged (dump {})",
             s.kept, s.dump
         )),
-        Ok(_) => JobMsg::Done(
-            "Import stopped — nothing changed; run it again to restart".to_string(),
-        ),
+        Ok(_) => {
+            JobMsg::Done("Import stopped — nothing changed; run it again to restart".to_string())
+        }
         Err(e) => JobMsg::Failed(format!("importing the genre database: {e}")),
     };
     let _ = tx.send(msg);
@@ -3524,7 +3530,10 @@ mod usb_transfer_tests {
             b"aaaa",
             "the device copy lands under a numbered name"
         );
-        assert_eq!(std::fs::read(dest.join("Artist/Album/b.mp3")).unwrap(), b"bbbb");
+        assert_eq!(
+            std::fs::read(dest.join("Artist/Album/b.mp3")).unwrap(),
+            b"bbbb"
+        );
         assert!(
             !dest.join("Artist/Album/b (2).mp3").exists(),
             "an identical file must not be duplicated"
