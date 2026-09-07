@@ -889,9 +889,14 @@ impl App {
                 }
             }
         };
-        // Digging is offered for a record that's in a list (it's the seed of a
-        // dig).
-        let can_dig = key.is_some_and(|k| self.can_dig(k));
+        // Digging is offered for any record with something to search on: a
+        // shelf record digs by its cached row, and a keyless one (a seller's
+        // listing, or a record reached by an earlier dig) seeds a dig from the
+        // sheet's own header fields.
+        let can_dig = match key {
+            Some(k) => self.can_dig(k),
+            None => !artist.trim().is_empty(),
+        };
         // A record reached *by* a dig branches with the strip's own two
         // buttons — but the sheet is drawn over the strip, so it carries its
         // own copy rather than making the user move the window to reach them.
@@ -1566,8 +1571,29 @@ impl App {
                 self.request_vinyl_edit(ctx.clone(), edit);
             }
             Some(Act::Dig) => {
-                let Some(k) = key else { return };
-                self.start_dig(k);
+                match key {
+                    Some(k) => self.start_dig(k),
+                    // A keyless record (seller listing, dug record) seeds the
+                    // dig from the sheet's own header. The label comes from the
+                    // fetched detail when it's in; the label *ids* the thread
+                    // needs resolve either way.
+                    None => {
+                        let label = self
+                            .vinyl_sheet
+                            .as_ref()
+                            .and_then(|s| s.detail.as_ref())
+                            .and_then(|d| d.label.clone());
+                        let cover = self.vinyl_sheet.as_ref().and_then(|s| s.cover_url.clone());
+                        self.start_dig_release(
+                            release_id,
+                            artist.clone(),
+                            title.clone(),
+                            label,
+                            sub.clone(),
+                            cover,
+                        );
+                    }
+                }
                 self.stop_sheet_video();
                 self.vinyl_sheet = None;
                 return;

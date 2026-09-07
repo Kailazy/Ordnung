@@ -87,6 +87,13 @@ pub struct Config {
     /// first). Defaults to descending, so the default view is newest first.
     #[serde(default)]
     pub vinyl_sort_ascending: bool,
+    /// How the vinyl tabs lay their records out: `"grid"` (a wall of covers,
+    /// the default) or `"list"` (compact rows — more records per screen, with
+    /// the caption fields readable at a glance). One choice covers all three
+    /// tabs: collection, wantlist and a seller's crates are the same kind of
+    /// browsing. Unknown values fall back to grid.
+    #[serde(default = "default_vinyl_view")]
+    pub vinyl_view: String,
     /// Which library sits at the top of the left navigation sidebar:
     /// `"digital"` (Library / New / playlists first, the default) or
     /// `"vinyl"` (the Discogs vinyl collection first). A vinyl-led collector
@@ -286,6 +293,10 @@ fn default_convert_format() -> String {
 
 fn default_vinyl_sort() -> String {
     "added".to_string()
+}
+
+fn default_vinyl_view() -> String {
+    "grid".to_string()
 }
 
 fn default_nav_density() -> String {
@@ -651,6 +662,7 @@ impl Default for Config {
             default_sort_ascending: true,
             vinyl_sort: default_vinyl_sort(),
             vinyl_sort_ascending: false,
+            vinyl_view: default_vinyl_view(),
             nav_primary: default_nav_primary(),
             nav_density: default_nav_density(),
             inspector_open: false,

@@ -745,24 +745,89 @@ impl App {
             (None, Some(f)) => f.to_string(),
             (None, None) => String::new(),
         };
+        self.begin_dig(
+            record.release_id,
+            record.artist.clone(),
+            record.title.clone(),
+            record.label.clone().filter(|l| !l.trim().is_empty()),
+            sub,
+            // The starting record's cover is already cached locally, so the
+            // strip reads it from `vinyl_covers` by key rather than the URL
+            // cache the dug steps use.
+            None,
+            true,
+        );
+        // The local cover cache is keyed by list + instance id, so make sure the
+        // starting record's cover is loaded even if the grid hasn't drawn it.
+        self.request_vinyl_cover(key);
+        self.dig_start_keys.insert(record.release_id, key);
+    }
+
+    /// Begin a dig at a bare Discogs release — one that isn't (necessarily) on
+    /// either shelf: a seller's listing, or a sheet reached by an earlier dig.
+    /// A release that *is* on a shelf digs as that shelf's record instead, so
+    /// its cached cover and ownership badge come along. Same replace/refocus
+    /// contract as [`App::start_dig`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start_dig_release(
+        &mut self,
+        release_id: u64,
+        artist: String,
+        title: String,
+        label: Option<String>,
+        sub: String,
+        thumb_url: Option<String>,
+    ) {
+        for list in [VinylList::Collection, VinylList::Wantlist] {
+            if let Some(r) = self.vinyl_record_in(list, release_id) {
+                self.start_dig((list, r.instance_id));
+                return;
+            }
+        }
+        if let Some(dig) = self.dig.as_mut() {
+            if let Some(i) = dig.steps.iter().position(|s| s.release_id == release_id) {
+                dig.refocus(i);
+                return;
+            }
+        }
+        self.begin_dig(
+            release_id,
+            artist,
+            title,
+            label.filter(|l| !l.trim().is_empty()),
+            sub,
+            thumb_url,
+            false,
+        );
+    }
+
+    /// Replace any running dig with a fresh one seeded at this record.
+    #[allow(clippy::too_many_arguments)]
+    fn begin_dig(
+        &mut self,
+        release_id: u64,
+        artist: String,
+        title: String,
+        label: Option<String>,
+        sub: String,
+        thumb_url: Option<String>,
+        owned: bool,
+    ) {
         let mut seen = HashSet::new();
-        seen.insert(record.release_id);
+        seen.insert(release_id);
         let mut works = HashSet::new();
-        works.insert(work_key(&record.artist, &record.title));
+        works.insert(work_key(&artist, &title));
         self.dig = Some(DigPath {
             steps: vec![DigStep {
-                release_id: record.release_id,
-                artist: record.artist.clone(),
-                title: record.title.clone(),
-                label: record.label.clone().filter(|l| !l.trim().is_empty()),
+                release_id,
+                artist,
+                title,
+                label,
                 artist_ids: Vec::new(),
                 label_ids: Vec::new(),
                 sub,
-                // The starting record's cover is already cached locally, so the
-                // strip reads it from `vinyl_covers` by key rather than the URL
-                // cache the dug steps use.
-                thumb_url: None,
-                owned: true,
+                thumb_url,
+                owned,
                 via: None,
                 landed_at: std::time::Instant::now(),
                 parent: None,
@@ -780,12 +845,8 @@ impl App {
             opened_at: std::time::Instant::now(),
             cancel_prime: Arc::new(AtomicBool::new(false)),
         });
-        // The local cover cache is keyed by list + instance id, so make sure the
-        // starting record's cover is loaded even if the grid hasn't drawn it.
-        self.request_vinyl_cover(key);
-        self.dig_start_keys.insert(record.release_id, key);
         // Both branches need this record's Discogs ids before they can be taken.
-        self.dig_resolve_ids(record.release_id);
+        self.dig_resolve_ids(release_id);
     }
 
     /// Take `thread` out of the record on screen.
