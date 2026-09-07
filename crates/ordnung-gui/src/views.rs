@@ -1411,30 +1411,27 @@ impl App {
                 // Sort: field first, then a direction pair whose wording follows
                 // the field ("Newest first" reads better than "Descending").
                 let arrow = if ascending { "↑" } else { "↓" };
-                ui.menu_button(format!("⇅ {} {arrow}", sort.label()), |ui| {
-                    ui.set_min_width(170.0);
+                let sort_btn = ui
+                    .button(format!("⇅ {} {arrow}", sort.label()))
+                    .on_hover_note("Order both shelves by date added, price or artist");
+                crate::ui::menu::dropdown(&sort_btn, 170.0, |m| {
                     for option in [VinylSort::Added, VinylSort::Price, VinylSort::Artist] {
-                        if ui
-                            .selectable_label(sort == option, option.label())
-                            .clicked()
-                        {
+                        if m.selectable(sort == option, option.label()) {
                             sort = option;
-                            ui.close_menu();
+                            m.close();
                         }
                     }
-                    ui.separator();
+                    m.separator();
                     let (asc_label, desc_label) = sort.direction_labels();
-                    if ui.selectable_label(!ascending, desc_label).clicked() {
+                    if m.selectable(!ascending, desc_label) {
                         ascending = false;
-                        ui.close_menu();
+                        m.close();
                     }
-                    if ui.selectable_label(ascending, asc_label).clicked() {
+                    if m.selectable(ascending, asc_label) {
                         ascending = true;
-                        ui.close_menu();
+                        m.close();
                     }
-                })
-                .response
-                .on_hover_note("Order both shelves by date added, price or artist");
+                });
             });
         });
         // The tab strip sits directly on the separator below, so the active tab's
