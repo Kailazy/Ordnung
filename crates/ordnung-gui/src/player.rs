@@ -2765,6 +2765,63 @@ pub(crate) fn draw_waveform(
     }
 }
 
+/// Track id keying the smoothing cache for the Settings → Waveform sample
+/// preview. `u64::MAX` can never collide with a catalog rowid.
+pub(crate) const SAMPLE_WAVEFORM_ID: Id = Id::MAX;
+
+/// Deterministic synthetic band envelope (`[low, mid, high, loudness]` per bin
+/// at [`analysis::waveform::COLOR_BINS_PER_SEC`], ~48 s) for the Settings →
+/// Waveform live preview: a hat-only intro, a kick/sub groove, a rising
+/// breakdown, and a full drop — enough contrast that every tunable (gains,
+/// smoothing, bass floor, band colors, the energy gradient) visibly bites
+/// without loading a real track. Bytes are sqrt-companded exactly like core
+/// `color_bands`, so `height_exp` behaves the same as on analyzed tracks.
+pub(crate) fn sample_waveform_bands() -> &'static [u8] {
+    static BANDS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BANDS.get_or_init(|| {
+        let rate = analysis::waveform::COLOR_BINS_PER_SEC;
+        let n = (48.0 * rate) as usize;
+        let beat = 60.0 / 128.0;
+        let compand = |v: f32| (v.clamp(0.0, 1.0).sqrt() * 255.0).round() as u8;
+        // Cheap deterministic jitter so bars don't repeat with machine regularity.
+        let jitter = |i: usize| ((i as f32 * 12.9898).sin() * 43758.547_f32).fract().abs();
+        let mut out = Vec::with_capacity(n * 4);
+        for i in 0..n {
+            let t = i as f32 / rate;
+            // Section levels: (kick, sustained sub, mids, hats, loudness).
+            let (kick, sub, mid_lv, high_lv, loud_lv) = if t < 8.0 {
+                (0.0, 0.0, 0.30, 0.55, 0.40)
+            } else if t < 24.0 {
+                (1.0, 0.40, 0.50, 0.60, 0.75)
+            } else if t < 32.0 {
+                let rise = (t - 24.0) / 8.0;
+                (
+                    0.0,
+                    0.0,
+                    0.35 + 0.45 * rise,
+                    0.30 + 0.50 * rise,
+                    0.40 + 0.50 * rise,
+                )
+            } else {
+                (1.0, 0.50, 0.62, 0.75, 1.0)
+            };
+            // Kick: sharp attack, fast decay, then the lingering sub tail the
+            // bass-floor sliders exist to dim.
+            let since_kick = (t / beat).fract() * beat;
+            let low = kick * (-since_kick * 9.0).exp() + sub * (0.8 + 0.2 * jitter(i));
+            // Offbeat hats with a fast decay over a small air floor.
+            let since_hat = ((t / beat) + 0.5).fract() * beat;
+            let high = high_lv * (-since_hat * 14.0).exp() + 0.10 * jitter(i.wrapping_mul(7));
+            // Chords: slow swell so Energy mode shows the gradient moving.
+            let mid =
+                mid_lv * (0.75 + 0.25 * (t * 0.9).sin().abs()) + 0.05 * jitter(i.wrapping_mul(3));
+            let loud = loud_lv * (0.85 + 0.15 * (t * 0.5).sin());
+            out.extend_from_slice(&[compand(low), compand(mid), compand(high), compand(loud)]);
+        }
+        out
+    })
+}
+
 /// Like [`draw_waveform`] but for the *moving* zoom lane: each bar is anchored to
 /// its absolute position in the track and placed at a sub-pixel x, so as the
 /// window scrolls under the playhead the whole waveform glides continuously

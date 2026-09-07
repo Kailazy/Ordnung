@@ -693,6 +693,15 @@ impl App {
                         let content_w = ui.available_width().max(300.0);
                         ui.set_min_width(content_w);
                         ui.set_max_width(content_w);
+                        // Waveform tab: a sample-track preview pinned above the
+                        // scroll area, so every slider below shows its effect
+                        // immediately even when the control itself is scrolled
+                        // far down the tab.
+                        let mut scroll_h = scroll_h;
+                        if self.settings_tab == SettingsTab::Waveform {
+                            let used = self.waveform_preview_strip(ui, content_w);
+                            scroll_h = (scroll_h - used).max(160.0);
+                        }
                         egui::ScrollArea::vertical()
                             .min_scrolled_height(scroll_h)
                             .max_height(scroll_h)
@@ -3165,6 +3174,45 @@ files elsewhere on the device stay plain storage.",
             return;
         }
         self.spawn_vinyl_edit(ctx.clone(), VinylEdit::Want { release_ids, label });
+    }
+
+    /// The Settings → Waveform sample preview: a synthetic track drawn through
+    /// the same `draw_waveform` + `WaveformStyle` path as the player, so every
+    /// slider tweak below renders here immediately without loading or playing
+    /// anything. The strip splits at a fake playhead so the played/unplayed
+    /// dimming shows too. Returns the vertical space consumed, which the caller
+    /// subtracts from the tab's scroll height to keep the strip pinned.
+    fn waveform_preview_strip(&self, ui: &mut egui::Ui, width: f32) -> f32 {
+        let top = ui.cursor().top();
+        ui.label(
+            egui::RichText::new("Live preview (sample track)")
+                .small()
+                .weak(),
+        );
+        ui.add_space(2.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 56.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 4.0, egui::Color32::from_gray(12));
+        let inner = rect.shrink2(egui::vec2(4.0, 3.0));
+        let style = crate::player::WaveformStyle::from_config(&self.config);
+        let played = 0.62;
+        crate::player::draw_waveform(
+            &painter,
+            inner,
+            crate::player::SAMPLE_WAVEFORM_ID,
+            &[],
+            crate::player::sample_waveform_bands(),
+            &style,
+            Some(played),
+            (0.0, 1.0),
+        );
+        painter.vline(
+            inner.left() + inner.width() * played,
+            inner.y_range(),
+            egui::Stroke::new(1.0, egui::Color32::from_gray(230)),
+        );
+        ui.add_space(8.0);
+        ui.cursor().top() - top
     }
 }
 
