@@ -864,6 +864,25 @@ fn draw_sleeve(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, fil
     }
 }
 
+/// A shopping cart, drawn with painter strokes because egui's bundled fonts
+/// have no glyph for U+1F6D2 (it renders as a tofu box): a tilted handle into
+/// a tapered basket over two wheels. `r` is roughly half the icon's width.
+pub(crate) fn draw_cart(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32) {
+    let s = r / 5.0;
+    let stroke = egui::Stroke::new(f32::max(1.2, s * 1.5), ink);
+    let at = |x: f32, y: f32| egui::pos2(c.x + x * s, c.y + y * s);
+    // Basket: a trapezoid, open corners squared off by the closed path.
+    p.add(egui::Shape::closed_line(
+        vec![at(-3.2, -2.6), at(4.4, -2.6), at(3.2, 1.6), at(-2.4, 1.6)],
+        stroke,
+    ));
+    // Handle, out to the upper left the way the emoji draws it.
+    p.line_segment([at(-5.2, -4.4), at(-3.2, -2.6)], stroke);
+    // Wheels.
+    p.circle_filled(at(-1.6, 3.4), f32::max(1.0, s * 1.1), ink);
+    p.circle_filled(at(2.4, 3.4), f32::max(1.0, s * 1.1), ink);
+}
+
 /// An eye: a pointed-oval outline with a pupil, filled when the record is on
 /// the wantlist.
 ///

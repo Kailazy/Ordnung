@@ -229,11 +229,7 @@ impl App {
                 // so a purchase plan spread over several shops stays visible
                 // from the row itself.
                 let cart = cart_summary(&self.cart_lines, &shop.username);
-                let label = match &cart {
-                    Some((n, _)) => format!("{} 🛒{n}", shop.username),
-                    None => shop.username.clone(),
-                };
-                let chip = ui.selectable_label(active, label);
+                let chip = ui.selectable_label(active, &shop.username);
                 // The chip's hover popup is the shop's info card: the cart
                 // slice, then the shipping floor. Quotes are per record and
                 // location-specific; a seller publishing only a free-text
@@ -254,7 +250,7 @@ impl App {
                         note.push_str(". Shipping not quoted yet, update the crates to fetch it")
                     }
                 }
-                let chip = chip.on_hover_note(note);
+                let chip = chip.on_hover_note(note.clone());
                 if chip.clicked() {
                     switch_to = Some(shop.username.clone());
                 }
@@ -271,6 +267,36 @@ impl App {
                         ui.close_menu();
                     }
                 });
+                // Cart badge riding the chip: a drawn cart (egui's fonts
+                // have no cart glyph) plus the count, sharing the chip's
+                // hover card.
+                if let Some((n, _)) = &cart {
+                    let ink = ui.visuals().strong_text_color();
+                    let galley = ui.painter().layout_no_wrap(
+                        n.to_string(),
+                        egui::FontId::proportional(11.0),
+                        ink,
+                    );
+                    let (rect, badge) = ui.allocate_exact_size(
+                        egui::vec2(14.0 + galley.size().x, 18.0),
+                        egui::Sense::hover(),
+                    );
+                    crate::records::draw_cart(
+                        ui.painter(),
+                        egui::pos2(rect.left() + 5.0, rect.center().y),
+                        4.5,
+                        ink,
+                    );
+                    ui.painter().galley(
+                        egui::pos2(
+                            rect.left() + 12.0,
+                            rect.center().y - galley.size().y / 2.0,
+                        ),
+                        galley,
+                        ink,
+                    );
+                    badge.on_hover_note(note);
+                }
             }
             if !self.sellers.is_empty() {
                 ui.add_space(6.0);
@@ -490,13 +516,21 @@ impl App {
             // leaving the bins.
             if let Some((n, total)) = &shop_cart {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = format!("🛒 {n} in cart · {total}");
+                    // Leading spaces hold room for the drawn cart (egui's
+                    // fonts have no cart glyph, so it's painted over them).
+                    let label = format!("     {n} in cart · {total}");
                     let resp = ui
                         .selectable_label(self.seller_cart_only, label)
                         .on_hover_note(
                             "Show only the records in the cart. The cart is \
                              local; checkout happens on discogs.com",
                         );
+                    crate::records::draw_cart(
+                        ui.painter(),
+                        egui::pos2(resp.rect.left() + 14.0, resp.rect.center().y),
+                        5.0,
+                        ui.visuals().strong_text_color(),
+                    );
                     if resp.clicked() {
                         self.seller_cart_only = !self.seller_cart_only;
                     }
@@ -924,17 +958,17 @@ impl App {
                         egui::Color32::from_gray(240)
                     };
                     ui.painter().circle_filled(cart_rect.center(), D / 2.0, bg);
-                    ui.painter().text(
-                        cart_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        if in_cart && cart_hovered {
-                            "✖"
-                        } else {
-                            "🛒"
-                        },
-                        egui::FontId::proportional(13.0),
-                        fg,
-                    );
+                    if in_cart && cart_hovered {
+                        ui.painter().text(
+                            cart_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "✖",
+                            egui::FontId::proportional(13.0),
+                            fg,
+                        );
+                    } else {
+                        crate::records::draw_cart(ui.painter(), cart_rect.center(), 6.0, fg);
+                    }
                     let cart_hit = cart_hit.on_hover_cursor(egui::CursorIcon::PointingHand);
                     let note = if in_cart {
                         "Remove from the cart"
@@ -950,7 +984,7 @@ impl App {
                     act = Some(SellerAct::Open(idx));
                 }
                 resp.context_menu(|ui| {
-                    if ui.button("🛒 Buy on Discogs ↗").clicked() {
+                    if ui.button("💰 Buy on Discogs ↗").clicked() {
                         act = Some(SellerAct::Buy(idx));
                         ui.close_menu();
                     }
@@ -1220,17 +1254,17 @@ impl App {
             };
             ui.painter()
                 .circle_filled(cart_rect.center(), CART_D / 2.0, bg);
-            ui.painter().text(
-                cart_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                if in_cart && cart_hovered {
-                    "✖"
-                } else {
-                    "🛒"
-                },
-                egui::FontId::proportional(11.0),
-                fg,
-            );
+            if in_cart && cart_hovered {
+                ui.painter().text(
+                    cart_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "✖",
+                    egui::FontId::proportional(11.0),
+                    fg,
+                );
+            } else {
+                crate::records::draw_cart(ui.painter(), cart_rect.center(), 5.0, fg);
+            }
             let cart_hit = cart_hit.on_hover_cursor(egui::CursorIcon::PointingHand);
             let note = if in_cart {
                 "Remove from the cart"
@@ -1269,7 +1303,7 @@ impl App {
             act = Some(SellerAct::Open(idx));
         }
         resp.context_menu(|ui| {
-            if ui.button("🛒 Buy on Discogs ↗").clicked() {
+            if ui.button("💰 Buy on Discogs ↗").clicked() {
                 act = Some(SellerAct::Buy(idx));
                 ui.close_menu();
             }
