@@ -1469,11 +1469,14 @@ impl App {
 
         // Every genre tag occurring in the current scope (the active shelf, or
         // the current seller's crates), with how many records carry it — the
-        // genre menu's option list. Built from the unfiltered scope so picking
-        // a tag doesn't collapse the menu to itself. For sellers, also count
-        // how many listings have known tags at all: their tags come from caches
-        // (see `seller_genres`), and a filter that silently drops untagged
-        // records should say so.
+        // genre menu's option list. Counted the way Discogs facets: only over
+        // records that match the tags already picked, so choosing a genre
+        // re-ranks the styles by how often they co-occur inside it (and tags
+        // that can no longer match anything drop out — except the active ones,
+        // re-added below so they can be seen and cleared). For sellers, also
+        // count how many listings have known tags at all: their tags come from
+        // caches (see `seller_genres`), and a filter that silently drops
+        // untagged records should say so.
         let (genre_options, seller_tagged) = {
             let mut counts: std::collections::BTreeMap<&str, usize> =
                 std::collections::BTreeMap::new();
@@ -1485,6 +1488,9 @@ impl App {
                         VinylList::Wantlist => &self.wantlist,
                     };
                     for r in recs {
+                        if !flt.genres_keep(&r.genres) {
+                            continue;
+                        }
                         for t in &r.genres {
                             *counts.entry(t.as_str()).or_default() += 1;
                         }
@@ -1494,6 +1500,9 @@ impl App {
                     for l in &self.seller_listings {
                         if let Some(tags) = self.seller_genres.get(&l.release_id) {
                             tagged += 1;
+                            if !flt.genres_keep(tags) {
+                                continue;
+                            }
                             for t in tags {
                                 *counts.entry(t.as_str()).or_default() += 1;
                             }
