@@ -2560,6 +2560,15 @@ pub(crate) fn run_vinyl_edit(
     };
 
     let mut touched: Vec<VinylList> = Vec::new();
+    // The moment the local cache mirrors the edit, tell the UI to reload so
+    // the shelf shows the change right away. Everything after that point —
+    // cover, tracklist and price warming, then the whole-shelf re-sync — is
+    // seconds of paced API calls the user shouldn't have to watch a stale
+    // grid through. A second `VinylChanged` lands after the re-sync.
+    let mirrored = || {
+        let _ = tx.send(JobMsg::VinylChanged);
+        ctx.request_repaint();
+    };
     let outcome: Result<String, String> = match edit {
         VinylEdit::Want { release_ids, label } => {
             let total = release_ids.len();
@@ -2582,6 +2591,7 @@ pub(crate) fn run_vinyl_edit(
                 match client.add_to_wantlist(&username, release_id) {
                     Ok(Some(rec)) => {
                         let _ = catalog.upsert_vinyl(VinylList::Wantlist, &rec);
+                        mirrored();
                         // Pull the cover now so the record isn't a blank tile
                         // until the next sync. Best-effort: a failed image
                         // download doesn't fail the want.
@@ -2661,6 +2671,7 @@ pub(crate) fn run_vinyl_edit(
                 match client.collection_record(&username, release_id, instance_id) {
                     Ok(Some(rec)) => {
                         let _ = catalog.upsert_vinyl(VinylList::Collection, &rec);
+                        mirrored();
                         // Pull the cover now so the record isn't a blank tile until
                         // the next sync; a failed download doesn't fail the add.
                         if let Some(url) = rec.cover_url.as_deref() {
@@ -2748,6 +2759,7 @@ pub(crate) fn run_vinyl_edit(
                 ))
             } else {
                 let _ = catalog.move_vinyl(from, record.instance_id, to, &moved);
+                mirrored();
                 // A no-op if the release was already warmed on the list it left.
                 cache_release_detail(&catalog, &client, record.release_id);
                 // The price does *not* survive the move: `upsert_vinyl` doesn't
@@ -2770,6 +2782,7 @@ pub(crate) fn run_vinyl_edit(
             }
             touched.push(list);
             let _ = catalog.delete_vinyl(list, record.instance_id);
+            mirrored();
             Ok(format!(
                 "Removed {} from your {}.",
                 record.title,
@@ -2816,6 +2829,7 @@ pub(crate) fn run_vinyl_edit(
                 ))
             } else {
                 let _ = catalog.delete_vinyl(list, record.instance_id);
+                mirrored();
                 // Cache the incoming row so the grid shows the new pressing straight
                 // away rather than a gap until the next sync. The wantlist add hands
                 // back the row itself; a collection add answers with an instance id
@@ -2833,6 +2847,7 @@ pub(crate) fn run_vinyl_edit(
                 };
                 if let Some((instance_id, Some(rec))) = fetched {
                     let _ = catalog.upsert_vinyl(list, &rec);
+                    mirrored();
                     if let Some(url) = rec.cover_url.as_deref() {
                         if let Some(png) = client.fetch_cover(url) {
                             let _ = catalog.set_vinyl_cover(list, rec.instance_id, &png);
