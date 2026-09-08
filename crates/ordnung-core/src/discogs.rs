@@ -2392,16 +2392,49 @@ fn retry_after(resp: &ureq::Response) -> Option<Duration> {
 fn map_ureq_err(e: ureq::Error) -> Error {
     match e {
         ureq::Error::Status(code, resp) => {
-            // 429 deserves a recognizable message so the caller can back off.
             let body = resp.into_string().unwrap_or_default();
-            if code == 429 {
-                Error::Network(format!("Discogs rate limited (HTTP 429): {body}"))
-            } else {
-                Error::Network(format!("Discogs HTTP {code}: {body}"))
+            Error::Discogs {
+                status: code,
+                message: discogs_error_message(&body),
             }
         }
-        ureq::Error::Transport(t) => Error::Network(format!("transport: {t}")),
+        // ureq's transport errors spell out the whole resolver or socket
+        // failure; the kind ("Dns Failed", "Connection Failed") is the part
+        // that tells the user what to check.
+        ureq::Error::Transport(t) => {
+            Error::Network(format!("couldn't reach Discogs ({})", t.kind()))
+        }
     }
+}
+
+/// The sentence Discogs puts in an error body, reworded for the person
+/// reading it. Error bodies are `{"message": "..."}`; anything else (an HTML
+/// error page from the CDN, an empty body) yields an empty string so the
+/// caller falls back to a generic line rather than echoing markup.
+fn discogs_error_message(body: &str) -> String {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        message: String,
+    }
+    let Ok(ErrorBody { message }) = serde_json::from_str::<ErrorBody>(body) else {
+        return String::new();
+    };
+    let m = message.trim().trim_end_matches('.').trim();
+    if m.is_empty() {
+        return String::new();
+    }
+    // Discogs writes about "the user"; the reader *is* the user, and the
+    // sentence is quoted mid-line, so it opens in lower case.
+    let mut out = m
+        .replace("the user's", "your")
+        .replace("The user's", "Your");
+    let first = out
+        .chars()
+        .next()
+        .map(|c| c.to_lowercase().to_string())
+        .unwrap_or_default();
+    out.replace_range(..out.chars().next().map_or(0, char::len_utf8), &first);
+    out
 }
 
 /// Decode arbitrary image bytes (Discogs returns JPEG), downscale to a
@@ -2447,6 +2480,49 @@ mod throttle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discogs_error_message_rewords_the_body_for_the_reader() {
+        assert_eq!(
+            discogs_error_message(
+                r#"{"message":"That release does not exist in the user's wantlist."}"#
+            ),
+            "that release does not exist in your wantlist"
+        );
+        assert_eq!(discogs_error_message(""), "");
+        assert_eq!(discogs_error_message("<html>502</html>"), "");
+        assert_eq!(discogs_error_message(r#"{"message":"  "}"#), "");
+    }
+
+    #[test]
+    fn discogs_errors_read_as_one_short_line() {
+        let e = Error::Discogs {
+            status: 404,
+            message: "that release does not exist in your wantlist".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "Discogs says that release does not exist in your wantlist (HTTP 404)"
+        );
+        let e = Error::Discogs {
+            status: 401,
+            message: "invalid consumer key".into(),
+        };
+        assert_eq!(e.to_string(), "Discogs rejected your token (HTTP 401)");
+        let e = Error::Discogs {
+            status: 503,
+            message: String::new(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "Discogs is having trouble right now, try again later (HTTP 503)"
+        );
+        let e = Error::Discogs {
+            status: 404,
+            message: String::new(),
+        };
+        assert_eq!(e.to_string(), "Discogs has no such record (HTTP 404)");
+    }
 
     #[test]
     fn split_artist_title_separates_on_first_dash() {

@@ -394,18 +394,14 @@ impl App {
                 discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
             let outcome = match client.identity() {
                 Ok(username) => DiscogsAuth::Connected { username },
-                Err(e) => {
-                    let msg = e.to_string();
-                    // `map_ureq_err` folds every HTTP status into Error::Network,
-                    // so the status code has to be read back out of the message
-                    // to tell "token is bad" from "network is down" — the two
-                    // need very different wording in the UI.
-                    if msg.contains("HTTP 401") || msg.contains("HTTP 403") {
-                        DiscogsAuth::Rejected
-                    } else {
-                        DiscogsAuth::Unreachable { detail: msg }
-                    }
-                }
+                // "Token is bad" and "network is down" need very different
+                // wording in the UI, so tell them apart by status.
+                Err(ordnung_core::error::Error::Discogs {
+                    status: 401 | 403, ..
+                }) => DiscogsAuth::Rejected,
+                Err(e) => DiscogsAuth::Unreachable {
+                    detail: e.to_string(),
+                },
             };
             let _ = tx.send(outcome);
             ctx.request_repaint();
