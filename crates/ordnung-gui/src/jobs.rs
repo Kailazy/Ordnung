@@ -6,6 +6,14 @@ impl App {
         self.job_rx.is_some()
     }
 
+    /// Show a failure in the status bar. The text is a complete sentence for
+    /// the user ("Couldn't remove X from your wantlist. Discogs says …"); the
+    /// bar paints it red while it's the current status.
+    pub(crate) fn fail(&mut self, msg: String) {
+        self.status_failed = msg.clone();
+        self.status = msg;
+    }
+
     /// Drain any pending worker messages. Returns true if we should reload rows.
     pub(crate) fn poll_worker(&mut self) -> bool {
         let Some(rx) = &self.job_rx else { return false };
@@ -25,7 +33,9 @@ impl App {
                     self.seller_listings_for = None;
                 }
                 Ok(JobMsg::Failed(s)) => {
-                    self.status = format!("error: {s}");
+                    // Same as `fail`, inlined: `rx` holds a borrow of `self`.
+                    self.status_failed = s.clone();
+                    self.status = s;
                     finished = true;
                 }
                 Ok(JobMsg::Failures { title, items }) => {
@@ -767,7 +777,7 @@ pub(crate) fn run_scan(
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
             ctx.request_repaint();
             return;
         }
@@ -802,7 +812,7 @@ fn run_usb_setup(
         Ok(_) => JobMsg::Done(format!(
             "{name} is now a rekordbox device. Exports can target it."
         )),
-        Err(e) => JobMsg::Failed(format!("setting up {name}: {e}")),
+        Err(e) => JobMsg::Failed(format!("Couldn't set up {name}: {e}")),
     };
     let _ = tx.send(msg);
     ctx.request_repaint();
@@ -828,7 +838,7 @@ pub(crate) fn run_export(
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
             ctx.request_repaint();
             return;
         }
@@ -838,14 +848,14 @@ pub(crate) fn run_export(
     let (tracks, playlists) = match catalog.export_selection(&playlist_ids) {
         Ok(v) => v,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("reading catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't read the catalog: {e}")));
             ctx.request_repaint();
             return;
         }
     };
     if tracks.is_empty() {
         let _ = tx.send(JobMsg::Failed(
-            "nothing to export — the selection has no tracks".into(),
+            "Nothing to export: the selection has no tracks.".into(),
         ));
         ctx.request_repaint();
         return;
@@ -932,7 +942,7 @@ to finish it."
             ));
         }
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("export: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Export failed: {e}")));
         }
     }
     ctx.request_repaint();
@@ -959,7 +969,7 @@ pub(crate) fn run_usb_transfer(
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
             ctx.request_repaint();
             return;
         }
@@ -1116,7 +1126,7 @@ pub(crate) fn run_import(
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
             ctx.request_repaint();
             return;
         }
@@ -1656,7 +1666,7 @@ pub(crate) fn run_relocate(db: PathBuf, dir: PathBuf, tx: Sender<JobMsg>, ctx: e
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
             ctx.request_repaint();
             return;
         }
@@ -1664,7 +1674,9 @@ pub(crate) fn run_relocate(db: PathBuf, dir: PathBuf, tx: Sender<JobMsg>, ctx: e
     let missing = match catalog.missing_tracks_detailed() {
         Ok(m) => m,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("listing missing tracks: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!(
+                "Couldn't list the missing tracks: {e}"
+            )));
             ctx.request_repaint();
             return;
         }
@@ -1740,7 +1752,7 @@ pub(crate) fn run_write_edits(
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
             ctx.request_repaint();
             return;
         }
@@ -1850,7 +1862,7 @@ pub(crate) fn run_trash_marked(
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
             ctx.request_repaint();
             return;
         }
@@ -1937,7 +1949,7 @@ pub(crate) fn run_analyze(
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
             ctx.request_repaint();
             return;
         }
@@ -2150,7 +2162,7 @@ pub(crate) fn run_sweep_seller(
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
             ctx.request_repaint();
             return;
         }
@@ -2174,7 +2186,7 @@ pub(crate) fn run_sweep_seller(
                 // A partial sweep is still useful: everything upserted so far
                 // stays cached (unpruned), exactly like a cancel.
                 let _ = tx.send(JobMsg::Failed(format!(
-                    "updating {username} (page {page}): {e}"
+                    "Couldn't finish updating {username} (stopped at page {page}). {e}."
                 )));
                 ctx.request_repaint();
                 return;
@@ -2284,7 +2296,7 @@ pub(crate) fn run_import_genredb(
         Ok(_) => {
             JobMsg::Done("Import stopped — nothing changed; run it again to restart".to_string())
         }
-        Err(e) => JobMsg::Failed(format!("importing the genre database: {e}")),
+        Err(e) => JobMsg::Failed(format!("Couldn't import the genre database: {e}")),
     };
     let _ = tx.send(msg);
     ctx.request_repaint();
@@ -2317,7 +2329,7 @@ pub(crate) fn run_refresh_vinyl(
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
             ctx.request_repaint();
             return;
         }
@@ -2333,7 +2345,7 @@ pub(crate) fn run_refresh_vinyl(
     let username = match client.identity() {
         Ok(u) => u,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("resolving Discogs account: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't sign in to Discogs. {e}.")));
             ctx.request_repaint();
             return;
         }
@@ -2342,7 +2354,9 @@ pub(crate) fn run_refresh_vinyl(
     let records = match client.fetch_collection_for(&username) {
         Ok(r) => r,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("fetching collection: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!(
+                "Couldn't fetch your collection. {e}."
+            )));
             ctx.request_repaint();
             return;
         }
@@ -2533,7 +2547,7 @@ pub(crate) fn run_vinyl_edit(
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
             ctx.request_repaint();
             return;
         }
@@ -2550,7 +2564,7 @@ pub(crate) fn run_vinyl_edit(
                 u
             }
             Err(e) => {
-                let _ = tx.send(JobMsg::Failed(format!("resolving Discogs account: {e}")));
+                let _ = tx.send(JobMsg::Failed(format!("Couldn't sign in to Discogs. {e}.")));
                 ctx.request_repaint();
                 return;
             }
@@ -2660,7 +2674,7 @@ pub(crate) fn run_vinyl_edit(
                 Ok(id) => id,
                 Err(e) => {
                     let _ = tx.send(JobMsg::Failed(format!(
-                        "adding {label} to your collection: {e}"
+                        "Couldn't add {label} to your collection. {e}."
                     )));
                     ctx.request_repaint();
                     return;
@@ -2735,7 +2749,7 @@ pub(crate) fn run_vinyl_edit(
                 };
             if let Err(e) = result {
                 let _ = tx.send(JobMsg::Failed(format!(
-                    "adding {} to your {}: {e}",
+                    "Couldn't add {} to your {}. {e}.",
                     record.title,
                     list_name(to)
                 )));
@@ -2752,7 +2766,7 @@ pub(crate) fn run_vinyl_edit(
             // re-sync shows the user exactly that state.
             if let Err(e) = remove_from(&client, &username, from, &record) {
                 Err(format!(
-                    "{} is now in your {}, but removing it from your {} failed: {e}",
+                    "{} is now in your {}, but couldn't be taken out of your {}. {e}.",
                     record.title,
                     list_name(to),
                     list_name(from)
@@ -2771,23 +2785,32 @@ pub(crate) fn run_vinyl_edit(
         }
 
         VinylEdit::Remove { list, record } => {
-            if let Err(e) = remove_from(&client, &username, list, &record) {
-                let _ = tx.send(JobMsg::Failed(format!(
-                    "removing {} from your {}: {e}",
-                    record.title,
-                    list_name(list)
-                )));
-                ctx.request_repaint();
-                return;
-            }
+            let was_there = match remove_from(&client, &username, list, &record) {
+                Ok(was_there) => was_there,
+                Err(e) => {
+                    let _ = tx.send(JobMsg::Failed(format!(
+                        "Couldn't remove {} from your {}. {e}.",
+                        record.title,
+                        list_name(list)
+                    )));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
             touched.push(list);
             let _ = catalog.delete_vinyl(list, record.instance_id);
             mirrored();
-            Ok(format!(
-                "Removed {} from your {}.",
-                record.title,
-                list_name(list)
-            ))
+            Ok(if was_there {
+                format!("Removed {} from your {}.", record.title, list_name(list))
+            } else {
+                // Gone on Discogs before we asked (removed on the site, or by
+                // an earlier click). The user wanted it gone; it now is.
+                format!(
+                    "{} was already gone from your Discogs {}, so it's been cleared here too.",
+                    record.title,
+                    list_name(list)
+                )
+            })
         }
 
         VinylEdit::Swap {
@@ -2810,7 +2833,7 @@ pub(crate) fn run_vinyl_edit(
                 Ok(a) => a,
                 Err(e) => {
                     let _ = tx.send(JobMsg::Failed(format!(
-                        "adding {to_label} to your {}: {e}",
+                        "Couldn't add {to_label} to your {}. {e}.",
                         list_name(list)
                     )));
                     ctx.request_repaint();
@@ -2823,7 +2846,7 @@ pub(crate) fn run_vinyl_edit(
             // cache alone so the re-sync shows the user that real state.
             if let Err(e) = remove_from(&client, &username, list, &record) {
                 Err(format!(
-                    "{to_label} is now in your {}, but removing {} failed: {e}",
+                    "{to_label} is now in your {}, but {} couldn't be taken out. {e}.",
                     list_name(list),
                     record.title
                 ))
@@ -2984,13 +3007,18 @@ fn cache_release_price(
 /// Discogs which folder holds the copy rather than guessing — guessing would fail
 /// for anyone who files records into folders of their own. Everything synced
 /// since already knows its folder and removes in one call.
+/// Take a record off one of the user's Discogs lists. `Ok(true)` when it was
+/// there and is now gone; `Ok(false)` when Discogs no longer had it (removed
+/// on the site, or an earlier click that the local cache never caught up
+/// with). Either way the list no longer holds it, which is what the caller
+/// wanted, so a stale cache row isn't reported as a failure.
 fn remove_from(
     client: &discogs::Client,
     username: &str,
     list: VinylList,
     record: &VinylRecord,
-) -> Result<(), ordnung_core::Error> {
-    match list {
+) -> Result<bool, ordnung_core::Error> {
+    let result = match list {
         VinylList::Wantlist => client.remove_from_wantlist(username, record.release_id),
         VinylList::Collection => {
             let folder = match record.folder_id {
@@ -3001,6 +3029,11 @@ fn remove_from(
             };
             client.remove_from_collection(username, folder, record.release_id, record.instance_id)
         }
+    };
+    match result {
+        Ok(()) => Ok(true),
+        Err(ordnung_core::Error::Discogs { status: 404, .. }) => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
@@ -3044,7 +3077,7 @@ pub(crate) fn run_fetch_tracks(
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("opening catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
             ctx.request_repaint();
             return;
         }
@@ -3336,7 +3369,7 @@ pub(crate) fn run_convert(
     ctx: egui::Context,
 ) {
     let result = Catalog::open(&db)
-        .map_err(|e| format!("could not open catalog: {e}"))
+        .map_err(|e| format!("Couldn't open the catalog: {e}"))
         .and_then(|catalog| {
             let track = catalog
                 .get_track(track_id)
@@ -3384,7 +3417,7 @@ pub(crate) fn run_batch_convert(
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("could not open catalog: {e}")));
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
             ctx.request_repaint();
             return;
         }

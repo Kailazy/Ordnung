@@ -1143,6 +1143,11 @@ struct App {
     /// seconds. Only idle messages expire; while a job runs the status stays.
     status_last: String,
     status_shown_at: f64,
+    /// The text of the last failure shown in the status bar. While `status`
+    /// still equals it the bar paints the message in red; any other status
+    /// (progress, a later success) simply stops matching, so nothing has to
+    /// remember to clear it.
+    status_failed: String,
     /// Determinate progress of the running job (`done`, `total`), or `None` when
     /// idle or running a job that doesn't report item counts. Drives the
     /// status-bar progress bar; cleared when the job finishes.

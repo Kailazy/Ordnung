@@ -413,47 +413,54 @@ impl ReleaseDetail {
     /// Assign at most one candidate to each tracklist entry. `candidates[i]` is
     /// the set of normalized forms item `i` may match under; the first item that
     /// matches a track claims it and is not offered to later tracks.
+    ///
+    /// Exact titles are settled across the *whole* tracklist before any looser
+    /// rule runs. The loose rules (a candidate that merely starts with the
+    /// track title, or names its position) are fallbacks for what exact
+    /// matching left over — run per track instead, an early "Dreamuniverse"
+    /// would claim the file for "Dreamuniverse Pt.II" by prefix before that
+    /// later track ever got to match it exactly.
     fn claim_by_title(
         &self,
         candidates: &[Vec<String>],
         allow_position: bool,
     ) -> Vec<Option<usize>> {
         let mut used = vec![false; candidates.len()];
-        let mut out = Vec::with_capacity(self.tracklist.len());
-        for t in &self.tracklist {
-            let want = norm_loose(&t.title);
-            let pos = norm_loose(&t.position);
-            let mut hit = None;
-            if !want.is_empty() {
-                // Two passes so an exact title always wins over a positional
-                // guess, even when the positional video comes first in the list.
-                'search: for exact_only in [true, false] {
-                    for (i, cands) in candidates.iter().enumerate() {
-                        if used[i] {
-                            continue;
-                        }
-                        let title_hit = cands.iter().any(|c| {
-                            c == &want || (!exact_only && c.starts_with(&format!("{want} ")))
-                        });
-                        // A position match needs the position to be a real
-                        // side/track marker (`a1`), not a bare digit that would
-                        // collide with any number in a video title.
-                        let pos_hit = allow_position
-                            && !exact_only
-                            && pos.len() >= 2
-                            && pos.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-                            && cands
-                                .iter()
-                                .any(|c| c == &pos || c.starts_with(&format!("{pos} ")));
-                        if title_hit || pos_hit {
-                            hit = Some(i);
-                            used[i] = true;
-                            break 'search;
-                        }
+        let mut out: Vec<Option<usize>> = vec![None; self.tracklist.len()];
+        for exact_only in [true, false] {
+            for (slot, t) in out.iter_mut().zip(&self.tracklist) {
+                if slot.is_some() {
+                    continue;
+                }
+                let want = norm_loose(&t.title);
+                if want.is_empty() {
+                    continue;
+                }
+                let pos = norm_loose(&t.position);
+                for (i, cands) in candidates.iter().enumerate() {
+                    if used[i] {
+                        continue;
+                    }
+                    let title_hit = cands.iter().any(|c| {
+                        c == &want || (!exact_only && c.starts_with(&format!("{want} ")))
+                    });
+                    // A position match needs the position to be a real
+                    // side/track marker (`a1`), not a bare digit that would
+                    // collide with any number in a video title.
+                    let pos_hit = allow_position
+                        && !exact_only
+                        && pos.len() >= 2
+                        && pos.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                        && cands
+                            .iter()
+                            .any(|c| c == &pos || c.starts_with(&format!("{pos} ")));
+                    if title_hit || pos_hit {
+                        *slot = Some(i);
+                        used[i] = true;
+                        break;
                     }
                 }
             }
-            out.push(hit);
         }
         out
     }
@@ -2399,10 +2406,10 @@ fn map_ureq_err(e: ureq::Error) -> Error {
             }
         }
         // ureq's transport errors spell out the whole resolver or socket
-        // failure; the kind ("Dns Failed", "Connection Failed") is the part
-        // that tells the user what to check.
-        ureq::Error::Transport(t) => {
-            Error::Network(format!("couldn't reach Discogs ({})", t.kind()))
+        // failure. Whatever the cause, what the user can do is the same:
+        // check the connection.
+        ureq::Error::Transport(_) => {
+            Error::Network("Couldn't reach Discogs. Check your connection".into())
         }
     }
 }
@@ -2502,26 +2509,35 @@ mod tests {
         };
         assert_eq!(
             e.to_string(),
-            "Discogs says that release does not exist in your wantlist (HTTP 404)"
+            "Discogs says that release does not exist in your wantlist"
         );
         let e = Error::Discogs {
             status: 401,
             message: "invalid consumer key".into(),
         };
-        assert_eq!(e.to_string(), "Discogs rejected your token (HTTP 401)");
+        assert_eq!(
+            e.to_string(),
+            "Discogs doesn't accept your token. Check it in Settings"
+        );
         let e = Error::Discogs {
             status: 503,
             message: String::new(),
         };
         assert_eq!(
             e.to_string(),
-            "Discogs is having trouble right now, try again later (HTTP 503)"
+            "Discogs is having trouble right now. Try again in a few minutes"
         );
         let e = Error::Discogs {
             status: 404,
             message: String::new(),
         };
-        assert_eq!(e.to_string(), "Discogs has no such record (HTTP 404)");
+        assert_eq!(e.to_string(), "Discogs can't find that record");
+        // Only an unfamiliar status keeps its code: there it's the one clue.
+        let e = Error::Discogs {
+            status: 418,
+            message: String::new(),
+        };
+        assert_eq!(e.to_string(), "Discogs couldn't do that (HTTP 418)");
     }
 
     #[test]
@@ -2772,6 +2788,33 @@ mod tests {
         ];
         assert_eq!(d.video_matches(), vec![Some(0), Some(1), Some(2)]);
         assert!(d.unmatched_videos().is_empty());
+    }
+
+    /// The library case: a record carries "Dreamuniverse" and, later in its
+    /// tracklist, "Dreamuniverse Pt.II". With only the Pt.II file on hand, the
+    /// earlier track must not grab it by prefix — and with both files, each
+    /// track gets its own.
+    #[test]
+    fn an_exact_title_later_in_the_tracklist_beats_an_earlier_prefix() {
+        let mut d = detail();
+        d.tracklist = vec![
+            track("J2", "Dreamuniverse"),
+            track("K1", "Dreamuniverse Pt.II"),
+            track("L3", "Dreamuniverse Pt.III"),
+        ];
+        let only_pt2 = vec!["dreamuniverse pt.ii".to_string()];
+        assert_eq!(d.file_matches(&only_pt2), vec![None, Some(0), None]);
+
+        let all = vec![
+            "dreamuniverse pt.iii".to_string(),
+            "dreamuniverse pt.ii".to_string(),
+            "dreamuniverse".to_string(),
+        ];
+        assert_eq!(d.file_matches(&all), vec![Some(2), Some(1), Some(0)]);
+
+        // The prefix rule still serves when nothing exact exists for a track.
+        let mixes = vec!["dreamuniverse (original mix)".to_string()];
+        assert_eq!(d.file_matches(&mixes), vec![Some(0), None, None]);
     }
 
     #[test]

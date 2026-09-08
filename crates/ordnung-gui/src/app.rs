@@ -120,6 +120,7 @@ impl App {
             status: String::new(),
             status_last: String::new(),
             status_shown_at: 0.0,
+            status_failed: String::new(),
             progress: None,
             load_error: None,
             cover_cache: HashMap::new(),
@@ -1413,7 +1414,7 @@ impl App {
                     })
                     .collect(),
                 Err(e) => {
-                    self.status = format!("error: {e}");
+                    self.fail(format!("Couldn't read that playlist's tracks: {e}"));
                     return;
                 }
             };
@@ -1474,7 +1475,7 @@ impl App {
             Ok(()) => {
                 self.status = format!("Saved {} track(s) to {}.", entries.len(), path.display())
             }
-            Err(e) => self.status = format!("error writing track list: {e}"),
+            Err(e) => self.fail(format!("Couldn't write the track list: {e}")),
         }
     }
 
@@ -2466,7 +2467,13 @@ impl eframe::App for App {
                     } else {
                         self.status.clone()
                     };
-                    ui.label(text);
+                    // A failure reads as a plain sentence; the colour is what
+                    // says "this didn't work", not an "error:" prefix.
+                    if !self.status.is_empty() && self.status == self.status_failed {
+                        ui.colored_label(egui::Color32::LIGHT_RED, text);
+                    } else {
+                        ui.label(text);
+                    }
                 }
             });
             if do_abort {
@@ -3160,7 +3167,7 @@ impl eframe::App for App {
                 if let Ok(cat) = Catalog::open(&self.db_path) {
                     match cat.add_tracks(pid, &ids) {
                         Ok(n) => self.status = format!("Added {n} track(s) to playlist."),
-                        Err(e) => self.status = format!("error: {e}"),
+                        Err(e) => self.fail(format!("Couldn't add to the playlist: {e}")),
                     }
                 }
                 self.reload();

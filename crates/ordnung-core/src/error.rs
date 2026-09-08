@@ -33,7 +33,10 @@ pub enum Error {
     #[error("invalid operation: {0}")]
     Invalid(String),
 
-    #[error("network error: {0}")]
+    /// Something went wrong talking to Discogs that wasn't an HTTP status:
+    /// the connection itself, or a response we couldn't read. The message is
+    /// a complete sentence, ready to show as-is.
+    #[error("{0}")]
     Network(String),
 
     /// Discogs answered with an HTTP error. `message` is the human sentence
@@ -43,9 +46,11 @@ pub enum Error {
     Discogs { status: u16, message: String },
 }
 
-/// One short sentence for a Discogs HTTP failure. The status codes the API
-/// actually sends each get their own wording, so the status bar reads
-/// "Discogs rejected your token" rather than a status code and a JSON blob.
+/// One plain sentence for a Discogs HTTP failure, written for the person
+/// using the app rather than for whoever debugs it: no status codes, no
+/// JSON. Each status the API actually sends gets its own wording; the code
+/// is only spelled out for a status we don't recognise, where it's the one
+/// clue there is.
 fn describe_discogs(status: u16, message: &str) -> String {
     let said = |fallback: &str| {
         if message.is_empty() {
@@ -55,17 +60,12 @@ fn describe_discogs(status: u16, message: &str) -> String {
         }
     };
     match status {
-        401 => "Discogs rejected your token (HTTP 401)".to_string(),
-        403 => format!("{} (HTTP 403)", said("Discogs refused the request")),
-        404 => format!("{} (HTTP 404)", said("Discogs has no such record")),
-        429 => "Discogs is rate limiting requests, try again in a minute (HTTP 429)".to_string(),
-        500..=599 => {
-            format!("Discogs is having trouble right now, try again later (HTTP {status})")
-        }
-        _ => format!(
-            "{} (HTTP {status})",
-            said("Discogs turned the request down")
-        ),
+        401 => "Discogs doesn't accept your token. Check it in Settings".to_string(),
+        403 => said("Discogs won't allow that"),
+        404 => said("Discogs can't find that record"),
+        429 => "Discogs asked us to slow down. Try again in a minute".to_string(),
+        500..=599 => "Discogs is having trouble right now. Try again in a few minutes".to_string(),
+        _ => format!("{} (HTTP {status})", said("Discogs couldn't do that")),
     }
 }
 
