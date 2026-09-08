@@ -1319,11 +1319,13 @@ impl Catalog {
     /// after their lead track). Matching ignores punctuation/spacing/case, so
     /// "Guardwatcher Pt. 1" and "guardwatcher pt 1" link.
     pub fn vinyl_catalog_links(&self, records: &[VinylRecord]) -> Result<Vec<(u64, Id)>> {
-        // Primary: exact release-id links. Records already covered here are not
-        // re-matched by the softer metadata pass below.
+        // Primary: exact release-id links. The metadata pass below runs for
+        // every record regardless — an id link only proves that *one* track
+        // was Discogs-fetched against this pressing, and its siblings may sit
+        // in the library under the album name alone, or linked to another
+        // pressing of the same record. Skipping id-linked records used to
+        // leave those siblings off the record's sheet.
         let id_links = self.release_track_links()?;
-        let linked_releases: std::collections::HashSet<u64> =
-            id_links.iter().map(|(rid, _)| *rid).collect();
 
         // Lightweight catalog index: just the fields metadata matching needs.
         let mut stmt = self.conn.prepare(
@@ -1348,10 +1350,6 @@ impl Catalog {
 
         let mut out = id_links;
         for rec in records {
-            // Fallback only — skip records the exact release id already matched.
-            if linked_releases.contains(&rec.release_id) {
-                continue;
-            }
             let rtitle = norm_match(&rec.title);
             if rtitle.is_empty() {
                 continue;
@@ -5626,9 +5624,15 @@ mod tests {
             .unwrap();
         cat.set_external_artwork(d, "discogs", Some("7000"), None, Some(&[1]), None)
             .unwrap();
+        // Track E: a sibling of D on the same record, never Discogs-fetched, so
+        // only its album tag says which record it is from. An id link on D must
+        // not hide E from the record.
+        let mut e = scanned("/m/e.mp3", "Lakker", "Techno", 1000);
+        e.tags.album = Some("Some EP".into());
+        let (e, _) = cat.upsert_scanned(&e).unwrap();
 
         let rec_meta = vinyl(1, "Lakker", "Guardwatcher Pt 1"); // release_id 9001, no id link
-        let mut rec_id = vinyl(2, "Lakker", "Some EP"); // matched by exact id only
+        let mut rec_id = vinyl(2, "Lakker", "Some EP"); // id link plus an album sibling
         rec_id.release_id = 7000;
 
         let mut links = cat
@@ -5639,6 +5643,7 @@ mod tests {
             (rec_meta.release_id, a), // album == title
             (rec_meta.release_id, b), // title == title + artist overlap
             (7000u64, d),             // exact release-id link
+            (7000u64, e),             // album == title, alongside the id link
         ];
         expected.sort();
         assert_eq!(links, expected);
