@@ -48,6 +48,7 @@ impl App {
                         self.cover_inflight.remove(&id);
                     }
                 }
+                Ok(JobMsg::VinylChanged) => reload = true,
                 Ok(JobMsg::VinylUsername(u)) => {
                     // Persist the resolved username so the collection link works
                     // across launches. Only write when it actually changed.
@@ -2358,18 +2359,8 @@ pub(crate) fn run_refresh_vinyl(
 
     // Upsert metadata and prune records dropped from each list, so the caches
     // mirror Discogs exactly. Cover bytes survive the metadata upsert.
-    let mut removed = 0usize;
-    for (list, recs) in [
-        (VinylList::Collection, &records),
-        (VinylList::Wantlist, &wants),
-    ] {
-        let mut keep = Vec::with_capacity(recs.len());
-        for rec in recs.iter() {
-            let _ = catalog.upsert_vinyl(list, rec);
-            keep.push(rec.instance_id);
-        }
-        removed += catalog.prune_vinyl_not_in(list, &keep).unwrap_or(0);
-    }
+    let removed = mirror_vinyl_list(&catalog, VinylList::Collection, &records)
+        + mirror_vinyl_list(&catalog, VinylList::Wantlist, &wants);
 
     // Download covers we don't already have, reporting progress across both
     // lists as one run so the grid fills top to bottom.
@@ -2568,7 +2559,8 @@ pub(crate) fn run_vinyl_edit(
         username
     };
 
-    let done = match edit {
+    let mut touched: Vec<VinylList> = Vec::new();
+    let outcome: Result<String, String> = match edit {
         VinylEdit::Want { release_ids, label } => {
             let total = release_ids.len();
             // Added to Discogs but not cached locally: the vinyl view is
@@ -2634,7 +2626,10 @@ pub(crate) fn run_vinyl_edit(
                 1 => " 1 isn't a vinyl pressing, so it won't show in the grid.".into(),
                 n => format!(" {n} aren't vinyl pressings, so they won't show in the grid."),
             };
-            match (wanted, non_vinyl, total) {
+            if wanted + non_vinyl > 0 {
+                touched.push(VinylList::Wantlist);
+            }
+            Ok(match (wanted, non_vinyl, total) {
                 // Every one failed; the failure report says why.
                 (0, 0, _) => "Nothing added to your wantlist.".to_string(),
                 // The common case: one release, wanted. Name it.
@@ -2643,7 +2638,7 @@ pub(crate) fn run_vinyl_edit(
                     "Added {} of {total} to your wantlist.{non_vinyl_note}",
                     wanted + non_vinyl
                 ),
-            }
+            })
         }
 
         VinylEdit::Collect { release_id, label } => {
@@ -2661,41 +2656,44 @@ pub(crate) fn run_vinyl_edit(
                     return;
                 }
             };
-            match client.collection_record(&username, release_id, instance_id) {
-                Ok(Some(rec)) => {
-                    let _ = catalog.upsert_vinyl(VinylList::Collection, &rec);
-                    // Pull the cover now so the record isn't a blank tile until
-                    // the next sync; a failed download doesn't fail the add.
-                    if let Some(url) = rec.cover_url.as_deref() {
-                        if let Some(png) = client.fetch_cover(url) {
-                            let _ = catalog.set_vinyl_cover(
-                                VinylList::Collection,
-                                rec.instance_id,
-                                &png,
-                            );
+            touched.push(VinylList::Collection);
+            Ok(
+                match client.collection_record(&username, release_id, instance_id) {
+                    Ok(Some(rec)) => {
+                        let _ = catalog.upsert_vinyl(VinylList::Collection, &rec);
+                        // Pull the cover now so the record isn't a blank tile until
+                        // the next sync; a failed download doesn't fail the add.
+                        if let Some(url) = rec.cover_url.as_deref() {
+                            if let Some(png) = client.fetch_cover(url) {
+                                let _ = catalog.set_vinyl_cover(
+                                    VinylList::Collection,
+                                    rec.instance_id,
+                                    &png,
+                                );
+                            }
                         }
+                        cache_release_detail(&catalog, &client, rec.release_id);
+                        cache_release_price(
+                            &catalog,
+                            &client,
+                            VinylList::Collection,
+                            rec.instance_id,
+                            rec.release_id,
+                        );
+                        format!("Added {label} to your collection.")
                     }
-                    cache_release_detail(&catalog, &client, rec.release_id);
-                    cache_release_price(
-                        &catalog,
-                        &client,
-                        VinylList::Collection,
-                        rec.instance_id,
-                        rec.release_id,
-                    );
-                    format!("Added {label} to your collection.")
-                }
-                Ok(None) => format!(
-                    "Added {label} to your Discogs collection. It isn't a vinyl \
+                    Ok(None) => format!(
+                        "Added {label} to your Discogs collection. It isn't a vinyl \
                      pressing, so it won't show in this view."
-                ),
-                // On Discogs either way — the local cache just misses it until
-                // the next sync, which is worth saying plainly.
-                Err(e) => format!(
-                    "Added {label} to your Discogs collection, but couldn't cache \
+                    ),
+                    // On Discogs either way — the local cache just misses it until
+                    // the next sync, which is worth saying plainly.
+                    Err(e) => format!(
+                        "Added {label} to your Discogs collection, but couldn't cache \
                      it locally: {e}"
-                ),
-            }
+                    ),
+                },
+            )
         }
 
         VinylEdit::Move { from, record } => {
@@ -2733,27 +2731,31 @@ pub(crate) fn run_vinyl_edit(
                 ctx.request_repaint();
                 return;
             }
+            // Both shelves are in play from here: the destination has the
+            // record, and the source either loses it or (on a failed removal)
+            // keeps it — the re-sync below shows whichever happened.
+            touched.push(to);
+            touched.push(from);
             // Now drop the source copy. If this fails the record is in both
-            // lists on Discogs — say so, and leave the local cache alone so a
-            // sync shows the user exactly that state.
+            // lists on Discogs — say so, and leave the local cache alone so the
+            // re-sync shows the user exactly that state.
             if let Err(e) = remove_from(&client, &username, from, &record) {
-                let _ = tx.send(JobMsg::Failed(format!(
+                Err(format!(
                     "{} is now in your {}, but removing it from your {} failed: {e}",
                     record.title,
                     list_name(to),
                     list_name(from)
-                )));
-                ctx.request_repaint();
-                return;
+                ))
+            } else {
+                let _ = catalog.move_vinyl(from, record.instance_id, to, &moved);
+                // A no-op if the release was already warmed on the list it left.
+                cache_release_detail(&catalog, &client, record.release_id);
+                // The price does *not* survive the move: `upsert_vinyl` doesn't
+                // write that column (it's set separately by the price pass), so the
+                // re-keyed row starts blank and has to be priced again.
+                cache_release_price(&catalog, &client, to, moved.instance_id, moved.release_id);
+                Ok(format!("Moved {} to your {}.", record.title, list_name(to)))
             }
-            let _ = catalog.move_vinyl(from, record.instance_id, to, &moved);
-            // A no-op if the release was already warmed on the list it left.
-            cache_release_detail(&catalog, &client, record.release_id);
-            // The price does *not* survive the move: `upsert_vinyl` doesn't
-            // write that column (it's set separately by the price pass), so the
-            // re-keyed row starts blank and has to be priced again.
-            cache_release_price(&catalog, &client, to, moved.instance_id, moved.release_id);
-            format!("Moved {} to your {}.", record.title, list_name(to))
         }
 
         VinylEdit::Remove { list, record } => {
@@ -2766,8 +2768,13 @@ pub(crate) fn run_vinyl_edit(
                 ctx.request_repaint();
                 return;
             }
+            touched.push(list);
             let _ = catalog.delete_vinyl(list, record.instance_id);
-            format!("Removed {} from your {}.", record.title, list_name(list))
+            Ok(format!(
+                "Removed {} from your {}.",
+                record.title,
+                list_name(list)
+            ))
         }
 
         VinylEdit::Swap {
@@ -2797,54 +2804,121 @@ pub(crate) fn run_vinyl_edit(
                     return;
                 }
             };
+            touched.push(list);
             // Now drop the pressing being replaced. A failure here leaves both
             // pressings in the list on Discogs — say exactly that, and leave the
-            // cache alone so the next sync shows the user that real state.
+            // cache alone so the re-sync shows the user that real state.
             if let Err(e) = remove_from(&client, &username, list, &record) {
-                let _ = tx.send(JobMsg::Failed(format!(
+                Err(format!(
                     "{to_label} is now in your {}, but removing {} failed: {e}",
                     list_name(list),
                     record.title
-                )));
-                ctx.request_repaint();
-                return;
-            }
-            let _ = catalog.delete_vinyl(list, record.instance_id);
-            // Cache the incoming row so the grid shows the new pressing straight
-            // away rather than a gap until the next sync. The wantlist add hands
-            // back the row itself; a collection add answers with an instance id
-            // only, so that one is looked up.
-            let fetched = match added {
-                Some((instance_id, Some(rec))) => Some((instance_id, Some(rec))),
-                Some((instance_id, None)) => Some((
-                    instance_id,
-                    client
-                        .collection_record(&username, to_release, instance_id)
-                        .ok()
-                        .flatten(),
-                )),
-                None => None,
-            };
-            if let Some((instance_id, Some(rec))) = fetched {
-                let _ = catalog.upsert_vinyl(list, &rec);
-                if let Some(url) = rec.cover_url.as_deref() {
-                    if let Some(png) = client.fetch_cover(url) {
-                        let _ = catalog.set_vinyl_cover(list, rec.instance_id, &png);
+                ))
+            } else {
+                let _ = catalog.delete_vinyl(list, record.instance_id);
+                // Cache the incoming row so the grid shows the new pressing straight
+                // away rather than a gap until the next sync. The wantlist add hands
+                // back the row itself; a collection add answers with an instance id
+                // only, so that one is looked up.
+                let fetched = match added {
+                    Some((instance_id, Some(rec))) => Some((instance_id, Some(rec))),
+                    Some((instance_id, None)) => Some((
+                        instance_id,
+                        client
+                            .collection_record(&username, to_release, instance_id)
+                            .ok()
+                            .flatten(),
+                    )),
+                    None => None,
+                };
+                if let Some((instance_id, Some(rec))) = fetched {
+                    let _ = catalog.upsert_vinyl(list, &rec);
+                    if let Some(url) = rec.cover_url.as_deref() {
+                        if let Some(png) = client.fetch_cover(url) {
+                            let _ = catalog.set_vinyl_cover(list, rec.instance_id, &png);
+                        }
                     }
+                    cache_release_detail(&catalog, &client, to_release);
+                    cache_release_price(&catalog, &client, list, instance_id, to_release);
                 }
-                cache_release_detail(&catalog, &client, to_release);
-                cache_release_price(&catalog, &client, list, instance_id, to_release);
+                Ok(format!(
+                    "Swapped {} for {to_label} in your {}.",
+                    record.title,
+                    list_name(list)
+                ))
             }
-            format!(
-                "Swapped {} for {to_label} in your {}.",
-                record.title,
-                list_name(list)
-            )
         }
     };
 
-    let _ = tx.send(JobMsg::Done(done));
+    // Every shelf the edit reached on Discogs is pulled back down whole, so the
+    // section the user is looking at is the account's real state — not just
+    // the one row mirrored above. That also covers what the mirror can't: a
+    // record Discogs accepted but the add couldn't cache, an add that landed
+    // beside something changed on the website since the last sync, and the
+    // half-finished move or swap that left a record on both shelves.
+    let mut note = String::new();
+    for list in &touched {
+        let _ = tx.send(JobMsg::Status(format!(
+            "Refreshing your {}…",
+            list_name(*list)
+        )));
+        ctx.request_repaint();
+        if let Err(e) = resync_vinyl_list(&catalog, &client, &username, *list) {
+            note.push_str(&format!(
+                " Refreshing your {} from Discogs failed: {e}.",
+                list_name(*list)
+            ));
+        }
+    }
+    if !touched.is_empty() {
+        let _ = tx.send(JobMsg::VinylChanged);
+    }
+    let _ = tx.send(match outcome {
+        Ok(m) => JobMsg::Done(format!("{m}{note}")),
+        Err(m) => JobMsg::Failed(format!("{m}{note}")),
+    });
     ctx.request_repaint();
+}
+
+/// Write one Discogs shelf into its local table: upsert every fetched record
+/// and prune the rows no longer on the shelf, so the cache mirrors Discogs
+/// exactly. Cover bytes and prices survive the upsert. Returns how many rows
+/// were pruned.
+fn mirror_vinyl_list(catalog: &Catalog, list: VinylList, recs: &[VinylRecord]) -> usize {
+    let mut keep = Vec::with_capacity(recs.len());
+    for rec in recs {
+        let _ = catalog.upsert_vinyl(list, rec);
+        keep.push(rec.instance_id);
+    }
+    catalog.prune_vinyl_not_in(list, &keep).unwrap_or(0)
+}
+
+/// Pull one shelf back down from Discogs after an edit touched it: the full
+/// list (paced by the client, one page per hundred records), mirrored into the
+/// cache, plus covers for any record that has none yet.
+///
+/// Deliberately lighter than [`run_refresh_vinyl`]: no tracklist warming and
+/// no price pass — the edit already did both for the record it added, and
+/// those passes are what make a full sync minutes long. What's left is a few
+/// seconds even on a big collection, which is what lets it run after every
+/// edit rather than only on an explicit Sync.
+fn resync_vinyl_list(
+    catalog: &Catalog,
+    client: &discogs::Client,
+    username: &str,
+    list: VinylList,
+) -> Result<(), ordnung_core::Error> {
+    let recs = match list {
+        VinylList::Collection => client.fetch_collection_for(username)?,
+        VinylList::Wantlist => client.fetch_wantlist_for(username)?,
+    };
+    mirror_vinyl_list(catalog, list, &recs);
+    for (instance_id, url) in catalog.vinyl_missing_covers(list).unwrap_or_default() {
+        if let Some(png) = client.fetch_cover(&url) {
+            let _ = catalog.set_vinyl_cover(list, instance_id, &png);
+        }
+    }
+    Ok(())
 }
 
 /// Cache a newly-added release's Discogs detail so its tracklist is searchable

@@ -829,6 +829,10 @@ enum JobMsg {
     /// The Discogs username resolved during a vinyl sync, so the UI can persist
     /// it (config) and link to the user's collection page.
     VinylUsername(String),
+    /// A vinyl edit re-synced the shelves it touched, so the cached lists have
+    /// changed and the rows should reload when the job finishes — sent even
+    /// when the job then reports `Failed`, which on its own asks for no reload.
+    VinylChanged,
 }
 
 /// Result of a background full-resolution cover load. The decode (potentially a
