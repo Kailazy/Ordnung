@@ -193,12 +193,16 @@ Buy ↗ to the listing), context menu buys/wantlists. Purchase itself stays on
 discogs.com (the API has no cart). Groundwork + endpoint findings in
 `docs/design/bulk-sellers-spike.md`; still open from that plan: sweep deltas.
 
-**Seller cart + shipping (v0.83.5–v0.85.0, Phases B/C of that plan).** The
-"session basket" landed as a persistent local cart (`cart_listings`, schema
-v6): a cart disc on every seller card/row and a context-menu toggle set a
-listing aside, shop chips wear per-seller cart counts (hover shows the price
-total), a cart chip over the crates lenses them to carted records, and carted
-records wear a CART badge beside OWNED/WANT. Checkout stays on discogs.com.
+**Seller cart + shipping (v0.83.5–v0.85.0; cart retired in v0.91.0).** The
+"session basket" first landed as a persistent local cart (`cart_listings`,
+schema v6, with badges/counts/lens in the Sellers tab), but the Discogs API
+exposes no cart endpoint in either direction, so a local cart could neither
+read nor feed the real one — the user asked for it to go. Since v0.91.0 the
+cart disc on every seller card/row (and the "Add to cart on Discogs" context
+item) opens the listing page on discogs.com, whose Add to Cart button is the
+actual cart; the table is dropped by migration (schema v11) and `CartLine` /
+the Catalog cart CRUD are gone. A paste-based cart import (v0.89.0) was also
+built and removed the same day (v0.89.1/v0.91.0) at the user's request.
 The wantlist-intersection ranking landed as the **wantlist watch** (62542f7):
 `Catalog::wantlist_offers` joins the wantlist against every swept shop,
 cheapest first. Shipping quotes (schema v8, `shipping_price`/`shipping_currency`
