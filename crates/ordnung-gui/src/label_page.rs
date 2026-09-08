@@ -364,10 +364,9 @@ impl App {
                                         if t.clicked() {
                                             act = Some(Act::Open(i));
                                         }
-                                        for (show, text) in [
-                                            (r.owned, "OWNED"),
-                                            (!r.owned && r.wanted, "WANT"),
-                                        ] {
+                                        for (show, text) in
+                                            [(r.owned, "OWNED"), (!r.owned && r.wanted, "WANT")]
+                                        {
                                             if show {
                                                 ui.label(
                                                     egui::RichText::new(text)

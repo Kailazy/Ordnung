@@ -48,8 +48,8 @@ use ordnung_core::discogs;
 use ordnung_core::genredb;
 use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
-    Analysis, CartLine, Format, Id, Playlist, SellerListing, SellerShop, Tags,
-    Track, TranscodeVerdict, VinylList, VinylRecord,
+    Analysis, Format, Id, Playlist, SellerListing, SellerShop, Tags, Track, TranscodeVerdict,
+    VinylList, VinylRecord,
 };
 use ordnung_core::search::{ScoredHit, SearchHit};
 use ordnung_core::{
@@ -1220,24 +1220,12 @@ struct App {
     /// marker; loaded from the `viewed_releases` table with the vinyl view
     /// and appended to live as songs play.
     viewed_releases: HashSet<u64>,
-    /// Marketplace listing ids in the local cart — the membership set the
-    /// crates' CART badge is drawn from. Loaded from the `cart_listings` table
-    /// with the vinyl view, updated in place as records are carted.
-    cart_ids: HashSet<u64>,
-    /// The cart summarized per seller (count + price total per currency),
-    /// loaded alongside `cart_ids`. Drives the cart marker on the shop chips.
-    cart_lines: Vec<CartLine>,
     /// Cheapest per-record shipping each seller quotes, `(price, currency)`
     /// keyed by username — the "shipping from" figure on the shop chips.
     /// Discogs computes quotes for this account's location; a seller
     /// publishing only a free-text policy is absent, which reads as
     /// "not published", never "free".
     seller_shipping: HashMap<String, (f64, String)>,
-    /// Show only carted records in the current seller's crates — toggled by
-    /// the cart summary chip above the grid. Cleared automatically when the
-    /// current seller has nothing in the cart, so it can never strand the
-    /// crates empty behind an invisible filter.
-    seller_cart_only: bool,
     /// The wantlist watch: every swept seller listing whose release is on the
     /// wantlist, cheapest first, as `(seller, listing)`. A pure local join
     /// (see `Catalog::wantlist_offers`), reloaded with the vinyl lists so a

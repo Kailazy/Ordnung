@@ -435,21 +435,6 @@ pub struct SellerListing {
     pub posted: Option<String>,
 }
 
-/// One seller's slice of the local cart: how many of their listings the user
-/// has set aside to buy and what those add up to. Grouped by currency, so a
-/// shop quoting everything in EUR yields one line; mixed currencies (rare)
-/// yield one line each and the caller joins them for display.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CartLine {
-    pub seller: String,
-    /// Listings from this seller in the cart, quoted in `currency`.
-    pub count: u64,
-    /// Sum of those listings' asking prices.
-    pub total: f64,
-    /// Currency code the total is quoted in, e.g. `EUR`.
-    pub currency: String,
-}
-
 /// Conversion target chosen explicitly by the user. Never applied automatically.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConvertRule {

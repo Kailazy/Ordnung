@@ -143,10 +143,7 @@ impl App {
             seller_hay: Vec::new(),
             seller_add: String::new(),
             viewed_releases: HashSet::new(),
-            cart_ids: HashSet::new(),
-            cart_lines: Vec::new(),
             seller_shipping: HashMap::new(),
-            seller_cart_only: false,
             wantlist_watch: Vec::new(),
             show_watch: false,
             label_panel: None,
@@ -742,15 +739,6 @@ impl App {
             self.viewed_releases = Catalog::open(&self.db_path)
                 .and_then(|c| c.viewed_releases())
                 .map(|ids| ids.into_iter().collect())
-                .unwrap_or_default();
-            // The cart is a purchase plan, not a shop — a handful of rows, so
-            // both the badge set and the per-seller summaries load whole.
-            self.cart_ids = Catalog::open(&self.db_path)
-                .and_then(|c| c.cart_listing_ids())
-                .map(|ids| ids.into_iter().collect())
-                .unwrap_or_default();
-            self.cart_lines = Catalog::open(&self.db_path)
-                .and_then(|c| c.cart_lines())
                 .unwrap_or_default();
             // One aggregate row per seller, so this too loads whole; sellers
             // updated before shipping was cached simply have no entry.

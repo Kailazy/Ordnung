@@ -90,11 +90,9 @@ fn vinyl_tabs(
         // active: bold runs a touch wider, and sizing each state from its own
         // galley made the strip (and the search field right of it) shift a few
         // pixels on every tab switch.
-        let bold = ui.painter().layout_no_wrap(
-            label,
-            font::strong(font::headline().size),
-            color::LABEL,
-        );
+        let bold =
+            ui.painter()
+                .layout_no_wrap(label, font::strong(font::headline().size), color::LABEL);
         let size = egui::vec2(
             bold.size().x + space::S4 * 2.0,
             bold.size().y + space::S3 * 2.0,

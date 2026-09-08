@@ -7,8 +7,8 @@
 use crate::error::{Error, Result};
 use crate::model::key::{Key, Mode, PitchClass};
 use crate::model::{
-    Analysis, AudioProperties, Beat, Beatgrid, CartLine, Format, Id, Playlist,
-    SellerListing, SellerShop, Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
+    Analysis, AudioProperties, Beat, Beatgrid, Format, Id, Playlist, SellerListing, SellerShop,
+    Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashMap;
@@ -299,7 +299,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 impl Catalog {
     /// Open (creating if needed) a catalog at `path` and ensure the schema exists.
@@ -649,18 +649,6 @@ impl Catalog {
             CREATE TABLE IF NOT EXISTS viewed_releases (
                 release_id INTEGER PRIMARY KEY,
                 viewed_at  INTEGER NOT NULL DEFAULT (unixepoch())
-            );
-
-            -- The local cart: listings the user has set aside to buy, keyed by
-            -- marketplace listing id. Local only — the Discogs API exposes no
-            -- cart, so checkout still happens on discogs.com. The cascade means
-            -- a record that a completed sweep no longer sees (sold, delisted)
-            -- leaves the cart with its listing, and removing a seller empties
-            -- their slice of it.
-            CREATE TABLE IF NOT EXISTS cart_listings (
-                listing_id INTEGER PRIMARY KEY
-                    REFERENCES seller_listings(listing_id) ON DELETE CASCADE,
-                added_at   INTEGER NOT NULL DEFAULT (unixepoch())
             );",
         )?;
         self.migrate()?;
@@ -856,6 +844,13 @@ impl Catalog {
         // absence means "not published", never "free".
         self.add_column_if_missing("seller_listings", "shipping_price", "REAL")?;
         self.add_column_if_missing("seller_listings", "shipping_currency", "TEXT")?;
+
+        // The local cart (schema v6) was retired in v11: the Discogs API has
+        // no cart endpoint, so a local stand-in could never mirror the real
+        // one — the crates' cart button now opens the listing on discogs.com
+        // instead, where the actual Add to Cart lives.
+        self.conn
+            .execute("DROP TABLE IF EXISTS cart_listings", [])?;
 
         // One-time data migration (user_version 0 → 1): adopt the "decide once,
         // at add time" model for the Discogs picker. Songs that were already
@@ -3381,61 +3376,6 @@ impl Catalog {
             .query_map([], |r| r.get::<_, i64>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows.into_iter().map(|id| id as u64).collect())
-    }
-
-    /// Put a listing in the local cart. Idempotent — re-adding keeps the
-    /// original added-at stamp. The cart is local (the Discogs API exposes no
-    /// cart); checkout happens on discogs.com.
-    pub fn cart_add(&self, listing_id: u64) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO cart_listings (listing_id) VALUES (?1)",
-            params![listing_id as i64],
-        )?;
-        Ok(())
-    }
-
-    /// Take a listing back out of the cart. Returns whether it was in there.
-    pub fn cart_remove(&self, listing_id: u64) -> Result<bool> {
-        let n = self.conn.execute(
-            "DELETE FROM cart_listings WHERE listing_id=?1",
-            params![listing_id as i64],
-        )?;
-        Ok(n > 0)
-    }
-
-    /// Every listing id in the local cart — the membership set the crates'
-    /// CART badge is drawn from. Small (a purchase plan, not a shop), so it
-    /// loads whole.
-    pub fn cart_listing_ids(&self) -> Result<Vec<u64>> {
-        let mut stmt = self.conn.prepare("SELECT listing_id FROM cart_listings")?;
-        let rows = stmt
-            .query_map([], |r| r.get::<_, i64>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows.into_iter().map(|id| id as u64).collect())
-    }
-
-    /// The cart summarized per seller: count and price total, one line per
-    /// (seller, currency) — see [`CartLine`]. Drives the cart marker on the
-    /// Sellers tab's shop chips.
-    pub fn cart_lines(&self) -> Result<Vec<CartLine>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT l.seller, COUNT(*), SUM(l.price), l.currency
-             FROM cart_listings c
-             JOIN seller_listings l ON l.listing_id = c.listing_id
-             GROUP BY l.seller, l.currency
-             ORDER BY l.seller, l.currency",
-        )?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(CartLine {
-                    seller: r.get(0)?,
-                    count: r.get::<_, i64>(1)? as u64,
-                    total: r.get(2)?,
-                    currency: r.get(3)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
     }
 
     /// The cheapest per-record shipping each seller quotes across their
