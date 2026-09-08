@@ -70,17 +70,47 @@ enum Act {
 /// Keep the rows a record digger wants: pressings (or format-unknown master
 /// rows, which are usually records too), one per *work* — a label page lists
 /// the original, the repress and every regional edition separately.
-fn crate_rows(page: &BrowsePage) -> Vec<BrowseRelease> {
-    let mut seen = HashSet::new();
-    page.releases
+/// The page's records, one row per work. Discogs lists every pressing of a
+/// record in the run (test pressing, standard, repress) and puts them in no
+/// useful order; the row that survives the collapse is the pressing on one of
+/// your shelves when there is one, else the first listed. That keeps the row's
+/// id pointing at *your* copy, so the shelf marks and the sheet it opens
+/// agree with your collection instead of with whichever pressing came first.
+fn crate_rows(
+    page: &BrowsePage,
+    owned: &HashSet<u64>,
+    wanted: &HashSet<u64>,
+) -> Vec<BrowseRelease> {
+    let mut slot: HashMap<String, usize> = HashMap::new();
+    let mut rows: Vec<BrowseRelease> = Vec::new();
+    for r in page
+        .releases
         .iter()
         .filter(|r| !r.format_known || crate::dig::is_vinyl(&r.format))
-        .filter(|r| {
-            let (a, t) = crate::dig::row_artist_title(r);
-            seen.insert(crate::dig::work_key(&a, &t))
-        })
-        .cloned()
-        .collect()
+    {
+        let (a, t) = crate::dig::row_artist_title(r);
+        let key = crate::dig::work_key(&a, &t);
+        let rank = |id: u64| -> u8 {
+            if owned.contains(&id) {
+                2
+            } else if wanted.contains(&id) {
+                1
+            } else {
+                0
+            }
+        };
+        match slot.get(&key) {
+            None => {
+                slot.insert(key, rows.len());
+                rows.push(r.clone());
+            }
+            Some(&i) if rank(r.release_id) > rank(rows[i].release_id) => {
+                rows[i] = r.clone();
+            }
+            Some(_) => {}
+        }
+    }
+    rows
 }
 
 impl App {
@@ -200,7 +230,7 @@ impl App {
                 panel.page = msg.page;
                 panel.pages = page.pages.max(1);
                 panel.items = page.items;
-                panel.releases = crate_rows(&page);
+                panel.releases = crate_rows(&page, &self.vinyl_owned, &self.vinyl_wanted);
             }
             Err(e) => panel.error = Some(e),
         }
@@ -256,6 +286,10 @@ impl App {
             .collect();
         let mut rows: Vec<Row> = Vec::with_capacity(specs.len());
         for (thumb, release_id, artist, title, sub) in specs {
+            // By record, not pressing: the run may list another pressing of a
+            // record you own.
+            let owned = self.owns_record(release_id, &artist, &title);
+            let wanted = self.wants_record(release_id, &artist, &title);
             rows.push(Row {
                 cover: (!thumb.trim().is_empty())
                     .then(|| self.dig_cover(&thumb).cloned())
@@ -263,8 +297,8 @@ impl App {
                 artist,
                 title,
                 sub,
-                owned: self.vinyl_owned.contains(&release_id),
-                wanted: self.vinyl_wanted.contains(&release_id),
+                owned,
+                wanted,
             });
         }
         let editing = self.is_busy();
@@ -491,5 +525,56 @@ impl App {
             Some(Act::Page(p)) => self.fetch_label_page(p),
             None => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release(id: u64, artist: &str, title: &str, format: &str) -> BrowseRelease {
+        BrowseRelease {
+            release_id: id,
+            title: title.into(),
+            artist: artist.into(),
+            year: Some(2019),
+            format: format.into(),
+            format_known: true,
+            label: "Nightime Drama".into(),
+            catno: "NTD010".into(),
+            thumb_url: String::new(),
+            main: true,
+        }
+    }
+
+    /// The screenshot case: Discogs lists the test pressing of Night Drive EP
+    /// ahead of the standard 12" the collection holds. The collapsed row has
+    /// to be the owned pressing, not whichever came first.
+    #[test]
+    fn crate_rows_keep_the_shelved_pressing_of_a_record() {
+        let page = BrowsePage {
+            pages: 1,
+            items: 3,
+            releases: vec![
+                release(1, "Various", "Night Drive EP", "12\", EP, TP"),
+                release(2, "Various", "Night Drive EP", "12\", EP"),
+                release(3, "Trinity", "Cascade Drive", "12\""),
+            ],
+        };
+        let owned: HashSet<u64> = [2].into_iter().collect();
+        let rows = crate_rows(&page, &owned, &HashSet::new());
+        let ids: Vec<u64> = rows.iter().map(|r| r.release_id).collect();
+        assert_eq!(ids, vec![2, 3], "owned pressing wins, order of first sight kept");
+
+        // A wanted pressing wins over an unshelved one, but not over an owned one.
+        let wanted: HashSet<u64> = [1].into_iter().collect();
+        let rows = crate_rows(&page, &HashSet::new(), &wanted);
+        assert_eq!(rows[0].release_id, 1);
+        let rows = crate_rows(&page, &owned, &wanted);
+        assert_eq!(rows[0].release_id, 2);
+
+        // Nothing shelved: first listed stands, as before.
+        let rows = crate_rows(&page, &HashSet::new(), &HashSet::new());
+        assert_eq!(rows[0].release_id, 1);
     }
 }

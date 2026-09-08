@@ -2923,6 +2923,25 @@ impl Catalog {
         Ok(ids)
     }
 
+    /// Every record in `list` as `(release_id, artist, title)`, one row per
+    /// pressing. This is what lets the front-end recognise a record by *work*
+    /// rather than by pressing: a label run or a shop listing may show a
+    /// different Discogs release of a record you own (the test pressing, a
+    /// repress), and the exact-id check alone would call it unowned. Skips the
+    /// cover blob, so it is cheap enough to load on every reload.
+    pub fn vinyl_titles(&self, list: VinylList) -> Result<Vec<(u64, String, String)>> {
+        let table = vinyl_table(list);
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT release_id, artist, title FROM {table}"))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Every Discogs release id cached in `list`. Deliberately release ids rather
     /// than row keys: this answers "do I already have this record?", and the two
     /// lists key their rows differently. Owning two pressings of one release
@@ -5373,6 +5392,21 @@ mod tests {
         for list in [own, want] {
             assert!(!cat.vinyl_tracks_in(list).unwrap().contains(&c));
         }
+    }
+
+    #[test]
+    fn vinyl_titles_list_every_row_by_record() {
+        let cat = Catalog::open(":memory:").unwrap();
+        cat.upsert_vinyl(VinylList::Collection, &vinyl(1, "Various", "Night Drive EP"))
+            .unwrap();
+        cat.upsert_vinyl(VinylList::Wantlist, &vinyl(2, "Jeff Mills", "Waveform"))
+            .unwrap();
+        let owned = cat.vinyl_titles(VinylList::Collection).unwrap();
+        assert_eq!(
+            owned,
+            vec![(9001, "Various".to_string(), "Night Drive EP".to_string())]
+        );
+        assert_eq!(cat.vinyl_titles(VinylList::Wantlist).unwrap().len(), 1);
     }
 
     #[test]

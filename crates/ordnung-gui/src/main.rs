@@ -1285,6 +1285,13 @@ struct App {
     /// would ask Discogs for a duplicate copy.
     vinyl_owned: HashSet<u64>,
     vinyl_wanted: HashSet<u64>,
+    /// The same membership by *record* rather than pressing: the
+    /// [`dig::work_key`] of every collection / wantlist row. A label run or a
+    /// shop lists whichever Discogs release it likes (the test pressing, a
+    /// repress), so a row's id alone can miss a record you own under another
+    /// pressing. See [`App::owns_record`].
+    vinyl_owned_keys: HashSet<String>,
+    vinyl_wanted_keys: HashSet<String>,
     /// The same membership seen from the library: catalog tracks whose record is
     /// already in the collection / wantlist. Matched the way the grid's "in
     /// catalog" badge matches — exact release id, then album/artist metadata —

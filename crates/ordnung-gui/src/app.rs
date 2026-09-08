@@ -160,6 +160,8 @@ impl App {
             track_releases: HashMap::new(),
             vinyl_owned: HashSet::new(),
             vinyl_wanted: HashSet::new(),
+            vinyl_owned_keys: HashSet::new(),
+            vinyl_wanted_keys: HashSet::new(),
             vinyl_owned_tracks: HashSet::new(),
             vinyl_wanted_tracks: HashSet::new(),
             confirm_vinyl_edit: None,
@@ -502,6 +504,26 @@ impl App {
             });
     }
 
+    /// Is this record on the collection shelf? Matches the pressing first and
+    /// then the record: `release_id` against the cached ids, else the
+    /// artist/title work key against every owned row. The second leg is what
+    /// keeps a label run honest when Discogs lists the test pressing of a
+    /// record you own the standard 12" of.
+    pub(crate) fn owns_record(&self, release_id: u64, artist: &str, title: &str) -> bool {
+        self.vinyl_owned.contains(&release_id)
+            || self
+                .vinyl_owned_keys
+                .contains(&crate::dig::work_key(artist, title))
+    }
+
+    /// The wantlist twin of [`App::owns_record`].
+    pub(crate) fn wants_record(&self, release_id: u64, artist: &str, title: &str) -> bool {
+        self.vinyl_wanted.contains(&release_id)
+            || self
+                .vinyl_wanted_keys
+                .contains(&crate::dig::work_key(artist, title))
+    }
+
     pub(crate) fn reload(&mut self) {
         // Rows are about to be rebuilt from the catalog, so any waveform bytes a
         // (re)analysis rewrote are now stale in the smoothing cache — and its key
@@ -637,22 +659,30 @@ impl App {
         // membership: by release (the grid's both-lists check) and by track (the
         // library's, which needs the metadata fallback since most tracks carry
         // no Discogs release id).
-        for (list, releases, tracks) in [
+        for (list, releases, keys, tracks) in [
             (
                 VinylList::Collection,
                 &mut self.vinyl_owned,
+                &mut self.vinyl_owned_keys,
                 &mut self.vinyl_owned_tracks,
             ),
             (
                 VinylList::Wantlist,
                 &mut self.vinyl_wanted,
+                &mut self.vinyl_wanted_keys,
                 &mut self.vinyl_wanted_tracks,
             ),
         ] {
-            *releases = Catalog::open(&self.db_path)
-                .and_then(|c| c.vinyl_release_ids(list))
-                .map(|ids| ids.into_iter().collect())
+            // One pass over the rows feeds both the by-pressing and the
+            // by-record views, so they can never disagree about a shelf.
+            let rows = Catalog::open(&self.db_path)
+                .and_then(|c| c.vinyl_titles(list))
                 .unwrap_or_default();
+            *releases = rows.iter().map(|(id, _, _)| *id).collect();
+            *keys = rows
+                .iter()
+                .map(|(_, artist, title)| crate::dig::work_key(artist, title))
+                .collect();
             *tracks = Catalog::open(&self.db_path)
                 .and_then(|c| c.vinyl_tracks_in(list))
                 .map(|ids| ids.into_iter().collect())
