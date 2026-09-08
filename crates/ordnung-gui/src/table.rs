@@ -682,6 +682,92 @@ impl App {
     /// drag-out when the user started dragging a row this frame (`None` otherwise);
     /// the caller fires the drag after the panel closure so no borrows are live
     /// during AppKit's nested drag loop.
+    /// The table's own filter bar, drawn immediately above the rows.
+    ///
+    /// The toolbar box searches: it spans songs, records and Discogs, and
+    /// picking a hit *navigates* to the thing rather than narrowing anything
+    /// (see `search_box.rs`). That left the Library with no way to say "show me
+    /// only these rows" — the vinyl view has had exactly that as a second field
+    /// beside its grid all along, so this is the same pattern for the table.
+    ///
+    /// Live as you type behind the usual reload debounce. Per-column filters
+    /// (double-click a header) stack on top of it, and the toolbar's "Clear
+    /// filters" clears both at once.
+    pub(crate) fn draw_table_filter_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.add_space(crate::ui::tokens::space::S2);
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.filter)
+                    .desired_width(220.0)
+                    .margin(egui::Margin::symmetric(
+                        crate::ui::tokens::space::S3,
+                        crate::ui::tokens::space::S2,
+                    ))
+                    .hint_text("Filter these tracks"),
+            );
+            field.clone().on_hover_note(
+                "Narrow the table by artist, title, album or filename",
+            );
+            // The search popup just handed its query over: put the caret in the
+            // field with the text selected, so the filter can be refined or
+            // replaced without a trip to the mouse.
+            if std::mem::take(&mut self.focus_table_filter) {
+                field.request_focus();
+                let chars = self.filter.chars().count();
+                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), field.id) {
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::two(
+                            egui::text::CCursor::new(0),
+                            egui::text::CCursor::new(chars),
+                        )));
+                    state.store(ui.ctx(), field.id);
+                }
+            }
+            if field.changed() {
+                // Every keystroke would otherwise re-query the catalog for the
+                // whole table; park it and rebuild once typing settles.
+                self.filter_apply_at = Some(std::time::Instant::now() + crate::app::SEARCH_DEBOUNCE);
+            }
+            // The ✖ keeps its slot while hidden so nothing right of it shifts as
+            // a filter is typed or cleared — same as the vinyl toolbar's.
+            ui.allocate_ui_with_layout(
+                egui::vec2(22.0, field.rect.height()),
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                |ui| {
+                    if !self.filter.is_empty()
+                        && ui
+                            .small_button("✖")
+                            .on_hover_note("Clear the filter")
+                            .clicked()
+                    {
+                        self.filter.clear();
+                        self.filter_apply_at = Some(std::time::Instant::now());
+                    }
+                },
+            );
+            // What the filter is actually hiding. Only worth saying while
+            // something is active — an unfiltered table already reads its
+            // count off the toolbar.
+            let active_cols = self.col_filters.values().filter(|v| !v.trim().is_empty()).count();
+            if !self.filter.trim().is_empty() || active_cols > 0 {
+                let mut note = format!("{} shown", self.rows.len());
+                if active_cols > 0 {
+                    note.push_str(&format!(
+                        " · {active_cols} column filter{}",
+                        if active_cols == 1 { "" } else { "s" }
+                    ));
+                }
+                ui.label(
+                    egui::RichText::new(note)
+                        .small()
+                        .color(crate::ui::tokens::color::LABEL_3),
+                );
+            }
+        });
+        ui.add_space(crate::ui::tokens::space::S2);
+    }
+
     pub(crate) fn draw_table(&mut self, ui: &mut egui::Ui) -> Option<Vec<PathBuf>> {
         let mut open_convert_for: Option<Id> = None;
         // A pending jump-to-row (e.g. from the vinyl grid's "in catalog" badge):

@@ -7,7 +7,7 @@ use ordnung_rbdb::edit;
 /// (see `App::filter_apply_at`). Short enough to feel immediate — comfortably
 /// under the ~200 ms gap that reads as a pause — while collapsing the keystrokes
 /// within a typed word into a single reload.
-const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 impl App {
     /// Resolve dragged track ids to their source files for the native
@@ -98,6 +98,7 @@ impl App {
             search_popup_open: false,
             search_row_shown_at: None,
             focus_search: false,
+            focus_table_filter: false,
             search_cursor: None,
             search_vinyl_covers: HashMap::new(),
             search_cover_req_tx,
@@ -3227,6 +3228,7 @@ impl eframe::App for App {
                     // to clear the filter, and the "catalog is empty" screen below
                     // would wrongly imply their library is gone. Offer a one-click
                     // clear of every active filter.
+                    self.draw_table_filter_bar(ui);
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
                             ui.heading("No tracks match the active filter");
@@ -3298,6 +3300,11 @@ impl eframe::App for App {
                         });
                     });
                 } else {
+                    // The table's own filter, above the rows it narrows. Only
+                    // on the views actually backed by table rows — Duplicates,
+                    // Missing, Vinyl and USB render from their own caches and
+                    // return early above.
+                    self.draw_table_filter_bar(ui);
                     native_drag = self.draw_table(ui);
                     // An open playlist gets a tiny info glyph over the table's
                     // top-right corner with its rollup totals on hover.

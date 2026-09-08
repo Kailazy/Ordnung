@@ -1078,6 +1078,11 @@ struct App {
     /// cascade while an unchanged list stays put. `None` while the popup is
     /// fully closed.
     search_row_shown_at: Option<std::time::Instant>,
+    /// Set for one frame when the search popup's "Show every match in the
+    /// table" row hands its query to the table filter, so the filter bar can
+    /// take focus with the text already in it. Mirrors `focus_search`, which
+    /// does the same job for the toolbar box.
+    focus_table_filter: bool,
     /// Set for one frame when ⌘F (or Edit ▸ Find) asks for the search box.
     /// The toolbar consumes it right after building the field — the request has
     /// to outlive the keypress by exactly that long, because the field's

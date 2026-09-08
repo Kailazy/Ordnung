@@ -93,6 +93,32 @@ impl App {
         self.reload();
     }
 
+    /// Hand the typed query to the table's own filter: switch to the Library
+    /// and narrow it to every row matching, rather than jumping to one hit.
+    ///
+    /// The bridge between the box's two halves. The dropdown answers "what is
+    /// this and where does it live?" in five ranked hits; a query that names a
+    /// label, a year or a word shared by forty tracks wants the other question
+    /// — "show me all of them" — and that is what the table filter is for.
+    pub(crate) fn filter_table_by_search(&mut self) {
+        let q = self.search_query.trim().to_string();
+        if q.is_empty() {
+            return;
+        }
+        self.view = LibraryView::Library;
+        self.filter = q;
+        // A stale column filter would silently cut into the set the user just
+        // asked to see in full.
+        self.col_filters.clear();
+        self.filter_apply_at = None;
+        self.search_popup_open = false;
+        self.search_cursor = None;
+        // Put the caret in the filter bar, so the query can be refined where it
+        // now lives instead of back in the box that no longer drives it.
+        self.focus_table_filter = true;
+        self.reload();
+    }
+
     /// Act on a chosen suggestion: go to where the thing actually lives.
     pub(crate) fn open_search_hit(&mut self, hit: SearchHit, ctx: &egui::Context) {
         self.search_popup_open = false;
@@ -198,6 +224,16 @@ impl App {
             self.search_cursor = None;
             ctx.request_repaint();
         }
+        // ⌘/Ctrl+Enter hands the query to the table filter instead of opening a
+        // hit — the keyboard route to the "Show every match" row below the list.
+        // Read before the `n > 0` guard below on purpose: a query with no ranked
+        // hits at all is exactly when widening to the table is worth offering.
+        if want_open && !dismissing && focused && !self.searching_discogs() {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) {
+                self.filter_table_by_search();
+                return;
+            }
+        }
         // Arrow/Enter handling only applies when there's a list to move through;
         // with the popup showing "No matches" the keys still belong to the table.
         if want_open && !dismissing && focused && n > 0 {
@@ -268,6 +304,10 @@ impl App {
         // no borrow of the caches is live when the loaders mutate them.
         let mut load_covers: Vec<SearchHit> = Vec::new();
         let cursor = self.search_cursor;
+        // Set when the "Show every match in the table" row is clicked; acted on
+        // after the Area closure, which holds `&mut self`.
+        let mut filter_clicked = false;
+        let query = self.search_query.trim().to_string();
         // `want_open` is this frame's intent; Esc above may have just revoked it.
         let want_open = want_open && !dismissing;
         let hits = self.search_hits.clone();
@@ -320,6 +360,11 @@ impl App {
                                 );
                             });
                             ui.add_space(space::S2);
+                            // Still offer the table: ranking looks for things a
+                            // query *names*, and a word that names nothing may
+                            // still appear in forty filenames.
+                            ui.separator();
+                            filter_clicked = show_all_row(ui, &query);
                             return;
                         }
                         for (i, scored) in hits.iter().enumerate() {
@@ -370,6 +415,11 @@ impl App {
                                 }
                             }
                         }
+                        // The other half of the search, under the five things it
+                        // found: the same query as a table filter, for when the
+                        // answer is "all of them" rather than one record.
+                        ui.separator();
+                        filter_clicked = show_all_row(ui, &query);
                     });
             });
 
@@ -424,7 +474,9 @@ impl App {
                 self.play_track(id, path);
             }
         }
-        if let Some(hit) = record_chosen {
+        if filter_clicked {
+            self.filter_table_by_search();
+        } else if let Some(hit) = record_chosen {
             self.open_record_hit(hit, &ctx);
         } else if let Some(hit) = chosen {
             self.open_search_hit(hit, &ctx);
@@ -432,6 +484,70 @@ impl App {
             self.search_popup_open = false;
             self.search_cursor = None;
         }
+    }
+}
+
+/// The popup's last row: hand this query to the table filter instead of opening
+/// one hit. Deliberately plain next to the artwork rows above it — it is a
+/// different kind of answer, not a sixth result, and shouldn't compete with them
+/// for the eye.
+fn show_all_row(ui: &mut egui::Ui, query: &str) -> bool {
+    const ROW_H: f32 = 26.0;
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ROW_H),
+        egui::Sense::click(),
+    );
+    // Wash first, then the content over it — the row is one target, so it
+    // highlights as one rather than lighting up behind the text only.
+    let t = ui.ctx().animate_bool_with_time(
+        ui.id().with(("show_all_hover", query)),
+        resp.hovered(),
+        ROW_HIGHLIGHT_ANIM,
+    );
+    if t > 0.0 {
+        ui.painter().rect_filled(
+            rect,
+            radius::MD,
+            ui.visuals().widgets.hovered.weak_bg_fill.gamma_multiply(t),
+        );
+    }
+    let text_color = if t > 0.0 {
+        color::LABEL_3.lerp_to_gamma(ui.visuals().strong_text_color(), t)
+    } else {
+        color::LABEL_3
+    };
+    let p = ui.painter();
+    p.text(
+        egui::pos2(rect.left() + space::S3, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "⚟",
+        egui::FontId::proportional(11.0),
+        color::LABEL_3,
+    );
+    p.text(
+        egui::pos2(rect.left() + space::S3 + 16.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Show every match in the table",
+        egui::FontId::proportional(14.0),
+        text_color,
+    );
+    p.text(
+        egui::pos2(rect.right() - space::S3, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        shortcut_hint(),
+        egui::FontId::proportional(11.0),
+        color::LABEL_3,
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// The modifier label for the "show every match" shortcut, in the platform's
+/// own notation.
+fn shortcut_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⌘↩"
+    } else {
+        "Ctrl+↩"
     }
 }
 
@@ -915,6 +1031,19 @@ mod tests {
                 has_cover: false,
             },
             score: 0,
+        }
+    }
+
+    #[test]
+    fn the_show_all_row_names_the_platform_chord() {
+        // The row advertises the same chord `draw_search_popup` consumes
+        // (COMMAND+Enter), which egui maps to ⌘ on macOS and Ctrl elsewhere.
+        let hint = shortcut_hint();
+        assert!(hint.ends_with('↩'), "the chord should name the Enter key");
+        if cfg!(target_os = "macos") {
+            assert_eq!(hint, "⌘↩");
+        } else {
+            assert_eq!(hint, "Ctrl+↩");
         }
     }
 
