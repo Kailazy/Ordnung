@@ -1355,6 +1355,9 @@ impl App {
             if m.selectable(self.vinyl_flt.hide_wanted, "Hide wantlist records") {
                 self.vinyl_flt.hide_wanted = !self.vinyl_flt.hide_wanted;
             }
+            if m.selectable(self.vinyl_flt.hide_viewed, "Hide records I've seen") {
+                self.vinyl_flt.hide_viewed = !self.vinyl_flt.hide_viewed;
+            }
         }
 
         // Genres and styles, split back out of the merged tag census: the

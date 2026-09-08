@@ -324,6 +324,9 @@ struct VinylFilters {
     /// "show me what I don't have yet" dig.
     hide_owned: bool,
     hide_wanted: bool,
+    /// Sellers only: drop records already auditioned (the crates' viewed eye
+    /// marker) — keep the dig to sleeves not yet listened to.
+    hide_viewed: bool,
 }
 
 impl VinylFilters {
@@ -385,7 +388,8 @@ impl VinylFilters {
             n += usize::from(self.price_cap().is_some())
                 + usize::from(self.min_grade.is_some())
                 + usize::from(self.hide_owned)
-                + usize::from(self.hide_wanted);
+                + usize::from(self.hide_wanted)
+                + usize::from(self.hide_viewed);
         }
         n
     }

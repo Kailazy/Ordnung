@@ -423,6 +423,7 @@ impl App {
                     })
                     && !(flt.hide_owned && self.vinyl_owned.contains(&l.release_id))
                     && !(flt.hide_wanted && self.vinyl_wanted.contains(&l.release_id))
+                    && !(flt.hide_viewed && self.viewed_releases.contains(&l.release_id))
             })
             .map(|(i, _)| i)
             .collect();
