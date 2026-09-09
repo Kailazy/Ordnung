@@ -59,6 +59,7 @@ impl App {
                     }
                 }
                 Ok(JobMsg::VinylChanged) => reload = true,
+                Ok(JobMsg::VinylConfirmed(c)) => self.vinyl_confirmed.extend(c),
                 Ok(JobMsg::VinylUsername(u)) => {
                     // Persist the resolved username so the collection link works
                     // across launches. Only write when it actually changed.
@@ -516,7 +517,9 @@ impl App {
             self.status = "Syncing vinyl collection and wantlist…".into();
         }
         let db = self.db_path.clone();
-        thread::spawn(move || run_refresh_vinyl(db, token, cancel, quiet, tx, ctx));
+        self.vinyl_confirmed.trim();
+        let recent = self.vinyl_confirmed.clone();
+        thread::spawn(move || run_refresh_vinyl(db, token, cancel, quiet, recent, tx, ctx));
     }
 
     /// Sweep one saved seller's Discogs inventory into the local cache — the
@@ -614,7 +617,9 @@ impl App {
         // previous sync resolved when we have it; the worker falls back to an
         // identity lookup (one extra request) when it's still blank.
         let username = self.config.discogs_username.trim().to_string();
-        thread::spawn(move || run_vinyl_edit(db, token, username, edit, tx, ctx));
+        self.vinyl_confirmed.trim();
+        let recent = self.vinyl_confirmed.clone();
+        thread::spawn(move || run_vinyl_edit(db, token, username, edit, recent, tx, ctx));
     }
 
     /// Fetch from Discogs for an explicit set of tracks (the right-click menu's
@@ -2323,6 +2328,7 @@ pub(crate) fn run_refresh_vinyl(
     token: String,
     cancel: Arc<AtomicBool>,
     quiet: bool,
+    recent: Confirmed,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
 ) {
@@ -2372,7 +2378,11 @@ pub(crate) fn run_refresh_vinyl(
     let wants = client.fetch_wantlist_for(&username).unwrap_or_default();
 
     // Upsert metadata and prune records dropped from each list, so the caches
-    // mirror Discogs exactly. Cover bytes survive the metadata upsert.
+    // mirror Discogs exactly — except where Discogs itself is behind an edit
+    // it confirmed minutes ago (see [`Confirmed`]). Cover bytes survive the
+    // metadata upsert.
+    let records = recent.reconcile(VinylList::Collection, records);
+    let wants = recent.reconcile(VinylList::Wantlist, wants);
     let removed = mirror_vinyl_list(&catalog, VinylList::Collection, &records)
         + mirror_vinyl_list(&catalog, VinylList::Wantlist, &wants);
 
@@ -2541,6 +2551,7 @@ pub(crate) fn run_vinyl_edit(
     token: String,
     username: String,
     edit: VinylEdit,
+    recent: Confirmed,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
 ) {
@@ -2574,6 +2585,19 @@ pub(crate) fn run_vinyl_edit(
     };
 
     let mut touched: Vec<VinylList> = Vec::new();
+    // What Discogs confirms during this edit, so the shelf re-sync below
+    // can't undo it. Handed back to the app at the end, where it joins the
+    // earlier edits still inside their grace window.
+    let mut confirmed = Confirmed::default();
+    // A local cache write that failed. Discogs has the change either way; the
+    // re-sync below normally repairs the cache, but the user should hear
+    // that it needed repairing rather than watch a row silently not appear.
+    let mut cache_err: Option<String> = None;
+    let mut local = |r: Result<(), ordnung_core::Error>| {
+        if let Err(e) = r {
+            cache_err.get_or_insert_with(|| e.to_string());
+        }
+    };
     // The moment the local cache mirrors the edit, tell the UI to reload so
     // the shelf shows the change right away. Everything after that point —
     // cover, tracklist and price warming, then the whole-shelf re-sync — is
@@ -2604,7 +2628,8 @@ pub(crate) fn run_vinyl_edit(
                 }
                 match client.add_to_wantlist(&username, release_id) {
                     Ok(Some(rec)) => {
-                        let _ = catalog.upsert_vinyl(VinylList::Wantlist, &rec);
+                        local(catalog.upsert_vinyl(VinylList::Wantlist, &rec));
+                        confirmed.added(VinylList::Wantlist, rec.clone());
                         mirrored();
                         // Pull the cover now so the record isn't a blank tile
                         // until the next sync. Best-effort: a failed image
@@ -2684,7 +2709,8 @@ pub(crate) fn run_vinyl_edit(
             Ok(
                 match client.collection_record(&username, release_id, instance_id) {
                     Ok(Some(rec)) => {
-                        let _ = catalog.upsert_vinyl(VinylList::Collection, &rec);
+                        local(catalog.upsert_vinyl(VinylList::Collection, &rec));
+                        confirmed.added(VinylList::Collection, rec.clone());
                         mirrored();
                         // Pull the cover now so the record isn't a blank tile until
                         // the next sync; a failed download doesn't fail the add.
@@ -2761,6 +2787,7 @@ pub(crate) fn run_vinyl_edit(
             // keeps it — the re-sync below shows whichever happened.
             touched.push(to);
             touched.push(from);
+            confirmed.added(to, moved.clone());
             // Now drop the source copy. If this fails the record is in both
             // lists on Discogs — say so, and leave the local cache alone so the
             // re-sync shows the user exactly that state.
@@ -2772,7 +2799,8 @@ pub(crate) fn run_vinyl_edit(
                     list_name(from)
                 ))
             } else {
-                let _ = catalog.move_vinyl(from, record.instance_id, to, &moved);
+                confirmed.removed(from, record.instance_id);
+                local(catalog.move_vinyl(from, record.instance_id, to, &moved));
                 mirrored();
                 // A no-op if the release was already warmed on the list it left.
                 cache_release_detail(&catalog, &client, record.release_id);
@@ -2798,7 +2826,8 @@ pub(crate) fn run_vinyl_edit(
                 }
             };
             touched.push(list);
-            let _ = catalog.delete_vinyl(list, record.instance_id);
+            confirmed.removed(list, record.instance_id);
+            local(catalog.delete_vinyl(list, record.instance_id).map(drop));
             mirrored();
             Ok(if was_there {
                 format!("Removed {} from your {}.", record.title, list_name(list))
@@ -2851,7 +2880,8 @@ pub(crate) fn run_vinyl_edit(
                     record.title
                 ))
             } else {
-                let _ = catalog.delete_vinyl(list, record.instance_id);
+                confirmed.removed(list, record.instance_id);
+                local(catalog.delete_vinyl(list, record.instance_id).map(drop));
                 mirrored();
                 // Cache the incoming row so the grid shows the new pressing straight
                 // away rather than a gap until the next sync. The wantlist add hands
@@ -2869,7 +2899,8 @@ pub(crate) fn run_vinyl_edit(
                     None => None,
                 };
                 if let Some((instance_id, Some(rec))) = fetched {
-                    let _ = catalog.upsert_vinyl(list, &rec);
+                    local(catalog.upsert_vinyl(list, &rec));
+                    confirmed.added(list, rec.clone());
                     mirrored();
                     if let Some(url) = rec.cover_url.as_deref() {
                         if let Some(png) = client.fetch_cover(url) {
@@ -2894,16 +2925,27 @@ pub(crate) fn run_vinyl_edit(
     // record Discogs accepted but the add couldn't cache, an add that landed
     // beside something changed on the website since the last sync, and the
     // half-finished move or swap that left a record on both shelves.
+    //
+    // Quietly: the status bar keeps the edit's own message, since from the
+    // user's side this is still the add (or move, or remove) finishing. A
+    // "Refreshing…" line belongs to the Sync button they actually clicked.
     let mut note = String::new();
+    if let Some(e) = cache_err {
+        note.push_str(&format!(
+            " Discogs has the change, but the local cache couldn't be written: {e}."
+        ));
+    }
+    // This edit's confirmations join the app's ledger before the re-sync, and
+    // the re-sync itself honours both — the earlier adds Discogs may still
+    // be catching up on as much as this one.
+    let _ = tx.send(JobMsg::VinylConfirmed(confirmed.clone()));
+    let mut all = recent;
+    all.extend(confirmed);
+    let confirmed = all;
     for list in &touched {
-        let _ = tx.send(JobMsg::Status(format!(
-            "Refreshing your {}…",
-            list_name(*list)
-        )));
-        ctx.request_repaint();
-        if let Err(e) = resync_vinyl_list(&catalog, &client, &username, *list) {
+        if let Err(e) = resync_vinyl_list(&catalog, &client, &username, *list, &confirmed) {
             note.push_str(&format!(
-                " Refreshing your {} from Discogs failed: {e}.",
+                " Couldn't check your {} against Discogs: {e}.",
                 list_name(*list)
             ));
         }
@@ -2931,9 +2973,99 @@ fn mirror_vinyl_list(catalog: &Catalog, list: VinylList, recs: &[VinylRecord]) -
     catalog.prune_vinyl_not_in(list, &keep).unwrap_or(0)
 }
 
+/// One change to a shelf that Discogs acknowledged.
+#[derive(Debug, Clone)]
+pub(crate) enum ShelfChange {
+    Added(Box<VinylRecord>),
+    /// By instance id (a wantlist row's is its release id).
+    Removed(u64),
+}
+
+/// The shelf changes Discogs has acknowledged recently, kept so a shelf
+/// download can't undo them.
+///
+/// Discogs's list endpoints lag its writes — a wantlist downloaded seconds
+/// after `PUT /wants/{id}` routinely still lacks the want, and one downloaded
+/// after a `DELETE` still carries it. Mirroring such a download as-is undoes
+/// the edit the user just watched succeed: the added record appears, then
+/// vanishes when the shelf is re-synced, and its "in wantlist" state flips
+/// back with it. The lag outlasts one edit, so the ledger lives on the app and
+/// spans jobs: the re-sync after the *next* add, or a Sync clicked a minute
+/// later, must not prune the previous add either. Entries expire after
+/// [`Confirmed::GRACE`], by which point Discogs has long caught up and the
+/// download is the truth again.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Confirmed {
+    entries: Vec<(Instant, VinylList, ShelfChange)>,
+}
+
+impl Confirmed {
+    /// How long a confirmed change outranks a download that disagrees with
+    /// it. Generous next to the lag seen in practice (under a minute), since
+    /// the cost of a stale entry is only that a change made on the website
+    /// within the window shows up a sync later.
+    const GRACE: Duration = Duration::from_secs(10 * 60);
+
+    fn added(&mut self, list: VinylList, rec: VinylRecord) {
+        self.entries
+            .push((Instant::now(), list, ShelfChange::Added(Box::new(rec))));
+    }
+
+    fn removed(&mut self, list: VinylList, instance_id: u64) {
+        self.entries
+            .push((Instant::now(), list, ShelfChange::Removed(instance_id)));
+    }
+
+    /// Fold a job's confirmations into the app's ledger.
+    pub(crate) fn extend(&mut self, other: Confirmed) {
+        self.entries.extend(other.entries);
+    }
+
+    /// Drop the entries Discogs has had long enough to reflect.
+    pub(crate) fn trim(&mut self) {
+        let now = Instant::now();
+        self.entries
+            .retain(|(at, _, _)| now.duration_since(*at) < Self::GRACE);
+    }
+
+    /// Correct a freshly downloaded shelf with what Discogs already confirmed
+    /// on it: a confirmed add missing from the download is put back (the
+    /// download is stale, not the add), and a confirmed removal still present
+    /// is dropped. Later confirmations for the same row win, so an add
+    /// followed by a removal ends absent. A download that agrees with the
+    /// ledger comes back unchanged.
+    fn reconcile(&self, list: VinylList, mut recs: Vec<VinylRecord>) -> Vec<VinylRecord> {
+        // Latest word per instance id, in the order the changes happened.
+        let mut latest: Vec<(u64, &ShelfChange)> = Vec::new();
+        for (_, l, change) in &self.entries {
+            if *l != list {
+                continue;
+            }
+            let id = match change {
+                ShelfChange::Added(rec) => rec.instance_id,
+                ShelfChange::Removed(id) => *id,
+            };
+            latest.retain(|(known, _)| *known != id);
+            latest.push((id, change));
+        }
+        for (id, change) in latest {
+            match change {
+                ShelfChange::Removed(_) => recs.retain(|r| r.instance_id != id),
+                ShelfChange::Added(rec) => {
+                    if !recs.iter().any(|r| r.instance_id == id) {
+                        recs.push((**rec).clone());
+                    }
+                }
+            }
+        }
+        recs
+    }
+}
+
 /// Pull one shelf back down from Discogs after an edit touched it: the full
-/// list (paced by the client, one page per hundred records), mirrored into the
-/// cache, plus covers for any record that has none yet.
+/// list (paced by the client, one page per hundred records), corrected by
+/// what the edit confirmed (see [`Confirmed`]), mirrored into the cache, plus
+/// covers for any record that has none yet.
 ///
 /// Deliberately lighter than [`run_refresh_vinyl`]: no tracklist warming and
 /// no price pass — the edit already did both for the record it added, and
@@ -2945,11 +3077,13 @@ fn resync_vinyl_list(
     client: &discogs::Client,
     username: &str,
     list: VinylList,
+    confirmed: &Confirmed,
 ) -> Result<(), ordnung_core::Error> {
     let recs = match list {
         VinylList::Collection => client.fetch_collection_for(username)?,
         VinylList::Wantlist => client.fetch_wantlist_for(username)?,
     };
+    let recs = confirmed.reconcile(list, recs);
     mirror_vinyl_list(catalog, list, &recs);
     for (instance_id, url) in catalog.vinyl_missing_covers(list).unwrap_or_default() {
         if let Some(png) = client.fetch_cover(&url) {
@@ -3552,6 +3686,85 @@ pub(crate) fn analysis_pool() -> Option<rayon::ThreadPool> {
         .num_threads(workers)
         .build()
         .ok()
+}
+
+#[cfg(test)]
+mod vinyl_resync_tests {
+    use super::*;
+
+    fn rec(instance_id: u64, title: &str) -> VinylRecord {
+        VinylRecord {
+            instance_id,
+            release_id: instance_id,
+            title: title.into(),
+            artist: String::new(),
+            year: None,
+            label: None,
+            catalog_number: None,
+            format: None,
+            thumb_url: None,
+            cover_url: None,
+            added: None,
+            folder_id: None,
+            has_cover: false,
+            price: None,
+            price_currency: None,
+            genres: Vec::new(),
+        }
+    }
+
+    fn ids(recs: &[VinylRecord]) -> Vec<u64> {
+        recs.iter().map(|r| r.instance_id).collect()
+    }
+
+    /// The bug this guards: Discogs hands back a wantlist that predates the
+    /// want just added, and the re-sync used to prune the new record on the
+    /// strength of it. A confirmed add survives a stale download, a confirmed
+    /// removal doesn't come back from one, the other shelf's entries don't
+    /// leak across, and the latest word on a row wins.
+    #[test]
+    fn stale_download_cannot_undo_a_confirmed_edit() {
+        let want = VinylList::Wantlist;
+        let own = VinylList::Collection;
+        let mut confirmed = Confirmed::default();
+        confirmed.added(want, rec(3, "just wanted"));
+        confirmed.removed(want, 2);
+        confirmed.added(own, rec(9, "owned"));
+        confirmed.removed(own, 1);
+        // Stale: still has 2 (removed), lacks 3 (added).
+        let stale = vec![rec(1, "kept"), rec(2, "just removed")];
+        assert_eq!(ids(&confirmed.reconcile(want, stale)), vec![1, 3]);
+
+        // Up to date: comes back as-is, the add not duplicated.
+        let fresh = vec![rec(1, "kept"), rec(3, "just wanted")];
+        assert_eq!(ids(&confirmed.reconcile(want, fresh)), vec![1, 3]);
+
+        // Nothing confirmed: nothing changes.
+        let plain = vec![rec(1, "kept"), rec(2, "still there")];
+        assert_eq!(
+            ids(&Confirmed::default().reconcile(want, plain)),
+            vec![1, 2]
+        );
+
+        // Wanted, then thought better of it: the removal is the last word,
+        // whatever the download says. And the other way round.
+        confirmed.removed(want, 3);
+        confirmed.added(want, rec(2, "wanted again"));
+        let stale = vec![rec(1, "kept"), rec(3, "just wanted")];
+        assert_eq!(ids(&confirmed.reconcile(want, stale)), vec![1, 2]);
+    }
+
+    /// Entries outlive one job but not the grace window.
+    #[test]
+    fn ledger_expires_after_grace() {
+        let mut confirmed = Confirmed::default();
+        confirmed.added(VinylList::Wantlist, rec(3, "new"));
+        confirmed.trim();
+        assert_eq!(confirmed.entries.len(), 1);
+        confirmed.entries[0].0 = Instant::now() - Confirmed::GRACE;
+        confirmed.trim();
+        assert!(confirmed.entries.is_empty());
+    }
 }
 
 #[cfg(test)]

@@ -166,6 +166,7 @@ impl App {
             vinyl_wanted_keys: HashSet::new(),
             vinyl_owned_tracks: HashSet::new(),
             vinyl_wanted_tracks: HashSet::new(),
+            vinyl_confirmed: crate::jobs::Confirmed::default(),
             confirm_vinyl_edit: None,
             vinyl_sheet: None,
             sheet_follows_dig: false,

@@ -65,7 +65,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use table::*;
 use tex::{Tex, TexGraveyard};
 use ui::hover::HoverNoteExt;
@@ -833,6 +833,9 @@ enum JobMsg {
     /// changed and the rows should reload when the job finishes — sent even
     /// when the job then reports `Failed`, which on its own asks for no reload.
     VinylChanged,
+    /// The shelf changes a vinyl edit got Discogs to acknowledge, for the
+    /// app's ledger (see [`jobs::Confirmed`]).
+    VinylConfirmed(jobs::Confirmed),
 }
 
 /// Result of a background full-resolution cover load. The decode (potentially a
@@ -1314,6 +1317,10 @@ struct App {
     /// destroy collection metadata on the user's account (see [`VinylEdit`]).
     /// `Some` shows the confirm modal; the edit only runs if they say yes.
     confirm_vinyl_edit: Option<VinylEdit>,
+    /// Shelf changes Discogs acknowledged recently, so no shelf download —
+    /// after an edit or from the Sync button — prunes a record Discogs is
+    /// still catching up on (see [`jobs::Confirmed`]).
+    vinyl_confirmed: jobs::Confirmed,
     /// The open record sheet — one record's tracklist, with what can play each
     /// position (a local file, a Discogs-listed YouTube video, or nothing).
     /// `None` when no record is open. See [`vinyl_sheet`].
