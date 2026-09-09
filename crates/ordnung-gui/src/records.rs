@@ -342,12 +342,6 @@ impl App {
     /// instance id rather than release id; anything actually in a list has one,
     /// because that's where membership is read from.
     fn toggle_record_list(&mut self, list: VinylList, hit: &RecordHit, owned: bool, wanted: bool) {
-        // One background job at a time — the shared worker channel is
-        // single-slot, and a second edit would silently displace the first.
-        if self.is_busy() {
-            self.status = "Still working on the last change — one moment.".into();
-            return;
-        }
         let label = edit_label(hit);
         let present = match list {
             VinylList::Collection => owned,

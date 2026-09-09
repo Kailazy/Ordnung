@@ -1012,9 +1012,15 @@ impl App {
             )),
             _ => None,
         };
-        // An edit is already running: the buttons would queue a second job
-        // against the same record, so they wait it out rather than misreport.
-        let editing = self.is_busy();
+        // Each list button answers for its own record: while an edit on it is
+        // in flight (or queued behind one) the button says so and waits,
+        // rather than showing the old state and taking a second click against
+        // it. Other records' edits don't hold these up.
+        let col_pending = self.vinyl_pending(VinylList::Collection, release_id);
+        let want_pending = self.vinyl_pending(VinylList::Wantlist, release_id);
+        // The alternative pressing's id is only known inside the window, so
+        // that one button waits out any edit at all.
+        let editing = self.vinyl_edit_running();
 
         /// What the user clicked this frame, applied after the window closes its
         /// borrow of `self`.
@@ -1267,41 +1273,39 @@ impl App {
                             // record's actual state — so one button always says
                             // what pressing it and clicking it does the opposite
                             // of what's true now.
-                            let (col_label, col_tip) = if in_collection {
-                                (
+                            let (col_label, col_tip) = match col_pending {
+                                Some(pending) => (pending, "Waiting on Discogs"),
+                                None if in_collection => (
                                     "✓ In collection",
                                     "Remove this record from your Discogs collection",
-                                )
-                            } else {
-                                (
+                                ),
+                                None => (
                                     "＋ Collection",
                                     "Add this record to your Discogs collection",
-                                )
+                                ),
                             };
                             if ui
-                                .add_enabled(!editing, egui::Button::new(col_label))
+                                .add_enabled(col_pending.is_none(), egui::Button::new(col_label))
                                 .on_hover_note(col_tip)
-                                .on_disabled_hover_text(crate::ui::hover::note(
-                                    "Wait for the current Discogs job to finish",
-                                ))
+                                .on_disabled_hover_text(crate::ui::hover::note(col_tip))
                                 .clicked()
                             {
                                 act = Some(Act::ToggleList(VinylList::Collection));
                             }
-                            let (want_label, want_tip) = if in_wantlist {
-                                (
+                            let (want_label, want_tip) = match want_pending {
+                                Some(pending) => (pending, "Waiting on Discogs"),
+                                None if in_wantlist => (
                                     "✓ In wantlist",
                                     "Remove this record from your Discogs wantlist",
-                                )
-                            } else {
-                                ("＋ Wantlist", "Add this record to your Discogs wantlist")
+                                ),
+                                None => {
+                                    ("＋ Wantlist", "Add this record to your Discogs wantlist")
+                                }
                             };
                             if ui
-                                .add_enabled(!editing, egui::Button::new(want_label))
+                                .add_enabled(want_pending.is_none(), egui::Button::new(want_label))
                                 .on_hover_note(want_tip)
-                                .on_disabled_hover_text(crate::ui::hover::note(
-                                    "Wait for the current Discogs job to finish",
-                                ))
+                                .on_disabled_hover_text(crate::ui::hover::note(want_tip))
                                 .clicked()
                             {
                                 act = Some(Act::ToggleList(VinylList::Wantlist));

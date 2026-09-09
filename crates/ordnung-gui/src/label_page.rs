@@ -260,6 +260,8 @@ impl App {
             sub: String,
             owned: bool,
             wanted: bool,
+            /// A wantlist edit on this record is in flight or queued.
+            pending: bool,
         }
         let specs: Vec<(String, u64, String, String, String)> = panel
             .releases
@@ -290,6 +292,7 @@ impl App {
             // record you own.
             let owned = self.owns_record(release_id, &artist, &title);
             let wanted = self.wants_record(release_id, &artist, &title);
+            let pending = self.vinyl_pending(VinylList::Wantlist, release_id).is_some();
             rows.push(Row {
                 cover: (!thumb.trim().is_empty())
                     .then(|| self.dig_cover(&thumb).cloned())
@@ -299,9 +302,9 @@ impl App {
                 sub,
                 owned,
                 wanted,
+                pending,
             });
         }
-        let editing = self.is_busy();
 
         let mut act: Option<Act> = None;
         let mut open = true;
@@ -427,7 +430,7 @@ impl App {
                                         let parked = r.owned || r.wanted;
                                         if ui
                                             .add_enabled(
-                                                !parked && !editing,
+                                                !parked && !r.pending,
                                                 egui::Button::new("＋").small(),
                                             )
                                             .on_hover_note("Add to your Discogs wantlist")

@@ -205,9 +205,9 @@ impl App {
                 row.cover = self.dig_cover(&u).cloned();
             }
         }
-        // A swap writes the user's Discogs account through the one job channel,
-        // so it waits out any running job rather than queueing behind it.
-        let busy = self.is_busy();
+        // A swap rewrites the record this window is open on, so it waits out
+        // the edit already in flight rather than queueing a second against it.
+        let busy = self.vinyl_edit_running();
         let mut act: Option<Act> = None;
         let mut open = true;
         egui::Window::new(format!("Other pressings — {artist} — {title}"))
@@ -346,7 +346,7 @@ impl App {
                                             } else if r.owned {
                                                 "You already have this pressing"
                                             } else if busy {
-                                                "Wait for the current job to finish"
+                                                "Wait for the current change to finish"
                                             } else {
                                                 "Trade your copy for this pressing on Discogs"
                                             };

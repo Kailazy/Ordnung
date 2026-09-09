@@ -52,6 +52,7 @@ impl App {
         let (thumb_req_tx, thumb_req_rx) = mpsc::channel::<Id>();
         let (thumb_tx, thumb_rx) = mpsc::channel();
         let thumb_tx_usb = thumb_tx.clone();
+        let (vinyl_tail_tx, vinyl_tail_rx) = mpsc::channel();
         spawn_thumb_loader(db_path.clone(), egui_ctx.clone(), thumb_req_rx, thumb_tx);
         // USB rows can't go through that loader (it reads the catalog, which
         // device tracks aren't in), but they need the same off-thread treatment:
@@ -166,7 +167,12 @@ impl App {
             vinyl_wanted_keys: HashSet::new(),
             vinyl_owned_tracks: HashSet::new(),
             vinyl_wanted_tracks: HashSet::new(),
-            vinyl_confirmed: crate::jobs::Confirmed::default(),
+            vinyl_confirmed: crate::jobs::Ledger::default(),
+            vinyl_edit_rx: None,
+            vinyl_edit_in_flight: None,
+            vinyl_edit_queue: VecDeque::new(),
+            vinyl_tail_tx,
+            vinyl_tail_rx,
             confirm_vinyl_edit: None,
             vinyl_sheet: None,
             sheet_follows_dig: false,
@@ -1669,7 +1675,10 @@ impl eframe::App for App {
         // before anything paints or uploads — guarantees the frame that painted
         // them has already been submitted to the GPU (see `tex_graveyard`).
         self.tex_graveyard.clear();
-        if self.poll_worker() {
+        // Both lanes drain every frame; either can change the rows.
+        let worker_changed = self.poll_worker();
+        let vinyl_changed = self.poll_vinyl_edits();
+        if worker_changed || vinyl_changed {
             self.reload();
             self.refresh_selected();
             // A finished analysis job may have re-gridded the loaded track;
@@ -2445,7 +2454,7 @@ impl eframe::App for App {
                                 .text(format!("{done}/{total}")),
                         );
                     }
-                    _ if self.is_busy() => {
+                    _ if self.is_busy() || self.vinyl_edit_running() => {
                         ui.spinner();
                     }
                     _ => {}
