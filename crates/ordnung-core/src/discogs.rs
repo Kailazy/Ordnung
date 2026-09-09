@@ -132,6 +132,23 @@ pub struct RecordHit {
     pub cover_image_url: String,
 }
 
+/// One artist returned by a free-text artist lookup ([`Client::search_artists`]).
+///
+/// The search box's Discogs mode answers "what exists?" with records; this is
+/// the other thing a typed name can mean. An artist hit is a door rather than a
+/// destination — it opens the artist's whole discography (browsed by id, see
+/// [`Client::browse_by_id`]) instead of one record — so it carries only what a
+/// row needs to be recognised: the name and a portrait.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtistHit {
+    pub artist_id: u64,
+    /// The name as Discogs lists it, disambiguator and all (`Lawrence (2)`).
+    /// Kept verbatim because the number is what tells two artists apart; strip
+    /// it for display only.
+    pub name: String,
+    pub thumb_url: String,
+}
+
 /// One page of free-text record-lookup results. See [`Client::search_records`].
 #[derive(Debug, Clone)]
 pub struct RecordSearchPage {
@@ -849,6 +866,38 @@ impl Client {
                 })
                 .collect(),
         })
+    }
+
+    /// Free-text lookup of **artists** by name, for the search box's Discogs
+    /// mode: the rows that let a typed name open a discography rather than
+    /// one record.
+    ///
+    /// Same endpoint as [`Client::search_records`] with `type=artist`, so it
+    /// matches as loosely — `Lawrence` returns every Lawrence Discogs knows,
+    /// each with its own id, and the caller shows them side by side for the
+    /// user to tell apart. Rows without a name are dropped. One API request
+    /// per call, paced by the shared throttle; an empty query returns an empty
+    /// list without touching the network.
+    pub fn search_artists(&self, query: &str, per_page: u32) -> Result<Vec<ArtistHit>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let per_page = per_page.clamp(1, 100).to_string();
+        let resp = self.call_with_retry(|| {
+            self.agent
+                .get(SEARCH_URL)
+                .set("User-Agent", &self.user_agent)
+                .set("Authorization", &format!("Discogs token={}", self.token))
+                .query("q", query)
+                .query("type", "artist")
+                .query("per_page", &per_page)
+                .query("page", "1")
+        })?;
+        let body: SearchResponse = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs artist search: {e}")))?;
+        Ok(artist_hits(body.results))
     }
 
     /// Like [`Client::find_artwork`] but returns *every* candidate release
@@ -1636,6 +1685,22 @@ fn split_artist_title(combined: &str) -> (String, String) {
         Some((a, t)) => (a.trim().to_string(), t.trim().to_string()),
         None => (String::new(), combined.trim().to_string()),
     }
+}
+
+/// Shape artist-search rows into [`ArtistHit`]s. An artist row reuses the
+/// release row's fields — `title` is the name, `thumb` the portrait — and a
+/// row Discogs returns with no name or no id is unusable, so it's dropped
+/// rather than shown as a blank chip.
+fn artist_hits(results: Vec<SearchHit>) -> Vec<ArtistHit> {
+    results
+        .into_iter()
+        .filter(|h| h.id > 0 && !h.title.trim().is_empty())
+        .map(|h| ArtistHit {
+            artist_id: h.id,
+            name: h.title.trim().to_string(),
+            thumb_url: h.thumb,
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -2550,6 +2615,35 @@ mod tests {
             message: String::new(),
         };
         assert_eq!(e.to_string(), "Discogs couldn't do that (HTTP 418)");
+    }
+
+    #[test]
+    fn artist_hits_keep_named_rows_and_drop_blank_ones() {
+        let body: SearchResponse = serde_json::from_str(
+            r#"{"pagination":{"pages":1,"items":3},"results":[
+                {"id":6644,"type":"artist","title":"Lawrence","thumb":"https://i/l.jpg","cover_image":"https://i/L.jpg"},
+                {"id":9,"type":"artist","title":"   "},
+                {"id":0,"type":"artist","title":"Ghost"},
+                {"id":12,"type":"artist","title":"Lawrence (2)","thumb":""}
+            ]}"#,
+        )
+        .unwrap();
+        let hits = artist_hits(body.results);
+        assert_eq!(
+            hits,
+            vec![
+                ArtistHit {
+                    artist_id: 6644,
+                    name: "Lawrence".into(),
+                    thumb_url: "https://i/l.jpg".into(),
+                },
+                ArtistHit {
+                    artist_id: 12,
+                    name: "Lawrence (2)".into(),
+                    thumb_url: String::new(),
+                },
+            ]
+        );
     }
 
     #[test]

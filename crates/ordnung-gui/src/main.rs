@@ -14,7 +14,7 @@ mod covers;
 mod dig;
 mod inspector;
 mod jobs;
-mod label_page;
+mod browse_page;
 mod macos_drag;
 mod macos_menu;
 mod macos_pasteboard;
@@ -1116,7 +1116,7 @@ struct App {
     record_generation: u64,
     /// Queries already answered this session, so backspacing to a previous one
     /// is instant instead of costing another rate-limited request.
-    record_cache: HashMap<String, (Vec<ordnung_core::discogs::RecordHit>, u32)>,
+    record_cache: HashMap<String, records::CachedLookup>,
     record_tx: Sender<RecordFetched>,
     record_rx: Receiver<RecordFetched>,
     /// When a parked keystroke should fire the Discogs lookup. Separate from
@@ -1359,14 +1359,14 @@ struct App {
             )>,
         )>,
     >,
-    /// The open label page — one imprint's discography as a paged list, with
-    /// the user's shelves marked on every row. `None` when closed. See
-    /// [`label_page`].
-    label_panel: Option<label_page::LabelPanel>,
-    /// Receives the open label page's fetches (the id resolution + first
-    /// page, then page turns). Tagged with the label id, so a reply for a
+    /// The open browse page — one label's or one artist's discography as a
+    /// paged list, with the user's shelves marked on every row. `None` when
+    /// closed. See [`browse_page`].
+    browse_panel: Option<browse_page::BrowsePanel>,
+    /// Receives the open browse page's fetches (the id resolution + first
+    /// page, then page turns). Tagged with the thread and id, so a reply for a
     /// panel since re-pointed elsewhere is dropped.
-    label_rx: Option<Receiver<label_page::LabelFetched>>,
+    browse_rx: Option<Receiver<browse_page::BrowseFetched>>,
     /// The open "other pressings" panel — every release hanging off the same
     /// Discogs master as one record, and the swap that trades your copy for one
     /// of them. `None` when it isn't open. See [`versions`].

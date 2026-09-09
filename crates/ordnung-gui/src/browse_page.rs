@@ -1,16 +1,18 @@
-//! The label page: one imprint's discography, read front to back.
+//! The browse page: one label's or one artist's discography, read front to back.
 //!
-//! The dig's label thread samples a label — one random find per pull. This is
-//! the deliberate version: click a label anywhere (the record sheet's header,
-//! a shelf or seller card's menu) and read the whole catalog as a list, with
-//! your own shelves marked on every row. For the labels that define a sound —
-//! Chain Reaction, Basic Channel, Underground Resistance — reading the run in
-//! order *is* the dig.
+//! The dig's artist and label threads sample — one random find per pull. This
+//! is the deliberate version: click a label anywhere (the record sheet's
+//! header, a shelf or seller card's menu), or an artist in the search box's
+//! Discogs results, and read the whole catalog as a list, with your own
+//! shelves marked on every row. For the labels that define a sound — Chain
+//! Reaction, Basic Channel, Underground Resistance — and for the artists whose
+//! every 12" is worth knowing, reading the run in order *is* the dig.
 //!
-//! Rides `GET /labels/{id}/releases` (the same browse the dig's label thread
-//! uses), 100 rows a page, most releases in catalog order as Discogs returns
-//! them. Non-record rows (CDs, files) are dropped; master rows with no format
-//! of their own are kept rather than mislabeled. One paced request per page.
+//! Rides `GET /labels/{id}/releases` and `GET /artists/{id}/releases` (the
+//! same browses the dig's threads use), 100 rows a page, in the order Discogs
+//! returns them — catalog order for a label, by year for an artist. Non-record
+//! rows (CDs, files) are dropped; master rows with no format of their own are
+//! kept rather than mislabeled. One paced request per page.
 
 use super::*;
 use ordnung_core::discogs::{BrowsePage, BrowseRelease, BrowseThread};
@@ -22,13 +24,19 @@ const PANEL_W: f32 = 560.0;
 /// Side of a row's sleeve thumbnail.
 const THUMB: f32 = 48.0;
 
-/// The open label page: which imprint, which page of its run, and the rows.
-pub(crate) struct LabelPanel {
-    /// Discogs label id — what the browse actually pages. 0 while the id is
-    /// still being resolved from the release the page was opened from.
-    pub label_id: u64,
-    /// Imprint name for the title bar, best known so far (the release's own
-    /// label string until the detail resolves the canonical one).
+/// The open browse page: whose run (a label's or an artist's), which page of
+/// it, and the rows.
+pub(crate) struct BrowsePanel {
+    /// Which association the page follows — the imprint's catalog or the
+    /// artist's discography. Decides the endpoint, the title glyph and what a
+    /// row's caption has room for.
+    pub thread: BrowseThread,
+    /// Discogs label or artist id — what the browse actually pages. 0 while
+    /// the id is still being resolved from the release the page was opened
+    /// from (label pages only; an artist page is opened by id).
+    pub id: u64,
+    /// Name for the title bar, best known so far (a release's own label string
+    /// until the detail resolves the canonical one).
     pub name: String,
     /// 1-based page currently shown (or being fetched).
     pub page: u32,
@@ -43,13 +51,14 @@ pub(crate) struct LabelPanel {
     pub error: Option<String>,
 }
 
-/// One finished label-page fetch, handed back to the UI thread.
-pub(crate) struct LabelFetched {
-    /// The label the fetch was for — a result for a panel since re-pointed at
-    /// another imprint is dropped.
-    pub label_id: u64,
-    /// Canonical label name, when the fetch resolved it (the first fetch
-    /// does; page turns don't need to).
+/// One finished browse-page fetch, handed back to the UI thread.
+pub(crate) struct BrowseFetched {
+    /// Whose run the fetch was for — a result for a panel since re-pointed at
+    /// another label or artist is dropped.
+    pub thread: BrowseThread,
+    pub id: u64,
+    /// Canonical name, when the fetch resolved it (a label page's first fetch
+    /// does; page turns and artist pages don't need to).
     pub name: Option<String>,
     pub page: u32,
     pub result: std::result::Result<BrowsePage, String>,
@@ -121,8 +130,9 @@ impl App {
     /// the detail corrects it.
     pub(crate) fn open_label_page(&mut self, release_id: u64, hint: Option<String>) {
         let name = hint.unwrap_or_else(|| "…".to_string());
-        self.label_panel = Some(LabelPanel {
-            label_id: 0,
+        self.browse_panel = Some(BrowsePanel {
+            thread: BrowseThread::Label,
+            id: 0,
             name: name.clone(),
             page: 1,
             pages: 1,
@@ -134,7 +144,7 @@ impl App {
         let token = self.discogs_token();
         let db = self.db_path.clone();
         let (tx, rx) = mpsc::channel();
-        self.label_rx = Some(rx);
+        self.browse_rx = Some(rx);
         let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
             let client =
@@ -152,8 +162,9 @@ impl App {
                 None => (None, None),
             };
             let Some(label_id) = label_id else {
-                let _ = tx.send(LabelFetched {
-                    label_id: 0,
+                let _ = tx.send(BrowseFetched {
+                    thread: BrowseThread::Label,
+                    id: 0,
                     name: label_name,
                     page: 1,
                     result: Err("Discogs lists no label for this record.".to_string()),
@@ -164,8 +175,9 @@ impl App {
             let result = client
                 .browse_by_id(BrowseThread::Label, label_id, 1)
                 .map_err(|e| e.to_string());
-            let _ = tx.send(LabelFetched {
-                label_id,
+            let _ = tx.send(BrowseFetched {
+                thread: BrowseThread::Label,
+                id: label_id,
                 name: label_name,
                 page: 1,
                 result,
@@ -174,29 +186,49 @@ impl App {
         });
     }
 
-    /// Fetch another page of the open label's run.
-    fn fetch_label_page(&mut self, page: u32) {
-        let Some(panel) = self.label_panel.as_mut() else {
+    /// Open the browse page on an artist's discography. The id is known up
+    /// front (it comes from a Discogs artist search hit), so this spends its
+    /// one paced call straight on the first page of the run.
+    pub(crate) fn open_artist_page(&mut self, artist_id: u64, name: String) {
+        self.browse_panel = Some(BrowsePanel {
+            thread: BrowseThread::Artist,
+            id: artist_id,
+            name,
+            page: 1,
+            pages: 1,
+            items: 0,
+            releases: Vec::new(),
+            loading: false,
+            error: None,
+        });
+        self.fetch_browse_page(1);
+    }
+
+    /// Fetch a page of the open run (the first, for an artist page; another,
+    /// on a page turn).
+    fn fetch_browse_page(&mut self, page: u32) {
+        let Some(panel) = self.browse_panel.as_mut() else {
             return;
         };
-        if panel.label_id == 0 || panel.loading {
+        if panel.id == 0 || panel.loading {
             return;
         }
-        let label_id = panel.label_id;
+        let (thread, id) = (panel.thread, panel.id);
         panel.loading = true;
         panel.page = page;
         let token = self.discogs_token();
         let (tx, rx) = mpsc::channel();
-        self.label_rx = Some(rx);
+        self.browse_rx = Some(rx);
         let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
             let client =
                 discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
             let result = client
-                .browse_by_id(BrowseThread::Label, label_id, page)
+                .browse_by_id(thread, id, page)
                 .map_err(|e| e.to_string());
-            let _ = tx.send(LabelFetched {
-                label_id,
+            let _ = tx.send(BrowseFetched {
+                thread,
+                id,
                 name: None,
                 page,
                 result,
@@ -205,22 +237,22 @@ impl App {
         });
     }
 
-    /// Adopt a finished label-page fetch onto the open panel.
-    pub(crate) fn poll_label_page(&mut self) {
-        let Some(rx) = &self.label_rx else { return };
+    /// Adopt a finished browse-page fetch onto the open panel.
+    pub(crate) fn poll_browse_page(&mut self) {
+        let Some(rx) = &self.browse_rx else { return };
         let Ok(msg) = rx.try_recv() else { return };
-        self.label_rx = None;
-        let Some(panel) = self.label_panel.as_mut() else {
+        self.browse_rx = None;
+        let Some(panel) = self.browse_panel.as_mut() else {
             return;
         };
-        // The first fetch is the only one that arrives while the panel still
-        // has no id; page turns must match the imprint on screen.
-        if panel.label_id != 0 && msg.label_id != panel.label_id {
+        // A label page's first fetch is the only one that arrives while the
+        // panel still has no id; everything else must match the run on screen.
+        if msg.thread != panel.thread || (panel.id != 0 && msg.id != panel.id) {
             return;
         }
         panel.loading = false;
-        if msg.label_id != 0 {
-            panel.label_id = msg.label_id;
+        if msg.id != 0 {
+            panel.id = msg.id;
         }
         if let Some(name) = msg.name.filter(|n| !n.trim().is_empty()) {
             panel.name = name;
@@ -236,11 +268,12 @@ impl App {
         }
     }
 
-    /// Draw the open label page, if any.
-    pub(crate) fn draw_label_page(&mut self, ctx: &egui::Context) {
-        let Some(panel) = self.label_panel.as_ref() else {
+    /// Draw the open browse page, if any.
+    pub(crate) fn draw_browse_page(&mut self, ctx: &egui::Context) {
+        let Some(panel) = self.browse_panel.as_ref() else {
             return;
         };
+        let thread = panel.thread;
         let (name, page, pages, items, loading, error) = (
             panel.name.clone(),
             panel.page,
@@ -256,22 +289,36 @@ impl App {
             cover: Option<Tex>,
             artist: String,
             title: String,
-            /// `1994 · 12" · CR-03`, whichever parts exist.
+            /// `1994 · 12" · CR-03`, whichever parts exist. An artist's rows
+            /// name the label too, since it varies down their run.
             sub: String,
+            /// Credited as remixer rather than as the artist (artist runs only).
+            remix: bool,
             owned: bool,
             wanted: bool,
             /// A wantlist edit on this record is in flight or queued.
             pending: bool,
         }
-        let specs: Vec<(String, u64, String, String, String)> = panel
+        let specs: Vec<(String, u64, String, String, String, bool)> = panel
             .releases
             .iter()
             .map(|r| {
                 let (artist, title) = crate::dig::row_artist_title(r);
+                let imprint = match thread {
+                    // A label page is the imprint; naming it on every row
+                    // says nothing. An artist's run hops labels, so there it
+                    // is the row's most telling fact after the year.
+                    BrowseThread::Label => r.catno.trim().to_string(),
+                    BrowseThread::Artist => [r.label.trim(), r.catno.trim()]
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                };
                 let sub = [
                     r.year.filter(|y| *y > 0).map(|y| y.to_string()),
                     (!r.format.trim().is_empty()).then(|| r.format.clone()),
-                    (!r.catno.trim().is_empty()).then(|| r.catno.clone()),
+                    (!imprint.is_empty()).then_some(imprint),
                 ]
                 .into_iter()
                 .flatten()
@@ -283,11 +330,12 @@ impl App {
                     crate::dig::strip_disambiguator(&artist).to_string(),
                     title,
                     sub,
+                    thread == BrowseThread::Artist && !r.main,
                 )
             })
             .collect();
         let mut rows: Vec<Row> = Vec::with_capacity(specs.len());
-        for (thumb, release_id, artist, title, sub) in specs {
+        for (thumb, release_id, artist, title, sub, remix) in specs {
             // By record, not pressing: the run may list another pressing of a
             // record you own.
             let owned = self.owns_record(release_id, &artist, &title);
@@ -300,6 +348,7 @@ impl App {
                 artist,
                 title,
                 sub,
+                remix,
                 owned,
                 wanted,
                 pending,
@@ -308,8 +357,12 @@ impl App {
 
         let mut act: Option<Act> = None;
         let mut open = true;
-        egui::Window::new(format!("⌂ {name}"))
-            .id(egui::Id::new("label-page"))
+        let glyph = match thread {
+            BrowseThread::Label => "⌂",
+            BrowseThread::Artist => "♪",
+        };
+        egui::Window::new(format!("{glyph} {name}"))
+            .id(egui::Id::new("browse-page"))
             .open(&mut open)
             .collapsible(false)
             .resizable([false, true])
@@ -320,15 +373,20 @@ impl App {
                 ui.set_min_width(PANEL_W);
                 ui.set_max_width(PANEL_W);
                 ui.add_space(2.0);
+                let whose = match thread {
+                    BrowseThread::Label => "The label's whole run",
+                    BrowseThread::Artist => "Everything the artist put out",
+                };
                 let blurb = if items > 0 {
                     format!(
-                        "The label's whole run, as Discogs lists it — {items} releases, \
+                        "{whose}, as Discogs lists it — {items} releases, \
                          records only shown. Your shelves are marked on every row."
                     )
                 } else {
-                    "The label's whole run, as Discogs lists it. Your shelves are \
-                     marked on every row."
-                        .to_string()
+                    format!(
+                        "{whose}, as Discogs lists it. Your shelves are marked on \
+                         every row."
+                    )
                 };
                 ui.label(egui::RichText::new(blurb).weak().small());
                 ui.add_space(6.0);
@@ -340,7 +398,11 @@ impl App {
                 if loading && rows.is_empty() {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(egui::RichText::new("Reading the label's crate…").weak());
+                        let reading = match thread {
+                            BrowseThread::Label => "Reading the label's crate…",
+                            BrowseThread::Artist => "Reading the artist's crate…",
+                        };
+                        ui.label(egui::RichText::new(reading).weak());
                     });
                     ui.add_space(4.0);
                     return;
@@ -401,9 +463,11 @@ impl App {
                                         if t.clicked() {
                                             act = Some(Act::Open(i));
                                         }
-                                        for (show, text) in
-                                            [(r.owned, "OWNED"), (!r.owned && r.wanted, "WANT")]
-                                        {
+                                        for (show, text) in [
+                                            (r.owned, "OWNED"),
+                                            (!r.owned && r.wanted, "WANT"),
+                                            (r.remix, "REMIX"),
+                                        ] {
                                             if show {
                                                 ui.label(
                                                     egui::RichText::new(text)
@@ -472,12 +536,12 @@ impl App {
                 }
             });
         if !open {
-            self.label_panel = None;
+            self.browse_panel = None;
             return;
         }
 
         let row_of = |i: usize| -> Option<&BrowseRelease> {
-            self.label_panel.as_ref().and_then(|p| p.releases.get(i))
+            self.browse_panel.as_ref().and_then(|p| p.releases.get(i))
         };
         match act {
             Some(Act::Open(i)) => {
@@ -516,16 +580,23 @@ impl App {
                     .flatten()
                     .collect::<Vec<_>>()
                     .join(" · ");
-                    let label_name = self
-                        .label_panel
-                        .as_ref()
-                        .map(|p| p.name.clone())
-                        .filter(|n| n != "…");
+                    // A label page knows the imprint; an artist's row carries
+                    // its own, when Discogs listed one.
+                    let label_name = match thread {
+                        BrowseThread::Label => self
+                            .browse_panel
+                            .as_ref()
+                            .map(|p| p.name.clone())
+                            .filter(|n| n != "…"),
+                        BrowseThread::Artist => {
+                            Some(r.label.trim().to_string()).filter(|l| !l.is_empty())
+                        }
+                    };
                     let thumb = (!r.thumb_url.trim().is_empty()).then(|| r.thumb_url.clone());
                     self.start_dig_release(r.release_id, artist, title, label_name, sub, thumb);
                 }
             }
-            Some(Act::Page(p)) => self.fetch_label_page(p),
+            Some(Act::Page(p)) => self.fetch_browse_page(p),
             None => {}
         }
     }

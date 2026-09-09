@@ -32,7 +32,7 @@
 use super::*;
 use crate::search_box::clipped_line;
 use crate::ui::tokens::{color, radius, space};
-use ordnung_core::discogs::{self, RecordHit};
+use ordnung_core::discogs::{self, ArtistHit, RecordHit};
 use std::thread;
 
 /// How long the box waits after the last keystroke before asking Discogs.
@@ -53,6 +53,22 @@ const RECORD_PER_PAGE: u32 = 25;
 /// and five large rows read at a glance where a scrolling list of twenty-five
 /// has to be worked through.
 const RECORD_HITS_SHOWN: usize = 5;
+
+/// How many artists one lookup asks for. A few more than are shown, so a row
+/// Discogs returns blank doesn't leave a gap.
+const ARTIST_PER_PAGE: u32 = 8;
+
+/// How many artist chips the band under the records shows at most. Fewer
+/// still fit the width when names run long; the rest are simply not drawn.
+const ARTIST_HITS_SHOWN: usize = 4;
+
+/// The artist band: its height, the chips' height and padding, the round
+/// portrait's side, and how wide a name may run before it's truncated.
+const BAND_H: f32 = 44.0;
+const CHIP_H: f32 = 32.0;
+const CHIP_PAD: f32 = 4.0;
+const AVATAR_PX: f32 = 24.0;
+const CHIP_NAME_MAX_W: f32 = 150.0;
 
 /// Cap on the memoised query cache. Small: entries are only worth keeping for
 /// the backspace-and-retype case within a session.
@@ -100,14 +116,53 @@ pub(crate) enum RecordSearch {
     Loading(String),
     /// Results for the query, possibly empty.
     Done {
+        /// The query these answer, so a follow-up (the artist lookup) can be
+        /// matched to the rows it belongs under.
+        query: String,
         hits: Vec<RecordHit>,
         /// Total matches Discogs reports, which is usually far more than the
         /// page we fetched — worth saying so the count doesn't read as "that's
         /// all there is".
         items: u32,
+        /// The artists the same words name, which arrive a beat after the
+        /// records — see [`ArtistLookup`].
+        artists: ArtistLookup,
     },
     /// The lookup failed. Carries a plain-language reason.
     Failed(String),
+}
+
+/// The artist half of a Discogs lookup.
+///
+/// A typed name means two things on Discogs — records with those words in the
+/// title, and artists called that — and the second is a different kind of
+/// answer: a door onto a whole discography rather than one record. Both are
+/// asked for, but *in turn*, on one worker, records first. The API is paced at
+/// one request a second process-wide, so asking for artists first would hold
+/// the records back by that second on every keystroke; asking after costs the
+/// records nothing, and the artists join the popup below them when they land.
+#[derive(Clone, Debug)]
+pub(crate) enum ArtistLookup {
+    /// Still on its way (or lost — a failed artist lookup is treated as "none";
+    /// records are the primary answer and shouldn't fail on account of it).
+    Pending,
+    Ready(Vec<ArtistHit>),
+}
+
+/// One answered query, as memoised in `record_cache`. `artists` is `None` when
+/// the artist half never landed (the user typed on before it did); a cache hit
+/// then re-asks for just that half.
+#[derive(Clone, Debug)]
+pub(crate) struct CachedLookup {
+    pub(crate) hits: Vec<RecordHit>,
+    pub(crate) items: u32,
+    pub(crate) artists: Option<Vec<ArtistHit>>,
+}
+
+/// What a worker handed back — the two halves of a lookup arrive separately.
+pub(crate) enum FetchedAnswer {
+    Records(std::result::Result<(Vec<RecordHit>, u32), String>),
+    Artists(Vec<ArtistHit>),
 }
 
 /// A finished lookup, handed back from the worker thread.
@@ -116,7 +171,17 @@ pub(crate) struct RecordFetched {
     /// replies for queries the user has already typed past.
     pub(crate) generation: u64,
     pub(crate) query: String,
-    pub(crate) result: std::result::Result<(Vec<RecordHit>, u32), String>,
+    pub(crate) answer: FetchedAnswer,
+}
+
+/// One row of the Discogs list the user can open: a record, or an artist.
+///
+/// The keyboard cursor runs over one flat index — the record rows, then the
+/// artist chips under them — so this is what "the thing at position `i`" is.
+#[derive(Clone, Debug)]
+pub(crate) enum Pick {
+    Record(RecordHit),
+    Artist(ArtistHit),
 }
 
 impl App {
@@ -166,11 +231,25 @@ impl App {
         }
         // Already answered this exact query in this session: show it now and
         // spend no request. This is what makes backspacing feel instant.
-        if let Some((hits, items)) = self.record_cache.get(&q) {
+        if let Some(cached) = self.record_cache.get(&q).cloned() {
+            // Both halves known — or the artist half already on its way for
+            // this very query, which a second worker would only duplicate.
+            let artists_inflight = matches!(
+                &self.record_search,
+                RecordSearch::Done { query, artists: ArtistLookup::Pending, .. } if *query == q
+            );
             self.record_search = RecordSearch::Done {
-                hits: hits.clone(),
-                items: *items,
+                query: q.clone(),
+                hits: cached.hits,
+                items: cached.items,
+                artists: match &cached.artists {
+                    Some(a) => ArtistLookup::Ready(a.clone()),
+                    None => ArtistLookup::Pending,
+                },
             };
+            if cached.artists.is_none() && !artists_inflight {
+                self.spawn_record_worker(q, false);
+            }
             return;
         }
         // Already waiting on this same query — don't stack a second request on
@@ -184,22 +263,52 @@ impl App {
                 RecordSearch::Failed("Add a Discogs token in Settings to look up records.".into());
             return;
         }
+        self.record_search = RecordSearch::Loading(q.clone());
+        self.spawn_record_worker(q, true);
+    }
+
+    /// Start the worker for one query. With `records` it asks for the record
+    /// page first and the artists after; without, only the artist half (the
+    /// records are already on screen from the cache). Bumps the generation, so
+    /// anything still in flight for an earlier call is dropped on arrival.
+    fn spawn_record_worker(&mut self, query: String, records: bool) {
+        let token = self.discogs_token();
+        if token.trim().is_empty() {
+            return;
+        }
         self.record_generation += 1;
         let generation = self.record_generation;
-        self.record_search = RecordSearch::Loading(q.clone());
         let (tx, ctx) = (self.record_tx.clone(), self.egui_ctx.clone());
-        let query = q;
         thread::spawn(move || {
             let client =
                 discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
-            let result = client
-                .search_records(&query, 1, RECORD_PER_PAGE)
-                .map(|page| (page.hits, page.items))
-                .map_err(|e| e.to_string());
+            if records {
+                let result = client
+                    .search_records(&query, 1, RECORD_PER_PAGE)
+                    .map(|page| (page.hits, page.items))
+                    .map_err(|e| e.to_string());
+                let failed = result.is_err();
+                let _ = tx.send(RecordFetched {
+                    generation,
+                    query: query.clone(),
+                    answer: FetchedAnswer::Records(result),
+                });
+                ctx.request_repaint();
+                // No point asking the second question when the first got no
+                // answer — the same outage answers both.
+                if failed {
+                    return;
+                }
+            }
+            // A failed artist lookup is "no artists": the records are already
+            // up, and an error line under them would say more than it's worth.
+            let artists = client
+                .search_artists(&query, ARTIST_PER_PAGE)
+                .unwrap_or_default();
             let _ = tx.send(RecordFetched {
                 generation,
                 query,
-                result,
+                answer: FetchedAnswer::Artists(artists),
             });
             ctx.request_repaint();
         });
@@ -213,24 +322,46 @@ impl App {
             if msg.generation != self.record_generation {
                 continue;
             }
-            match msg.result {
-                Ok((hits, items)) => {
+            match msg.answer {
+                FetchedAnswer::Records(Ok((hits, items))) => {
                     if self.record_cache.len() >= RECORD_CACHE_MAX {
                         self.record_cache.clear();
                     }
-                    self.record_cache.insert(msg.query, (hits.clone(), items));
-                    self.record_search = RecordSearch::Done { hits, items };
+                    self.record_cache.insert(
+                        msg.query.clone(),
+                        CachedLookup {
+                            hits: hits.clone(),
+                            items,
+                            artists: None,
+                        },
+                    );
+                    self.record_search = RecordSearch::Done {
+                        query: msg.query,
+                        hits,
+                        items,
+                        artists: ArtistLookup::Pending,
+                    };
                 }
-                Err(e) => self.record_search = RecordSearch::Failed(e),
+                FetchedAnswer::Records(Err(e)) => self.record_search = RecordSearch::Failed(e),
+                FetchedAnswer::Artists(list) => {
+                    if let Some(cached) = self.record_cache.get_mut(&msg.query) {
+                        cached.artists = Some(list.clone());
+                    }
+                    if let RecordSearch::Done { query, artists, .. } = &mut self.record_search {
+                        if *query == msg.query {
+                            *artists = ArtistLookup::Ready(list);
+                        }
+                    }
+                }
             }
         }
     }
 
     /// Draw the Discogs results list inside the already-open popup frame.
     ///
-    /// Returns the release the user clicked, if any — applied by the caller so
+    /// Returns what the user clicked, if anything — applied by the caller so
     /// the list doesn't mutate `self` mid-render.
-    pub(crate) fn draw_record_results(&mut self, ui: &mut egui::Ui) -> Option<RecordHit> {
+    pub(crate) fn draw_record_results(&mut self, ui: &mut egui::Ui) -> Option<Pick> {
         // Snapshot what we're drawing so the row loop can borrow `self` for
         // cover lookups without fighting the borrow on `record_search`.
         let state = self.record_search.clone();
@@ -259,12 +390,21 @@ impl App {
                 note(ui, &e);
                 None
             }
-            RecordSearch::Done { hits, items } => {
-                if hits.is_empty() {
+            RecordSearch::Done {
+                hits,
+                items,
+                artists,
+                ..
+            } => {
+                let artists: Vec<ArtistHit> = match artists {
+                    ArtistLookup::Ready(a) => a.into_iter().take(ARTIST_HITS_SHOWN).collect(),
+                    ArtistLookup::Pending => Vec::new(),
+                };
+                if hits.is_empty() && artists.is_empty() {
                     note(ui, "No records on Discogs match that");
                     return None;
                 }
-                let mut chosen = None;
+                let mut chosen: Option<Pick> = None;
                 let mut toggled: Option<(VinylList, RecordHit, bool, bool)> = None;
                 let mut want_covers: Vec<String> = Vec::new();
                 // Only the first few are drawn. The popup is a quick answer, so
@@ -289,7 +429,7 @@ impl App {
                     let owned = self.vinyl_owned.contains(&hit.release_id);
                     let wanted = self.vinyl_wanted.contains(&hit.release_id);
                     match record_row(ui, hit, selected, tex, owned, wanted) {
-                        Some(RowAct::Open) => chosen = Some(hit.clone()),
+                        Some(RowAct::Open) => chosen = Some(Pick::Record(hit.clone())),
                         // Wanting or collecting leaves the popup up: the whole
                         // point of a lookup list is to work down it, and
                         // dismissing after each add would mean re-running the
@@ -308,6 +448,31 @@ impl App {
                             y,
                             egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE),
                         );
+                    }
+                }
+                if hits.is_empty() {
+                    note(ui, "No records on Discogs match that");
+                }
+                // The artists those words name, as a strip of chips under the
+                // records. The chips continue the cursor's index space, so the
+                // keyboard walks records then artists.
+                if !artists.is_empty() {
+                    let portraits: Vec<Option<Tex>> = artists
+                        .iter()
+                        .map(|a| match self.dig_covers.get(&a.thumb_url) {
+                            Some(ThumbState::Ready(t)) => t.clone(),
+                            Some(_) => None,
+                            None => {
+                                if !a.thumb_url.is_empty() {
+                                    want_covers.push(a.thumb_url.clone());
+                                }
+                                None
+                            }
+                        })
+                        .collect();
+                    let selected = self.search_cursor.and_then(|c| c.checked_sub(shown));
+                    if let Some(i) = artist_band(ui, &artists, &portraits, selected) {
+                        chosen = Some(Pick::Artist(artists[i].clone()));
                     }
                 }
                 // Account for everything the five rows didn't show, so the list
@@ -373,51 +538,206 @@ impl App {
         self.request_vinyl_edit(ctx, edit);
     }
 
-    /// Act on a chosen lookup result: open the record's sheet.
+    /// Act on a chosen lookup result.
     ///
-    /// A looked-up record is by definition one you may not own, so this goes
+    /// A looked-up record is by definition one you may not own, so it goes
     /// through `open_release_sheet` — the bare-release path a dig uses — rather
     /// than the collection-keyed one. The sheet then does the rest of the work
     /// the design brief asks of a confirmed match: tracklist, videos, "other
     /// versions", marketplace price, and links to any copies already in the
     /// catalog.
-    pub(crate) fn open_record_hit(&mut self, hit: RecordHit, ctx: &egui::Context) {
+    ///
+    /// An artist opens their whole discography as a page (the same list the
+    /// label page shows for an imprint), because "show me what they made" is
+    /// what typing an artist's name into a record search asks for.
+    pub(crate) fn open_pick(&mut self, pick: Pick, ctx: &egui::Context) {
         self.search_popup_open = false;
         self.search_cursor = None;
-        let cover = if hit.cover_image_url.is_empty() {
-            Some(hit.thumb_url.clone()).filter(|u| !u.is_empty())
-        } else {
-            Some(hit.cover_image_url.clone())
-        };
-        self.open_release_sheet(
-            hit.release_id,
-            hit.artist.clone(),
-            hit.title.clone(),
-            sheet_subtitle(&hit),
-            cover,
-            ctx,
-        );
+        match pick {
+            Pick::Record(hit) => {
+                let cover = if hit.cover_image_url.is_empty() {
+                    Some(hit.thumb_url.clone()).filter(|u| !u.is_empty())
+                } else {
+                    Some(hit.cover_image_url.clone())
+                };
+                self.open_release_sheet(
+                    hit.release_id,
+                    hit.artist.clone(),
+                    hit.title.clone(),
+                    sheet_subtitle(&hit),
+                    cover,
+                    ctx,
+                );
+            }
+            Pick::Artist(artist) => {
+                self.open_artist_page(artist.artist_id, artist.name);
+            }
+        }
     }
 
     /// How many rows the Discogs list currently has, for keyboard navigation.
     ///
     /// Counts what's *drawn*, not what was fetched: arrowing past the last
     /// visible row would otherwise highlight nothing and Enter would open a
-    /// record the user can't see.
-    pub(crate) fn record_hit_count(&self) -> usize {
+    /// record the user can't see. Artist chips count after the record rows.
+    pub(crate) fn pick_count(&self) -> usize {
         match &self.record_search {
-            RecordSearch::Done { hits, .. } => hits.len().min(RECORD_HITS_SHOWN),
+            RecordSearch::Done { hits, artists, .. } => {
+                hits.len().min(RECORD_HITS_SHOWN) + shown_artists(artists)
+            }
             _ => 0,
         }
     }
 
-    /// The record at `i` in the current results, if any.
-    pub(crate) fn record_hit_at(&self, i: usize) -> Option<RecordHit> {
+    /// The record or artist at `i` in the current results, if any.
+    pub(crate) fn pick_at(&self, i: usize) -> Option<Pick> {
         match &self.record_search {
-            RecordSearch::Done { hits, .. } => hits.get(i).cloned(),
+            RecordSearch::Done { hits, artists, .. } => {
+                let shown = hits.len().min(RECORD_HITS_SHOWN);
+                if i < shown {
+                    return hits.get(i).cloned().map(Pick::Record);
+                }
+                match artists {
+                    ArtistLookup::Ready(a) if i - shown < shown_artists(artists) => {
+                        a.get(i - shown).cloned().map(Pick::Artist)
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
+}
+
+/// How many artist chips the band draws for this lookup.
+fn shown_artists(artists: &ArtistLookup) -> usize {
+    match artists {
+        ArtistLookup::Ready(a) => a.len().min(ARTIST_HITS_SHOWN),
+        ArtistLookup::Pending => 0,
+    }
+}
+
+/// The strip of artist chips under the record rows. Returns the chip clicked.
+///
+/// A chip, not a row: an artist has no format, year or label to stack, only a
+/// name and a face, and four names side by side read as "the artists called
+/// this" where four tall rows would look like four more records. Chips that
+/// don't fit the width are simply not drawn — the strip is a quick offer, not
+/// a list to scroll.
+///
+/// `selected` is the keyboard cursor within the band, if it's here.
+fn artist_band(
+    ui: &mut egui::Ui,
+    artists: &[ArtistHit],
+    portraits: &[Option<Tex>],
+    selected: Option<usize>,
+) -> Option<usize> {
+    let (band, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), BAND_H),
+        egui::Sense::hover(),
+    );
+    ui.painter().hline(
+        band.x_range(),
+        band.top(),
+        egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE),
+    );
+    let small = egui::TextStyle::Small.resolve(ui.style());
+    let label = ui.painter().text(
+        egui::pos2(band.left() + space::S3, band.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Artists",
+        small.clone(),
+        color::LABEL_3,
+    );
+    let mut x = label.right() + space::S3;
+    let right = band.right() - space::S3;
+    let mut clicked = None;
+    for (i, a) in artists.iter().enumerate() {
+        let name = crate::dig::strip_disambiguator(&a.name).to_string();
+        let galley = ui.fonts(|f| {
+            let mut job = egui::text::LayoutJob::simple_singleline(
+                name,
+                egui::TextStyle::Body.resolve(ui.style()),
+                color::LABEL,
+            );
+            job.wrap.max_width = CHIP_NAME_MAX_W;
+            job.wrap.max_rows = 1;
+            job.wrap.break_anywhere = false;
+            f.layout_job(job)
+        });
+        let w = CHIP_PAD + AVATAR_PX + space::S2 + galley.size().x + CHIP_PAD;
+        if x + w > right {
+            break;
+        }
+        let chip = egui::Rect::from_min_size(
+            egui::pos2(x, band.center().y - CHIP_H / 2.0),
+            egui::vec2(w, CHIP_H),
+        );
+        let resp = ui.interact(
+            chip,
+            ui.id().with(("artist-chip", a.artist_id)),
+            egui::Sense::click(),
+        );
+        let hot = ui.ctx().animate_bool_with_time(
+            resp.id.with("hot"),
+            selected == Some(i) || resp.hovered(),
+            ROW_HIGHLIGHT_ANIM,
+        );
+        let rounding = egui::Rounding::same(CHIP_H / 2.0);
+        ui.painter().rect_filled(chip, rounding, color::SURFACE_HI);
+        if hot > 0.0 {
+            ui.painter().rect_filled(
+                chip,
+                rounding,
+                ui.visuals()
+                    .widgets
+                    .hovered
+                    .weak_bg_fill
+                    .gamma_multiply(hot),
+            );
+        }
+        // The portrait, round: a face in a circle reads as a person where the
+        // square covers above read as records.
+        let face = egui::Rect::from_center_size(
+            egui::pos2(chip.left() + CHIP_PAD + AVATAR_PX / 2.0, chip.center().y),
+            egui::vec2(AVATAR_PX, AVATAR_PX),
+        );
+        let face_round = egui::Rounding::same(AVATAR_PX / 2.0);
+        match portraits.get(i).cloned().flatten() {
+            Some(tex) => {
+                egui::Image::new(&tex)
+                    .rounding(face_round)
+                    .paint_at(ui, face);
+            }
+            None => {
+                ui.painter().rect_filled(face, face_round, color::FIELD);
+                ui.painter().text(
+                    face.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "♪",
+                    small.clone(),
+                    color::LABEL_3,
+                );
+            }
+        }
+        ui.painter().galley(
+            egui::pos2(
+                face.right() + space::S2,
+                chip.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            color::LABEL,
+        );
+        if resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(format!("Every release by {}", a.name))
+            .clicked()
+        {
+            clicked = Some(i);
+        }
+        x += w + space::S2;
+    }
+    clicked
 }
 
 /// Total width the scope toggle occupies, reserved by the toolbar so the search

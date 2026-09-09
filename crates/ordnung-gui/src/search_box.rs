@@ -209,7 +209,7 @@ impl App {
         let focused = field.has_focus();
         // Arrow/Enter navigate whichever list is on screen.
         let n = if self.searching_discogs() {
-            self.record_hit_count()
+            self.pick_count()
         } else {
             self.search_hits.len()
         };
@@ -264,8 +264,8 @@ impl App {
             if enter {
                 let i = self.search_cursor.unwrap_or(0);
                 if self.searching_discogs() {
-                    if let Some(hit) = self.record_hit_at(i) {
-                        self.open_record_hit(hit, &ctx);
+                    if let Some(pick) = self.pick_at(i) {
+                        self.open_pick(pick, &ctx);
                         return;
                     }
                 } else if let Some(h) = self.search_hits.get(i) {
@@ -297,7 +297,7 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
-        let mut record_chosen: Option<ordnung_core::discogs::RecordHit> = None;
+        let mut record_chosen: Option<crate::records::Pick> = None;
         let discogs_mode = self.searching_discogs();
         let mut dismiss = false;
         // Cover loads discovered while drawing; issued after the Area closure so
@@ -476,8 +476,8 @@ impl App {
         }
         if filter_clicked {
             self.filter_table_by_search();
-        } else if let Some(hit) = record_chosen {
-            self.open_record_hit(hit, &ctx);
+        } else if let Some(pick) = record_chosen {
+            self.open_pick(pick, &ctx);
         } else if let Some(hit) = chosen {
             self.open_search_hit(hit, &ctx);
         } else if dismiss {

@@ -149,8 +149,8 @@ impl App {
             seller_shipping: HashMap::new(),
             wantlist_watch: Vec::new(),
             show_watch: false,
-            label_panel: None,
-            label_rx: None,
+            browse_panel: None,
+            browse_rx: None,
             vinyl_filter: String::new(),
             vinyl_flt: VinylFilters::default(),
             vinyl_genre_fallback: HashMap::new(),
@@ -1732,7 +1732,7 @@ impl eframe::App for App {
         self.poll_vinyl_sheet();
         self.poll_sheet_price();
         self.poll_versions();
-        self.poll_label_page();
+        self.poll_browse_page();
         self.poll_dig();
         self.poll_records();
         self.poll_dig_primed();
@@ -3631,7 +3631,7 @@ impl eframe::App for App {
         self.draw_vinyl_sheet(ctx, frame);
         self.draw_versions(ctx);
         self.draw_wantlist_watch(ctx);
-        self.draw_label_page(ctx);
+        self.draw_browse_page(ctx);
         self.draw_failure_report(ctx);
         self.draw_export_confirm(ctx);
         self.draw_usb_setup_confirm(ctx);
