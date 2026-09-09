@@ -1946,15 +1946,19 @@ pub(crate) fn run_write_edits(
                 let _ = catalog.clear_user_edited(t.id);
                 // If we embedded art, re-scan so the catalog's cover_thumb
                 // reflects what now lives in the file, then drop the fetched
-                // row — the cover now lives in the file, so keeping it around
-                // would leave the inspector's "Embed fetched cover into file"
-                // button offering a write that already happened. Same reasoning
-                // (and same order) as the single-track embed path.
+                // image bytes — the cover now lives in the file, so keeping
+                // them around would leave the inspector's "Embed fetched cover
+                // into file" button offering a write that already happened.
+                // Only the images: the row's release id is the track's Discogs
+                // match (the library tick, "View release", wantlisting), and an
+                // auto-matched import lands here on the automatic write, so
+                // deleting the row used to un-match every new song. Same
+                // reasoning (and same order) as the single-track embed path.
                 if art.is_some() {
                     if let Ok(scanned) = scan::scan_file(&path) {
                         let _ = catalog.upsert_scanned(&scanned);
                     }
-                    let _ = catalog.clear_external_artwork(t.id);
+                    let _ = catalog.clear_external_artwork_images(t.id);
                 }
                 written += 1;
             }

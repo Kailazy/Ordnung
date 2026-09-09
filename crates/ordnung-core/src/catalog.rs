@@ -1378,6 +1378,32 @@ impl Catalog {
         Ok(())
     }
 
+    /// The fetched cover now lives in the source file: forget the cached image
+    /// bytes but keep the row's release link. Embedding is the normal end of an
+    /// auto-match (fetch → pending edit → automatic write), and deleting the
+    /// whole row there — as [`Self::clear_external_artwork`] does — silently
+    /// un-matched every such track: the library's release tick, "View release",
+    /// and the wantlist menu all read `external_id`. With the images gone the
+    /// inspector's "Embed fetched cover" button still disappears (it keys on
+    /// `full_bytes`), the cover loader falls back to the now-embedded art, and
+    /// the `prefer_external` flag is reset since there's nothing left to prefer.
+    /// A row with no release id (a dragged-in cover, a no-match marker) has
+    /// nothing worth keeping and is dropped outright, exactly as before.
+    pub fn clear_external_artwork_images(&self, track_id: Id) -> Result<()> {
+        self.conn.execute(
+            "UPDATE track_external_artwork
+             SET png_bytes = NULL, full_bytes = NULL, url = NULL, prefer_external = 0
+             WHERE track_id = ?1",
+            params![track_id as i64],
+        )?;
+        self.conn.execute(
+            "DELETE FROM track_external_artwork
+             WHERE track_id = ?1 AND (external_id IS NULL OR TRIM(external_id) = '')",
+            params![track_id as i64],
+        )?;
+        Ok(())
+    }
+
     /// Return a cached Discogs [`ReleaseDetail`] for `release_id`, or `None` if it
     /// hasn't been fetched yet. A corrupt/old cached row (one that no longer
     /// deserializes) is treated as a miss, not an error, so a schema change to
@@ -5471,6 +5497,46 @@ mod tests {
             .unwrap();
         assert_eq!(png.as_deref(), Some(&[1u8, 2][..]));
         assert_eq!(full.as_deref(), Some(&[3u8, 4][..]));
+    }
+
+    /// Embedding a fetched cover must not un-match the track: the images go,
+    /// the release link stays, and rows with no release id vanish as before.
+    #[test]
+    fn clear_external_artwork_images_keeps_the_release_link() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let (a, _) = cat
+            .upsert_scanned(&scanned("/m/a.mp3", "A", "House", 1000))
+            .unwrap();
+        let (b, _) = cat
+            .upsert_scanned(&scanned("/m/b.mp3", "B", "House", 1000))
+            .unwrap();
+        cat.set_external_artwork(
+            a,
+            "discogs",
+            Some("222"),
+            Some("u"),
+            Some(&[1, 2]),
+            Some(&[3, 4]),
+        )
+        .unwrap();
+        cat.set_prefer_external_artwork(a, true).unwrap();
+        // A dragged-in cover: no release behind it.
+        cat.set_external_artwork(b, "drag", None, None, Some(&[1, 2]), Some(&[3, 4]))
+            .unwrap();
+
+        cat.clear_external_artwork_images(a).unwrap();
+        cat.clear_external_artwork_images(b).unwrap();
+
+        assert_eq!(cat.release_track_links().unwrap(), vec![(222u64, a)]);
+        assert_eq!(cat.external_release_id(a).unwrap().as_deref(), Some("222"));
+        assert!(cat.get_external_artwork(a).unwrap().is_none());
+        assert!(cat.get_external_artwork_full(a).unwrap().is_none());
+        assert!(!cat.prefers_external_artwork(a).unwrap());
+        assert!(cat.external_artwork_ids().unwrap().is_empty());
+        // Still counts as a settled Discogs attempt, so a re-import won't re-match.
+        assert!(cat.tracks_without_release_attempt(&[a]).unwrap().is_empty());
+        // The linkless row is gone entirely.
+        assert!(cat.tracks_without_release_attempt(&[b]).unwrap() == vec![b]);
     }
 
     #[test]

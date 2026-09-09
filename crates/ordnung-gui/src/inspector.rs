@@ -926,10 +926,12 @@ impl App {
                 // cover_thumb reflects the embedded art, mirroring a rescan.
                 //
                 // The write above succeeded, so the cover IS now in the file —
-                // that's the authoritative signal. The fetched external artwork
-                // is therefore redundant: drop it so the "Embed fetched cover"
+                // that's the authoritative signal. The fetched image bytes are
+                // therefore redundant: drop them so the "Embed fetched cover"
                 // button (inspector) — derived from the external full-res row —
-                // disappears for this track.
+                // disappears for this track. The row's release id stays: it is
+                // the track's Discogs match, and embedding the cover doesn't
+                // un-match the song.
                 //
                 // The rescan is best-effort *thumbnail refresh* only: it updates
                 // cover_thumb/has_cover from the file. We deliberately do NOT gate
@@ -946,7 +948,7 @@ impl App {
                     }
                     Err(_) => false,
                 };
-                if let Err(e) = catalog.clear_external_artwork(id) {
+                if let Err(e) = catalog.clear_external_artwork_images(id) {
                     self.status = format!("Embedded cover, but failed to clear fetched art: {e}");
                 } else if !verified {
                     self.status = format!(
