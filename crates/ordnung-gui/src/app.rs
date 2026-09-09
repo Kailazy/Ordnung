@@ -1647,6 +1647,13 @@ impl App {
     }
 }
 
+/// Tightest usable global zoom. Below this the row text falls under the
+/// legible floor on a laptop panel.
+const MIN_UI_ZOOM: f32 = 0.8;
+/// Loosest usable global zoom. Above this the inspector and table no longer
+/// fit side by side on a 13-inch screen.
+const MAX_UI_ZOOM: f32 = 1.5;
+
 impl eframe::App for App {
     // TEMP DEBUG: inject a synthetic hover at ORDNUNG_CURSOR_PROBE="x,y".
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -1670,6 +1677,18 @@ impl eframe::App for App {
         if !self.menu_installed {
             self.menu_installed = true;
             crate::macos_menu::install();
+        }
+        // Keep the global UI zoom (Cmd +/-, applied by egui at the start of
+        // the pass) inside a usable band. egui's own bounds are 0.2x..5x, which
+        // lets one held keystroke shrink the table to a smear or blow a single
+        // row past the window. Clamping here also catches an out-of-range zoom
+        // restored from a previous session's persisted memory.
+        {
+            let zoom = ctx.zoom_factor();
+            let clamped = zoom.clamp(MIN_UI_ZOOM, MAX_UI_ZOOM);
+            if clamped != zoom {
+                ctx.set_zoom_factor(clamped);
+            }
         }
         // Drop cover textures evicted during the PREVIOUS frame. Doing it here —
         // before anything paints or uploads — guarantees the frame that painted
