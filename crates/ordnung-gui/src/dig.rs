@@ -43,12 +43,14 @@ impl DigThread {
 
 /// What one step actually asks Discogs: an id browse down the artist or label
 /// thread, or a style search by tag name. Carried alongside the [`DigThread`]
-/// so the fetch worker doesn't have to re-derive which style was picked —
-/// a record lists several, and the button's menu chooses one.
+/// so the fetch worker doesn't have to re-derive what was searched. A style
+/// query carries *all* of the record's tags — the search wants records that
+/// share the whole set, not any one of them, so a "Deep House / Dub Techno"
+/// record finds the records that sit in exactly that corner.
 #[derive(Clone)]
 pub(crate) enum DigQuery {
     Browse(BrowseThread, u64),
-    Style(String),
+    Style(Vec<String>),
 }
 
 impl DigQuery {
@@ -63,21 +65,57 @@ impl DigQuery {
         }
     }
 
-    /// The style name this query searches, for the connector's caption.
+    /// The style tags this query searches, joined for the connector's caption.
     fn style(&self) -> Option<String> {
         match self {
-            DigQuery::Style(s) => Some(s.clone()),
+            DigQuery::Style(s) => Some(style_caption(s)),
             DigQuery::Browse(..) => None,
         }
     }
 }
 
-/// A stable 64-bit key for a style name (FNV-1a), standing in where the other
-/// threads have a Discogs id. Folded to lowercase so a tag that Discogs
-/// capitalizes inconsistently across releases still keys one thread.
-fn style_entity(style: &str) -> u64 {
+/// The tag set as one line: "Deep House, Dub Techno".
+pub(crate) fn style_caption(styles: &[String]) -> String {
+    styles
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The style button's hover line, shared by the strip and the release sheet:
+/// what one click will look for, or why it can't yet.
+pub(crate) fn style_tip(styles: &[String], resolved: bool) -> String {
+    let tags: Vec<&str> = styles
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    match tags.as_slice() {
+        [] if resolved => "Discogs lists no style for this record".to_string(),
+        [] => "Looking up this record's styles on Discogs…".to_string(),
+        [one] => format!("Find another {one} record on vinyl that you don't own"),
+        [head @ .., last] => format!(
+            "Find another record tagged {} and {last} on vinyl that you don't own",
+            head.join(", ")
+        ),
+    }
+}
+
+/// A stable 64-bit key for a style tag set (FNV-1a), standing in where the
+/// other threads have a Discogs id. Folded to lowercase and sorted so a tag
+/// that Discogs capitalizes inconsistently, or credits in a different order
+/// across releases, still keys one thread.
+fn style_entity(styles: &[String]) -> u64 {
+    let mut tags: Vec<String> = styles
+        .iter()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    tags.sort();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in style.trim().to_lowercase().bytes() {
+    for b in tags.join("\n").bytes() {
         h ^= b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01B3);
     }
@@ -135,8 +173,8 @@ pub(crate) struct DigStep {
 }
 
 impl DigStep {
-    /// The default query down `thread` from this record: the primary artist or
-    /// label id, or the first style tag. `None` while the detail is still
+    /// The query down `thread` from this record: the primary artist or label
+    /// id, or the full set of style tags. `None` while the detail is still
     /// resolving (or when the release genuinely has none) — the buttons wait
     /// on it either way.
     fn query(&self, thread: DigThread) -> Option<DigQuery> {
@@ -149,7 +187,9 @@ impl DigStep {
                 .label_ids
                 .first()
                 .map(|id| DigQuery::Browse(BrowseThread::Label, *id)),
-            DigThread::Style => self.styles.first().map(|s| DigQuery::Style(s.clone())),
+            DigThread::Style => {
+                (!self.styles.is_empty()).then(|| DigQuery::Style(self.styles.clone()))
+            }
         }
     }
 }
@@ -685,6 +725,50 @@ mod tests {
     /// A fork keeps its first branch on the parent's row and drops each later
     /// branch below everything the earlier branches used, so no two cards can
     /// ever share a slot however the web was grown.
+    /// The style thread keys on the whole tag set, however Discogs cased or
+    /// ordered it, and one different tag is a different thread.
+    #[test]
+    fn style_key_is_the_tag_set() {
+        let tags = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            style_entity(&tags(&["Deep House", "Dub Techno"])),
+            style_entity(&tags(&["dub techno ", " deep house"]))
+        );
+        assert_ne!(
+            style_entity(&tags(&["Deep House", "Dub Techno"])),
+            style_entity(&tags(&["Deep House"]))
+        );
+        assert_eq!(
+            style_entity(&tags(&["Deep House", ""])),
+            style_entity(&tags(&["Deep House"]))
+        );
+    }
+
+    #[test]
+    fn style_tip_names_every_tag() {
+        let tags = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            style_tip(&tags(&["Deep House"]), true),
+            "Find another Deep House record on vinyl that you don't own"
+        );
+        assert_eq!(
+            style_tip(&tags(&["Deep House", "Dub Techno", "Ambient"]), true),
+            "Find another record tagged Deep House, Dub Techno and Ambient on vinyl that you don't own"
+        );
+        assert_eq!(
+            style_tip(&[], true),
+            "Discogs lists no style for this record"
+        );
+        assert_eq!(
+            style_tip(&[], false),
+            "Looking up this record's styles on Discogs…"
+        );
+        assert_eq!(
+            style_caption(&tags(&["Deep House", "Dub Techno"])),
+            "Deep House, Dub Techno"
+        );
+    }
+
     #[test]
     fn web_layout_branches_drop_below() {
         // 0 → 1 → 2, then back to 1 for a second thread (4), then back to the
@@ -753,7 +837,7 @@ fn browse_step(
         DigQuery::Browse(thread, entity) => client.browse_by_id(*thread, *entity, page),
         // The style search filters to vinyl server-side and returns each row's
         // format, so the resolution below is a no-op for nearly every row.
-        DigQuery::Style(style) => client.search_by_style(style, page),
+        DigQuery::Style(styles) => client.search_by_style(styles, page),
     }
     .map(|mut p| {
         // Master rows carry no format, so "is this a record?" can't be
@@ -938,12 +1022,6 @@ impl App {
             return;
         };
         self.dig_take(thread, query);
-    }
-
-    /// Take the style thread down one *specific* style — the pick made in the
-    /// style button's menu on a record that carries several tags.
-    pub(crate) fn dig_step_style(&mut self, style: String) {
-        self.dig_take(DigThread::Style, DigQuery::Style(style));
     }
 
     /// Take one concrete query out of the record on screen, spending the
@@ -1168,7 +1246,7 @@ impl App {
                     pick.label.clone()
                 }
             }
-            // The tag that was searched — the row itself carries no styles.
+            // The tags that were searched — the row itself carries no styles.
             DigThread::Style => style.unwrap_or_default(),
         };
         let step = DigStep {
@@ -1287,9 +1365,7 @@ impl App {
         let head = dig.head();
         let from = head.release_id;
         // Nothing to prime while this head is still resolving its own ids; the
-        // next frame after they land will catch it. The style thread primes
-        // its *default* pick (the first tag) — a menu pick of another style
-        // fetches on demand, which is the rarer path.
+        // next frame after they land will catch it.
         let mut want: Vec<(DigThread, DigQuery)> = Vec::new();
         for thread in [DigThread::Artist, DigThread::Label, DigThread::Style] {
             let Some(query) = head.query(thread) else {
@@ -1602,7 +1678,6 @@ impl App {
 
         let mut open: Option<DigOpen> = None;
         let mut step: Option<DigThread> = None;
-        let mut step_style: Option<String> = None;
         let mut goto: Option<usize> = None;
         let mut end = false;
         // Set while laying out the web when it has forked past one row — the
@@ -2034,39 +2109,21 @@ impl App {
                                 step = Some(DigThread::Label);
                             }
                             // The third thread: records that sound like this one.
-                            // One style digs on click; several open as a menu, so
-                            // a "Deep House / Dub Techno" record can be followed
-                            // down either sound.
+                            // The search asks for every tag the record carries,
+                            // so a "Deep House / Dub Techno" record finds the
+                            // records that sit in that same corner rather than
+                            // anything from either bin.
                             let can_style = !head_styles.is_empty();
-                            let style_tip = match head_styles.first() {
-                                Some(s) if head_styles.len() == 1 => {
-                                    format!("Find another {s} record on vinyl that you don't own")
-                                }
-                                Some(_) => "Find another record with one of this record's \
-                                        style tags"
-                                    .to_string(),
-                                None if head_resolved => {
-                                    "Discogs lists no style for this record".to_string()
-                                }
-                                None => "Looking up this record's styles on Discogs…".to_string(),
-                            };
-                            let style_btn = ui
+                            let style_tip = style_tip(&head_styles, head_resolved);
+                            if ui
                                 .add_enabled(
                                     can_style && !busy,
                                     egui::Button::new("  ◈  Dig the style  "),
                                 )
                                 .on_hover_note(style_tip.clone())
-                                .on_disabled_hover_text(crate::ui::hover::note(style_tip));
-                            if head_styles.len() > 1 {
-                                crate::ui::menu::dropdown(&style_btn, 200.0, |m| {
-                                    for s in &head_styles {
-                                        if m.selectable(false, s) {
-                                            step_style = Some(s.clone());
-                                            m.close();
-                                        }
-                                    }
-                                });
-                            } else if style_btn.clicked() {
+                                .on_disabled_hover_text(crate::ui::hover::note(style_tip))
+                                .clicked()
+                            {
                                 step = Some(DigThread::Style);
                             }
                             if busy {
@@ -2123,8 +2180,6 @@ impl App {
             }
         } else if let Some(thread) = step {
             self.dig_step(thread);
-        } else if let Some(style) = step_style {
-            self.dig_step_style(style);
         }
         // Whichever way the head moved — a branch taken, a step back, a jump to
         // a card — everything speculated for the record we just left is now

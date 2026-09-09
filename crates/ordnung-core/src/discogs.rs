@@ -1430,22 +1430,34 @@ impl Client {
         })
     }
 
-    /// Browse releases by Discogs **style** tag ("Deep House", "Dub Techno"),
-    /// for the dig's style thread — records that sound like this one, from
-    /// anyone, on any label.
+    /// Browse releases carrying **every** one of these Discogs style tags
+    /// ("Deep House" + "Dub Techno"), for the dig's style thread — records
+    /// that sound like this one, from anyone, on any label.
     ///
     /// Unlike the artist/label browses this rides the search endpoint, which
     /// takes a `style` facet and a `format` filter — so the rows come back
     /// vinyl-only and carrying their format string, and the caller's format
     /// resolution has nothing left to do on most pages. Style names come from
-    /// [`ReleaseDetail::styles`]; the facet matches the tag exactly, so a name
-    /// is as precise as an id is for an artist.
+    /// [`ReleaseDetail::styles`]; the facet matches each tag exactly, so a
+    /// name is as precise as an id is for an artist.
+    ///
+    /// Several tags go up as one comma-joined facet, which Discogs ANDs: a
+    /// "Deep House, Dub Techno" record finds only records tagged with both,
+    /// not everything in either bin. (Repeating the parameter instead is
+    /// silently collapsed to the first tag.) Blank tags are dropped; with
+    /// none left the page comes back empty without a request.
     ///
     /// `page` is 1-based; the caller learns the real page count from
     /// [`BrowsePage::pages`]. One API request per call, paced by the shared
     /// throttle.
-    pub fn search_by_style(&self, style: &str, page: u32) -> Result<BrowsePage> {
-        let style = style.trim();
+    pub fn search_by_style(&self, styles: &[String], page: u32) -> Result<BrowsePage> {
+        let style = styles
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(",");
+        let style = style.as_str();
         if style.is_empty() {
             return Ok(BrowsePage::default());
         }
