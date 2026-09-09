@@ -3,167 +3,43 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Ordnung — DJ music catalog &amp; analyzer</title>
-<meta name="description" content="A DJ music catalog and analyzer." />
-
+<title>Ordnung</title>
+<meta name="description" content="Ordnung for macOS." />
 <meta property="og:title" content="Ordnung" />
-<meta property="og:description" content="A DJ music catalog and analyzer." />
 <meta property="og:type" content="website" />
-
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1024 1024'%3E%3Crect width='1024' height='1024' rx='229' fill='%2342454b'/%3E%3Cpath d='M512 192A320 320 0 1 0 512 832A320 320 0 1 0 512 192ZM512 292A220 220 0 1 1 512 732A220 220 0 1 1 512 292Z' fill='%2393a6bf' fill-rule='evenodd'/%3E%3Crect x='402' y='490' width='220' height='44' rx='22' fill='%2393a6bf'/%3E%3C/svg%3E" />
-
 <style>
-  :root {
-    /* pulled straight from the egui app's palette */
-    --bg: #141414;            /* from_gray(20) */
-    --line-soft: #262626;
-    --accent: #406eb4;        /* NAV_ACCENT rgb(64,110,180) */
-    --accent-bright: #5a96dc; /* selection stroke rgb(90,150,220) */
-    --text: #d6d6d6;
-    --muted: #888888;         /* from_gray(120-ish) */
-    --radius: 6px;            /* egui Rounding::same(6.0) */
-  }
-
-  * { box-sizing: border-box; }
-
   body {
     margin: 0;
     min-height: 100vh;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 40px 20px;
-    background: var(--bg);
-    color: var(--text);
+    gap: 22px;
+    background: #141414;
+    color: #d6d6d6;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
     font-size: 15px;
-    line-height: 1.55;
     -webkit-font-smoothing: antialiased;
   }
-
-  main { width: 100%; max-width: 520px; text-align: center; }
-
-  h1 {
-    font-size: 2rem;
-    font-weight: 600;
-    letter-spacing: -0.02em;
-    margin: 0;
-  }
-
-  .tagline { color: var(--muted); margin: 6px 0 0; }
-
-  /* ---- waveform ---- */
-  .wave {
-    height: 64px;
-    margin: 30px 0;
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    padding: 0 2px;
-    border-radius: var(--radius);
-    background: #161616;
-    border: 1px solid var(--line-soft);
-    overflow: hidden;
-  }
-  .wave i {
-    flex: 1 1 0;
-    border-radius: 1px;
-    background: var(--accent);
-    opacity: 0.85;
-    min-width: 0;
-  }
-
-  /* ---- download ---- */
+  h1 { margin: 0; font-size: 2rem; font-weight: 600; letter-spacing: -0.02em; }
   .btn {
-    display: inline-flex; align-items: center; gap: 8px;
     padding: 10px 20px;
-    border-radius: var(--radius);
-    font-size: 0.95rem; font-weight: 550;
-    text-decoration: none;
-    border: 1px solid transparent;
-    background: var(--accent);
+    border-radius: 6px;
+    background: #406eb4;
     color: #fff;
-    transition: background 0.15s ease;
+    font-weight: 550;
+    text-decoration: none;
   }
-  .btn:hover { background: var(--accent-bright); }
-  .btn svg { width: 17px; height: 17px; }
-
-  .platform-note {
-    color: var(--muted);
-    font-size: 0.82rem;
-    margin: 12px 0 0;
-    text-wrap: balance;
-  }
-
-  /* ---- the two things it does ---- */
-  .does {
-    margin: 38px 0 0;
-    padding: 22px 0 0;
-    border-top: 1px solid var(--line-soft);
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 22px;
-    text-align: left;
-  }
-  .does b { display: block; font-weight: 550; font-size: 0.9rem; }
-  .does span { color: var(--muted); font-size: 0.85rem; }
-
-  @media (max-width: 560px) {
-    h1 { font-size: 1.7rem; }
-    .does { grid-template-columns: 1fr; gap: 18px; }
-  }
-
-  footer { margin: 34px 0 0; }
-  footer a { color: var(--muted); font-size: 0.82rem; text-decoration: none; }
-  footer a:hover { color: var(--text); }
+  .btn:hover { background: #5a96dc; }
+  .gh { color: #888; font-size: 0.82rem; text-decoration: none; }
+  .gh:hover { color: #d6d6d6; }
 </style>
 </head>
 <body>
-
-<main>
   <h1>Ordnung</h1>
-  <p class="tagline">A DJ music catalog and analyzer.</p>
-
-  <div class="wave" id="wave" aria-hidden="true"></div>
-
-  <a class="btn" href="https://github.com/Kailazy/Ordnung/releases/latest">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
-    Download for macOS
-  </a>
-  <p class="platform-note">Universal <code>.dmg</code> — Apple Silicon + Intel · macOS 11+</p>
-
-  <div class="does">
-    <div><b>Catalog</b><span>Scans your music into a SQLite catalog. Finds duplicates and missing files.</span></div>
-    <div><b>Analysis</b><span>Musical key, colored waveforms, and loudness.</span></div>
-  </div>
-
-  <footer><a href="https://github.com/Kailazy/Ordnung">GitHub</a></footer>
-</main>
-
-<script>
-  // Build a static waveform strip echoing the app's spectrum view.
-  // Deterministic shape (no randomness) — a couple of musical "swells".
-  (function () {
-    var wave = document.getElementById("wave");
-    if (!wave) return;
-    var N = 96;
-    for (var i = 0; i < N; i++) {
-      var x = i / N;
-      // two overlapping envelopes + a fine ripple, all in [0,1]
-      var env = 0.45
-        + 0.40 * Math.sin(x * Math.PI)                 // overall swell
-        + 0.18 * Math.sin(x * Math.PI * 7 + 0.6)       // mid detail
-        + 0.10 * Math.sin(x * Math.PI * 23 + 1.2);     // fine ripple
-      env = Math.max(0.10, Math.min(1, env));
-      var bar = document.createElement("i");
-      bar.style.height = (env * 100).toFixed(1) + "%";
-      // tint shifts subtly toward the bright accent at peaks (spectrum feel)
-      bar.style.opacity = (0.55 + env * 0.4).toFixed(2);
-      if (env > 0.8) bar.style.background = "var(--accent-bright)";
-      wave.appendChild(bar);
-    }
-  })();
-</script>
-
+  <a class="btn" href="https://github.com/Kailazy/Ordnung/releases/latest">Download for macOS</a>
+  <a class="gh" href="https://github.com/Kailazy/Ordnung">GitHub</a>
 </body>
 </html>
