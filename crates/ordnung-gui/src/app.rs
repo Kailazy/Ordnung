@@ -145,6 +145,7 @@ impl App {
             seller_genres: HashMap::new(),
             seller_hay: Vec::new(),
             seller_add: String::new(),
+            seller_find: String::new(),
             viewed_releases: HashSet::new(),
             seller_shipping: HashMap::new(),
             wantlist_watch: Vec::new(),

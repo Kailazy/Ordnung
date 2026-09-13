@@ -189,56 +189,21 @@ impl App {
         let busy = self.is_busy();
         self.ensure_seller_listings();
 
-        // --- Shop row: saved sellers as chips, plus the add box. -------------
+        // --- Shop rows: actions on one line, the saved sellers wrapped below.
+        // The chips wrap instead of running off the edge, so a hundred saved
+        // shops are still all on screen; past a handful a find box narrows
+        // them by name, and the actions for the current shop keep their own
+        // line so they never land on top of a chip.
         let mut switch_to: Option<String> = None;
         let mut remove: Option<String> = None;
         let mut sweep: Option<String> = None;
         let mut add_clicked = false;
+        const FIND_AT: usize = 8;
+        let many = self.sellers.len() >= FIND_AT;
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            for shop in &self.sellers {
-                let active = self.seller_current.as_deref() == Some(shop.username.as_str());
-                let chip = ui.selectable_label(active, &shop.username);
-                // The chip's hover popup is the shop's info card, led by the
-                // shipping floor. Quotes are per record and location-specific;
-                // a seller publishing only a free-text policy has none, and
-                // that absence never reads as free.
-                let mut note = String::from("Browse this seller's crates");
-                match self.seller_shipping.get(&shop.username) {
-                    Some((price, currency)) => note.push_str(&format!(
-                        ". Shipping from {} per record",
-                        crate::vinyl_sheet::fmt_market_price(&discogs::MarketPrice {
-                            value: *price,
-                            currency: currency.clone(),
-                        })
-                    )),
-                    None => {
-                        note.push_str(". Shipping not quoted yet, update the crates to fetch it")
-                    }
-                }
-                let chip = chip.on_hover_note(note);
-                if chip.clicked() {
-                    switch_to = Some(shop.username.clone());
-                }
-                chip.context_menu(|ui| {
-                    if ui.button("↗ Open shop on Discogs").clicked() {
-                        open_url(&format!(
-                            "https://www.discogs.com/seller/{}/profile",
-                            shop.username
-                        ));
-                        ui.close_menu();
-                    }
-                    if ui.button("✖ Remove seller").clicked() {
-                        remove = Some(shop.username.clone());
-                        ui.close_menu();
-                    }
-                });
-            }
-            if !self.sellers.is_empty() {
-                ui.add_space(6.0);
-            }
-            // The add box lives in a popup so the shop row stays a row of
-            // chips; the button toggles it, Enter or Add inside submits.
+            // The add box lives in a popup so the row stays a row of
+            // buttons; the button toggles it, Enter or Add inside submits.
             let add_btn = ui
                 .small_button("＋ Add seller")
                 .on_hover_note("Save a Discogs seller to dig through, by username or shop URL");
@@ -276,6 +241,25 @@ impl App {
                     });
                 },
             );
+            if many {
+                ui.add_space(6.0);
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.seller_find)
+                        .desired_width(150.0)
+                        .hint_text(format!("Find among {} sellers", self.sellers.len())),
+                );
+                edit.on_hover_note("Narrow the seller chips by name");
+                if !self.seller_find.is_empty()
+                    && ui
+                        .small_button("✖")
+                        .on_hover_note("Show every seller again")
+                        .clicked()
+                {
+                    self.seller_find.clear();
+                }
+            } else {
+                self.seller_find.clear();
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(cur) = self.seller_current.clone() {
                     ui.add_enabled_ui(!busy, |ui| {
@@ -297,9 +281,74 @@ impl App {
                     {
                         open_url(&format!("https://www.discogs.com/seller/{cur}/profile"));
                     }
+                    if ui
+                        .button("✖ Remove")
+                        .on_hover_note("Forget this seller and their cached crates")
+                        .clicked()
+                    {
+                        remove = Some(cur.clone());
+                    }
+                    ui.label(egui::RichText::new(&cur).strong());
                 }
             });
         });
+        if !self.sellers.is_empty() {
+            ui.add_space(4.0);
+            // Alphabetical so a long list scans; the find box narrows it by
+            // substring. The current shop always stays visible even when it
+            // doesn't match, so the selection never looks lost.
+            let find = self.seller_find.trim().to_lowercase();
+            let mut shown: Vec<&SellerShop> = self
+                .sellers
+                .iter()
+                .filter(|s| {
+                    find.is_empty()
+                        || s.username.to_lowercase().contains(&find)
+                        || self.seller_current.as_deref() == Some(s.username.as_str())
+                })
+                .collect();
+            shown.sort_by_key(|s| s.username.to_lowercase());
+            ui.horizontal_wrapped(|ui| {
+                for shop in shown {
+                    let active = self.seller_current.as_deref() == Some(shop.username.as_str());
+                    let chip = ui.selectable_label(active, &shop.username);
+                    // The chip's hover popup is the shop's info card, led by
+                    // the shipping floor. Quotes are per record and
+                    // location-specific; a seller publishing only a free-text
+                    // policy has none, and that absence never reads as free.
+                    let mut note = String::from("Browse this seller's crates");
+                    match self.seller_shipping.get(&shop.username) {
+                        Some((price, currency)) => note.push_str(&format!(
+                            ". Shipping from {} per record",
+                            crate::vinyl_sheet::fmt_market_price(&discogs::MarketPrice {
+                                value: *price,
+                                currency: currency.clone(),
+                            })
+                        )),
+                        None => note.push_str(
+                            ". Shipping not quoted yet, update the crates to fetch it",
+                        ),
+                    }
+                    let chip = chip.on_hover_note(note);
+                    if chip.clicked() {
+                        switch_to = Some(shop.username.clone());
+                    }
+                    chip.context_menu(|ui| {
+                        if ui.button("↗ Open shop on Discogs").clicked() {
+                            open_url(&format!(
+                                "https://www.discogs.com/seller/{}/profile",
+                                shop.username
+                            ));
+                            ui.close_menu();
+                        }
+                        if ui.button("✖ Remove seller").clicked() {
+                            remove = Some(shop.username.clone());
+                            ui.close_menu();
+                        }
+                    });
+                }
+            });
+        }
 
         // Apply the shop-row asks now that `self.sellers` is free again.
         if let Some(u) = switch_to {

@@ -1233,6 +1233,9 @@ struct App {
     /// The "add a seller" input box in the Sellers tab (username or a pasted
     /// discogs.com seller/user URL).
     seller_add: String,
+    /// The "find a seller" box that narrows the saved-seller chips once the
+    /// list is long enough to need it.
+    seller_find: String,
     /// Releases the user has auditioned while digging — opened from a seller
     /// card and actually played a song from. Drives the crates' small eye
     /// marker; loaded from the `viewed_releases` table with the vinyl view
