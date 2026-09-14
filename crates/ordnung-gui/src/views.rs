@@ -73,7 +73,7 @@ fn vinyl_tabs(
 ) -> Option<VinylTab> {
     use crate::ui::tokens::{color, font, radius, space};
 
-    let tab = |ui: &mut egui::Ui, label: String, active: bool, tip: &str| -> bool {
+    let tab = |ui: &mut egui::Ui, label: String, active: bool, tip: &str, mark: Option<VinylList>| -> bool {
         // Size the tab from its own text, so the two sit shoulder to shoulder at
         // whatever width their counts need.
         let text_font = if active {
@@ -93,8 +93,14 @@ fn vinyl_tabs(
         let bold =
             ui.painter()
                 .layout_no_wrap(label, font::strong(font::headline().size), color::LABEL);
+        // Room for the shelf mark before the words, on the two shelf tabs.
+        let mark_w = if mark.is_some() {
+            crate::ui::icon::SHELF_R * 2.0 + space::S2 + 2.0
+        } else {
+            0.0
+        };
         let size = egui::vec2(
-            bold.size().x + space::S4 * 2.0,
+            bold.size().x + mark_w + space::S4 * 2.0,
             bold.size().y + space::S3 * 2.0,
         );
         let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
@@ -129,7 +135,7 @@ fn vinyl_tabs(
                 egui::Stroke::new(2.0, color::ACCENT),
             );
         }
-        let text_pos = rect.center() - galley.size() * 0.5;
+        let text_pos = rect.center() - galley.size() * 0.5 + egui::vec2(mark_w * 0.5, 0.0);
         // Hover lifts an inactive label toward full contrast, so the tab answers
         // the pointer before it's clicked.
         let ink = if active || resp.hovered() {
@@ -137,6 +143,13 @@ fn vinyl_tabs(
         } else {
             color::LABEL_2
         };
+        if let Some(list) = mark {
+            let c = egui::pos2(
+                text_pos.x - space::S2 - 2.0 - crate::ui::icon::SHELF_R,
+                rect.center().y,
+            );
+            crate::ui::icon::shelf(ui.painter(), c, crate::ui::icon::SHELF_R, ink, true, list);
+        }
         ui.painter().galley(text_pos, galley, ink);
         resp.on_hover_note(tip).clicked()
     };
@@ -202,6 +215,7 @@ fn vinyl_tabs(
         format!("Collection ({owned})"),
         current == VinylTab::Shelf(VinylList::Collection),
         "Records you own",
+        Some(VinylList::Collection),
     ) {
         clicked = Some(VinylTab::Shelf(VinylList::Collection));
     }
@@ -210,6 +224,7 @@ fn vinyl_tabs(
         format!("Wantlist ({wanted})"),
         current == VinylTab::Shelf(VinylList::Wantlist),
         "Records you want but don't own yet",
+        Some(VinylList::Wantlist),
     ) {
         clicked = Some(VinylTab::Shelf(VinylList::Wantlist));
     }
@@ -226,6 +241,7 @@ fn vinyl_tabs(
         sellers_label,
         current == VinylTab::Sellers,
         "Dig through a Discogs seller's crates",
+        None,
     ) {
         clicked = Some(VinylTab::Sellers);
     }

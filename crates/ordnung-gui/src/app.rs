@@ -2301,7 +2301,10 @@ impl eframe::App for App {
                     // when they apply, so the toolbar always reflects current state.
                     // The vinyl view has no table rows, so it counts records instead
                     // — filtered by its own search box, the way the grid is.
-                    let counts = if self.view == LibraryView::Vinyl {
+                    // The vinyl counts are drawn with their shelf marks
+                    // rather than as words (see below), so they're carried
+                    // separately.
+                    let shelf_counts = (self.view == LibraryView::Vinyl).then(|| {
                         let query = self.vinyl_filter.trim().to_lowercase();
                         let n = |recs: &[VinylRecord]| {
                             if query.is_empty() {
@@ -2312,11 +2315,10 @@ impl eframe::App for App {
                                     .count()
                             }
                         };
-                        format!(
-                            "{} in collection · {} in wantlist",
-                            n(&self.vinyl),
-                            n(&self.wantlist)
-                        )
+                        (n(&self.vinyl), n(&self.wantlist))
+                    });
+                    let counts = if shelf_counts.is_some() {
+                        String::new()
                     } else {
                         let mut counts = format!("{} tracks", self.rows.len());
                         if !self.selection.is_empty() {
@@ -2373,7 +2375,18 @@ impl eframe::App for App {
                             self.settings_open = true;
                         }
                         ui.separator();
-                        ui.label(counts);
+                        match shelf_counts {
+                            // Right-to-left, so the wantlist goes first to
+                            // land on the right.
+                            Some((owned, wanted)) => {
+                                crate::ui::icon::shelf_count(ui, VinylList::Wantlist, wanted);
+                                ui.label("·");
+                                crate::ui::icon::shelf_count(ui, VinylList::Collection, owned);
+                            }
+                            None => {
+                                ui.label(counts);
+                            }
+                        }
                         ui.separator();
                         // The filter group fills whatever horizontal space the utility
                         // group left over. Rendered left-to-right inside the reserved

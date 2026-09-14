@@ -1270,40 +1270,48 @@ impl App {
                             // record's actual state — so one button always says
                             // what pressing it and clicking it does the opposite
                             // of what's true now.
+                            // The shelf mark does the "✓"/"＋" work: solid
+                            // means it's there, outlined means it could be.
                             let (col_label, col_tip) = match col_pending {
                                 Some(pending) => (pending, "Waiting on Discogs"),
                                 None if in_collection => (
-                                    "✓ In collection",
+                                    "In collection",
                                     "Remove this record from your Discogs collection",
                                 ),
                                 None => (
-                                    "＋ Collection",
+                                    "Collection",
                                     "Add this record to your Discogs collection",
                                 ),
                             };
-                            if ui
-                                .add_enabled(col_pending.is_none(), egui::Button::new(col_label))
-                                .on_hover_note(col_tip)
-                                .on_disabled_hover_text(crate::ui::hover::note(col_tip))
-                                .clicked()
+                            if crate::ui::icon::shelf_button(
+                                ui,
+                                VinylList::Collection,
+                                in_collection,
+                                col_label,
+                                col_pending.is_none(),
+                            )
+                            .on_hover_note(col_tip)
+                            .clicked()
                             {
                                 act = Some(Act::ToggleList(VinylList::Collection));
                             }
                             let (want_label, want_tip) = match want_pending {
                                 Some(pending) => (pending, "Waiting on Discogs"),
                                 None if in_wantlist => (
-                                    "✓ In wantlist",
+                                    "In wantlist",
                                     "Remove this record from your Discogs wantlist",
                                 ),
-                                None => {
-                                    ("＋ Wantlist", "Add this record to your Discogs wantlist")
-                                }
+                                None => ("Wantlist", "Add this record to your Discogs wantlist"),
                             };
-                            if ui
-                                .add_enabled(want_pending.is_none(), egui::Button::new(want_label))
-                                .on_hover_note(want_tip)
-                                .on_disabled_hover_text(crate::ui::hover::note(want_tip))
-                                .clicked()
+                            if crate::ui::icon::shelf_button(
+                                ui,
+                                VinylList::Wantlist,
+                                in_wantlist,
+                                want_label,
+                                want_pending.is_none(),
+                            )
+                            .on_hover_note(want_tip)
+                            .clicked()
                             {
                                 act = Some(Act::ToggleList(VinylList::Wantlist));
                             }

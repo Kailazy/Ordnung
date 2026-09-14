@@ -1138,44 +1138,7 @@ fn draw_list_button(
     if hovered {
         p.circle_filled(c, LIST_BTN_R + 3.0, color::SURFACE_HI);
     }
-    match list {
-        VinylList::Collection => draw_sleeve(p, c, LIST_BTN_R, ink, present),
-        VinylList::Wantlist => draw_eye(p, c, LIST_BTN_R, ink, present),
-    }
-}
-
-/// A record half out of its sleeve: a rounded square with a disc emerging from
-/// its right edge. Solid when the record is in the collection, outlined when
-/// it isn't.
-///
-/// Went through a stack of slabs first, which rendered as a hamburger menu —
-/// three equal bars is far too overloaded a glyph to mean "records", and the
-/// taper that would have distinguished it disappears at 18px. A sleeve with a
-/// disc sliding out is unmistakable at this size, and one record is the right
-/// unit anyway: the row *is* one record, and the question the button answers is
-/// whether **it** is on your shelf.
-fn draw_sleeve(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, filled: bool) {
-    let w = r * 0.92;
-    // The sleeve sits left of centre so the disc has somewhere to emerge to,
-    // keeping the pair balanced on `c` rather than hanging off it.
-    let sleeve = egui::Rect::from_min_max(
-        egui::pos2(c.x - w * 1.02, c.y - w),
-        egui::pos2(c.x + w * 0.30, c.y + w),
-    );
-    let rounding = egui::Rounding::same(1.3);
-    let disc_c = egui::pos2(c.x + w * 0.34, c.y);
-    let disc_r = w * 0.86;
-    if filled {
-        p.rect_filled(sleeve, rounding, ink);
-        p.circle_filled(disc_c, disc_r, ink);
-        // The spindle hole is punched in the row's own ground, which is what
-        // keeps a solid disc reading as a record rather than as a dot.
-        p.circle_filled(disc_c, disc_r * 0.24, color::SURFACE);
-    } else {
-        p.rect_stroke(sleeve, rounding, egui::Stroke::new(1.3, ink));
-        p.circle_stroke(disc_c, disc_r, egui::Stroke::new(1.3, ink));
-        p.circle_filled(disc_c, disc_r * 0.22, ink);
-    }
+    crate::ui::icon::shelf(p, c, LIST_BTN_R, ink, present, list);
 }
 
 /// A shopping cart, drawn with painter strokes because egui's bundled fonts

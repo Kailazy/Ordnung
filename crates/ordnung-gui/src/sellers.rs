@@ -744,30 +744,18 @@ impl App {
                 // thing worth knowing before the price — you either have it
                 // or you're already hunting it.
                 let mut chip_x = rect.left() + 5.0;
-                for (show, text, fill) in [
-                    (owned, "OWNED", egui::Color32::from_rgb(40, 120, 70)),
-                    (
-                        !owned && wanted,
-                        "WANT",
-                        egui::Color32::from_rgb(120, 90, 30),
-                    ),
+                for (show, list) in [
+                    (owned, VinylList::Collection),
+                    (!owned && wanted, VinylList::Wantlist),
                 ] {
                     if !show {
                         continue;
                     }
-                    let font = egui::FontId::proportional(10.0);
-                    let galley =
-                        ui.painter()
-                            .layout_no_wrap(text.into(), font, egui::Color32::WHITE);
-                    let pad = egui::vec2(5.0, 3.0);
-                    let chip = egui::Rect::from_min_size(
+                    let chip = crate::ui::icon::shelf_chip(
+                        ui.painter(),
                         egui::pos2(chip_x, rect.top() + 5.0),
-                        galley.size() + pad * 2.0,
+                        list,
                     );
-                    ui.painter()
-                        .rect_filled(chip, egui::Rounding::same(4.0), fill);
-                    ui.painter()
-                        .galley(chip.min + pad, galley, egui::Color32::WHITE);
                     chip_x = chip.right() + 4.0;
                 }
                 // Viewed eye, top-right: you already pulled this record out
@@ -866,9 +854,14 @@ impl App {
                         ui.close_menu();
                     }
                     let already = owned || wanted;
-                    if ui
-                        .add_enabled(!already, egui::Button::new("＋ Add to wantlist"))
-                        .clicked()
+                    if crate::ui::icon::shelf_button(
+                        ui,
+                        VinylList::Wantlist,
+                        false,
+                        "Add to wantlist",
+                        !already,
+                    )
+                    .clicked()
                     {
                         act = Some(SellerAct::Want(idx));
                         ui.close_menu();
@@ -1020,32 +1013,19 @@ impl App {
             egui::Color32::from_rgb(120, 200, 140),
         );
         let mut right_edge = rect.right() - TERMS_W;
-        for (show, text, fill) in [
-            (
-                !owned && wanted,
-                "WANT",
-                egui::Color32::from_rgb(120, 90, 30),
-            ),
-            (owned, "OWNED", egui::Color32::from_rgb(40, 120, 70)),
+        for (show, list) in [
+            (!owned && wanted, VinylList::Wantlist),
+            (owned, VinylList::Collection),
         ] {
             if !show {
                 continue;
             }
-            let font = egui::FontId::proportional(10.0);
-            let galley = ui
-                .painter()
-                .layout_no_wrap(text.into(), font, egui::Color32::WHITE);
-            let pad = egui::vec2(5.0, 3.0);
-            let size = galley.size() + pad * 2.0;
-            let chip = egui::Rect::from_min_size(
-                egui::pos2(right_edge - size.x, rect.center().y - size.y / 2.0),
-                size,
+            let chip = crate::ui::icon::shelf_chip(
+                ui.painter(),
+                egui::pos2(right_edge - 20.0, rect.center().y - 8.0),
+                list,
             );
             right_edge = chip.left() - 8.0;
-            ui.painter()
-                .rect_filled(chip, egui::Rounding::same(4.0), fill);
-            ui.painter()
-                .galley(chip.min + pad, galley, egui::Color32::WHITE);
         }
         // Viewed eye, left of the chip column: same audition marker the card
         // wears in its corner.
@@ -1136,8 +1116,7 @@ impl App {
                 ui.close_menu();
             }
             let already = owned || wanted;
-            if ui
-                .add_enabled(!already, egui::Button::new("＋ Add to wantlist"))
+            if crate::ui::icon::shelf_button(ui, VinylList::Wantlist, false, "Add to wantlist", !already)
                 .clicked()
             {
                 act = Some(SellerAct::Want(idx));

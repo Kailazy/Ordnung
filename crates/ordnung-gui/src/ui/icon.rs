@@ -7,6 +7,8 @@
 //! triangle, so a row of controls reads as one set.
 
 use super::hover::HoverNoteExt;
+use super::tokens::{color, font, radius, space};
+use ordnung_core::model::VinylList;
 
 /// Resting and hover colours shared by the icons here, so a close in the player
 /// bar and a close on a card answer the pointer the same way.
@@ -407,4 +409,167 @@ pub fn check(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32, strok
         ],
         s,
     ));
+}
+
+// --- Shelf marks -----------------------------------------------------------
+//
+// The two Discogs shelves have one mark each, drawn here and nowhere else, so
+// a record's standing reads the same on a tab, a button, a chip, a legend
+// and a row: the collection is a record half out of its sleeve, the wantlist
+// is a heart, the mark Discogs itself puts on wants. Solid when the record is
+// on that shelf, outlined when it isn't.
+
+/// Radius the marks are drawn at beside body text.
+pub const SHELF_R: f32 = 6.5;
+
+/// The mark for `list`, centred on `c`.
+pub fn shelf(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, filled: bool, list: VinylList) {
+    match list {
+        VinylList::Collection => collection(p, c, r, ink, filled),
+        VinylList::Wantlist => wantlist(p, c, r, ink, filled),
+    }
+}
+
+/// A record half out of its sleeve: a rounded square with a disc emerging
+/// from its right edge. One record is the right unit: the question the mark
+/// answers is whether *this* record is on the shelf.
+pub fn collection(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, filled: bool) {
+    let w = r * 0.92;
+    // The sleeve sits left of centre so the disc has somewhere to emerge to,
+    // keeping the pair balanced on `c` rather than hanging off it.
+    let sleeve = egui::Rect::from_min_max(
+        egui::pos2(c.x - w * 1.02, c.y - w),
+        egui::pos2(c.x + w * 0.30, c.y + w),
+    );
+    let rounding = egui::Rounding::same((r * 0.15).max(1.0));
+    let disc_c = egui::pos2(c.x + w * 0.34, c.y);
+    let disc_r = w * 0.86;
+    let stroke = egui::Stroke::new((r * 0.15).clamp(1.0, 1.6), ink);
+    if filled {
+        p.rect_filled(sleeve, rounding, ink);
+        p.circle_filled(disc_c, disc_r, ink);
+        // The spindle hole is punched in the ground, which is what keeps a
+        // solid disc reading as a record rather than as a dot.
+        p.circle_filled(disc_c, disc_r * 0.24, color::SURFACE);
+    } else {
+        p.rect_stroke(sleeve, rounding, stroke);
+        p.circle_stroke(disc_c, disc_r, stroke);
+        p.circle_filled(disc_c, disc_r * 0.22, ink);
+    }
+}
+
+/// A heart, the wantlist's mark on discogs.com too.
+pub fn wantlist(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, filled: bool) {
+    // The classic parametric heart, scaled so it fills the same optical box
+    // as the sleeve and sits a touch low, where a heart's weight is.
+    const STEPS: usize = 36;
+    let pts: Vec<egui::Pos2> = (0..STEPS)
+        .map(|i| {
+            let t = std::f32::consts::TAU * i as f32 / STEPS as f32;
+            let x = 16.0 * t.sin().powi(3);
+            let y = 13.0 * t.cos() - 5.0 * (2.0 * t).cos() - 2.0 * (3.0 * t).cos() - (4.0 * t).cos();
+            egui::pos2(c.x + x * r / 16.0, c.y - (y - 1.0) * r / 16.0)
+        })
+        .collect();
+    if filled {
+        p.add(egui::Shape::convex_polygon(pts, ink, egui::Stroke::NONE));
+    } else {
+        p.add(egui::Shape::closed_line(
+            pts,
+            egui::Stroke::new((r * 0.15).clamp(1.0, 1.6), ink),
+        ));
+    }
+}
+
+/// The chip ground a shelf badge sits on: the collection's green and the
+/// wantlist's amber, kept from the seller cards where they started.
+pub fn shelf_fill(list: VinylList) -> egui::Color32 {
+    match list {
+        VinylList::Collection => egui::Color32::from_rgb(40, 120, 70),
+        VinylList::Wantlist => egui::Color32::from_rgb(120, 90, 30),
+    }
+}
+
+/// A small filled chip carrying the mark, for a card or a row that wants a
+/// record's standing badged without words. Returns the chip's rect.
+pub fn shelf_chip(p: &egui::Painter, min: egui::Pos2, list: VinylList) -> egui::Rect {
+    let chip = egui::Rect::from_min_size(min, egui::vec2(20.0, 16.0));
+    p.rect_filled(chip, egui::Rounding::same(4.0), shelf_fill(list));
+    shelf(p, chip.center(), 5.0, egui::Color32::WHITE, true, list);
+    chip
+}
+
+/// A button carrying the shelf mark before its label: filled when the record
+/// is on the shelf, outlined when it's an offer to put it there. An empty
+/// label makes it a square mark-only button. Disabled while `enabled` is
+/// false, drawn the way a disabled stock button is.
+pub fn shelf_button(
+    ui: &mut egui::Ui,
+    list: VinylList,
+    present: bool,
+    label: &str,
+    enabled: bool,
+) -> egui::Response {
+    let text_font = font::body();
+    let galley = (!label.is_empty()).then(|| {
+        ui.painter()
+            .layout_no_wrap(label.to_string(), text_font, color::LABEL)
+    });
+    let pad = ui.spacing().button_padding;
+    let mark = SHELF_R * 2.0 + 2.0;
+    let text_w = galley.as_ref().map_or(0.0, |g| g.size().x + space::S2);
+    let h = galley
+        .as_ref()
+        .map_or(mark, |g| g.size().y.max(mark))
+        + pad.y * 2.0;
+    let size = egui::vec2(mark + text_w + pad.x * 2.0, h);
+    let (rect, resp) = ui.allocate_exact_size(
+        size,
+        if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        },
+    );
+    let visuals = if enabled {
+        ui.style().interact(&resp)
+    } else {
+        &ui.style().visuals.widgets.inactive
+    };
+    ui.painter().rect(
+        rect,
+        radius::SM,
+        visuals.weak_bg_fill,
+        visuals.bg_stroke,
+    );
+    let ink = if enabled {
+        visuals.text_color()
+    } else {
+        visuals.text_color().gamma_multiply(0.5)
+    };
+    let c = egui::pos2(rect.left() + pad.x + mark * 0.5, rect.center().y);
+    shelf(ui.painter(), c, SHELF_R, ink, present, list);
+    if let Some(g) = galley {
+        let pos = egui::pos2(c.x + mark * 0.5 + space::S2, rect.center().y - g.size().y * 0.5);
+        ui.painter().galley(pos, g, ink);
+    }
+    resp
+}
+
+/// A count beside its shelf mark, for a status line: the mark, then the number.
+pub fn shelf_count(ui: &mut egui::Ui, list: VinylList, n: usize) {
+    let text = n.to_string();
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text, font::body(), color::LABEL);
+    let mark = SHELF_R * 2.0 + 2.0;
+    let size = egui::vec2(mark + space::S2 + galley.size().x, galley.size().y.max(mark));
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let c = egui::pos2(rect.left() + mark * 0.5, rect.center().y);
+    shelf(ui.painter(), c, SHELF_R, color::LABEL_2, true, list);
+    ui.painter().galley(
+        egui::pos2(c.x + mark * 0.5 + space::S2, rect.center().y - galley.size().y * 0.5),
+        galley,
+        color::LABEL,
+    );
 }

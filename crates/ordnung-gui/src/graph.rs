@@ -1526,20 +1526,28 @@ impl App {
                 0.0,
                 color::CONTENT_BG.gamma_multiply(0.85),
             );
-            let mut swatch = |c: egui::Color32, w: f32, text: String| {
-                painter.rect_stroke(
-                    egui::Rect::from_center_size(egui::pos2(x + 5.0, y), egui::Vec2::splat(9.0)),
-                    2.0,
-                    egui::Stroke::new(w, c),
-                );
+            // The shelf marks, then the dug ring, each with its count.
+            let caption = |x: &mut f32, text: String| {
                 let galley = painter.layout_no_wrap(text, font::caption(), color::LABEL_3);
                 let size = galley.size();
-                painter.galley(egui::pos2(x + 15.0, y - size.y * 0.5), galley, color::LABEL_3);
-                x += 15.0 + size.x + 14.0;
+                painter.galley(egui::pos2(*x, y - size.y * 0.5), galley, color::LABEL_3);
+                *x += size.x + 14.0;
             };
-            swatch(color::LABEL_3, 1.0, format!("Own {owned}"));
-            swatch(color::ACCENT, 2.0, format!("Want {wanted}"));
-            swatch(color::ORANGE, 2.0, format!("Dug {dug}"));
+            for (list, n, c) in [
+                (VinylList::Collection, owned, color::LABEL_3),
+                (VinylList::Wantlist, wanted, color::ACCENT),
+            ] {
+                crate::ui::icon::shelf(&painter, egui::pos2(x + 5.5, y), 5.5, c, true, list);
+                x += 16.0;
+                caption(&mut x, n.to_string());
+            }
+            painter.rect_stroke(
+                egui::Rect::from_center_size(egui::pos2(x + 5.0, y), egui::Vec2::splat(9.0)),
+                2.0,
+                egui::Stroke::new(2.0, color::ORANGE),
+            );
+            x += 15.0;
+            caption(&mut x, format!("Dug {dug}"));
             let count = match g.arrange {
                 Arrange::Artists => format!("{artists} artists"),
                 Arrange::Genres => format!("{artists} styles"),

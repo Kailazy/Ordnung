@@ -463,18 +463,33 @@ impl App {
                                         if t.clicked() {
                                             act = Some(Act::Open(i));
                                         }
-                                        for (show, text) in [
-                                            (r.owned, "OWNED"),
-                                            (!r.owned && r.wanted, "WANT"),
-                                            (r.remix, "REMIX"),
+                                        // Your shelves, marked: the mark
+                                        // itself, solid, in the row's quiet ink.
+                                        for (show, list) in [
+                                            (r.owned, VinylList::Collection),
+                                            (!r.owned && r.wanted, VinylList::Wantlist),
                                         ] {
                                             if show {
-                                                ui.label(
-                                                    egui::RichText::new(text)
-                                                        .small()
-                                                        .color(egui::Color32::from_gray(140)),
+                                                let (rect, _) = ui.allocate_exact_size(
+                                                    egui::vec2(14.0, 14.0),
+                                                    egui::Sense::hover(),
+                                                );
+                                                crate::ui::icon::shelf(
+                                                    ui.painter(),
+                                                    rect.center(),
+                                                    5.5,
+                                                    egui::Color32::from_gray(150),
+                                                    true,
+                                                    list,
                                                 );
                                             }
+                                        }
+                                        if r.remix {
+                                            ui.label(
+                                                egui::RichText::new("REMIX")
+                                                    .small()
+                                                    .color(egui::Color32::from_gray(140)),
+                                            );
                                         }
                                     });
                                     if !r.sub.is_empty() {
@@ -492,13 +507,15 @@ impl App {
                                             act = Some(Act::Dig(i));
                                         }
                                         let parked = r.owned || r.wanted;
-                                        if ui
-                                            .add_enabled(
-                                                !parked && !r.pending,
-                                                egui::Button::new("＋").small(),
-                                            )
-                                            .on_hover_note("Add to your Discogs wantlist")
-                                            .clicked()
+                                        if crate::ui::icon::shelf_button(
+                                            ui,
+                                            VinylList::Wantlist,
+                                            false,
+                                            "",
+                                            !parked && !r.pending,
+                                        )
+                                        .on_hover_note("Add to your Discogs wantlist")
+                                        .clicked()
                                         {
                                             act = Some(Act::Want(i));
                                         }
