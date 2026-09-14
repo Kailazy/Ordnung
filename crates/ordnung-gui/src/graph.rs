@@ -1009,11 +1009,10 @@ impl App {
 
         let pointer = resp.hover_pos().or_else(|| resp.interact_pointer_pos());
         if resp.hovered() || resp.dragged() {
-            // Pinch and a vertical scroll both zoom about the pointer (scroll
-            // up to lean in, the way a map wheel works); a sideways scroll
-            // pans, and so does a drag on empty canvas.
-            let (pinch, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
-            let zd = pinch * (scroll.y * 0.0035).exp();
+            // A pinch zooms about the pointer; a two-finger scroll pans the
+            // canvas in both directions, the way a map does under a trackpad,
+            // and so does a drag on empty canvas.
+            let (zd, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
             if (zd - 1.0).abs() > 1e-4 {
                 if let Some(p) = pointer {
                     let anchor = to_world(g.cam_goal, g.zoom_goal, p);
@@ -1023,8 +1022,8 @@ impl App {
                     g.follow_fit = false;
                 }
             }
-            if scroll.x != 0.0 {
-                g.cam_goal.x -= scroll.x / g.zoom_goal;
+            if scroll != egui::Vec2::ZERO {
+                g.cam_goal -= scroll / g.zoom_goal;
                 g.follow_fit = false;
             }
         }
