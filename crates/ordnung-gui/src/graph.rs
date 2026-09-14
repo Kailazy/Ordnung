@@ -6,12 +6,13 @@
 //! it's dug to, and reads as wanted the moment it's asked for on a list,
 //! before Discogs has answered.
 //!
-//! The layout is a force simulation rather than a fixed drawing: springs hold
-//! each record to its hub, everything repels everything nearby, and hubs are
-//! drawn loosely to the middle. The springs are deliberately underdamped, so
-//! a record that lands, or a hub that gets flung, overshoots and settles the
-//! way something on a string does rather than sliding into a slot. The
-//! simulation sleeps once it's still, so an idle map costs nothing.
+//! The layout is live rather than a fixed drawing, but tidy: each hub lays
+//! its records on concentric rings around itself, and only the hubs take
+//! part in a simulation, each as one body the size of its whole cloud, so
+//! clouds keep clear of each other and settle into an even field. Records
+//! glide to their ring slots on a critically damped spring, so a landing
+//! arrives and stops rather than wobbling. The simulation sleeps once it's
+//! still, so an idle map costs nothing.
 //!
 //! Zoom is bounded on the wide end at the scale that shows the whole map, so
 //! however far out you go, nothing is ever off the edge. Split out of
@@ -117,6 +118,14 @@ struct Node {
     vel: egui::Vec2,
     /// World-space radius (half side for a release cover).
     r: f32,
+    /// How far the node pushes others away. A record's is its size; a hub's
+    /// takes in the room its records need, so two big clouds keep their
+    /// distance instead of interleaving.
+    reach: f32,
+    /// A record's (or sub-group's) place on its cloud's rings, relative to
+    /// the top-level hub. The node eases toward `hub_pos + slot` every tick;
+    /// only hubs are moved by the simulation itself.
+    slot: egui::Vec2,
     /// Display scale, driven by its own little spring: 0 at birth, 1 at rest,
     /// a touch over while hovered. Separate from the layout so a pop-in or a
     /// hover never disturbs the neighbours.
@@ -140,10 +149,9 @@ struct Node {
 struct Edge {
     a: usize,
     b: usize,
-    rest: f32,
-    k: f32,
-    /// A same-label tie between two artists' label groups: weak, and drawn
-    /// as a faint dash rather than a line.
+    /// A same-label tie between two artists' label groups, or a record's
+    /// tie to a further style: drawn as a faint dash when zoomed in, never
+    /// a force.
     soft: bool,
 }
 
@@ -217,30 +225,33 @@ impl Default for GraphState {
 const REL_R: f32 = 20.0;
 /// A label sub-group's ring.
 const LABEL_R: f32 = 9.0;
-/// Spring stiffness of a hub link. Stiff, with the light damping below, is
-/// what makes a landing overshoot and settle rather than slide.
-const SPRING_K: f32 = 34.0;
-/// Velocity kept per 60 Hz frame. Higher is bouncier; 1.0 would never settle.
-const DAMPING: f32 = 0.955;
+/// Velocity kept per 60 Hz frame by a moving hub. Higher is bouncier; 1.0
+/// would never settle. Set so a cloud glides into place with at most a
+/// slight overshoot: the map should move like something heavy, not rubber.
+const DAMPING: f32 = 0.86;
+/// The spring that carries a record to its ring slot: stiffness and, at
+/// critical damping, the matching drag, so it arrives without a wobble.
+const SLOT_K: f32 = 70.0;
+/// Clear space between two covers on a ring, and between rings.
+const RING_GAP: f32 = 10.0;
 /// Range and strength of the repulsion between any two nodes.
-const REPEL_RANGE: f32 = 260.0;
+const REPEL_RANGE: f32 = 320.0;
 const REPEL_K: f32 = 7000.0;
 /// Pull toward the middle, keeping the map one body. A constant tug rather
 /// than a spring, so the map settles as an even disc instead of a dense
 /// core with a thin rim.
 const GRAVITY_HUB: f32 = 70.0;
-const GRAVITY_LEAF: f32 = 4.0;
 /// A small spring-like share on top of the constant tug, so the rim of a
 /// large map meets a firm edge rather than creeping outward for minutes.
 const GRAVITY_SLOPE: f32 = 0.05;
-const MAX_SPEED: f32 = 1400.0;
+const MAX_SPEED: f32 = 900.0;
 /// Below this top speed the simulation goes to sleep.
 const SLEEP_SPEED: f32 = 6.0;
 /// Top speed under which the map is "settling": damping firms up so the last
 /// low-amplitude jitter dies instead of ringing on. Big motion (a landing,
 /// a fling) stays bouncy.
 const SETTLE_SPEED: f32 = 90.0;
-const SETTLE_DAMPING: f32 = 0.90;
+const SETTLE_DAMPING: f32 = 0.80;
 /// Closest the camera can get.
 const MAX_ZOOM: f32 = 3.0;
 /// Canvas padding around the map when fitted.
@@ -279,6 +290,36 @@ fn next_rand(seed: &mut u64) -> f32 {
 
 fn hub_radius(weight: usize) -> f32 {
     (13.0 + 4.2 * (weight as f32).sqrt()).min(60.0)
+}
+
+/// Lay `n` bodies of half-size `body` on concentric rings outside a hub of
+/// radius `inner`: each ring holds as many as fit at cover pitch, spread
+/// evenly around it. Returns each body's offset from the hub, in order, and
+/// the outer radius of the cloud. Consecutive bodies sit side by side, so a
+/// sub-group's records form one arc.
+fn ring_slots(n: usize, inner: f32, body: f32, phase: f32) -> (Vec<egui::Vec2>, f32) {
+    let pitch = body * 2.0 + RING_GAP;
+    let mut out = Vec::with_capacity(n);
+    let mut radius = inner + body + RING_GAP;
+    let mut left = n;
+    let mut ring = 0usize;
+    while left > 0 {
+        let cap = ((std::f32::consts::TAU * radius) / pitch).floor().max(1.0) as usize;
+        let here = left.min(cap);
+        // Alternate the start angle ring to ring so spokes don't line up.
+        let start = phase + ring as f32 * 0.5;
+        for j in 0..here {
+            let a = start + std::f32::consts::TAU * j as f32 / here as f32;
+            out.push(egui::vec2(a.cos(), a.sin()) * radius);
+        }
+        left -= here;
+        ring += 1;
+        if left > 0 {
+            radius += pitch;
+        }
+    }
+    let outer = if n == 0 { inner } else { radius + body };
+    (out, outer)
 }
 
 /// Is this tag one of Discogs's coarse genres (as opposed to a style)?
@@ -498,11 +539,13 @@ impl GraphState {
                 .as_ref()
                 .and_then(|k| self.index.get(k).copied());
             self.nodes[i].hub = hub;
+            let w = self.nodes[i].weight as f32;
             self.nodes[i].r = match self.nodes[i].kind {
                 Kind::Hub => hub_radius(self.nodes[i].weight),
-                Kind::Sub => LABEL_R + 1.5 * (self.nodes[i].weight as f32).sqrt(),
+                Kind::Sub => LABEL_R + 1.5 * w.sqrt(),
                 Kind::Release => REL_R,
             };
+            let _ = w;
             self.nodes[i].hay = match self.nodes[i].kind {
                 Kind::Release => std::mem::take(&mut self.nodes[i].hay),
                 _ => self.nodes[i].name.to_lowercase(),
@@ -567,30 +610,56 @@ impl GraphState {
         }
         self.seed = seed;
 
-        // Links: every node to its hub, and a faint tie between two artists'
-        // groups on the same label so the label reads across the map.
+        // Every top-level hub lays its members on rings: its own records
+        // first, then each label sub-group as one arc (the group's mark,
+        // then its records). A sub-group's records are keyed to the group
+        // but placed on the artist's rings, so the arc reads as a bay of
+        // that artist's cloud rather than a second cloud hanging off it.
+        let hubs: Vec<usize> = (0..self.nodes.len())
+            .filter(|&i| self.nodes[i].kind == Kind::Hub)
+            .collect();
+        for h in hubs {
+            let mut members: Vec<usize> = Vec::new();
+            let mut direct: Vec<usize> = (0..self.nodes.len())
+                .filter(|&i| self.nodes[i].kind == Kind::Release && self.nodes[i].hub == Some(h))
+                .collect();
+            direct.sort_by(|a, b| self.nodes[*a].key.cmp(&self.nodes[*b].key));
+            members.extend(direct);
+            let mut subs: Vec<usize> = (0..self.nodes.len())
+                .filter(|&i| self.nodes[i].kind == Kind::Sub && self.nodes[i].hub == Some(h))
+                .collect();
+            subs.sort_by(|a, b| self.nodes[*a].name.cmp(&self.nodes[*b].name));
+            for sidx in subs {
+                members.push(sidx);
+                let mut under: Vec<usize> = (0..self.nodes.len())
+                    .filter(|&i| {
+                        self.nodes[i].kind == Kind::Release && self.nodes[i].hub == Some(sidx)
+                    })
+                    .collect();
+                under.sort_by(|a, b| self.nodes[*a].key.cmp(&self.nodes[*b].key));
+                members.extend(under);
+            }
+            // A fixed phase per hub, so a lone record doesn't always hang
+            // due east of its artist.
+            let phase = (self.nodes[h].key.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32)) % 628) as f32 / 100.0;
+            let (slots, outer) = ring_slots(members.len(), self.nodes[h].r, REL_R, phase);
+            for (m, slot) in members.iter().zip(slots) {
+                self.nodes[*m].slot = slot;
+            }
+            self.nodes[h].reach = outer + RING_GAP;
+        }
+
+        // Ties are drawn, never pulled: a label two artists share, and a
+        // record's further styles.
         self.edges.clear();
         for i in 0..self.nodes.len() {
-            let Some(h) = self.nodes[i].hub else { continue };
-            let (rest, k) = match (self.nodes[i].kind, self.nodes[h].kind) {
-                (Kind::Release, Kind::Hub) => {
-                    let fan = (self.nodes[h].weight as f32).sqrt() * 9.0;
-                    (self.nodes[h].r + REL_R + 12.0 + fan.min(60.0), SPRING_K)
-                }
-                (Kind::Release, Kind::Sub) => {
-                    let fan = (self.nodes[h].weight as f32).sqrt() * 8.0;
-                    (self.nodes[h].r + REL_R + 18.0 + fan.min(40.0), SPRING_K)
-                }
-                (Kind::Sub, _) => (self.nodes[h].r + 64.0, SPRING_K * 0.8),
-                _ => (80.0, SPRING_K),
-            };
-            self.edges.push(Edge {
-                a: i,
-                b: h,
-                rest,
-                k,
-                soft: false,
-            });
+            if let Some(h) = self.nodes[i].hub {
+                self.edges.push(Edge {
+                    a: i,
+                    b: h,
+                    soft: false,
+                });
+            }
         }
         let mut by_label: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, n) in self.nodes.iter().enumerate() {
@@ -603,22 +672,13 @@ impl GraphState {
                 self.edges.push(Edge {
                     a: w[0],
                     b: w[1],
-                    rest: 260.0,
-                    k: 1.2,
                     soft: true,
                 });
             }
         }
         for (rk, gk) in ties {
             if let (Some(&a), Some(&b)) = (self.index.get(&rk), self.index.get(&gk)) {
-                let rest = self.nodes[b].r + REL_R + 90.0;
-                self.edges.push(Edge {
-                    a,
-                    b,
-                    rest,
-                    k: 2.0,
-                    soft: true,
-                });
+                self.edges.push(Edge { a, b, soft: true });
             }
         }
         // A map built from nothing is settled off screen first, so it opens
@@ -626,7 +686,7 @@ impl GraphState {
         // spending its first half minute drifting apart. Records that land
         // later spring out from their hub in full view.
         if n_before == 0 && !self.nodes.is_empty() {
-            for _ in 0..160 {
+            for _ in 0..240 {
                 self.tick(1.0 / 30.0);
             }
         }
@@ -656,6 +716,8 @@ impl GraphState {
                 Kind::Sub => LABEL_R,
                 Kind::Release => REL_R,
             },
+            reach: REL_R,
+            slot: egui::Vec2::ZERO,
             scale: 0.0,
             scale_v: 0.0,
             hub_key,
@@ -678,34 +740,32 @@ impl GraphState {
     }
 
     /// One simulation step. Returns whether anything is still moving.
+    ///
+    /// Only hubs are simulated: each is one body whose reach is the whole
+    /// cloud, so clouds keep clear of each other and the map settles as an
+    /// even field. Everything else eases to its ring slot around its hub.
     fn tick(&mut self, dt: f32) -> bool {
         let n = self.nodes.len();
         if n == 0 {
             return false;
         }
         let dt = dt.clamp(1.0 / 240.0, 1.0 / 30.0);
+        let hubs: Vec<usize> = (0..n).filter(|&i| self.nodes[i].kind == Kind::Hub).collect();
         let substeps = 2;
         let h = dt / substeps as f32;
         let mut forces = vec![egui::Vec2::ZERO; n];
         let mut top_speed = 0.0f32;
         for _ in 0..substeps {
             forces.fill(egui::Vec2::ZERO);
-            // Springs.
-            for e in &self.edges {
-                let d = self.nodes[e.b].pos - self.nodes[e.a].pos;
-                let len = d.length().max(0.01);
-                let f = d / len * (e.k * (len - e.rest));
-                forces[e.a] += f;
-                forces[e.b] -= f;
-            }
-            // Repulsion over a uniform grid: only pairs within range meet.
+            // Repulsion between clouds over a uniform grid: only pairs
+            // within range meet.
             let cell = REPEL_RANGE;
             let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
-            for (i, node) in self.nodes.iter().enumerate() {
-                let c = ((node.pos.x / cell).floor() as i32, (node.pos.y / cell).floor() as i32);
+            for &i in &hubs {
+                let p = self.nodes[i].pos;
+                let c = ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32);
                 grid.entry(c).or_default().push(i);
             }
-            let range2 = REPEL_RANGE * REPEL_RANGE;
             for (&(cx, cy), bucket) in &grid {
                 for dx in -1..=1 {
                     for dy in -1..=1 {
@@ -713,8 +773,6 @@ impl GraphState {
                             Some(o) => o,
                             None => continue,
                         };
-                        // Each unordered pair once: same cell by index order,
-                        // different cells by cell order.
                         let same = dx == 0 && dy == 0;
                         if !same && (dx, dy) < (0, 0) {
                             continue;
@@ -725,19 +783,19 @@ impl GraphState {
                                     continue;
                                 }
                                 let d = self.nodes[j].pos - self.nodes[i].pos;
-                                let d2 = d.length_sq();
-                                if d2 >= range2 {
+                                let dist = d.length().max(0.5);
+                                let (ri, rj) = (self.nodes[i].reach, self.nodes[j].reach);
+                                // Clouds must not overlap: a firm push while
+                                // they do, and a soft one for a margin beyond.
+                                let touch = ri + rj;
+                                let range = touch + REPEL_RANGE * 0.5;
+                                if dist >= range {
                                     continue;
                                 }
-                                let dist = d2.sqrt().max(0.5);
                                 let dir = d / dist;
-                                let (ri, rj) = (self.nodes[i].r, self.nodes[j].r);
-                                let falloff = 1.0 - dist / REPEL_RANGE;
-                                let mut f = REPEL_K * (ri * rj) / (d2 + 400.0) * falloff;
-                                // Bodies never sit on top of each other.
-                                let touch = ri + rj + 8.0;
+                                let mut f = REPEL_K * 0.02 * (1.0 - (dist - touch).max(0.0) / (range - touch));
                                 if dist < touch {
-                                    f += (touch - dist) * 28.0;
+                                    f += (touch - dist) * 40.0;
                                 }
                                 forces[i] -= dir * f;
                                 forces[j] += dir * f;
@@ -750,23 +808,19 @@ impl GraphState {
             let settling = self.energy < SETTLE_SPEED;
             top_speed = 0.0;
             let damp = if settling { SETTLE_DAMPING } else { DAMPING }.powf(h * 60.0);
-            for (i, node) in self.nodes.iter_mut().enumerate() {
+            for &i in &hubs {
+                let node = &mut self.nodes[i];
                 if node.held {
                     continue;
                 }
-                let g = match node.kind {
-                    Kind::Hub => GRAVITY_HUB,
-                    Kind::Sub => GRAVITY_HUB * 0.35,
-                    Kind::Release => GRAVITY_LEAF,
-                };
                 let len = node.pos.length();
                 let pull = if len > 1e-3 {
-                    node.pos / len * (g * (len / 40.0).min(1.0) + GRAVITY_SLOPE * len)
+                    node.pos / len * (GRAVITY_HUB * (len / 40.0).min(1.0) + GRAVITY_SLOPE * len)
                 } else {
                     egui::Vec2::ZERO
                 };
                 let f = forces[i] - pull;
-                let mass = (node.r / 14.0).max(1.0);
+                let mass = (node.reach / 40.0).max(1.0);
                 node.vel = (node.vel + f / mass * h) * damp;
                 let speed = node.vel.length();
                 if speed > MAX_SPEED {
@@ -776,11 +830,32 @@ impl GraphState {
                 top_speed = top_speed.max(speed);
             }
         }
+        // Members ease to their slots around whichever hub they belong to
+        // (a sub-group's records ride the artist's rings): a critically
+        // damped spring, so they arrive and stop.
+        let crit = 2.0 * SLOT_K.sqrt();
+        for i in 0..n {
+            if self.nodes[i].kind == Kind::Hub || self.nodes[i].held {
+                continue;
+            }
+            let Some(mut top) = self.nodes[i].hub else { continue };
+            if self.nodes[top].kind == Kind::Sub {
+                let Some(up) = self.nodes[top].hub else { continue };
+                top = up;
+            }
+            let target = self.nodes[top].pos + self.nodes[i].slot;
+            let node = &mut self.nodes[i];
+            let a = (target - node.pos) * SLOT_K - node.vel * crit;
+            node.vel += a * dt;
+            node.pos += node.vel * dt;
+            let off = (target - node.pos).length();
+            top_speed = top_speed.max(node.vel.length().max(off * 2.0));
+        }
         self.energy = top_speed;
         if top_speed <= SLEEP_SPEED {
             // Still enough: stop outright, so nothing creeps while asleep.
-            for n in &mut self.nodes {
-                n.vel = egui::Vec2::ZERO;
+            for node in &mut self.nodes {
+                node.vel = egui::Vec2::ZERO;
             }
             return false;
         }
@@ -968,9 +1043,14 @@ impl App {
         if resp.drag_stopped() {
             if let Some(i) = g.drag.take() {
                 g.nodes[i].held = false;
+                // A released hub keeps a little of the pointer's motion and
+                // drifts to rest, rather than flying off like a slingshot; a
+                // released record just returns to its slot.
+                let keep = if g.nodes[i].kind == Kind::Hub { 0.3 } else { 0.0 };
+                g.nodes[i].vel *= keep;
                 let speed = g.nodes[i].vel.length();
-                if speed > MAX_SPEED {
-                    g.nodes[i].vel *= MAX_SPEED / speed;
+                if speed > MAX_SPEED * 0.5 {
+                    g.nodes[i].vel *= MAX_SPEED * 0.5 / speed;
                 }
             }
             g.wake();
@@ -1050,7 +1130,9 @@ impl App {
             } else {
                 1.0
             };
-            let a = 260.0 * (target - n.scale) - 13.0 * n.scale_v;
+            // Near critical damping: a pop-in or a hover grows to size with
+            // one soft overshoot, not a wobble.
+            let a = 260.0 * (target - n.scale) - 27.0 * n.scale_v;
             n.scale_v += a * sdt;
             n.scale = (n.scale + n.scale_v * sdt).clamp(0.0, 2.0);
             if (n.scale - target).abs() > 0.002 || n.scale_v.abs() > 0.02 {
@@ -1096,6 +1178,11 @@ impl App {
             }
             let on = matches[e.a] || matches[e.b];
             if e.soft {
+                // Cross-ties are detail: at the whole-map scale they only
+                // scribble over the clouds they join.
+                if zoom < 0.75 && !(searching && on) {
+                    continue;
+                }
                 painter.add(egui::Shape::dashed_line(
                     &[pa, pb],
                     egui::Stroke::new(link_w * 0.8, dim(color::LABEL_4.gamma_multiply(0.7), on)),
@@ -1107,6 +1194,9 @@ impl App {
                     Kind::Sub => color::LABEL_4,
                     _ => color::SEPARATOR_OPAQUE,
                 };
+                // Spokes thin out as the map zooms out, so a dense cloud
+                // reads as covers around a hub rather than a starburst.
+                let c = c.gamma_multiply(zoom.clamp(0.35, 1.0));
                 painter.line_segment([pa, pb], egui::Stroke::new(link_w, dim(c, on)));
             }
         }
