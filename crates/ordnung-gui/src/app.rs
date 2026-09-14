@@ -147,6 +147,9 @@ impl App {
             seller_add: String::new(),
             seller_find: String::new(),
             viewed_releases: HashSet::new(),
+            dug: Vec::new(),
+            graph: graph::GraphState::default(),
+            graph_rect: egui::Rect::NOTHING,
             seller_shipping: HashMap::new(),
             wantlist_watch: Vec::new(),
             show_watch: false,
@@ -704,6 +707,9 @@ impl App {
                 .unwrap_or_default();
             self.wantlist = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_vinyl(VinylList::Wantlist))
+                .unwrap_or_default();
+            self.dug = Catalog::open(&self.db_path)
+                .and_then(|c| c.list_dug_releases())
                 .unwrap_or_default();
             // Shelf rows synced before the genres column existed carry no tags
             // until the next Discogs refresh; in the meantime, fill in whatever

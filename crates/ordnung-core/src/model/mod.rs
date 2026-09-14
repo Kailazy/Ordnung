@@ -378,6 +378,29 @@ pub struct VinylRecord {
     pub genres: Vec<String>,
 }
 
+/// A release the user dug to (walked onto while following artist, label or
+/// style threads out of a record — see the GUI's dig), or asked for on a
+/// Discogs list from somewhere that isn't a shelf. Neither list holds it yet,
+/// so the record map (the graph of every record the user has crossed paths
+/// with) keeps its own note of it. Display fields only: this is a map pin,
+/// not a cache of the release.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DugRelease {
+    pub release_id: u64,
+    pub artist: String,
+    pub title: String,
+    /// Label name, when the browse row or release detail carried one.
+    pub label: Option<String>,
+    /// Caption line, e.g. `1993 · 12"`.
+    pub sub: String,
+    pub thumb_url: Option<String>,
+    /// True once the user asked Discogs to put it on a list from the dig. The
+    /// map shows it as wanted from that moment, before the list sync lands.
+    pub wanted: bool,
+    /// Unix seconds when the record was first dug to.
+    pub dug_at: i64,
+}
+
 /// A Discogs marketplace seller whose inventory is cached locally — one "shop"
 /// the user digs through in the Sellers tab of the vinyl view. Added explicitly
 /// by username; the cache fills only when the user runs a sweep.

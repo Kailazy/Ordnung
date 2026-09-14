@@ -590,6 +590,18 @@ impl App {
             self.settings_open = true;
             return;
         }
+        // A record asked for on a list joins the map now, not when the sync
+        // that follows the edit lands: the map is where a dig's finds go,
+        // and the want is the moment they're kept.
+        match &edit {
+            VinylEdit::Want { release_ids, label } => {
+                for id in release_ids {
+                    self.note_listed(*id, label);
+                }
+            }
+            VinylEdit::Collect { release_id, label } => self.note_listed(*release_id, label),
+            _ => {}
+        }
         if self.vinyl_edit_rx.is_some() {
             // The record's own button already says "Adding…" for a queued
             // edit (see [`App::vinyl_pending`]), so no status line needed.

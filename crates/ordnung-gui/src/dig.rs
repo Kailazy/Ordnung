@@ -1283,6 +1283,18 @@ impl App {
                 step.thumb_url.clone(),
             )
         });
+        // The map remembers every record a dig lands on, whether or not it
+        // ever makes a list.
+        let pin = ordnung_core::model::DugRelease {
+            release_id,
+            artist: step.artist.clone(),
+            title: step.title.clone(),
+            label: step.label.clone(),
+            sub: step.sub.clone(),
+            thumb_url: step.thumb_url.clone(),
+            wanted: false,
+            dug_at: crate::graph::unix_now(),
+        };
         // Grafted under the record it was dug from — a second thread taken out
         // of the same record forks the web rather than replacing the first.
         let idx = dig.steps.len();
@@ -1290,6 +1302,7 @@ impl App {
         dig.steps[dig.at].children.push(idx);
         dig.steps[dig.at].last_child = Some(idx);
         dig.at = idx;
+        self.note_dug(pin);
         // The new step can't be dug from until we know its artist/label ids.
         self.dig_resolve_ids(release_id);
         // A thread taken from the open sheet's own branch buttons: the window

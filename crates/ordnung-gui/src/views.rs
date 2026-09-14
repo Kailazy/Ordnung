@@ -146,6 +146,57 @@ fn vinyl_tabs(
     ui.spacing_mut().item_spacing.x = space::S1;
 
     let mut clicked = None;
+    // The record map, left of the shelves: one square, no label, a painted
+    // solar system. Emphasised by its ink rather than its size, so it reads
+    // as the map's own door and not as a fourth shelf.
+    {
+        let h = {
+            let bold = ui.painter().layout_no_wrap(
+                "Collection".to_string(),
+                font::strong(font::headline().size),
+                color::LABEL,
+            );
+            bold.size().y + space::S3 * 2.0
+        };
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(h + space::S2, h), egui::Sense::click());
+        let active = current == VinylTab::Graph;
+        let rounding = egui::Rounding {
+            nw: radius::SM,
+            ne: radius::SM,
+            sw: 0.0,
+            se: 0.0,
+        };
+        if active {
+            ui.painter().rect_filled(rect, rounding, color::SURFACE_HI);
+            let y = rect.bottom() - 1.0;
+            ui.painter().line_segment(
+                [
+                    egui::pos2(rect.left() + space::S2, y),
+                    egui::pos2(rect.right() - space::S2, y),
+                ],
+                egui::Stroke::new(2.0, color::ACCENT),
+            );
+        } else if resp.hovered() {
+            ui.painter().rect_filled(rect, rounding, color::SURFACE);
+        }
+        let ink = if active {
+            color::ACCENT_HOVER
+        } else if resp.hovered() {
+            color::LABEL
+        } else {
+            color::LABEL_2
+        };
+        crate::graph::solar_icon(ui.painter(), rect.center(), ink, h * 0.34);
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp
+            .on_hover_note("Map of every record you've crossed paths with")
+            .clicked()
+        {
+            clicked = Some(VinylTab::Graph);
+        }
+    }
     if tab(
         ui,
         format!("Collection ({owned})"),
@@ -234,7 +285,7 @@ struct VinylCell {
 
 /// The caption line under a cover, e.g. `1993 · Vinyl, 12"`. Also part of the
 /// search haystack, so it's built in one place for both.
-fn vinyl_sub(v: &VinylRecord) -> String {
+pub(crate) fn vinyl_sub(v: &VinylRecord) -> String {
     match (v.year, v.format.as_deref()) {
         (Some(y), Some(f)) => format!("{y} · {f}"),
         (Some(y), None) => y.to_string(),
@@ -1458,6 +1509,9 @@ impl App {
         // else's crates, with its own header controls — so the shelf-specific
         // toolbar pieces below are skipped for it.
         let seller_mode = self.vinyl_tab == VinylTab::Sellers;
+        // The map has no sort, layout or filters of its own: the search box
+        // lights matching records in place, and that's the whole toolbar.
+        let graph_mode = self.vinyl_tab == VinylTab::Graph;
         // The user's Discogs collection page, known once a sync has resolved the
         // username. `None` until the first sync.
         // Whichever shelf is showing, its own Discogs page is what the link
@@ -1527,6 +1581,7 @@ impl App {
                         }
                     }
                 }
+                VinylTab::Graph => {}
                 VinylTab::Sellers => {
                     for l in &self.seller_listings {
                         if let Some(tags) = self.seller_genres.get(&l.release_id) {
@@ -1580,6 +1635,8 @@ impl App {
             ui.add_space(10.0);
             let hint = if seller_mode {
                 "Search the crates"
+            } else if graph_mode {
+                "Find on the map"
             } else {
                 "Search vinyl"
             };
@@ -1590,6 +1647,8 @@ impl App {
             );
             let search = search.on_hover_note(if seller_mode {
                 "Filter the crates by artist, title, label, year or format"
+            } else if graph_mode {
+                "Light up records on the map by artist, title, label or year"
             } else {
                 "Filter both shelves by artist, title, year or format"
             });
@@ -1609,6 +1668,21 @@ impl App {
                     }
                 },
             );
+            if graph_mode {
+                ui.add_space(6.0);
+                if ui
+                    .button("⊙ Fit")
+                    .on_hover_note(
+                        "Show the whole map. Pinch to zoom, drag or scroll to move, \
+                         double-click a record to lean in",
+                    )
+                    .clicked()
+                {
+                    let rect = self.graph_rect;
+                    self.graph_fit(rect);
+                }
+                return;
+            }
             // Every structured filter — year range, format, genre + style
             // tags, and the seller-only facets — lives behind this one popup,
             // so the toolbar stays a single row however many are active. The
@@ -1748,6 +1822,26 @@ impl App {
             self.draw_sellers(ui, ctx, &query);
             return;
         }
+        if graph_mode {
+            let rect = ui.available_rect_before_wrap();
+            self.graph_rect = rect;
+            let act = self.draw_graph(ui, rect, &query);
+            if let Some(graph::GraphAct::Open(rel)) = act {
+                let cover_url = rel.cover_url();
+                match rel.key {
+                    Some(key) => self.open_vinyl_sheet(key, ctx),
+                    None => self.open_release_sheet(
+                        rel.release_id,
+                        rel.artist,
+                        rel.title,
+                        rel.sub,
+                        cover_url,
+                        ctx,
+                    ),
+                }
+            }
+            return;
+        }
 
         if self.vinyl.is_empty() && self.wantlist.is_empty() {
             ui.centered_and_justified(|ui| {
@@ -1789,8 +1883,8 @@ impl App {
         // Only the active tab's shelf is built: the other one isn't on screen.
         let tab = match self.vinyl_tab {
             VinylTab::Shelf(list) => list,
-            // Unreachable: seller mode returned above.
-            VinylTab::Sellers => VinylList::Collection,
+            // Unreachable: seller and graph modes returned above.
+            VinylTab::Sellers | VinylTab::Graph => VinylList::Collection,
         };
         let recs = match tab {
             VinylList::Collection => &owned_recs,

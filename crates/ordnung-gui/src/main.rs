@@ -12,6 +12,7 @@ mod audio;
 mod config;
 mod covers;
 mod dig;
+mod graph;
 mod inspector;
 mod jobs;
 mod browse_page;
@@ -269,6 +270,9 @@ enum LibraryView {
 enum VinylTab {
     Shelf(VinylList),
     Sellers,
+    /// The record map: every record you've crossed paths with, as one web
+    /// (see `graph`). Both shelves and every dug record, in one place.
+    Graph,
 }
 
 /// Discogs's coarse genre vocabulary — a small closed set, which is what lets
@@ -1241,6 +1245,16 @@ struct App {
     /// marker; loaded from the `viewed_releases` table with the vinyl view
     /// and appended to live as songs play.
     viewed_releases: HashSet<u64>,
+    /// Records the map knows that live on neither shelf: every release a dig
+    /// has landed on, and every bare release asked for on a list. Loaded
+    /// from the `dug_releases` table with the vinyl view and appended to
+    /// live as digs land (see [`App::note_dug`]).
+    dug: Vec<ordnung_core::model::DugRelease>,
+    /// The record map's simulation and camera.
+    graph: graph::GraphState,
+    /// The canvas the map was last drawn into, so the toolbar's Fit button
+    /// (drawn before the canvas each frame) knows what to fit to.
+    graph_rect: egui::Rect,
     /// Cheapest per-record shipping each seller quotes, `(price, currency)`
     /// keyed by username — the "shipping from" figure on the shop chips.
     /// Discogs computes quotes for this account's location; a seller

@@ -7,8 +7,8 @@
 use crate::error::{Error, Result};
 use crate::model::key::{Key, Mode, PitchClass};
 use crate::model::{
-    Analysis, AudioProperties, Beat, Beatgrid, Format, Id, Playlist, SellerListing, SellerShop,
-    Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
+    Analysis, AudioProperties, Beat, Beatgrid, DugRelease, Format, Id, Playlist, SellerListing,
+    SellerShop, Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashMap;
@@ -299,7 +299,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 impl Catalog {
     /// Open (creating if needed) a catalog at `path` and ensure the schema exists.
@@ -649,6 +649,21 @@ impl Catalog {
             CREATE TABLE IF NOT EXISTS viewed_releases (
                 release_id INTEGER PRIMARY KEY,
                 viewed_at  INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+
+            -- Releases the user dug to (or wanted from a dig) that live on
+            -- neither shelf: the pins of the record map. Display fields only
+            -- (a map pin, not a release cache); `wanted` flips the moment a
+            -- list add is asked for, so the map answers before Discogs does.
+            CREATE TABLE IF NOT EXISTS dug_releases (
+                release_id INTEGER PRIMARY KEY,
+                artist     TEXT NOT NULL,
+                title      TEXT NOT NULL,
+                label      TEXT,
+                sub        TEXT NOT NULL DEFAULT '',
+                thumb_url  TEXT,
+                wanted     INTEGER NOT NULL DEFAULT 0,
+                dug_at     INTEGER NOT NULL DEFAULT (unixepoch())
             );",
         )?;
         self.migrate()?;
@@ -3408,6 +3423,72 @@ impl Catalog {
         Ok(())
     }
 
+    // --- Record map pins -----------------------------------------------------
+
+    /// Note a release the user dug to. Idempotent on the id: a record dug to
+    /// twice keeps its first `dug_at`, refreshes the display fields (a later
+    /// visit may know the label the first didn't) and never loses `wanted`.
+    pub fn record_dug_release(&self, d: &DugRelease) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO dug_releases
+                (release_id, artist, title, label, sub, thumb_url, wanted, dug_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(release_id) DO UPDATE SET
+                artist    = excluded.artist,
+                title     = excluded.title,
+                label     = COALESCE(excluded.label, label),
+                sub       = CASE WHEN excluded.sub = '' THEN sub ELSE excluded.sub END,
+                thumb_url = COALESCE(excluded.thumb_url, thumb_url),
+                wanted    = MAX(wanted, excluded.wanted)",
+            params![
+                d.release_id as i64,
+                d.artist,
+                d.title,
+                d.label,
+                d.sub,
+                d.thumb_url,
+                d.wanted as i64,
+                d.dug_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Flag a dug release as asked for on a Discogs list. A no-op for ids the
+    /// map doesn't know (shelf records are already on the map by being
+    /// shelved).
+    pub fn mark_dug_wanted(&self, release_id: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE dug_releases SET wanted = 1 WHERE release_id = ?1",
+            params![release_id as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Every dug release, oldest first. Grows one row per record dug to, so
+    /// it loads whole.
+    pub fn list_dug_releases(&self) -> Result<Vec<DugRelease>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT release_id, artist, title, label, sub, thumb_url, wanted, dug_at
+             FROM dug_releases ORDER BY dug_at, release_id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(DugRelease {
+                    release_id: r.get::<_, i64>(0)? as u64,
+                    artist: r.get(1)?,
+                    title: r.get(2)?,
+                    label: r.get(3)?,
+                    sub: r.get(4)?,
+                    thumb_url: r.get(5)?,
+                    wanted: r.get::<_, i64>(6)? != 0,
+                    dug_at: r.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Every release the user has auditioned from a seller's crates — the set
     /// the viewed marker is drawn from. Small (it grows one row per record
     /// actually listened to), so it loads whole.
@@ -5303,6 +5384,40 @@ mod tests {
         let mut viewed = cat.viewed_releases().unwrap();
         viewed.sort_unstable();
         assert_eq!(viewed, vec![7, 42]);
+    }
+
+    #[test]
+    fn dug_releases_merge_on_id_and_keep_wanted() {
+        let cat = Catalog::open(temp_db_path("dug")).unwrap();
+        let first = DugRelease {
+            release_id: 9,
+            artist: "Aphex Twin".into(),
+            title: "Selected Ambient Works".into(),
+            label: None,
+            sub: "1992 · 2xLP".into(),
+            thumb_url: None,
+            wanted: false,
+            dug_at: 100,
+        };
+        cat.record_dug_release(&first).unwrap();
+        cat.mark_dug_wanted(9).unwrap();
+        // A second visit fills in the label and can't clear the want.
+        cat.record_dug_release(&DugRelease {
+            label: Some("Apollo".into()),
+            sub: String::new(),
+            dug_at: 200,
+            ..first.clone()
+        })
+        .unwrap();
+        let rows = cat.list_dug_releases().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label.as_deref(), Some("Apollo"));
+        assert_eq!(rows[0].sub, "1992 · 2xLP");
+        assert!(rows[0].wanted);
+        assert_eq!(rows[0].dug_at, 100);
+        // Unknown ids are ignored by the flag, not invented.
+        cat.mark_dug_wanted(77).unwrap();
+        assert_eq!(cat.list_dug_releases().unwrap().len(), 1);
     }
 
     #[test]
