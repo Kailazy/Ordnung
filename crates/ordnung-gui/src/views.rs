@@ -1699,7 +1699,7 @@ impl App {
                 if ui
                     .button("⊙ Fit")
                     .on_hover_note(
-                        "Show the whole map. Pinch to zoom, drag or scroll to move, \
+                        "Show the whole map. Scroll or pinch to zoom, drag to move, \
                          double-click a record to lean in",
                     )
                     .clicked()

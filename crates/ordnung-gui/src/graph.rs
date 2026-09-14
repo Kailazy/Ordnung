@@ -288,8 +288,41 @@ fn next_rand(seed: &mut u64) -> f32 {
     (x >> 11) as f32 / (1u64 << 53) as f32
 }
 
-fn hub_radius(weight: usize) -> f32 {
-    (13.0 + 4.2 * (weight as f32).sqrt()).min(60.0)
+/// A hub is an anchor, not a body: the cloud's first record sits on it and
+/// the area is painted around it, so it only needs a small radius of its
+/// own for hit-testing.
+fn hub_radius(_weight: usize) -> f32 {
+    4.0
+}
+
+/// A cloud's tint, from its name: one hue per cloud, kept muted and dark
+/// so it reads as a wash under the covers rather than a colour of its own.
+fn cloud_tint(name: &str) -> egui::Color32 {
+    let h = name
+        .bytes()
+        .fold(0x811c_9dc5u32, |a, b| (a ^ b as u32).wrapping_mul(0x0100_0193));
+    let hue = (h % 360) as f32 / 360.0;
+    let (s, l) = (0.55, 0.58);
+    // HSL to RGB.
+    let q = l + s - l * s;
+    let p = 2.0 * l - q;
+    let chan = |t: f32| -> f32 {
+        let t = t.rem_euclid(1.0);
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    egui::Color32::from_rgb(
+        (chan(hue + 1.0 / 3.0) * 255.0) as u8,
+        (chan(hue) * 255.0) as u8,
+        (chan(hue - 1.0 / 3.0) * 255.0) as u8,
+    )
 }
 
 /// Lay `n` bodies of half-size `body` on concentric rings outside a hub of
@@ -300,8 +333,13 @@ fn hub_radius(weight: usize) -> f32 {
 fn ring_slots(n: usize, inner: f32, body: f32, phase: f32) -> (Vec<egui::Vec2>, f32) {
     let pitch = body * 2.0 + RING_GAP;
     let mut out = Vec::with_capacity(n);
-    let mut radius = inner + body + RING_GAP;
-    let mut left = n;
+    if n == 0 {
+        return (out, inner);
+    }
+    // The first body sits on the anchor; the rings go around it.
+    out.push(egui::Vec2::ZERO);
+    let mut radius = inner.max(body) + body + RING_GAP;
+    let mut left = n - 1;
     let mut ring = 0usize;
     while left > 0 {
         let cap = ((std::f32::consts::TAU * radius) / pitch).floor().max(1.0) as usize;
@@ -318,7 +356,7 @@ fn ring_slots(n: usize, inner: f32, body: f32, phase: f32) -> (Vec<egui::Vec2>, 
             radius += pitch;
         }
     }
-    let outer = if n == 0 { inner } else { radius + body };
+    let outer = if n == 1 { body } else { radius + body };
     (out, outer)
 }
 
@@ -785,9 +823,11 @@ impl GraphState {
                                 let d = self.nodes[j].pos - self.nodes[i].pos;
                                 let dist = d.length().max(0.5);
                                 let (ri, rj) = (self.nodes[i].reach, self.nodes[j].reach);
-                                // Clouds must not overlap: a firm push while
-                                // they do, and a soft one for a margin beyond.
-                                let touch = ri + rj;
+                                // Clouds must not overlap, and their washes
+                                // want clear ground between them: a firm push
+                                // while they're closer than that margin, and
+                                // a soft one for a way beyond.
+                                let touch = ri + rj + 36.0;
                                 let range = touch + REPEL_RANGE * 0.5;
                                 if dist >= range {
                                     continue;
@@ -795,7 +835,7 @@ impl GraphState {
                                 let dir = d / dist;
                                 let mut f = REPEL_K * 0.02 * (1.0 - (dist - touch).max(0.0) / (range - touch));
                                 if dist < touch {
-                                    f += (touch - dist) * 40.0;
+                                    f += (touch - dist) * 140.0;
                                 }
                                 forces[i] -= dir * f;
                                 forces[j] += dir * f;
@@ -867,7 +907,9 @@ impl GraphState {
         let mut r: Option<egui::Rect> = None;
         for n in &self.nodes {
             let c = egui::pos2(n.pos.x, n.pos.y);
-            let b = egui::Rect::from_center_size(c, egui::Vec2::splat(n.r * 2.0 + 24.0));
+            // A hub's extent is its wash plus the caption over it.
+            let ext = if n.kind == Kind::Hub { n.reach * 1.3 + 26.0 } else { n.r + 12.0 };
+            let b = egui::Rect::from_center_size(c, egui::Vec2::splat(ext * 2.0));
             r = Some(match r {
                 Some(x) => x.union(b),
                 None => b,
@@ -967,9 +1009,11 @@ impl App {
 
         let pointer = resp.hover_pos().or_else(|| resp.interact_pointer_pos());
         if resp.hovered() || resp.dragged() {
-            // Pinch (or ctrl+scroll) zooms about the pointer; a plain scroll
-            // pans, the way a trackpad moves a map.
-            let (zd, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
+            // Pinch and a vertical scroll both zoom about the pointer (scroll
+            // up to lean in, the way a map wheel works); a sideways scroll
+            // pans, and so does a drag on empty canvas.
+            let (pinch, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
+            let zd = pinch * (scroll.y * 0.0035).exp();
             if (zd - 1.0).abs() > 1e-4 {
                 if let Some(p) = pointer {
                     let anchor = to_world(g.cam_goal, g.zoom_goal, p);
@@ -979,21 +1023,39 @@ impl App {
                     g.follow_fit = false;
                 }
             }
-            if scroll != egui::Vec2::ZERO {
-                g.cam_goal -= scroll / g.zoom_goal;
+            if scroll.x != 0.0 {
+                g.cam_goal.x -= scroll.x / g.zoom_goal;
                 g.follow_fit = false;
             }
         }
 
         // --- Hit test -------------------------------------------------------
+        // Records and sub-group marks first; failing those, the cloud whose
+        // area the pointer is over.
         let hit = |g: &GraphState, p: egui::Pos2| -> Option<usize> {
             let mut best: Option<(usize, f32)> = None;
             for (i, n) in g.nodes.iter().enumerate() {
+                if n.kind == Kind::Hub {
+                    continue;
+                }
                 let s = to_screen(g.cam, g.zoom, n.pos);
                 let r = (n.r * n.scale.max(0.2) * g.zoom).max(5.0) + 2.0;
                 let d = (p - s).length();
                 if d <= r && best.is_none_or(|(_, bd)| d < bd) {
                     best = Some((i, d));
+                }
+            }
+            if best.is_none() {
+                for (i, n) in g.nodes.iter().enumerate() {
+                    if n.kind != Kind::Hub {
+                        continue;
+                    }
+                    let s = to_screen(g.cam, g.zoom, n.pos);
+                    let d = (p - s).length();
+                    let r = n.reach * g.zoom;
+                    if d <= r && best.is_none_or(|(_, bd)| d < bd) {
+                        best = Some((i, d));
+                    }
                 }
             }
             best.map(|(i, _)| i)
@@ -1166,10 +1228,38 @@ impl App {
             .collect();
         let visible = |p: egui::Pos2, r: f32| -> bool { rect.expand(r + 40.0).contains(p) };
 
-        // Links. A match lights the link to its hub too, so a hit's family
-        // is legible under the dimming.
+        // Cloud areas go under everything: a soft, feathered wash in the
+        // cloud's own tint, wide enough that its records rest inside it.
+        // The feathering is a stack of faint discs, largest first, so the
+        // edge fades out rather than stopping.
+        for (i, n) in g.nodes.iter().enumerate() {
+            if n.kind != Kind::Hub || n.scale <= 0.01 {
+                continue;
+            }
+            let p = to_screen(cam, zoom, n.pos);
+            let reach = n.reach * zoom;
+            if !visible(p, reach) {
+                continue;
+            }
+            let on = matches[i];
+            let lit = Some(i) == g.hover || Some(i) == g.drag;
+            let tint = cloud_tint(&n.name);
+            let layers = 7;
+            let base = if lit { 9.0 } else { 6.5 } * n.scale.clamp(0.0, 1.0);
+            for k in 0..layers {
+                let t = k as f32 / (layers - 1) as f32;
+                let r = reach * (1.28 - 0.5 * t);
+                let a = (base * (0.6 + 0.8 * t)) as u8;
+                painter.circle_filled(p, r, dim(tint.gamma_multiply(a as f32 / 255.0), on));
+            }
+        }
+
+        // Links between clouds.
         let link_w = (1.0 * zoom.sqrt()).clamp(0.5, 1.6);
         for e in &g.edges {
+            if !e.soft {
+                continue;
+            }
             let (a, b) = (&g.nodes[e.a], &g.nodes[e.b]);
             let pa = to_screen(cam, zoom, a.pos);
             let pb = to_screen(cam, zoom, b.pos);
@@ -1178,9 +1268,10 @@ impl App {
             }
             let on = matches[e.a] || matches[e.b];
             if e.soft {
-                // Cross-ties are detail: at the whole-map scale they only
-                // scribble over the clouds they join.
-                if zoom < 0.75 && !(searching && on) {
+                // Cross-ties are detail for a search or a hover: drawn
+                // always, they scribble over the clouds they join.
+                let hovered = Some(e.a) == g.hover || Some(e.b) == g.hover;
+                if !(hovered || (searching && on)) {
                     continue;
                 }
                 painter.add(egui::Shape::dashed_line(
@@ -1189,16 +1280,9 @@ impl App {
                     4.0 * zoom.max(0.5),
                     6.0 * zoom.max(0.5),
                 ));
-            } else {
-                let c = match a.kind {
-                    Kind::Sub => color::LABEL_4,
-                    _ => color::SEPARATOR_OPAQUE,
-                };
-                // Spokes thin out as the map zooms out, so a dense cloud
-                // reads as covers around a hub rather than a starburst.
-                let c = c.gamma_multiply(zoom.clamp(0.35, 1.0));
-                painter.line_segment([pa, pb], egui::Stroke::new(link_w, dim(c, on)));
             }
+            // Spokes aren't drawn: the area under a cloud is what says which
+            // records belong to it.
         }
 
         // Hubs under, records over, the hovered node last so it sits on top.
@@ -1228,20 +1312,13 @@ impl App {
             let lit = Some(i) == g.hover || Some(i) == g.drag;
             match n.kind {
                 Kind::Hub => {
-                    painter.circle(
-                        p,
-                        r,
-                        dim(if lit { color::SURFACE_ACTIVE } else { color::SURFACE_HI }, on),
-                        egui::Stroke::new(
-                            1.5f32.min(r * 0.2),
-                            dim(if lit { color::LABEL } else { color::LABEL_3 }, on),
-                        ),
-                    );
-                    // Names earn their place by size: a hub that's a dot on
-                    // screen stays unlabelled until you lean in, so the
-                    // whole-map view isn't a carpet of type.
-                    if r >= 9.5 || lit {
-                        hub_names.push((p, r, n.name.clone(), dim(color::LABEL, on)));
+                    // Nothing at the anchor itself; the area is the body.
+                    // Names earn their place by size: a cloud that's a
+                    // speck on screen stays unlabelled until you lean in,
+                    // so the whole-map view isn't a carpet of type.
+                    let area = n.reach * zoom;
+                    if area >= 26.0 || lit {
+                        hub_names.push((p, area, n.name.clone(), dim(color::LABEL, on)));
                     }
                 }
                 Kind::Sub => {
@@ -1351,7 +1428,10 @@ impl App {
                     egui::Stroke::new(1.0, color::ACCENT.gamma_multiply(0.6)),
                 );
             }
-            if r >= 17.0 || lit {
+            // A title only when the cover is big enough on screen for the
+            // words to belong to it alone, or on hover: a caption under
+            // every cover of a packed cloud is a second cloud of type.
+            if r >= 30.0 || lit {
                 let size = (11.0 * zoom.sqrt()).clamp(9.0, 13.0);
                 let mut title = n.name.clone();
                 if title.chars().count() > 22 {
@@ -1367,15 +1447,14 @@ impl App {
             }
         }
 
-        for (p, r, name, ink) in hub_names {
+        for (p, area, name, ink) in hub_names {
             let size = (13.0 * zoom.sqrt()).clamp(9.0, 16.0);
             let galley = painter.layout_no_wrap(name, font::strong(size), ink);
-            // Inside the circle when it fits, else just below it.
-            let pos = if galley.size().x <= r * 1.8 && galley.size().y <= r * 1.2 {
-                p - galley.size() * 0.5
-            } else {
-                egui::pos2(p.x - galley.size().x * 0.5, p.y + r + 3.0)
-            };
+            // Over the top of the area, like a caption on a region of a map.
+            let pos = egui::pos2(
+                p.x - galley.size().x * 0.5,
+                p.y - area - galley.size().y - 2.0,
+            );
             // A soft shadow keeps the word legible over a busy cloud.
             painter.galley(
                 pos + egui::vec2(0.0, 1.0),
