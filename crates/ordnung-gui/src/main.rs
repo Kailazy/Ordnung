@@ -1250,6 +1250,11 @@ struct App {
     /// from the `dug_releases` table with the vinyl view and appended to
     /// live as digs land (see [`App::note_dug`]).
     dug: Vec<ordnung_core::model::DugRelease>,
+    /// Genre tags for dug records, which carry none of their own: read from
+    /// the release-detail cache and the bulk genre database at reload, the
+    /// way untagged shelf rows are backfilled. What the map's genre clouds
+    /// place them by.
+    dug_genres: HashMap<u64, Vec<String>>,
     /// The record map's simulation and camera.
     graph: graph::GraphState,
     /// The canvas the map was last drawn into, so the toolbar's Fit button

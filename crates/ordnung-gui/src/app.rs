@@ -148,6 +148,7 @@ impl App {
             seller_find: String::new(),
             viewed_releases: HashSet::new(),
             dug: Vec::new(),
+            dug_genres: HashMap::new(),
             graph: graph::GraphState::default(),
             graph_rect: egui::Rect::NOTHING,
             seller_shipping: HashMap::new(),
@@ -711,6 +712,35 @@ impl App {
             self.dug = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_dug_releases())
                 .unwrap_or_default();
+            // Dug records carry no tags of their own; the detail cache (the
+            // dig fetches every landed release's detail) and the bulk genre
+            // database supply them for the map's genre clouds.
+            let dug_ids: Vec<u64> = self.dug.iter().map(|d| d.release_id).collect();
+            if !dug_ids.is_empty() && dug_ids.len() != self.dug_genres.len() {
+                let mut map = Catalog::open(&self.db_path)
+                    .and_then(|c| c.release_genres(&dug_ids))
+                    .unwrap_or_default();
+                let still: Vec<u64> = dug_ids
+                    .iter()
+                    .copied()
+                    .filter(|id| !map.contains_key(id))
+                    .collect();
+                if !still.is_empty() {
+                    if let Ok(Some(gdb)) =
+                        genredb::GenreDb::open(&genredb::default_path(&self.db_path))
+                    {
+                        if let Ok(more) = gdb.genres_for(&still) {
+                            map.extend(more);
+                        }
+                    }
+                }
+                // Every id gets an entry, so the length check above is a
+                // stable "seen this set" test.
+                for id in &dug_ids {
+                    map.entry(*id).or_default();
+                }
+                self.dug_genres = map;
+            }
             // Shelf rows synced before the genres column existed carry no tags
             // until the next Discogs refresh; in the meantime, fill in whatever
             // the release-detail cache already knows. Memoized on the missing

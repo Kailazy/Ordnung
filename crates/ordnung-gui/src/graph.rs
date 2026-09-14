@@ -32,12 +32,42 @@ pub(crate) enum Status {
     Dug,
 }
 
+/// What the map gathers records around. Switching re-homes every record
+/// under new hubs in place, and the springs carry them across.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Arrange {
+    /// Artist hubs, with a label sub-group where an artist has two or more
+    /// records on one label.
+    Artists,
+    /// Style hubs ("Deep House"), each a cloud of the records tagged with
+    /// it first; a record's further styles tie it loosely to those clouds
+    /// too, so neighbouring styles drift together.
+    Genres,
+}
+
+impl Arrange {
+    pub(crate) fn from_key(k: &str) -> Self {
+        if k == "genres" {
+            Self::Genres
+        } else {
+            Self::Artists
+        }
+    }
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Artists => "artists",
+            Self::Genres => "genres",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    Artist,
-    /// A label an artist has two or more records on: the sub-group between
-    /// that artist and those records.
-    Label,
+    /// A cluster's centre: an artist, or a style in genre clouds.
+    Hub,
+    /// The sub-group between a hub and some of its records: a label an
+    /// artist has two or more records on.
+    Sub,
     Release,
 }
 
@@ -58,6 +88,9 @@ pub(crate) struct Release {
     pub title: String,
     pub sub: String,
     pub label: Option<String>,
+    /// Discogs genres then styles, as the shelf row or the tag caches know
+    /// them. Empty for a record nothing has tagged yet.
+    pub genres: Vec<String>,
     pub status: Status,
     cover: Cover,
     /// The shelf key when the record is on a shelf, so a click opens the
@@ -129,6 +162,8 @@ pub(crate) struct GraphState {
     /// Signature of the sources the nodes were built from; a sync is skipped
     /// while it matches.
     sig: u64,
+    /// How the map was last built.
+    arrange: Arrange,
     /// World point at the middle of the canvas, and the scale, as drawn now
     /// and as they're heading. Input moves the goal; the drawn camera eases
     /// after it.
@@ -160,6 +195,7 @@ impl Default for GraphState {
             edges: Vec::new(),
             index: HashMap::new(),
             sig: 0,
+            arrange: Arrange::Artists,
             cam: egui::Vec2::ZERO,
             zoom: 1.0,
             cam_goal: egui::Vec2::ZERO,
@@ -241,15 +277,43 @@ fn next_rand(seed: &mut u64) -> f32 {
     (x >> 11) as f32 / (1u64 << 53) as f32
 }
 
-fn artist_radius(weight: usize) -> f32 {
-    (13.0 + 4.2 * (weight as f32).sqrt()).min(44.0)
+fn hub_radius(weight: usize) -> f32 {
+    (13.0 + 4.2 * (weight as f32).sqrt()).min(60.0)
+}
+
+/// Is this tag one of Discogs's coarse genres (as opposed to a style)?
+fn is_coarse_genre(tag: &str) -> bool {
+    crate::DISCOGS_GENRES.iter().any(|g| g.eq_ignore_ascii_case(tag))
+}
+
+/// The style a record files under in genre clouds, and the further styles
+/// that tie it to other clouds. The first *style* wins over the coarse genre
+/// — for a DJ's shelves "Electronic" would hold nearly everything, and the
+/// styles are where the shape is — with the genre as the fallback for a
+/// record tagged only coarsely.
+fn cloud_of(genres: &[String]) -> (String, Vec<String>) {
+    let mut styles = genres.iter().filter(|t| !is_coarse_genre(t)).map(|t| t.trim().to_string());
+    match styles.next() {
+        Some(first) => (first, styles.take(2).collect()),
+        None => match genres.first() {
+            Some(g) => (g.trim().to_string(), Vec::new()),
+            None => ("Untagged".to_string(), Vec::new()),
+        },
+    }
 }
 
 impl GraphState {
     /// Rebuild the nodes from the three sources when any of them changed.
     /// Existing nodes keep their position and motion; new ones are born at
     /// their hub and spring out from it; nodes no source names any more go.
-    fn sync(&mut self, owned: &[VinylRecord], wanted: &[VinylRecord], dug: &[DugRelease]) {
+    fn sync(
+        &mut self,
+        arrange: Arrange,
+        owned: &[VinylRecord],
+        wanted: &[VinylRecord],
+        dug: &[DugRelease],
+        dug_genres: &HashMap<u64, Vec<String>>,
+    ) {
         // Merge by release: a record on a shelf is that shelf's, whatever a
         // dig also knows about it; a dug record asked for on a list reads as
         // wanted straight away.
@@ -282,6 +346,7 @@ impl GraphState {
                         title: v.title.clone(),
                         sub: crate::views::vinyl_sub(v),
                         label: v.label.clone().filter(|l| !l.trim().is_empty()),
+                        genres: v.genres.clone(),
                         status,
                         cover,
                         key: Some(key),
@@ -298,6 +363,7 @@ impl GraphState {
                     title: d.title.clone(),
                     sub: d.sub.clone(),
                     label: d.label.clone().filter(|l| !l.trim().is_empty()),
+                    genres: dug_genres.get(&d.release_id).cloned().unwrap_or_default(),
                     status: if d.wanted { Status::Wanted } else { Status::Dug },
                     cover: match d.thumb_url.as_deref().filter(|u| !u.trim().is_empty()) {
                         Some(u) => Cover::Url(u.to_string()),
@@ -310,10 +376,14 @@ impl GraphState {
         }
 
         let mut sig = 0xcbf2_9ce4_8422_2325u64;
+        mix(&mut sig, arrange as u64);
         for r in &releases {
             mix(&mut sig, r.release_id);
             mix(&mut sig, r.status as u64);
             mix_str(&mut sig, r.label.as_deref().unwrap_or(""));
+            for g in &r.genres {
+                mix_str(&mut sig, g);
+            }
             match &r.cover {
                 Cover::None => mix(&mut sig, 0),
                 Cover::Shelf((l, id)) => {
@@ -327,6 +397,7 @@ impl GraphState {
             return;
         }
         self.sig = sig;
+        self.arrange = arrange;
 
         for n in &mut self.nodes {
             n.alive = false;
@@ -344,24 +415,52 @@ impl GraphState {
             artist_keys.push(ak);
         }
 
+        // Loose ties from a record to the further clouds it belongs to, by
+        // key; resolved to indices once the nodes are compacted.
+        let mut ties: Vec<(String, String)> = Vec::new();
         let n_before = self.nodes.len();
         for (r, ak) in releases.into_iter().zip(artist_keys) {
-            let artist_name = crate::dig::strip_disambiguator(&r.artist).trim().to_string();
-            let artist_name = if artist_name.is_empty() {
-                "Unknown artist".to_string()
-            } else {
-                artist_name
-            };
-            let ai = self.ensure(Kind::Artist, &ak, &artist_name, None);
-            self.nodes[ai].weight += 1;
-            let hub_key = match &r.label {
-                Some(l) if per_label.get(&(ak.clone(), fold(l))).copied().unwrap_or(0) >= 2 => {
-                    let lk = format!("l:{ak}|{}", fold(l));
-                    let li = self.ensure(Kind::Label, &lk, l.trim(), Some(ak.clone()));
-                    self.nodes[li].weight += 1;
-                    lk
+            let hub_key = match arrange {
+                Arrange::Artists => {
+                    let artist_name =
+                        crate::dig::strip_disambiguator(&r.artist).trim().to_string();
+                    let artist_name = if artist_name.is_empty() {
+                        "Unknown artist".to_string()
+                    } else {
+                        artist_name
+                    };
+                    let ai = self.ensure(Kind::Hub, &ak, &artist_name, None);
+                    self.nodes[ai].weight += 1;
+                    match &r.label {
+                        Some(l)
+                            if per_label
+                                .get(&(ak.clone(), fold(l)))
+                                .copied()
+                                .unwrap_or(0)
+                                >= 2 =>
+                        {
+                            let lk = format!("l:{ak}|{}", fold(l));
+                            let li = self.ensure(Kind::Sub, &lk, l.trim(), Some(ak.clone()));
+                            self.nodes[li].weight += 1;
+                            lk
+                        }
+                        _ => ak.clone(),
+                    }
                 }
-                _ => ak.clone(),
+                Arrange::Genres => {
+                    let (first, more) = cloud_of(&r.genres);
+                    let gk = format!("g:{}", fold(&first));
+                    let gi = self.ensure(Kind::Hub, &gk, &first, None);
+                    self.nodes[gi].weight += 1;
+                    for style in more {
+                        let sk = format!("g:{}", fold(&style));
+                        // A tie's far end exists only if something files
+                        // under it first; a style nobody leads with isn't
+                        // a cloud, and the tie is dropped at resolution.
+                        ties.push((format!("r:{}", r.release_id), sk));
+                    }
+                    gk
+                }
             };
             let rk = format!("r:{}", r.release_id);
             let ri = self.ensure(Kind::Release, &rk, &r.title, Some(hub_key));
@@ -400,8 +499,8 @@ impl GraphState {
                 .and_then(|k| self.index.get(k).copied());
             self.nodes[i].hub = hub;
             self.nodes[i].r = match self.nodes[i].kind {
-                Kind::Artist => artist_radius(self.nodes[i].weight),
-                Kind::Label => LABEL_R + 1.5 * (self.nodes[i].weight as f32).sqrt(),
+                Kind::Hub => hub_radius(self.nodes[i].weight),
+                Kind::Sub => LABEL_R + 1.5 * (self.nodes[i].weight as f32).sqrt(),
                 Kind::Release => REL_R,
             };
             self.nodes[i].hay = match self.nodes[i].kind {
@@ -410,31 +509,63 @@ impl GraphState {
             };
         }
 
-        // Newborns start on their hub (or, for a hub with no home yet, on a
-        // sunflower spiral so a whole fresh map opens evenly) and let the
-        // springs carry them out.
+        // Newborns: a hub whose records are already on the map appears among
+        // them (a rearrangement grows its new hubs out of the old clusters,
+        // then the springs sort the records); a hub with no home yet takes a
+        // sunflower spiral slot so a whole fresh map opens evenly; a record
+        // starts on its hub and springs out.
+        let placed: Vec<bool> = self.nodes.iter().map(|n| n.scale > 0.0).collect();
         let mut spiral = 0usize;
         for i in 0..self.nodes.len() {
-            if self.nodes[i].alive && self.nodes[i].scale > 0.0 {
+            if placed[i] || self.nodes[i].kind == Kind::Release {
                 continue;
             }
-            let hub_pos = self.nodes[i].hub.map(|h| self.nodes[h].pos);
+            let (mut sum, mut count) = (egui::Vec2::ZERO, 0usize);
+            for (j, n) in self.nodes.iter().enumerate() {
+                if placed[j] && n.hub == Some(i) {
+                    sum += n.pos;
+                    count += 1;
+                }
+            }
             let a = next_rand(&mut self.seed) * std::f32::consts::TAU;
             let jitter = egui::vec2(a.cos(), a.sin());
-            self.nodes[i].pos = match hub_pos {
-                Some(p) => p + jitter * (self.nodes[i].r + 6.0),
-                None => {
-                    // Spread new hubs among the ones already there rather
-                    // than piling them on the origin.
-                    let k = (self.nodes.len() + spiral) as f32;
-                    spiral += 1;
-                    let r = 30.0 * k.sqrt();
-                    let t = k * 2.399_963;
-                    egui::vec2(r * t.cos(), r * t.sin()) + jitter * 8.0
-                }
+            self.nodes[i].pos = if count > 0 {
+                // Rearranging spreads every cluster over the whole map, so
+                // the centroids all land near the middle; a growing offset
+                // keeps the new hubs from starting on top of each other.
+                let k = spiral as f32;
+                spiral += 1;
+                sum / count as f32 + jitter * (40.0 * k.sqrt())
+            } else if let Some(p) = self.nodes[i].hub.filter(|&h| placed[h]).map(|h| self.nodes[h].pos) {
+                p + jitter * (self.nodes[i].r + 6.0)
+            } else {
+                let k = (self.nodes.len() + spiral) as f32;
+                spiral += 1;
+                let r = 30.0 * k.sqrt();
+                let t = k * 2.399_963;
+                egui::vec2(r * t.cos(), r * t.sin()) + jitter * 8.0
             };
             self.nodes[i].vel = egui::Vec2::ZERO;
         }
+        let hub_pos: Vec<Option<egui::Vec2>> = self
+            .nodes
+            .iter()
+            .map(|n| n.hub.map(|h| self.nodes[h].pos))
+            .collect();
+        let mut seed = self.seed;
+        for ((n, placed), hub_pos) in self.nodes.iter_mut().zip(placed).zip(hub_pos) {
+            if placed || n.kind != Kind::Release {
+                continue;
+            }
+            let a = next_rand(&mut seed) * std::f32::consts::TAU;
+            let jitter = egui::vec2(a.cos(), a.sin());
+            n.pos = match hub_pos {
+                Some(p) => p + jitter * (n.r + 6.0),
+                None => jitter * 20.0,
+            };
+            n.vel = egui::Vec2::ZERO;
+        }
+        self.seed = seed;
 
         // Links: every node to its hub, and a faint tie between two artists'
         // groups on the same label so the label reads across the map.
@@ -442,15 +573,15 @@ impl GraphState {
         for i in 0..self.nodes.len() {
             let Some(h) = self.nodes[i].hub else { continue };
             let (rest, k) = match (self.nodes[i].kind, self.nodes[h].kind) {
-                (Kind::Release, Kind::Artist) => {
+                (Kind::Release, Kind::Hub) => {
                     let fan = (self.nodes[h].weight as f32).sqrt() * 9.0;
                     (self.nodes[h].r + REL_R + 12.0 + fan.min(60.0), SPRING_K)
                 }
-                (Kind::Release, Kind::Label) => {
+                (Kind::Release, Kind::Sub) => {
                     let fan = (self.nodes[h].weight as f32).sqrt() * 8.0;
                     (self.nodes[h].r + REL_R + 18.0 + fan.min(40.0), SPRING_K)
                 }
-                (Kind::Label, _) => (self.nodes[h].r + 64.0, SPRING_K * 0.8),
+                (Kind::Sub, _) => (self.nodes[h].r + 64.0, SPRING_K * 0.8),
                 _ => (80.0, SPRING_K),
             };
             self.edges.push(Edge {
@@ -463,7 +594,7 @@ impl GraphState {
         }
         let mut by_label: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, n) in self.nodes.iter().enumerate() {
-            if n.kind == Kind::Label {
+            if n.kind == Kind::Sub {
                 by_label.entry(fold(&n.name)).or_default().push(i);
             }
         }
@@ -474,6 +605,18 @@ impl GraphState {
                     b: w[1],
                     rest: 260.0,
                     k: 1.2,
+                    soft: true,
+                });
+            }
+        }
+        for (rk, gk) in ties {
+            if let (Some(&a), Some(&b)) = (self.index.get(&rk), self.index.get(&gk)) {
+                let rest = self.nodes[b].r + REL_R + 90.0;
+                self.edges.push(Edge {
+                    a,
+                    b,
+                    rest,
+                    k: 2.0,
                     soft: true,
                 });
             }
@@ -509,8 +652,8 @@ impl GraphState {
             pos: egui::Vec2::ZERO,
             vel: egui::Vec2::ZERO,
             r: match kind {
-                Kind::Artist => artist_radius(1),
-                Kind::Label => LABEL_R,
+                Kind::Hub => hub_radius(1),
+                Kind::Sub => LABEL_R,
                 Kind::Release => REL_R,
             },
             scale: 0.0,
@@ -612,8 +755,8 @@ impl GraphState {
                     continue;
                 }
                 let g = match node.kind {
-                    Kind::Artist => GRAVITY_HUB,
-                    Kind::Label => GRAVITY_HUB * 0.35,
+                    Kind::Hub => GRAVITY_HUB,
+                    Kind::Sub => GRAVITY_HUB * 0.35,
                     Kind::Release => GRAVITY_LEAF,
                 };
                 let len = node.pos.length();
@@ -687,7 +830,8 @@ impl App {
     ) -> Option<GraphAct> {
         use crate::ui::tokens::{color, font};
         let mut g = std::mem::take(&mut self.graph);
-        g.sync(&self.vinyl, &self.wantlist, &self.dug);
+        let arrange = Arrange::from_key(&self.config.graph_arrange);
+        g.sync(arrange, &self.vinyl, &self.wantlist, &self.dug, &self.dug_genres);
 
         let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let painter = ui.painter().with_clip_rect(rect);
@@ -960,7 +1104,7 @@ impl App {
                 ));
             } else {
                 let c = match a.kind {
-                    Kind::Label => color::LABEL_4,
+                    Kind::Sub => color::LABEL_4,
                     _ => color::SEPARATOR_OPAQUE,
                 };
                 painter.line_segment([pa, pb], egui::Stroke::new(link_w, dim(c, on)));
@@ -972,14 +1116,17 @@ impl App {
         order.sort_by_key(|&i| {
             (
                 match g.nodes[i].kind {
-                    Kind::Label => 0,
-                    Kind::Artist => 1,
+                    Kind::Sub => 0,
+                    Kind::Hub => 1,
                     Kind::Release => 2,
                 },
                 (Some(i) == g.hover || Some(i) == g.drag) as u8,
             )
         });
         let mut cover_asks: Vec<usize> = Vec::new();
+        // Hub names go on last, over the covers: a big cloud's records
+        // would otherwise bury the one word that says what the cloud is.
+        let mut hub_names: Vec<(egui::Pos2, f32, String, egui::Color32)> = Vec::new();
         for &i in &order {
             let n = &g.nodes[i];
             let p = to_screen(cam, zoom, n.pos);
@@ -990,7 +1137,7 @@ impl App {
             let on = matches[i];
             let lit = Some(i) == g.hover || Some(i) == g.drag;
             match n.kind {
-                Kind::Artist => {
+                Kind::Hub => {
                     painter.circle(
                         p,
                         r,
@@ -1004,17 +1151,10 @@ impl App {
                     // screen stays unlabelled until you lean in, so the
                     // whole-map view isn't a carpet of type.
                     if r >= 9.5 || lit {
-                        let size = (13.0 * zoom.sqrt()).clamp(9.0, 16.0);
-                        painter.text(
-                            p + egui::vec2(0.0, r + 3.0),
-                            egui::Align2::CENTER_TOP,
-                            &n.name,
-                            font::strong(size),
-                            dim(color::LABEL, on),
-                        );
+                        hub_names.push((p, r, n.name.clone(), dim(color::LABEL, on)));
                     }
                 }
-                Kind::Label => {
+                Kind::Sub => {
                     painter.circle_stroke(
                         p,
                         r,
@@ -1137,6 +1277,24 @@ impl App {
             }
         }
 
+        for (p, r, name, ink) in hub_names {
+            let size = (13.0 * zoom.sqrt()).clamp(9.0, 16.0);
+            let galley = painter.layout_no_wrap(name, font::strong(size), ink);
+            // Inside the circle when it fits, else just below it.
+            let pos = if galley.size().x <= r * 1.8 && galley.size().y <= r * 1.2 {
+                p - galley.size() * 0.5
+            } else {
+                egui::pos2(p.x - galley.size().x * 0.5, p.y + r + 3.0)
+            };
+            // A soft shadow keeps the word legible over a busy cloud.
+            painter.galley(
+                pos + egui::vec2(0.0, 1.0),
+                galley.clone(),
+                egui::Color32::from_black_alpha(140),
+            );
+            painter.galley(pos, galley, ink);
+        }
+
         // The hovered record, in words.
         if let Some(i) = g.hover {
             if let Some(rel) = g.nodes[i].release.clone() {
@@ -1162,7 +1320,7 @@ impl App {
                     };
                     ui.label(egui::RichText::new(word).color(c).small());
                 });
-            } else if g.nodes[i].kind == Kind::Artist {
+            } else if g.nodes[i].kind == Kind::Hub {
                 let n = &g.nodes[i];
                 let words = format!(
                     "{} · {} record{}",
@@ -1181,7 +1339,7 @@ impl App {
             let (mut owned, mut wanted, mut dug, mut artists) = (0, 0, 0, 0);
             for n in &g.nodes {
                 match (n.kind, n.release.as_ref().map(|r| r.status)) {
-                    (Kind::Artist, _) => artists += 1,
+                    (Kind::Hub, _) => artists += 1,
                     (_, Some(Status::Owned)) => owned += 1,
                     (_, Some(Status::Wanted)) => wanted += 1,
                     (_, Some(Status::Dug)) => dug += 1,
@@ -1213,7 +1371,10 @@ impl App {
             swatch(color::LABEL_3, 1.0, format!("Own {owned}"));
             swatch(color::ACCENT, 2.0, format!("Want {wanted}"));
             swatch(color::ORANGE, 2.0, format!("Dug {dug}"));
-            let count = format!("{artists} artists");
+            let count = match g.arrange {
+                Arrange::Artists => format!("{artists} artists"),
+                Arrange::Genres => format!("{artists} styles"),
+            };
             painter.text(
                 egui::pos2(rect.right() - 14.0, y),
                 egui::Align2::RIGHT_CENTER,

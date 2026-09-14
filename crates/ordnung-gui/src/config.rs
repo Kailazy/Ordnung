@@ -94,6 +94,11 @@ pub struct Config {
     /// browsing. Unknown values fall back to grid.
     #[serde(default = "default_vinyl_view")]
     pub vinyl_view: String,
+    /// How the record map gathers its records: `"artists"` (hubs are
+    /// artists, the default) or `"genres"` (hubs are styles, so the map
+    /// reads as genre clouds). Unknown values fall back to artists.
+    #[serde(default)]
+    pub graph_arrange: String,
     /// Which library sits at the top of the left navigation sidebar:
     /// `"digital"` (Library / New / playlists first, the default) or
     /// `"vinyl"` (the Discogs vinyl collection first). A vinyl-led collector
@@ -663,6 +668,7 @@ impl Default for Config {
             vinyl_sort: default_vinyl_sort(),
             vinyl_sort_ascending: false,
             vinyl_view: default_vinyl_view(),
+            graph_arrange: String::new(),
             nav_primary: default_nav_primary(),
             nav_density: default_nav_density(),
             inspector_open: false,

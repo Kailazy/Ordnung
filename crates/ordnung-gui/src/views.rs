@@ -1669,6 +1669,32 @@ impl App {
                 },
             );
             if graph_mode {
+                // What the map gathers around: artists, or genre clouds.
+                // Switching re-homes every record in place and the springs
+                // carry it to its new cloud.
+                ui.add_space(6.0);
+                let current = graph::Arrange::from_key(&self.config.graph_arrange);
+                let mut pick = current;
+                if ui
+                    .selectable_label(current == graph::Arrange::Artists, "Artists")
+                    .on_hover_note("Gather records around their artists")
+                    .clicked()
+                {
+                    pick = graph::Arrange::Artists;
+                }
+                if ui
+                    .selectable_label(current == graph::Arrange::Genres, "Genre clouds")
+                    .on_hover_note("Gather records into clouds by style")
+                    .clicked()
+                {
+                    pick = graph::Arrange::Genres;
+                }
+                if pick != current {
+                    self.config.graph_arrange = pick.key().to_string();
+                    if let Err(e) = self.config.save() {
+                        self.status = format!("Couldn't save settings: {e}");
+                    }
+                }
                 ui.add_space(6.0);
                 if ui
                     .button("⊙ Fit")
