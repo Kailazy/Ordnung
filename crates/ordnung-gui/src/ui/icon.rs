@@ -458,21 +458,55 @@ pub fn collection(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, 
     }
 }
 
-/// A heart, the wantlist's mark on discogs.com too.
+/// A heart, the wantlist's mark on discogs.com too: two round lobes over a
+/// point, the plainest heart there is.
+///
+/// Built from geometry rather than the parametric curve, which bulged at the
+/// lobes and pinched at the notch and read as a blob at 13px. Here the lobes
+/// are two circles meeting at the notch and the sides run straight and
+/// tangent from them down to the tip, so the outline and the fill are the
+/// same clean shape at every size it's drawn.
 pub fn wantlist(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, filled: bool) {
-    // The classic parametric heart, scaled so it fills the same optical box
-    // as the sleeve and sits a touch low, where a heart's weight is.
-    const STEPS: usize = 36;
-    let pts: Vec<egui::Pos2> = (0..STEPS)
-        .map(|i| {
-            let t = std::f32::consts::TAU * i as f32 / STEPS as f32;
-            let x = 16.0 * t.sin().powi(3);
-            let y = 13.0 * t.cos() - 5.0 * (2.0 * t).cos() - 2.0 * (3.0 * t).cos() - (4.0 * t).cos();
-            egui::pos2(c.x + x * r / 16.0, c.y - (y - 1.0) * r / 16.0)
-        })
-        .collect();
+    let lobe = r * 0.52; // lobe radius; the heart is 2 lobes wide
+    let drop = r * 1.32; // notch to tip
+    // Centre the whole shape on `c`: the top of the lobes and the tip sit the
+    // same distance from it.
+    let notch_y = c.y - (drop - lobe) * 0.5;
+    let tip = egui::pos2(c.x, notch_y + drop);
+    let left = egui::pos2(c.x - lobe, notch_y);
+    let right = egui::pos2(c.x + lobe, notch_y);
+    // Where the straight side leaves the left lobe: the tangent from the tip.
+    let v = tip - left;
+    let len = v.length();
+    let phi = v.y.atan2(v.x);
+    let alpha = (lobe / len).acos();
+    // Of the two tangents, the outer one (larger angle, further left).
+    let t0 = phi + alpha;
+    const STEPS: usize = 18;
+    let arc = |centre: egui::Pos2, from: f32, to: f32, out: &mut Vec<egui::Pos2>| {
+        for i in 0..=STEPS {
+            let a = from + (to - from) * i as f32 / STEPS as f32;
+            out.push(egui::pos2(centre.x + lobe * a.cos(), centre.y + lobe * a.sin()));
+        }
+    };
+    let mut pts = Vec::with_capacity(STEPS * 2 + 4);
+    pts.push(tip);
+    // Up the left side, over the left lobe to the notch (angle 0 on this
+    // circle), over the right lobe (from angle π) and down to the tip.
+    arc(left, t0, std::f32::consts::TAU, &mut pts);
+    arc(right, std::f32::consts::PI, 3.0 * std::f32::consts::PI - t0, &mut pts);
     if filled {
-        p.add(egui::Shape::convex_polygon(pts, ink, egui::Stroke::NONE));
+        // A heart isn't convex, so it's filled as the union of pieces that
+        // are: the two lobes and the kite between them and the tip.
+        p.circle_filled(left, lobe, ink);
+        p.circle_filled(right, lobe, ink);
+        let t_left = pts[1];
+        let t_right = pts[pts.len() - 1];
+        p.add(egui::Shape::convex_polygon(
+            vec![tip, t_left, left, right, t_right],
+            ink,
+            egui::Stroke::NONE,
+        ));
     } else {
         p.add(egui::Shape::closed_line(
             pts,
