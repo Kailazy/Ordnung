@@ -3362,6 +3362,84 @@ impl Catalog {
         Ok(rows)
     }
 
+    /// Cached listings across *every* saved seller that match a free-text
+    /// query — the Sellers tab's find box, which answers "who has this
+    /// record?" without switching shops one by one. Every whitespace term
+    /// must appear in the artist, title or label (case-insensitive, same
+    /// contract as the crates search); rows come back as `(seller, listing)`,
+    /// alphabetical by artist then title so the same record stocked by
+    /// several shops lands together. Empty for an empty query.
+    pub fn find_seller_listings(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, SellerListing)>> {
+        let terms: Vec<String> = query
+            .split_whitespace()
+            .map(|t| format!("%{}%", t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")))
+            .collect();
+        if terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let clauses: Vec<String> = (1..=terms.len())
+            .map(|i| {
+                format!(
+                    "(l.artist || ' ' || l.title || ' ' || COALESCE(l.label, '')) \
+                     LIKE ?{i} ESCAPE '\\'"
+                )
+            })
+            .collect();
+        let sql = format!(
+            "SELECT l.seller, l.listing_id, l.release_id, l.title, l.artist,
+                    l.year, l.label, l.catalog_number, l.format, l.thumb_url,
+                    l.price, l.currency, l.condition, l.sleeve_condition,
+                    l.ships_from, l.shipping_price, l.shipping_currency,
+                    l.allow_offers, l.uri, l.posted
+             FROM seller_listings l
+             WHERE {}
+             ORDER BY l.artist COLLATE NOCASE ASC, l.title COLLATE NOCASE ASC,
+                      l.seller COLLATE NOCASE ASC, l.listing_id ASC
+             LIMIT ?{}",
+            clauses.join(" AND "),
+            terms.len() + 1
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = terms
+            .iter()
+            .map(|t| Box::new(t.clone()) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        params.push(Box::new(limit as i64));
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    SellerListing {
+                        listing_id: r.get::<_, i64>(1)? as u64,
+                        release_id: r.get::<_, i64>(2)? as u64,
+                        title: r.get(3)?,
+                        artist: r.get(4)?,
+                        year: r.get::<_, Option<i64>>(5)?.map(|y| y as u16),
+                        label: r.get(6)?,
+                        catalog_number: r.get(7)?,
+                        format: r.get(8)?,
+                        thumb_url: r.get(9)?,
+                        price: r.get(10)?,
+                        currency: r.get(11)?,
+                        condition: r.get(12)?,
+                        sleeve_condition: r.get(13)?,
+                        ships_from: r.get(14)?,
+                        shipping_price: r.get(15)?,
+                        shipping_currency: r.get(16)?,
+                        allow_offers: r.get::<_, i64>(17)? != 0,
+                        uri: r.get(18)?,
+                        posted: r.get(19)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Every cached seller listing whose release is on the wantlist — the
     /// wantlist watch, and the payoff for sweeping shops: which of the user's
     /// wants are in stock right now, and at what price. Each row pairs the
@@ -5297,6 +5375,26 @@ mod tests {
         assert_eq!(shop.cached, 2);
         assert_eq!(shop.reported, Some(250));
         assert!(shop.swept_at.is_some());
+
+        // The cross-shop find: a second seller stocking the same record shows
+        // up next to the first, every term must match, and the label counts.
+        cat.add_seller("decks").unwrap();
+        cat.upsert_seller_listing("decks", &listing(3, "Monolake", "Cyan", "2024-05-06"))
+            .unwrap();
+        let hits = cat.find_seller_listings("mono cyan", 10).unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|(s, l)| (s.as_str(), l.listing_id))
+                .collect::<Vec<_>>(),
+            vec![("decks", 3), ("hardwax", 1)]
+        );
+        assert_eq!(cat.find_seller_listings("chain reaction", 10).unwrap().len(), 3);
+        assert_eq!(cat.find_seller_listings("monolake gentil", 10).unwrap().len(), 0);
+        assert_eq!(cat.find_seller_listings("a", 2).unwrap().len(), 2);
+        assert!(cat.find_seller_listings("   ", 10).unwrap().is_empty());
+        // A literal `%` or `_` in the query is a character, not a wildcard.
+        assert!(cat.find_seller_listings("%", 10).unwrap().is_empty());
+        assert!(cat.remove_seller("decks").unwrap());
 
         // Pruning to what the sweep saw drops the sold record.
         assert_eq!(

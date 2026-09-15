@@ -1237,9 +1237,19 @@ struct App {
     /// The "add a seller" input box in the Sellers tab (username or a pasted
     /// discogs.com seller/user URL).
     seller_add: String,
-    /// The "find a seller" box that narrows the saved-seller chips once the
-    /// list is long enough to need it.
+    /// The Sellers tab's find box: a record search across every saved
+    /// seller's cached crates, answered by a dropdown of `seller_find_hits`.
     seller_find: String,
+    /// The find box's results, `(seller, listing)`, computed for
+    /// `seller_find_for` so a frame that types nothing re-runs no query.
+    seller_find_hits: Vec<(String, SellerListing)>,
+    seller_find_for: String,
+    /// The listing a find-box pick landed on, ringed in the crates so the
+    /// eye finds it. Cleared when the shop is switched by hand.
+    seller_highlight: Option<u64>,
+    /// Set with `seller_highlight`: the crates should scroll the ringed
+    /// listing into view on the next draw, then stay put.
+    seller_scroll_to: bool,
     /// Releases the user has auditioned while digging — opened from a seller
     /// card and actually played a song from. Drives the crates' small eye
     /// marker; loaded from the `viewed_releases` table with the vinyl view

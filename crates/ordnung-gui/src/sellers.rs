@@ -189,17 +189,19 @@ impl App {
         let busy = self.is_busy();
         self.ensure_seller_listings();
 
-        // --- Shop rows: actions on one line, the saved sellers wrapped below.
-        // The chips wrap instead of running off the edge, so a hundred saved
-        // shops are still all on screen; past a handful a find box narrows
-        // them by name, and the actions for the current shop keep their own
-        // line so they never land on top of a chip.
+        // --- Shop row: add, pick a shop, find a record, then the current
+        // shop's actions pinned right. The shops live in an alphabetical
+        // dropdown rather than a strip of chips: a strip is scanned by eye
+        // and stops working past a couple of dozen names, a sorted list
+        // scrolls and can be lettered. The find box searches the *records*
+        // across every saved shop and names the shop on each hit, so "who
+        // has this?" is one lookup instead of a shop-by-shop tour.
         let mut switch_to: Option<String> = None;
         let mut remove: Option<String> = None;
         let mut sweep: Option<String> = None;
         let mut add_clicked = false;
-        const FIND_AT: usize = 8;
-        let many = self.sellers.len() >= FIND_AT;
+        // A find-box hit picked this frame: `(seller, listing_id)`.
+        let mut pick: Option<(String, u64)> = None;
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             // The add box lives in a popup so the row stays a row of
@@ -241,24 +243,15 @@ impl App {
                     });
                 },
             );
-            if many {
+            if !self.sellers.is_empty() {
                 ui.add_space(6.0);
-                let edit = ui.add(
-                    egui::TextEdit::singleline(&mut self.seller_find)
-                        .desired_width(150.0)
-                        .hint_text(format!("Find among {} sellers", self.sellers.len())),
-                );
-                edit.on_hover_note("Narrow the seller chips by name");
-                if !self.seller_find.is_empty()
-                    && ui
-                        .small_button("✖")
-                        .on_hover_note("Show every seller again")
-                        .clicked()
-                {
-                    self.seller_find.clear();
-                }
+                self.draw_seller_picker(ui, &mut switch_to);
+                ui.add_space(6.0);
+                self.draw_seller_find(ui, ctx, &mut pick);
             } else {
                 self.seller_find.clear();
+                self.seller_find_hits.clear();
+                self.seller_find_for.clear();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(cur) = self.seller_current.clone() {
@@ -288,71 +281,27 @@ impl App {
                     {
                         remove = Some(cur.clone());
                     }
-                    ui.label(egui::RichText::new(&cur).strong());
                 }
             });
         });
-        if !self.sellers.is_empty() {
-            ui.add_space(4.0);
-            // Alphabetical so a long list scans; the find box narrows it by
-            // substring. The current shop always stays visible even when it
-            // doesn't match, so the selection never looks lost.
-            let find = self.seller_find.trim().to_lowercase();
-            let mut shown: Vec<&SellerShop> = self
-                .sellers
-                .iter()
-                .filter(|s| {
-                    find.is_empty()
-                        || s.username.to_lowercase().contains(&find)
-                        || self.seller_current.as_deref() == Some(s.username.as_str())
-                })
-                .collect();
-            shown.sort_by_key(|s| s.username.to_lowercase());
-            ui.horizontal_wrapped(|ui| {
-                for shop in shown {
-                    let active = self.seller_current.as_deref() == Some(shop.username.as_str());
-                    let chip = ui.selectable_label(active, &shop.username);
-                    // The chip's hover popup is the shop's info card, led by
-                    // the shipping floor. Quotes are per record and
-                    // location-specific; a seller publishing only a free-text
-                    // policy has none, and that absence never reads as free.
-                    let mut note = String::from("Browse this seller's crates");
-                    match self.seller_shipping.get(&shop.username) {
-                        Some((price, currency)) => note.push_str(&format!(
-                            ". Shipping from {} per record",
-                            crate::vinyl_sheet::fmt_market_price(&discogs::MarketPrice {
-                                value: *price,
-                                currency: currency.clone(),
-                            })
-                        )),
-                        None => note.push_str(
-                            ". Shipping not quoted yet, update the crates to fetch it",
-                        ),
-                    }
-                    let chip = chip.on_hover_note(note);
-                    if chip.clicked() {
-                        switch_to = Some(shop.username.clone());
-                    }
-                    chip.context_menu(|ui| {
-                        if ui.button("↗ Open shop on Discogs").clicked() {
-                            open_url(&format!(
-                                "https://www.discogs.com/seller/{}/profile",
-                                shop.username
-                            ));
-                            ui.close_menu();
-                        }
-                        if ui.button("✖ Remove seller").clicked() {
-                            remove = Some(shop.username.clone());
-                            ui.close_menu();
-                        }
-                    });
-                }
-            });
+        // A find-box pick: land in that shop with the record ringed and
+        // scrolled to. Done before the generic switch below so the highlight
+        // set here survives (a hand-picked shop clears it instead).
+        if let Some((seller, listing_id)) = pick {
+            if self.seller_current.as_deref() != Some(seller.as_str()) {
+                self.seller_current = Some(seller);
+                self.ensure_seller_listings();
+            }
+            self.seller_highlight = Some(listing_id);
+            self.seller_scroll_to = true;
+            ctx.memory_mut(|m| m.close_popup());
         }
 
         // Apply the shop-row asks now that `self.sellers` is free again.
         if let Some(u) = switch_to {
             self.seller_current = Some(u);
+            self.seller_highlight = None;
+            self.seller_scroll_to = false;
             self.ensure_seller_listings();
         }
         if add_clicked {
@@ -476,6 +425,18 @@ impl App {
             })
             .map(|(i, _)| i)
             .collect();
+        // Where the find box's pick sits in the visible crates, if it does:
+        // what the scroll-to aims at, and what the meta line explains when
+        // the current search or filters hide it.
+        let highlight_pos = self.seller_highlight.and_then(|id| {
+            filtered
+                .iter()
+                .position(|&i| self.seller_listings[i].listing_id == id)
+        });
+        let highlight_hidden = highlight_pos.is_none()
+            && self.seller_highlight.is_some_and(|id| {
+                self.seller_listings.iter().any(|l| l.listing_id == id)
+            });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             let mut meta = match (unfiltered, shop.cached) {
@@ -485,6 +446,9 @@ impl App {
             match shop.swept_at {
                 Some(t) => meta.push_str(&format!(" · updated {}", fmt_ago(t))),
                 None => meta.push_str(" · never updated"),
+            }
+            if highlight_hidden {
+                meta.push_str(" · the record you picked is hidden by the search or filters");
             }
             ui.label(egui::RichText::new(meta).weak());
         });
@@ -541,9 +505,14 @@ impl App {
         let mut act: Option<SellerAct> = None;
         if self.config.vinyl_view == "list" {
             const ROW_H: f32 = 54.0;
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show_rows(ui, ROW_H, filtered.len(), |ui, rows| {
+            let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+            if let Some(p) = highlight_pos.filter(|_| self.seller_scroll_to) {
+                // One row of context above the ringed one, so it doesn't sit
+                // flush against the top edge.
+                area = area.vertical_scroll_offset((p as f32 - 1.0).max(0.0) * ROW_H);
+                self.seller_scroll_to = false;
+            }
+            area.show_rows(ui, ROW_H, filtered.len(), |ui, rows| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     for i in rows {
                         let idx = filtered[i];
@@ -566,9 +535,12 @@ impl App {
             let row_h = cover_side + CAPTION_H + GAP;
             let n_rows = filtered.len().div_ceil(cols);
 
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show_rows(ui, row_h, n_rows, |ui, rows| {
+            let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+            if let Some(p) = highlight_pos.filter(|_| self.seller_scroll_to) {
+                area = area.vertical_scroll_offset((p / cols) as f32 * row_h);
+                self.seller_scroll_to = false;
+            }
+            area.show_rows(ui, row_h, n_rows, |ui, rows| {
                     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
                     for row in rows {
                         ui.horizontal_top(|ui| {
@@ -632,6 +604,254 @@ impl App {
         }
     }
 
+    /// The shop picker: an alphabetical dropdown of every saved seller, the
+    /// current one named on the button. Past a dozen shops the list gets
+    /// letter headings so a long roster scans the way a strip of chips
+    /// never could. A pick lands in `switch_to`, applied once the borrows
+    /// on `self.sellers` are released.
+    fn draw_seller_picker(&self, ui: &mut egui::Ui, switch_to: &mut Option<String>) {
+        use crate::ui::tokens::color;
+        const LETTERS_AT: usize = 12;
+        let mut sorted: Vec<&SellerShop> = self.sellers.iter().collect();
+        sorted.sort_by_key(|s| s.username.to_lowercase());
+        let current = self
+            .seller_current
+            .clone()
+            .unwrap_or_else(|| "Pick a seller".to_string());
+        let lettered = sorted.len() >= LETTERS_AT;
+        let resp = egui::ComboBox::from_id_salt("seller-pick")
+            .selected_text(egui::RichText::new(current).strong())
+            .width(220.0)
+            .height(420.0)
+            .show_ui(ui, |ui| {
+                ui.set_min_width(240.0);
+                let mut last_letter: Option<char> = None;
+                for shop in &sorted {
+                    if lettered {
+                        let letter = shop
+                            .username
+                            .chars()
+                            .next()
+                            .map(|c| c.to_uppercase().next().unwrap_or(c))
+                            .map(|c| if c.is_alphabetic() { c } else { '#' })
+                            .unwrap_or('#');
+                        if last_letter != Some(letter) {
+                            if last_letter.is_some() {
+                                ui.add_space(4.0);
+                            }
+                            ui.label(
+                                egui::RichText::new(letter.to_string())
+                                    .small()
+                                    .color(color::LABEL_3),
+                            );
+                            last_letter = Some(letter);
+                        }
+                    }
+                    let active = self.seller_current.as_deref() == Some(shop.username.as_str());
+                    let text = match shop.cached {
+                        0 => shop.username.clone(),
+                        n => format!("{}  ·  {n}", shop.username),
+                    };
+                    let row = ui.selectable_label(active, text);
+                    // The row's hover popup is the shop's info card, led by
+                    // the shipping floor. Quotes are per record and
+                    // location-specific; a seller publishing only a free-text
+                    // policy has none, and that absence never reads as free.
+                    let mut note = String::from("Browse this seller's crates");
+                    match self.seller_shipping.get(&shop.username) {
+                        Some((price, currency)) => note.push_str(&format!(
+                            ". Shipping from {} per record",
+                            crate::vinyl_sheet::fmt_market_price(&discogs::MarketPrice {
+                                value: *price,
+                                currency: currency.clone(),
+                            })
+                        )),
+                        None => note.push_str(
+                            ". Shipping not quoted yet, update the crates to fetch it",
+                        ),
+                    }
+                    if row.on_hover_note(note).clicked() {
+                        *switch_to = Some(shop.username.clone());
+                    }
+                }
+            });
+        resp.response
+            .on_hover_note(format!("Pick one of {} saved sellers, A to Z", sorted.len()));
+    }
+
+    /// The find box: a record search across every saved seller's crates,
+    /// with the hits in a dropdown under the field, each naming the shop that
+    /// has it. Typing re-runs the query (a bounded SQL scan, no network);
+    /// a click lands in `pick` as `(seller, listing_id)` for the caller to
+    /// switch shops and ring the record.
+    fn draw_seller_find(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        pick: &mut Option<(String, u64)>,
+    ) {
+        use crate::ui::tokens::color;
+        /// How many hits the dropdown shows; past this, keep typing.
+        const MAX_HITS: usize = 8;
+        const ROW_H: f32 = 40.0;
+        const POPUP_W: f32 = 460.0;
+
+        let n_sellers = self.sellers.len();
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut self.seller_find)
+                .desired_width(240.0)
+                .hint_text(format!("Find a record across {n_sellers} sellers")),
+        );
+        let edit = edit.on_hover_note(
+            "Search every saved seller's crates by artist, title or label; \
+             each hit names the shop",
+        );
+        let popup_id = ui.make_persistent_id("seller-find-popup");
+        let query = self.seller_find.trim().to_string();
+        if query != self.seller_find_for {
+            self.seller_find_hits = if query.is_empty() {
+                Vec::new()
+            } else {
+                Catalog::open(&self.db_path)
+                    .and_then(|c| c.find_seller_listings(&query, MAX_HITS))
+                    .unwrap_or_default()
+            };
+            self.seller_find_for = query.clone();
+            ui.memory_mut(|m| {
+                if query.is_empty() {
+                    if m.is_popup_open(popup_id) {
+                        m.close_popup();
+                    }
+                } else {
+                    m.open_popup(popup_id);
+                }
+            });
+        } else if edit.gained_focus() && !query.is_empty() {
+            ui.memory_mut(|m| m.open_popup(popup_id));
+        }
+        if edit.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            ui.memory_mut(|m| {
+                if m.is_popup_open(popup_id) {
+                    m.close_popup();
+                }
+            });
+        }
+        if !query.is_empty()
+            && ui
+                .small_button("✖")
+                .on_hover_note("Clear the search")
+                .clicked()
+        {
+            self.seller_find.clear();
+        }
+
+        let hits = &self.seller_find_hits;
+        let highlight = self.seller_highlight;
+        egui::popup::popup_below_widget(
+            ui,
+            popup_id,
+            &edit,
+            egui::PopupCloseBehavior::CloseOnClickOutside,
+            |ui| {
+                ui.set_min_width(POPUP_W);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                if hits.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("No record in the crates matches that").weak(),
+                    );
+                    ui.add_space(6.0);
+                    return;
+                }
+                for (seller, l) in hits.iter() {
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width().max(POPUP_W), ROW_H),
+                        egui::Sense::click(),
+                    );
+                    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    let is_current = highlight == Some(l.listing_id);
+                    if resp.hovered() || is_current {
+                        ui.painter().rect_filled(
+                            rect,
+                            egui::Rounding::same(5.0),
+                            if resp.hovered() {
+                                color::SURFACE_HOVER
+                            } else {
+                                color::SURFACE_HI
+                            },
+                        );
+                    }
+                    // Right column: the shop, then the offer under it. The
+                    // shop is the answer the box exists for, so it takes
+                    // the stronger colour.
+                    let mut terms = crate::vinyl_sheet::fmt_market_price(&discogs::MarketPrice {
+                        value: l.price,
+                        currency: l.currency.clone(),
+                    });
+                    if let Some(c) = l.condition.as_deref() {
+                        terms.push_str(&format!(" · {}", cond_short(c)));
+                    }
+                    let right_x = rect.right() - 10.0;
+                    let seller_rect = ui.painter().text(
+                        egui::pos2(right_x, rect.top() + 6.0),
+                        egui::Align2::RIGHT_TOP,
+                        seller,
+                        crate::ui::tokens::font::callout(),
+                        color::ACCENT_HOVER,
+                    );
+                    let terms_rect = ui.painter().text(
+                        egui::pos2(right_x, rect.bottom() - 6.0),
+                        egui::Align2::RIGHT_BOTTOM,
+                        &terms,
+                        crate::ui::tokens::font::footnote(),
+                        egui::Color32::from_rgb(120, 200, 140),
+                    );
+                    let right_w = seller_rect.width().max(terms_rect.width()) + 16.0;
+                    // Left column: artist over title · year, truncated so
+                    // a long credit never runs under the shop name.
+                    let text_rect = egui::Rect::from_min_max(
+                        egui::pos2(rect.left() + 10.0, rect.top() + 5.0),
+                        egui::pos2(rect.right() - right_w - 6.0, rect.bottom() - 4.0),
+                    );
+                    let mut text_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(text_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min))
+                            .id_salt(("seller-find-row", l.listing_id)),
+                    );
+                    text_ui.spacing_mut().item_spacing.y = 0.0;
+                    text_ui.add(
+                        egui::Label::new(egui::RichText::new(&l.artist).strong()).truncate(),
+                    );
+                    let line2 = match l.year {
+                        Some(y) => format!("{} · {y}", l.title),
+                        None => l.title.clone(),
+                    };
+                    text_ui.add(
+                        egui::Label::new(egui::RichText::new(line2).small().weak()).truncate(),
+                    );
+                    if resp
+                        .on_hover_note(format!("Show this record in {seller}'s crates"))
+                        .clicked()
+                    {
+                        *pick = Some((seller.clone(), l.listing_id));
+                    }
+                }
+                if hits.len() >= MAX_HITS {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "First {MAX_HITS} matches, keep typing to narrow"
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                    ui.add_space(4.0);
+                }
+            },
+        );
+    }
+
     /// One card of the crates: cover, credit, and the sale terms — price and
     /// grade are what separate flipping through a shop from browsing a
     /// discography, so they get the caption's third line. Returns what the
@@ -672,6 +892,7 @@ impl App {
             )
         };
         let tex = thumb.as_deref().and_then(|u| self.dig_cover(u).cloned());
+        let highlighted = self.seller_highlight == Some(listing_id);
 
         let mut act: Option<SellerAct> = None;
         ui.allocate_ui_with_layout(
@@ -738,6 +959,15 @@ impl App {
                         rect,
                         egui::Rounding::same(6.0),
                         egui::Stroke::new(2.0, color::ACCENT),
+                    );
+                }
+                // The find box's pick: a ring just outside the cover, so it
+                // reads at a glance among a wall of cards.
+                if highlighted {
+                    ui.painter().rect_stroke(
+                        rect.expand(3.0),
+                        egui::Rounding::same(8.0),
+                        egui::Stroke::new(3.0, color::ACCENT_HOVER),
                     );
                 }
                 // Membership chips: a record already on a shelf is the one
@@ -968,6 +1198,20 @@ impl App {
                 rect,
                 egui::Rounding::same(6.0),
                 crate::ui::tokens::color::SURFACE,
+            );
+        }
+        // The find box's pick: a wash and a ring on the row, matching the
+        // card grid's treatment.
+        if self.seller_highlight == Some(listing_id) {
+            ui.painter().rect_filled(
+                rect.shrink(1.0),
+                egui::Rounding::same(6.0),
+                crate::ui::tokens::color::ACCENT_SOFT.gamma_multiply(0.45),
+            );
+            ui.painter().rect_stroke(
+                rect.shrink(1.0),
+                egui::Rounding::same(6.0),
+                egui::Stroke::new(2.0, crate::ui::tokens::color::ACCENT_HOVER),
             );
         }
         ui.painter().line_segment(
