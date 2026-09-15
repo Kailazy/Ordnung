@@ -83,7 +83,8 @@ const RECORD_CACHE_MAX: usize = 32;
 const ROW_H: f32 = 84.0;
 const ROW_COVER_PX: f32 = 68.0;
 
-/// Radius of the two membership buttons on the right of each row.
+/// Hit radius of the two membership buttons on the right of each row; the
+/// mark inside is drawn at the shared `icon::SHELF_R`.
 const LIST_BTN_R: f32 = 9.0;
 
 /// Motion for a row's hover wash and the cover fading in.
@@ -988,11 +989,14 @@ fn record_row(
     // The two membership buttons, laid out from the right edge inward. Done
     // before the text so the lines know where to stop rather than running
     // underneath them.
+    // Right-to-left, so the wantlist goes first to land on the right: the
+    // pair reads collection, wantlist, the order the shelf tabs, the record
+    // sheet's buttons and the header counts all use.
     let mut act = None;
     let mut right_edge = slot.right() - pad;
     for (list, present) in [
-        (VinylList::Collection, owned),
         (VinylList::Wantlist, wanted),
+        (VinylList::Collection, owned),
     ] {
         let c = egui::pos2(right_edge - LIST_BTN_R, slot.center().y);
         let hit_rect =
@@ -1102,13 +1106,9 @@ fn edit_label(hit: &RecordHit) -> String {
     }
 }
 
-/// Paint one membership button: a record in its sleeve for the collection, an
-/// eye for the wantlist.
-///
-/// The two metaphors are about *where a record is*, not about generic approval:
-/// a collection is the record on your shelf, and a wantlist is the set you're
-/// keeping an eye on. Both read at 18px without a label, which a checkmark
-/// only manages by convention.
+/// Paint one membership button: the shelf's own mark (`ui::icon::shelf`),
+/// drawn at the size it has on the record sheet's buttons and the shelf tabs,
+/// so the pair here reads as the same two icons and not a larger cousin.
 ///
 /// **Filled means you have it.** The same symbol carries both the state and the
 /// action, so a row needs no separate badge — an outline is an invitation, a
@@ -1138,7 +1138,7 @@ fn draw_list_button(
     if hovered {
         p.circle_filled(c, LIST_BTN_R + 3.0, color::SURFACE_HI);
     }
-    crate::ui::icon::shelf(p, c, LIST_BTN_R, ink, present, list);
+    crate::ui::icon::shelf(p, c, crate::ui::icon::SHELF_R, ink, present, list);
 }
 
 /// A shopping cart, drawn with painter strokes because egui's bundled fonts
