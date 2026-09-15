@@ -2168,16 +2168,30 @@ struct ReleaseResponse {
     /// format of its own.
     #[serde(default, deserialize_with = "null_as_default")]
     formats: Vec<CollectionFormat>,
-    /// Cover images, for caching a record the user just added to their
-    /// collection — the add response itself carries no artwork.
+    /// Cover art, for caching a record the user just added to their
+    /// collection — the add response itself carries no artwork. Unlike the
+    /// collection and wantlist listings, the release endpoint has no
+    /// `cover_image`: `thumb` is the 150px preview and the full-size art is
+    /// the `images` gallery. See [`ReleaseResponse::cover_url`].
     #[serde(default, deserialize_with = "null_as_default")]
     thumb: String,
     #[serde(default, deserialize_with = "null_as_default")]
-    cover_image: String,
+    images: Vec<ReleaseImage>,
     #[serde(default, deserialize_with = "null_as_default")]
     tracklist: Vec<TracklistEntry>,
     #[serde(default, deserialize_with = "null_as_default")]
     videos: Vec<VideoEntry>,
+}
+
+/// One entry of a release's image gallery. Discogs marks the cover
+/// `"primary"` and the rest (back sleeve, labels, inserts) `"secondary"`; the
+/// listing endpoints' `cover_image` is the first of these, at 600px.
+#[derive(Debug, Deserialize)]
+struct ReleaseImage {
+    #[serde(default, rename = "type", deserialize_with = "null_as_default")]
+    kind: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    uri: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2309,8 +2323,7 @@ impl ReleaseResponse {
             catalog_number,
             format,
             thumb_url: none_if_empty(self.thumb.clone()),
-            cover_url: none_if_empty(self.cover_image.clone())
-                .or_else(|| none_if_empty(self.thumb.clone())),
+            cover_url: self.cover_url(),
             // Discogs stamps the add itself; the next sync brings the real date.
             added: None,
             folder_id,
@@ -2319,6 +2332,21 @@ impl ReleaseResponse {
             price_currency: None,
             genres: genre_tags(&self.genres, &self.styles),
         })
+    }
+
+    /// The full-size cover, matching the `cover_image` the collection and
+    /// wantlist listings carry for the same release: the gallery's primary
+    /// image, else its first (some releases mark none primary), else the
+    /// thumb. Cached as the collection grid's cover, so anything but the
+    /// full-size image would leave the record blurry until a sync replaced
+    /// it.
+    fn cover_url(&self) -> Option<String> {
+        self.images
+            .iter()
+            .find(|i| i.kind == "primary")
+            .or_else(|| self.images.first())
+            .and_then(|i| none_if_empty(i.uri.clone()))
+            .or_else(|| none_if_empty(self.thumb.clone()))
     }
 
     /// The release's formats as one comparable string, e.g. `Vinyl, 12", Album`.
@@ -3129,6 +3157,45 @@ mod tests {
         assert!(!rec.has_cover);
         // Genres then styles, one flat tag list.
         assert_eq!(rec.genres, vec!["Electronic", "Techno", "Acid"]);
+    }
+
+    /// The release endpoint has no `cover_image`; the grid cover must come from
+    /// the gallery's primary image, not the 150px thumb.
+    #[test]
+    fn release_response_caches_the_full_size_cover() {
+        let json = r#"{
+            "id": 7, "title": "Sheet One", "year": 1993,
+            "artists": [{"id": 1, "name": "Plastikman"}],
+            "labels": [{"id": 385, "name": "Plus 8", "catno": "PLUS8 024"}],
+            "formats": [{"name": "Vinyl", "descriptions": ["12\""]}],
+            "thumb": "https://img/h:150/thumb.jpg",
+            "images": [
+                {"type": "secondary", "uri": "https://img/h:600/back.jpg", "uri150": "https://img/h:150/back.jpg"},
+                {"type": "primary", "uri": "https://img/h:600/front.jpg", "uri150": "https://img/h:150/front.jpg"}
+            ]
+        }"#;
+        let rec = serde_json::from_str::<ReleaseResponse>(json)
+            .unwrap()
+            .into_vinyl_record(1001, Some(UNCATEGORIZED_FOLDER))
+            .expect("vinyl release -> record");
+        assert_eq!(rec.thumb_url.as_deref(), Some("https://img/h:150/thumb.jpg"));
+        assert_eq!(rec.cover_url.as_deref(), Some("https://img/h:600/front.jpg"));
+
+        // No primary marked: the first image is what the listings call the
+        // cover. No images at all: the thumb is better than nothing.
+        let json = r#"{"id": 7, "formats": [{"name": "Vinyl"}], "thumb": "https://img/t.jpg",
+            "images": [{"type": "secondary", "uri": "https://img/first.jpg"}]}"#;
+        let rec = serde_json::from_str::<ReleaseResponse>(json)
+            .unwrap()
+            .into_vinyl_record(1, None)
+            .unwrap();
+        assert_eq!(rec.cover_url.as_deref(), Some("https://img/first.jpg"));
+        let json = r#"{"id": 7, "formats": [{"name": "Vinyl"}], "thumb": "https://img/t.jpg"}"#;
+        let rec = serde_json::from_str::<ReleaseResponse>(json)
+            .unwrap()
+            .into_vinyl_record(1, None)
+            .unwrap();
+        assert_eq!(rec.cover_url.as_deref(), Some("https://img/t.jpg"));
     }
 
     #[test]

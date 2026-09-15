@@ -2841,8 +2841,12 @@ impl Catalog {
 
     /// Insert or update one vinyl record's metadata in `list`'s cache. Keyed on
     /// `instance_id`; a refresh re-runs this for every item, so the cached
-    /// `cover_png` is deliberately left untouched here (covers are downloaded
-    /// once and survive metadata refreshes — see [`Catalog::set_vinyl_cover`]).
+    /// `cover_png` survives it (covers are downloaded once — see
+    /// [`Catalog::set_vinyl_cover`]) — unless the cover URL itself changed, in
+    /// which case the image on file is for a picture Discogs no longer calls
+    /// the cover, and it's dropped so [`Catalog::vinyl_missing_covers`] fetches
+    /// the new one. That is also what repairs a record cached with a low-res
+    /// cover: the next sync brings the full-size URL, and the image follows.
     pub fn upsert_vinyl(&self, list: VinylList, rec: &VinylRecord) -> Result<()> {
         let table = vinyl_table(list);
         self.conn.execute(
@@ -2861,6 +2865,8 @@ impl Catalog {
                  catalog_number = excluded.catalog_number,
                  format         = excluded.format,
                  thumb_url      = excluded.thumb_url,
+                 cover_png      = CASE WHEN cover_url IS excluded.cover_url
+                                       THEN cover_png ELSE NULL END,
                  cover_url      = excluded.cover_url,
                  added          = excluded.added,
                  folder_id      = excluded.folder_id,
@@ -5300,6 +5306,15 @@ mod tests {
             cat.vinyl_cover(own, 1).unwrap().as_deref(),
             Some(&[1, 2, 3][..])
         );
+
+        // But a refresh that brings a different cover URL (a low-res cover
+        // cached at add time, replaced by the listing's full-size one) drops
+        // the stale image so the next cover pass downloads the new one.
+        updated.cover_url = Some("https://img/cover-600.jpg".into());
+        cat.upsert_vinyl(own, &updated).unwrap();
+        assert_eq!(cat.vinyl_cover(own, 1).unwrap(), None);
+        assert!(!cat.list_vinyl(own).unwrap()[0].has_cover);
+        assert_eq!(cat.vinyl_missing_covers(own).unwrap().len(), 2);
 
         // Pruning to the set still in the Discogs collection drops the rest.
         let removed = cat.prune_vinyl_not_in(own, &[1]).unwrap();
