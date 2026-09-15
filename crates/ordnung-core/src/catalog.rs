@@ -299,7 +299,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 impl Catalog {
     /// Open (creating if needed) a catalog at `path` and ensure the schema exists.
@@ -888,6 +888,20 @@ impl Catalog {
                 [],
             )?;
             self.conn.pragma_update(None, "user_version", 1)?;
+        }
+
+        // Schema v13: drop every cached vinyl cover once. Until v13 a record
+        // added from inside the app cached its 150px Discogs thumb, upscaled
+        // to the cover size, and the sync that followed rewrote the row's
+        // cover URL to the full-size one without touching the image — so the
+        // URL-change rule in `upsert_vinyl` can't tell those rows from good
+        // ones now. The startup sync re-downloads the lot from the full-size
+        // URLs the rows already carry.
+        if version < 13 {
+            self.conn.execute_batch(
+                "UPDATE vinyl_collection SET cover_png = NULL;
+                 UPDATE vinyl_wantlist SET cover_png = NULL;",
+            )?;
         }
         Ok(())
     }
@@ -5200,6 +5214,39 @@ mod tests {
             price_currency: None,
             genres: vec!["Electronic".into(), "Techno".into()],
         }
+    }
+
+    /// Upgrading a catalog from before v13 clears every cached vinyl cover so
+    /// the thumbs cached at add time get replaced by the full-size art. A
+    /// catalog already at v13 keeps its covers across reopen.
+    #[test]
+    fn schema_v13_clears_cached_vinyl_covers_once() {
+        let db = temp_db_path("v13-covers");
+        let _ = std::fs::remove_file(&db);
+        let own = VinylList::Collection;
+        let want = VinylList::Wantlist;
+        {
+            let cat = Catalog::open(&db).unwrap();
+            cat.upsert_vinyl(own, &vinyl(1, "Plastikman", "Sheet One"))
+                .unwrap();
+            cat.set_vinyl_cover(own, 1, &[1, 2, 3]).unwrap();
+            cat.upsert_vinyl(want, &vinyl(2, "Surgeon", "Force + Form"))
+                .unwrap();
+            cat.set_vinyl_cover(want, 2, &[4, 5]).unwrap();
+            // Pretend the catalog was written by the previous generation.
+            cat.conn.pragma_update(None, "user_version", 12).unwrap();
+        }
+        {
+            let cat = Catalog::open(&db).unwrap();
+            assert_eq!(cat.vinyl_cover(own, 1).unwrap(), None);
+            assert_eq!(cat.vinyl_cover(want, 2).unwrap(), None);
+            assert_eq!(cat.vinyl_missing_covers(own).unwrap().len(), 1);
+            cat.set_vinyl_cover(own, 1, &[7]).unwrap();
+        }
+        let cat = Catalog::open(&db).unwrap();
+        assert_eq!(cat.vinyl_cover(own, 1).unwrap().as_deref(), Some(&[7][..]));
+        drop(cat);
+        let _ = std::fs::remove_file(&db);
     }
 
     #[test]

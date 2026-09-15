@@ -2552,9 +2552,17 @@ fn discogs_error_message(body: &str) -> String {
 /// Decode arbitrary image bytes (Discogs returns JPEG), downscale to a
 /// `max_side`-pixel square, re-encode as PNG. Returns `None` on any failure,
 /// which the caller treats as "no usable artwork" and moves on.
+/// Decode `bytes` and re-encode as PNG, shrinking to fit `max_side` if larger.
+/// Never enlarges: `image::thumbnail` scales *up* to fit as readily as down,
+/// which would turn a 150px thumb into a 400px blur that looks cached at
+/// full size — and can't be told apart from one afterwards.
 fn downscale_png(bytes: &[u8], max_side: u32) -> Option<Vec<u8>> {
     let img = image::load_from_memory(bytes).ok()?;
-    let thumb = img.thumbnail(max_side, max_side);
+    let thumb = if img.width() > max_side || img.height() > max_side {
+        img.thumbnail(max_side, max_side)
+    } else {
+        img
+    };
     let mut out = Vec::new();
     thumb
         .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
@@ -2568,6 +2576,28 @@ use std::io::Read;
 #[cfg(test)]
 mod throttle_tests {
     use super::*;
+
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(w, h));
+        let mut out = Vec::new();
+        img.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    fn dims(png: &[u8]) -> (u32, u32) {
+        let img = image::load_from_memory(png).unwrap();
+        (img.width(), img.height())
+    }
+
+    /// A source smaller than the cap keeps its size; a larger one shrinks to
+    /// fit. Upscaling a thumb would only fake a full-size cover.
+    #[test]
+    fn downscale_png_shrinks_but_never_enlarges() {
+        assert_eq!(dims(&downscale_png(&png(150, 150), 400).unwrap()), (150, 150));
+        assert_eq!(dims(&downscale_png(&png(400, 400), 400).unwrap()), (400, 400));
+        assert_eq!(dims(&downscale_png(&png(600, 300), 400).unwrap()), (400, 200));
+    }
 
     /// The pace must be shared by *separately constructed* clients, not just by
     /// clones of one. Callers build a fresh client per worker thread, so a
