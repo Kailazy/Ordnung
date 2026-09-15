@@ -63,6 +63,12 @@ so the cache can invalidate correctly.
   CLI flags, prompt, or print.
 - Tests live next to code; the Camelot/key mapping and any format writer get unit
   tests with known-good fixtures.
+- GUI controls that share a row share a height. Size a row of buttons, pickers
+  and fields through `crate::ui::control_row` (the single-line text field is the
+  reference height); never mix `small_button` with full-size controls on one
+  line, and take sizes, gaps and radii from `ui/tokens.rs` rather than literals.
+  Before reporting a UI change done, look at the row: three neighbouring
+  controls at three heights is a bug.
 
 ## Where does my change go? (quick guide)
 

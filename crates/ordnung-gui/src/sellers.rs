@@ -203,11 +203,13 @@ impl App {
         // A find-box hit picked this frame: `(seller, listing_id)`.
         let mut pick: Option<(String, u64)> = None;
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        // One height for the whole row: the find field sets it, the add
+        // button, the picker and the shop actions are sized to match.
+        ui.horizontal(|ui| crate::ui::control_row(ui, |ui| {
             // The add box lives in a popup so the row stays a row of
             // buttons; the button toggles it, Enter or Add inside submits.
             let add_btn = ui
-                .small_button("＋ Add seller")
+                .button("＋ Add seller")
                 .on_hover_note("Save a Discogs seller to dig through, by username or shop URL");
             let popup_id = ui.make_persistent_id("seller-add-popup");
             if add_btn.clicked() {
@@ -283,7 +285,7 @@ impl App {
                     }
                 }
             });
-        });
+        }));
         // A find-box pick: land in that shop with the record ringed and
         // scrolled to. Done before the generic switch below so the highlight
         // set here survives (a hand-picked shop clears it instead).
@@ -738,7 +740,7 @@ impl App {
         }
         if !query.is_empty()
             && ui
-                .small_button("✖")
+                .button("✖")
                 .on_hover_note("Clear the search")
                 .clicked()
         {
