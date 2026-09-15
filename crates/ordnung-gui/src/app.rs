@@ -8,6 +8,9 @@ use ordnung_rbdb::edit;
 /// under the ~200 ms gap that reads as a pause — while collapsing the keystrokes
 /// within a typed word into a single reload.
 pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+/// Narrowest the toolbar search field shrinks to before the counts label
+/// starts giving up its parts. Still wide enough to read a short query.
+const SEARCH_FIELD_MIN_W: f32 = 72.0;
 
 impl App {
     /// Resolve dragged track ids to their source files for the native
@@ -2317,17 +2320,23 @@ impl eframe::App for App {
                         };
                         (n(&self.vinyl), n(&self.wantlist))
                     });
-                    let counts = if shelf_counts.is_some() {
-                        String::new()
+                    // Built longest-first: a narrow window drops the trailing
+                    // parts rather than letting the label run under the search
+                    // group (see the fitting below).
+                    let count_forms: Vec<String> = if shelf_counts.is_some() {
+                        Vec::new()
                     } else {
                         let mut counts = format!("{} tracks", self.rows.len());
+                        let mut forms = vec![counts.clone()];
                         if !self.selection.is_empty() {
                             counts.push_str(&format!(" · {} selected", self.selection.len()));
+                            forms.insert(0, counts.clone());
                         }
                         if self.missing_count > 0 {
                             counts.push_str(&format!(" · {} missing", self.missing_count));
+                            forms.insert(0, counts.clone());
                         }
-                        counts
+                        forms
                     };
                     // Right-aligned utility group: counts and Settings live away from
                     // the left-edge library actions so the toolbar reads "do work …
@@ -2384,7 +2393,43 @@ impl eframe::App for App {
                                 crate::ui::icon::shelf_count(ui, VinylList::Collection, owned);
                             }
                             None => {
-                                ui.label(counts);
+                                // Whatever the search group can't give up: the
+                                // field at its floor, the scope toggle, the
+                                // Clear-filters button when it shows, and the
+                                // separators on either side of this label.
+                                // Everything else is the label's to use, so it
+                                // shortens (then truncates) instead of the
+                                // toggle drawing over it in a narrow window.
+                                let gap = ui.spacing().item_spacing.x;
+                                let sep_w = 6.0 + gap;
+                                let clear_w = if has_filters { 140.0 + gap } else { 0.0 };
+                                let reserved =
+                                    SEARCH_FIELD_MIN_W + gap + SCOPE_TOGGLE_W + clear_w + sep_w * 2.0;
+                                let room = ui.available_width() - reserved;
+                                let width_of = |ui: &egui::Ui, text: &str| {
+                                    ui.painter()
+                                        .layout_no_wrap(
+                                            text.to_owned(),
+                                            egui::TextStyle::Body.resolve(ui.style()),
+                                            egui::Color32::PLACEHOLDER,
+                                        )
+                                        .size()
+                                        .x
+                                };
+                                let fitting = count_forms
+                                    .iter()
+                                    .find(|f| width_of(ui, f) <= room)
+                                    .or_else(|| count_forms.last());
+                                if let Some(text) = fitting {
+                                    if width_of(ui, text) <= room {
+                                        ui.label(text);
+                                    } else if room >= 24.0 {
+                                        ui.scope(|ui| {
+                                            ui.set_max_width(room);
+                                            ui.add(egui::Label::new(text).truncate());
+                                        });
+                                    }
+                                }
                             }
                         }
                         ui.separator();
@@ -2398,7 +2443,8 @@ impl eframe::App for App {
                             let gap = ui.spacing().item_spacing.x;
                             let clear_w = if has_filters { 140.0 + gap } else { 0.0 };
                             let reserved = clear_w + SCOPE_TOGGLE_W + gap;
-                            let w = (ui.available_width() - reserved).clamp(120.0, 320.0);
+                            let w = (ui.available_width() - reserved)
+                                .clamp(SEARCH_FIELD_MIN_W, 320.0);
                             // Anchor the field + scope toggle to the window's
                             // horizontal center rather than the left edge of
                             // whatever space the other groups left over, so the
