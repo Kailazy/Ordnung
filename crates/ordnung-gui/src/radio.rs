@@ -122,6 +122,26 @@ impl App {
         }
     }
 
+    /// Start the radio on `rel`, from its node on the map. A radio already
+    /// playing moves here rather than stopping first.
+    pub(crate) fn radio_start_from(&mut self, rel: &crate::graph::Release) {
+        self.map_stand_on(rel);
+        let Some(id) = self.dig.as_ref().map(|d| d.head().release_id) else {
+            return;
+        };
+        if !self.radio.on {
+            self.radio = Radio {
+                on: true,
+                ..Radio::default()
+            };
+            webview::prewarm();
+        } else {
+            self.radio.reseeds = 0;
+            self.radio.skip = false;
+        }
+        self.radio_ready(id);
+    }
+
     pub(crate) fn radio_stop(&mut self, why: &str) {
         let was_on = self.radio.on;
         self.radio.on = false;
@@ -204,6 +224,12 @@ impl App {
                 }
             }
             Phase::Playing { release_id, since } => {
+                // The file player started: one sound at a time, and the
+                // listener chose that one.
+                if self.audio.as_ref().is_some_and(|a| a.is_active()) {
+                    self.radio_stop("Radio off: the player took over");
+                    return;
+                }
                 if std::mem::take(&mut self.radio.skip) {
                     self.radio_step_from(release_id, Vec::new());
                     return;

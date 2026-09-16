@@ -1897,6 +1897,9 @@ impl App {
                 Some(graph::GraphAct::Thread(rel, thread)) => {
                     self.map_take_thread(&rel, thread);
                 }
+                Some(graph::GraphAct::Radio(rel)) => {
+                    self.radio_start_from(&rel);
+                }
                 None => {}
             }
             return;

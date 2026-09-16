@@ -80,8 +80,12 @@ pub(crate) struct VinylSheet {
     pub release_id: u64,
     pub title: String,
     pub artist: String,
-    /// Second header line, e.g. `1993 · Vinyl, 12" · Warp WAP42`.
+    /// Second header line: year and format, e.g. `1993 · Vinyl, 12"`.
     pub sub: String,
+    /// The imprint, `Warp · WAP42`, on its own header line: a record is known
+    /// by its label as much as by its artist. From the shelf row when there
+    /// is one, else from the release detail once it lands.
+    pub label: Option<String>,
     pub detail: Option<discogs::ReleaseDetail>,
     pub local: Vec<SheetLocal>,
     pub rows: Vec<SheetRow>,
@@ -193,6 +197,18 @@ fn sheet_alternative(
 
 /// Render a marketplace price for the sheet header — symbol where there is
 /// one, and always the exact figure: this is the number the user decides on.
+/// The header's label line: `Warp · WAP42`, or whichever half is known.
+pub(crate) fn imprint_line(label: Option<&str>, catno: Option<&str>) -> Option<String> {
+    let l = label.unwrap_or("").trim();
+    let c = catno.unwrap_or("").trim();
+    match (l, c) {
+        ("", "") => None,
+        (l, "") => Some(l.to_string()),
+        ("", c) => Some(c.to_string()),
+        (l, c) => Some(format!("{l} · {c}")),
+    }
+}
+
 pub(crate) fn fmt_market_price(p: &discogs::MarketPrice) -> String {
     let code = p.currency.trim().to_uppercase();
     let symbol = match code.as_str() {
@@ -228,20 +244,12 @@ impl App {
         // otherwise play on under a tracklist it doesn't belong to (and
         // `playing_video` indexes the old release's videos).
         self.stop_sheet_video();
-        let sub = [
-            record.year.map(|y| y.to_string()),
-            record.format.clone(),
-            match (&record.label, &record.catalog_number) {
-                (Some(l), Some(c)) => Some(format!("{l} {c}")),
-                (Some(l), None) => Some(l.clone()),
-                (None, Some(c)) => Some(c.clone()),
-                (None, None) => None,
-            },
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ");
+        let sub = [record.year.map(|y| y.to_string()), record.format.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let label = imprint_line(record.label.as_deref(), record.catalog_number.as_deref());
 
         self.vinyl_sheet = Some(VinylSheet {
             key: Some(key),
@@ -254,6 +262,7 @@ impl App {
             title: record.title.clone(),
             artist: record.artist.clone(),
             sub,
+            label,
             detail: None,
             local: self.sheet_local_tracks(record.release_id),
             rows: Vec::new(),
@@ -308,6 +317,8 @@ impl App {
             title,
             artist,
             sub,
+            // Filled in by the detail fetch; a dug row rarely carries it.
+            label: None,
             detail: None,
             // A dug record can still turn out to be one you have digitally —
             // the link map is by release id, not by list membership.
@@ -364,26 +375,19 @@ impl App {
             .or_else(|| track.as_ref().and_then(|t| t.tags.album.clone()))
             .or_else(|| track.as_ref().and_then(|t| t.tags.title.clone()))
             .unwrap_or_else(|| format!("Release {release_id}"));
-        // Same citation line the record search builds, from whatever the cache
-        // has: year · label · catalogue number.
+        // Year and format from whatever the cache has; the label takes its
+        // own header line once the detail lands (which, cached, is at once).
         let sub = cached
             .as_ref()
             .map(|d| {
-                let year = d.year.map(|y| y.to_string()).unwrap_or_default();
-                let imprint = match (
-                    d.label.as_deref().unwrap_or("").trim(),
-                    d.catalog_number.as_deref().unwrap_or("").trim(),
-                ) {
-                    ("", "") => String::new(),
-                    (l, "") => l.to_string(),
-                    ("", c) => c.to_string(),
-                    (l, c) => format!("{l} {c}"),
-                };
-                [year.as_str(), imprint.as_str()]
-                    .into_iter()
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" · ")
+                [
+                    d.year.map(|y| y.to_string()).unwrap_or_default(),
+                    d.format.trim().to_string(),
+                ]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ")
             })
             .unwrap_or_default();
         let cover_url = cat
@@ -631,6 +635,12 @@ impl App {
                     })
                     .collect();
                 sheet.extra_videos = videos.leftover;
+                // The detail knows the imprint even when the row that opened
+                // the sheet didn't; the shelf's own reading stands when set.
+                if sheet.label.is_none() {
+                    sheet.label =
+                        imprint_line(detail.label.as_deref(), detail.catalog_number.as_deref());
+                }
                 // A release with no tracklist at all (Discogs has plenty) still
                 // has its videos — show them as the record's only contents
                 // rather than an empty sheet.
@@ -770,9 +780,13 @@ impl App {
         }
     }
 
-    /// Close the mini-player and forget which row it was on.
+    /// Close the mini-player and forget which row it was on. With the radio
+    /// on, the player is the radio's, not the sheet's: opening or closing a
+    /// sheet must not cut the music off.
     pub(crate) fn stop_sheet_video(&mut self) {
-        webview::close();
+        if !self.radio.on {
+            webview::close();
+        }
         if let Some(sheet) = self.vinyl_sheet.as_mut() {
             sheet.playing_video = None;
             sheet.video_uri = None;
@@ -879,6 +893,7 @@ impl App {
             .and_then(|s| s.detail.as_ref())
             .map(|d| d.genre_tags().join(" · "))
             .filter(|l| !l.is_empty());
+        let label_line = self.vinyl_sheet.as_ref().and_then(|s| s.label.clone());
         let cover = match cached {
             Some(t) => Some(t),
             None => cover_url
@@ -1114,6 +1129,11 @@ impl App {
                         ui.label(
                             egui::RichText::new(&title).font(crate::ui::tokens::font::headline()),
                         );
+                        // The imprint gets the same standing as the artist
+                        // and the title: for a record it's the third name.
+                        if let Some(line) = &label_line {
+                            ui.label(egui::RichText::new(line).color(crate::ui::tokens::color::LABEL_2));
+                        }
                         if !sub.is_empty() {
                             ui.label(egui::RichText::new(&sub).weak());
                         }
@@ -1630,19 +1650,19 @@ impl App {
                     // `released` is a date only sometimes; the header line
                     // wants just the year either way.
                     let year = v.released.split('-').next().unwrap_or("").trim();
-                    let imprint = match (v.label.trim(), v.catno.trim()) {
-                        ("", "") => String::new(),
-                        (l, "") => l.to_string(),
-                        ("", c) => c.to_string(),
-                        (l, c) => format!("{l} {c}"),
-                    };
-                    let sub = [year, v.format.trim(), imprint.as_str()]
+                    let sub = [year, v.format.trim()]
                         .into_iter()
                         .filter(|s| !s.is_empty())
                         .collect::<Vec<_>>()
                         .join(" · ");
                     let cover = (!v.thumb_url.trim().is_empty()).then(|| v.thumb_url.clone());
+                    let label = imprint_line(Some(&v.label), Some(&v.catno));
                     self.open_release_sheet(v.release_id, artist, v.title.clone(), sub, cover, ctx);
+                    if let Some(s) = self.vinyl_sheet.as_mut() {
+                        if s.release_id == v.release_id && s.label.is_none() {
+                            s.label = label;
+                        }
+                    }
                 }
             }
             Some(Act::ToggleList(list)) => {

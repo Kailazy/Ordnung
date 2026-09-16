@@ -173,6 +173,8 @@ pub(crate) enum GraphAct {
     Open(Release),
     /// A thread node was clicked: take that thread out of this record.
     Thread(Release, DigThread),
+    /// The radio node was clicked: start the radio from this record.
+    Radio(Release),
 }
 
 /// A thread taken from the map, from the click to the landing.
@@ -217,12 +219,30 @@ pub(crate) fn thread_tint(t: DigThread) -> egui::Color32 {
     }
 }
 
-/// The thread's mark, painted at `r` half-size.
-fn thread_glyph(p: &egui::Painter, t: DigThread, c: egui::Pos2, ink: egui::Color32, r: f32) {
-    match t {
-        DigThread::Artist => crate::ui::icon::artist(p, c, ink, r),
-        DigThread::Label => crate::ui::icon::house(p, c, ink, r),
-        DigThread::Style => crate::ui::icon::style(p, c, ink, r),
+/// One of the small nodes a record puts out: a thread to dig, or the radio.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Knob {
+    Thread(DigThread),
+    /// Start the radio from this record.
+    Radio,
+}
+
+impl Knob {
+    fn tint(self) -> egui::Color32 {
+        match self {
+            Knob::Thread(t) => thread_tint(t),
+            Knob::Radio => crate::ui::tokens::color::ACCENT,
+        }
+    }
+}
+
+/// The knob's mark, painted at `r` half-size.
+fn knob_glyph(p: &egui::Painter, k: Knob, c: egui::Pos2, ink: egui::Color32, r: f32) {
+    match k {
+        Knob::Thread(DigThread::Artist) => crate::ui::icon::artist(p, c, ink, r),
+        Knob::Thread(DigThread::Label) => crate::ui::icon::house(p, c, ink, r),
+        Knob::Thread(DigThread::Style) => crate::ui::icon::style(p, c, ink, r),
+        Knob::Radio => crate::ui::icon::broadcast(p, c, ink, r),
     }
 }
 
@@ -232,7 +252,11 @@ const THREAD_R: f32 = 10.0;
 /// Clear space between a cover's edge and its thread nodes.
 const THREAD_GAP: f32 = 12.0;
 /// Angle between neighbouring thread nodes.
-const THREAD_SPREAD: f32 = 0.74;
+const THREAD_SPREAD: f32 = 0.6;
+/// Smallest a cover may be on screen for a hover to put its nodes out: any
+/// smaller and four nodes the size of a control would swamp it. The dig's
+/// own record keeps its nodes at any scale.
+const HOVER_MIN_R: f32 = 7.0;
 
 /// The simulation, its camera and the interaction state. Lives on `App` and
 /// is rebuilt from the record lists whenever they change.
@@ -268,8 +292,8 @@ pub(crate) struct GraphState {
     /// The record the dig stands on. Its threads stay out without a hover,
     /// and the radio lights it while it plays.
     pub(crate) focus: Option<String>,
-    /// The thread node under the pointer: its record's index and the thread.
-    hover_thread: Option<(usize, DigThread)>,
+    /// The knob under the pointer: its record's index and which knob.
+    hover_knob: Option<(usize, Knob)>,
     /// A thread taken from the map, from click to landing.
     pub(crate) awaiting: Option<Await>,
     /// A record the camera should move to once it's on the map, and whether
@@ -304,7 +328,7 @@ impl Default for GraphState {
             drag: None,
             shown: None,
             focus: None,
-            hover_thread: None,
+            hover_knob: None,
             awaiting: None,
             lean: None,
             trails: Vec::new(),
@@ -1024,10 +1048,11 @@ impl GraphState {
         Some((b.center().to_vec2(), z.clamp(0.02, MAX_ZOOM)))
     }
 
-    /// Where record `i`'s three thread nodes sit on screen, fanned out on the
-    /// far side of the record from its cloud's centre and scaled by the
-    /// record's bloom, so they grow out of the cover rather than appear.
-    fn thread_slots(&self, i: usize, canvas_center: egui::Pos2) -> [(egui::Pos2, DigThread); 3] {
+    /// Where record `i`'s knobs sit on screen: the three threads and the
+    /// radio, fanned out on the far side of the record from its cloud's
+    /// centre and scaled by the record's bloom, so they grow out of the
+    /// cover rather than appear.
+    fn knob_slots(&self, i: usize, canvas_center: egui::Pos2) -> [(egui::Pos2, Knob); 4] {
         let n = &self.nodes[i];
         let p = canvas_center + (n.pos - self.cam) * self.zoom;
         let r = n.r * n.scale * self.zoom;
@@ -1050,15 +1075,27 @@ impl GraphState {
         };
         let base = out.angle();
         let dist = (r + THREAD_GAP + THREAD_R) * n.threads.min(1.0);
-        let at = |k: f32, t: DigThread| {
+        let at = |k: f32, knob: Knob| {
             let a = base + k * THREAD_SPREAD;
-            (p + egui::vec2(a.cos(), a.sin()) * dist, t)
+            (p + egui::vec2(a.cos(), a.sin()) * dist, knob)
         };
         [
-            at(-1.0, DigThread::Artist),
-            at(0.0, DigThread::Label),
-            at(1.0, DigThread::Style),
+            at(-1.5, Knob::Thread(DigThread::Artist)),
+            at(-0.5, Knob::Thread(DigThread::Label)),
+            at(0.5, Knob::Thread(DigThread::Style)),
+            at(1.5, Knob::Radio),
         ]
+    }
+
+    /// Whether `p` is inside record `i`'s halo: the cover plus the ring its
+    /// knobs sit on, with a little slack. While the pointer is in there the
+    /// record keeps its knobs out and its neighbours can't steal the hover,
+    /// so crossing the gap to a knob in a packed cloud is a steady move.
+    fn in_halo(&self, i: usize, p: egui::Pos2, canvas_center: egui::Pos2) -> bool {
+        let n = &self.nodes[i];
+        let s = canvas_center + (n.pos - self.cam) * self.zoom;
+        let r = n.r * n.scale.max(1.0) * self.zoom;
+        (p - s).length() <= r + THREAD_GAP + THREAD_R * 2.0 + 8.0
     }
 
     /// The record filed under `key`, if it's on the map.
@@ -1225,34 +1262,50 @@ impl App {
             }
             best.map(|(i, _)| i)
         };
-        // Thread nodes first: they sit outside their record, over whatever
-        // the cloud has there, so a pointer on one must not read as the
+        // Knobs first: they sit outside their record, over whatever the
+        // cloud has there, so a pointer on one must not read as the
         // neighbour under it.
-        let thread_hit = |g: &GraphState, p: egui::Pos2| -> Option<(usize, DigThread)> {
-            let mut best: Option<((usize, DigThread), f32)> = None;
+        let knob_hit = |g: &GraphState, p: egui::Pos2| -> Option<(usize, Knob)> {
+            let mut best: Option<((usize, Knob), f32)> = None;
             for (i, n) in g.nodes.iter().enumerate() {
                 if n.kind != Kind::Release || n.threads < 0.6 {
                     continue;
                 }
-                for (c, t) in g.thread_slots(i, center) {
+                for (c, k) in g.knob_slots(i, center) {
                     let d = (p - c).length();
                     if d <= THREAD_R + 3.0 && best.is_none_or(|(_, bd)| d < bd) {
-                        best = Some(((i, t), d));
+                        best = Some(((i, k), d));
                     }
                 }
             }
             best.map(|(h, _)| h)
         };
         let pointer_free = resp.hovered() && g.drag.is_none() && !resp.dragged();
-        let thread_now = if pointer_free {
-            pointer.and_then(|p| thread_hit(&g, p))
+        let knob_now = if pointer_free {
+            pointer.and_then(|p| knob_hit(&g, p))
+        } else {
+            None
+        };
+        // The record whose knobs are out holds the hover for as long as the
+        // pointer stays inside its halo: in a packed cloud the gap between a
+        // cover and its knobs lies over other covers, and without this the
+        // knobs would jump to whichever neighbour the pointer crossed.
+        let held = if pointer_free {
+            match (&g.shown, pointer) {
+                (Some(k), Some(p)) => g
+                    .index
+                    .get(k)
+                    .copied()
+                    .filter(|&i| g.nodes[i].threads > 0.6 && g.in_halo(i, p, center)),
+                _ => None,
+            }
         } else {
             None
         };
         let hovered_now = if pointer_free {
-            match thread_now {
+            match knob_now {
                 Some((i, _)) => Some(i),
-                None => pointer.and_then(|p| hit(&g, p)),
+                None => held.or_else(|| pointer.and_then(|p| hit(&g, p))),
             }
         } else {
             None
@@ -1261,13 +1314,12 @@ impl App {
             g.hover = hovered_now;
             g.wake();
         }
-        if thread_now != g.hover_thread {
-            g.hover_thread = thread_now;
+        if knob_now != g.hover_knob {
+            g.hover_knob = knob_now;
             g.wake();
         }
-        // Which record has its threads out for the pointer: the one under
-        // it, held while the pointer crosses the gap to the nodes, let go
-        // once it's away.
+        // Which record has its knobs out for the pointer: the one under it,
+        // let go once the pointer has left its halo.
         match hovered_now.filter(|&i| g.nodes[i].kind == Kind::Release) {
             Some(i) => {
                 if g.shown.as_deref() != Some(g.nodes[i].key.as_str()) {
@@ -1277,11 +1329,9 @@ impl App {
             }
             None => {
                 let keep = match (&g.shown, pointer) {
-                    (Some(k), Some(p)) if pointer_free => g.index.get(k).is_some_and(|&i| {
-                        let s = to_screen(g.cam, g.zoom, g.nodes[i].pos);
-                        let r = g.nodes[i].r * g.zoom;
-                        (p - s).length() <= r + THREAD_GAP + THREAD_R * 2.0 + 24.0
-                    }),
+                    (Some(k), Some(p)) if pointer_free => {
+                        g.index.get(k).is_some_and(|&i| g.in_halo(i, p, center))
+                    }
                     _ => false,
                 };
                 if !keep && g.shown.is_some() {
@@ -1353,10 +1403,15 @@ impl App {
                 None => g.fit(rect),
             }
         } else if resp.clicked() {
-            if let Some((i, thread)) = g.hover_thread {
+            if let Some((i, knob)) = g.hover_knob {
                 if let Some(r) = &g.nodes[i].release {
-                    if self.thread_avail(r.release_id, thread) != Avail::Missing {
-                        act = Some(GraphAct::Thread(r.clone(), thread));
+                    match knob {
+                        Knob::Thread(thread) => {
+                            if self.thread_avail(r.release_id, thread) != Avail::Missing {
+                                act = Some(GraphAct::Thread(r.clone(), thread));
+                            }
+                        }
+                        Knob::Radio => act = Some(GraphAct::Radio(r.clone())),
                     }
                 }
             } else if let Some(i) = pointer.and_then(|p| hit(&g, p)) {
@@ -1439,8 +1494,11 @@ impl App {
         // the one the dig stands on, folded away everywhere else.
         let shown_idx = g.shown.as_ref().and_then(|k| g.index.get(k).copied());
         let focus_idx = g.focus.as_ref().and_then(|k| g.index.get(k).copied());
+        let zoom_now = g.zoom;
         for (i, n) in g.nodes.iter_mut().enumerate() {
-            let target = if n.kind == Kind::Release && (Some(i) == shown_idx || Some(i) == focus_idx)
+            let big_enough = n.r * zoom_now >= HOVER_MIN_R;
+            let target = if n.kind == Kind::Release
+                && (Some(i) == focus_idx || (Some(i) == shown_idx && big_enough))
             {
                 1.0
             } else {
@@ -1762,11 +1820,19 @@ impl App {
                 ctx.request_repaint();
             }
             let bloom = n.threads.min(1.0);
-            for (c, thread) in g.thread_slots(i, center) {
-                let avail = self.thread_avail(rel.release_id, thread);
-                let busy = g.awaiting.is_some_and(|a| a.is_for(rel.release_id, thread));
-                let lit = g.hover_thread == Some((i, thread));
-                let tint = thread_tint(thread);
+            for (c, knob) in g.knob_slots(i, center) {
+                let (avail, busy) = match knob {
+                    Knob::Thread(t) => (
+                        self.thread_avail(rel.release_id, t),
+                        g.awaiting.is_some_and(|a| a.is_for(rel.release_id, t)),
+                    ),
+                    Knob::Radio => (Avail::Ready, false),
+                };
+                // The radio's knob reads as switched on while it's playing
+                // this very record.
+                let on_air = knob == Knob::Radio && is_focus && radio_on;
+                let lit = g.hover_knob == Some((i, knob)) || on_air;
+                let tint = knob.tint();
                 let tr = THREAD_R * bloom;
                 if tr < 1.0 {
                     continue;
@@ -1784,7 +1850,13 @@ impl App {
                 painter.circle_filled(
                     c,
                     tr,
-                    if lit { color::SURFACE_HOVER } else { color::SURFACE_HI },
+                    if on_air {
+                        color::ACCENT_SOFT
+                    } else if lit {
+                        color::SURFACE_HOVER
+                    } else {
+                        color::SURFACE_HI
+                    },
                 );
                 let edge = match (lit, avail) {
                     (true, _) => tint,
@@ -1798,7 +1870,7 @@ impl App {
                     _ => color::LABEL_2,
                 };
                 if tr >= 4.0 {
-                    thread_glyph(&painter, thread, c, ink, tr * 0.5);
+                    knob_glyph(&painter, knob, c, ink, tr * 0.5);
                 }
                 if busy {
                     // An arc chasing round the node while Discogs answers.
@@ -1832,21 +1904,37 @@ impl App {
             painter.galley(pos, galley, ink);
         }
 
-        // The hovered thread node, or the hovered record, in words.
-        if let Some((i, thread)) = g.hover_thread {
+        // The hovered knob, or the hovered record, in words.
+        if let Some((i, knob)) = g.hover_knob {
             if let Some(rel) = g.nodes[i].release.clone() {
-                let avail = self.thread_avail(rel.release_id, thread);
-                let busy = g.awaiting.is_some_and(|a| a.is_for(rel.release_id, thread));
-                if avail != Avail::Missing {
-                    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                let words = self.thread_words(&rel, thread, avail, busy);
+                let words = match knob {
+                    Knob::Thread(thread) => {
+                        let avail = self.thread_avail(rel.release_id, thread);
+                        let busy = g.awaiting.is_some_and(|a| a.is_for(rel.release_id, thread));
+                        if avail != Avail::Missing {
+                            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        self.thread_words(&rel, thread, avail, busy)
+                    }
+                    Knob::Radio => {
+                        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                        let on_air = self.radio.on
+                            && g.focus.as_deref() == Some(g.nodes[i].key.as_str());
+                        if on_air {
+                            "The radio is playing this record".to_string()
+                        } else {
+                            "Start the radio here: play this record, then dig on from it"
+                                .to_string()
+                        }
+                    }
+                };
                 resp.clone().on_hover_ui_at_pointer(|ui| {
                     ui.set_max_width(260.0);
                     ui.label(crate::ui::hover::note(words));
                 });
             }
         } else if let Some(i) = g.hover {
+            let small = g.nodes[i].r * g.zoom < HOVER_MIN_R;
             if let Some(rel) = g.nodes[i].release.clone() {
                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                 resp.clone().on_hover_ui_at_pointer(|ui| {
@@ -1869,6 +1957,13 @@ impl App {
                         Status::Dug => ("Dug to, not on a list yet", color::ORANGE),
                     };
                     ui.label(egui::RichText::new(word).color(c).small());
+                    if small {
+                        ui.label(
+                            egui::RichText::new("Zoom in to dig or start the radio from here")
+                                .color(color::LABEL_3)
+                                .small(),
+                        );
+                    }
                 });
             } else if g.nodes[i].kind == Kind::Hub {
                 let n = &g.nodes[i];

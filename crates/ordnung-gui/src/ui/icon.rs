@@ -281,6 +281,24 @@ pub fn style(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
     p.circle_filled(c, MARK * 0.8, col);
 }
 
+/// Radio: a dot sending out two arcs. The map's radio node.
+pub fn broadcast(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
+    let s = egui::Stroke::new(MARK, col);
+    let o = egui::pos2(c.x - r * 0.45, c.y + r * 0.45);
+    p.circle_filled(o, MARK * 0.9, col);
+    for k in [0.55f32, 1.0] {
+        let pts: Vec<egui::Pos2> = (0..=8)
+            .map(|i| {
+                // From due north round to due east: the quarter facing away
+                // from the corner the dot sits in.
+                let a = -std::f32::consts::FRAC_PI_2 + i as f32 / 8.0 * std::f32::consts::FRAC_PI_2;
+                o + egui::vec2(a.cos(), a.sin()) * r * 1.25 * k
+            })
+            .collect();
+        p.add(egui::Shape::line(pts, s));
+    }
+}
+
 /// Record: a disc — outer edge, label, spindle.
 pub fn record(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
     let s = egui::Stroke::new(MARK, col);
