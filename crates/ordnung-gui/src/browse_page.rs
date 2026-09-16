@@ -499,8 +499,9 @@ impl App {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if ui
-                                            .small_button("🔍")
+                                        // Same square as the heart beside it,
+                                        // so the pair reads as one control row.
+                                        if crate::ui::icon::glyph_button(ui, "🔍", true)
                                             .on_hover_note("Dig from this record")
                                             .clicked()
                                         {

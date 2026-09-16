@@ -590,6 +590,48 @@ pub fn shelf_button(
     resp
 }
 
+/// A square button carrying one text glyph, the exact size of a mark-only
+/// [`shelf_button`], so the two sit side by side in a row at one height and
+/// one width. Use it for the dig glyph beside a wantlist heart; a stock
+/// `small_button` comes out a different box and the row reads as mismatched.
+pub fn glyph_button(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
+    let pad = ui.spacing().button_padding;
+    let mark = SHELF_R * 2.0 + 2.0;
+    let size = egui::vec2(mark + pad.x * 2.0, mark + pad.y * 2.0);
+    let (rect, resp) = ui.allocate_exact_size(
+        size,
+        if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        },
+    );
+    let visuals = if enabled {
+        ui.style().interact(&resp)
+    } else {
+        &ui.style().visuals.widgets.inactive
+    };
+    ui.painter().rect(
+        rect,
+        radius::SM,
+        visuals.weak_bg_fill,
+        visuals.bg_stroke,
+    );
+    let ink = if enabled {
+        visuals.text_color()
+    } else {
+        visuals.text_color().gamma_multiply(0.5)
+    };
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        font::body(),
+        ink,
+    );
+    resp
+}
+
 /// A count beside its shelf mark, for a status line: the mark, then the number.
 pub fn shelf_count(ui: &mut egui::Ui, list: VinylList, n: usize) {
     let text = n.to_string();
