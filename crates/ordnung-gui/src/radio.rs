@@ -2,8 +2,9 @@
 //!
 //! Switched on, it stands the dig on a record, plays that record's first
 //! Discogs video in the mini-player, and when the video ends takes one of
-//! the record's threads (artist, label or style, never the same one twice
-//! running when there's a choice) to land on a record you don't own. That
+//! the record's threads (artist or label, never the same one twice running
+//! when there's a choice; style only when a record has neither, since a
+//! style tag is too broad to steer by) to land on a record you don't own. That
 //! record plays next, and so on. Each landing lights up on the map, joined
 //! to the record before it by a trail, and the camera leans in on it. Skip
 //! moves on at once; Want puts the record on the wantlist without stopping
@@ -247,6 +248,16 @@ impl App {
                     }
                     return;
                 }
+                // Artist and label first: a style tag is broad and subjective,
+                // and a walk down it wanders off into anything Discogs files
+                // under the same word. Style is only for a record with
+                // neither of the other two.
+                let firm: Vec<DigThread> = open
+                    .iter()
+                    .copied()
+                    .filter(|t| *t != DigThread::Style)
+                    .collect();
+                let open = if firm.is_empty() { open } else { firm };
                 // Prefer a different thread from the one that got us here.
                 let fresh: Vec<DigThread> = open
                     .iter()
