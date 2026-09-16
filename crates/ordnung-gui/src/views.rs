@@ -1709,6 +1709,20 @@ impl App {
                     }
                 }
                 ui.add_space(6.0);
+                // The radio: play a record, dig to the next, keep going.
+                let on = self.radio.on;
+                if ui
+                    .selectable_label(on, if on { "■ Radio" } else { "▶ Radio" })
+                    .on_hover_note(if on {
+                        "Switch the radio off"
+                    } else {
+                        "Play a record, dig to the next, and keep going. Starts from the record the map is standing on, or one off your shelves"
+                    })
+                    .clicked()
+                {
+                    self.radio_toggle();
+                }
+                ui.add_space(6.0);
                 if ui
                     .button("⊙ Fit")
                     .on_hover_note(
@@ -1865,19 +1879,25 @@ impl App {
             let rect = ui.available_rect_before_wrap();
             self.graph_rect = rect;
             let act = self.draw_graph(ui, rect, &query);
-            if let Some(graph::GraphAct::Open(rel)) = act {
-                let cover_url = rel.cover_url();
-                match rel.key {
-                    Some(key) => self.open_vinyl_sheet(key, ctx),
-                    None => self.open_release_sheet(
-                        rel.release_id,
-                        rel.artist,
-                        rel.title,
-                        rel.sub,
-                        cover_url,
-                        ctx,
-                    ),
+            match act {
+                Some(graph::GraphAct::Open(rel)) => {
+                    let cover_url = rel.cover_url();
+                    match rel.key {
+                        Some(key) => self.open_vinyl_sheet(key, ctx),
+                        None => self.open_release_sheet(
+                            rel.release_id,
+                            rel.artist,
+                            rel.title,
+                            rel.sub,
+                            cover_url,
+                            ctx,
+                        ),
+                    }
                 }
+                Some(graph::GraphAct::Thread(rel, thread)) => {
+                    self.map_take_thread(&rel, thread);
+                }
+                None => {}
             }
             return;
         }

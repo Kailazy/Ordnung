@@ -199,6 +199,19 @@ pub enum PlayerStatus {
     Stuck,
 }
 
+/// True once the loaded video has run to its end with nothing queued after
+/// it, as of the last [`poll`]. What the radio waits on to dig for the next
+/// record; the sheet's queue advance is handled inside [`poll`] itself.
+#[cfg(target_os = "macos")]
+pub fn ended() -> bool {
+    imp::ended()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn ended() -> bool {
+    false
+}
+
 /// Ask the mini-player what became of the video it was given.
 #[cfg(target_os = "macos")]
 pub fn status() -> PlayerStatus {
@@ -408,6 +421,17 @@ mod imp {
             return false;
         }
         PANEL.with(|slot| slot.borrow().as_ref().is_some_and(|mini| mini.live))
+    }
+
+    pub fn ended() -> bool {
+        if MainThreadMarker::new().is_none() {
+            return false;
+        }
+        PANEL.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|mini| mini.live && mini.state == "ended" && mini.queue.is_empty())
+        })
     }
 
     pub fn status() -> PlayerStatus {

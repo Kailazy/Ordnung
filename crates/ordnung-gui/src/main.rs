@@ -22,6 +22,7 @@ mod macos_pasteboard;
 mod modals;
 mod onboarding;
 mod player;
+mod radio;
 mod records;
 mod search_box;
 mod sellers;
@@ -1279,6 +1280,9 @@ struct App {
     dug_genres: HashMap<u64, Vec<String>>,
     /// The record map's simulation and camera.
     graph: graph::GraphState,
+    /// The map's radio: plays a record, digs to the next, keeps going. See
+    /// [`radio`].
+    radio: radio::Radio,
     /// The canvas the map was last drawn into, so the toolbar's Fit button
     /// (drawn before the canvas each frame) knows what to fit to.
     graph_rect: egui::Rect,

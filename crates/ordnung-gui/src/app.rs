@@ -159,6 +159,7 @@ impl App {
             dug: Vec::new(),
             dug_genres: HashMap::new(),
             graph: graph::GraphState::default(),
+            radio: radio::Radio::default(),
             graph_rect: egui::Rect::NOTHING,
             seller_shipping: HashMap::new(),
             wantlist_watch: Vec::new(),
@@ -1809,6 +1810,7 @@ impl eframe::App for App {
         self.poll_dig_ids();
         self.poll_dig_covers(ctx);
         self.drive_video_player(ctx);
+        self.drive_radio(ctx, frame);
 
         // Fade an idle status message out of the bottom-left bar after a short
         // while, so a one-off "Synced…/Done…" note doesn't linger forever. We

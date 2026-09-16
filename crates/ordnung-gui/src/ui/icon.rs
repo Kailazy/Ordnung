@@ -236,6 +236,51 @@ pub fn dig(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
     );
 }
 
+/// Artist: a head over shoulders. The map's artist thread node.
+pub fn artist(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
+    let s = egui::Stroke::new(MARK, col);
+    p.circle_stroke(egui::pos2(c.x, c.y - r * 0.38), r * 0.36, s);
+    // Shoulders: a bowl opening downward under the head.
+    let centre = egui::pos2(c.x, c.y + r * 0.95);
+    let pts: Vec<egui::Pos2> = (0..=10)
+        .map(|i| {
+            let a = std::f32::consts::PI * (1.0 + i as f32 / 10.0);
+            centre + egui::vec2(a.cos(), a.sin()) * r * 0.82
+        })
+        .collect();
+    p.add(egui::Shape::line(pts, s));
+}
+
+/// Label: a house, roof over walls. The map's label thread node.
+pub fn house(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
+    let s = egui::Stroke::new(MARK, col);
+    p.add(egui::Shape::closed_line(
+        vec![
+            egui::pos2(c.x - r * 0.78, c.y + r * 0.82),
+            egui::pos2(c.x - r * 0.78, c.y - r * 0.05),
+            egui::pos2(c.x, c.y - r * 0.88),
+            egui::pos2(c.x + r * 0.78, c.y - r * 0.05),
+            egui::pos2(c.x + r * 0.78, c.y + r * 0.82),
+        ],
+        s,
+    ));
+}
+
+/// Style: a diamond with a dot at its heart. The map's style thread node.
+pub fn style(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
+    let s = egui::Stroke::new(MARK, col);
+    p.add(egui::Shape::closed_line(
+        vec![
+            egui::pos2(c.x, c.y - r * 0.95),
+            egui::pos2(c.x + r * 0.95, c.y),
+            egui::pos2(c.x, c.y + r * 0.95),
+            egui::pos2(c.x - r * 0.95, c.y),
+        ],
+        s,
+    ));
+    p.circle_filled(c, MARK * 0.8, col);
+}
+
 /// Record: a disc — outer edge, label, spindle.
 pub fn record(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
     let s = egui::Stroke::new(MARK, col);

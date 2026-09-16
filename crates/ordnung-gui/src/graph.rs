@@ -17,7 +17,15 @@
 //! Zoom is bounded on the wide end at the scale that shows the whole map, so
 //! however far out you go, nothing is ever off the edge. Split out of
 //! `views.rs`; part of the GUI `App`.
+//!
+//! The map is also where you dig. A record under the pointer (or the one the
+//! dig stands on) puts out three small thread nodes, artist, label and style,
+//! and clicking one takes that thread exactly as the strip's buttons do: the
+//! find lands on the map, joined to the record it was dug from by a trail in
+//! the thread's colour. The radio (see `radio.rs`) walks the map the same way
+//! on its own, playing each record it lands on.
 use super::*;
+use crate::dig::DigThread;
 use ordnung_core::model::DugRelease;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -144,6 +152,10 @@ struct Node {
     hay: String,
     /// Pinned to the pointer while dragged.
     held: bool,
+    /// How far this record's thread nodes are out: 0 tucked away, 1 at
+    /// rest. Its own spring, so they bloom and fold rather than blink.
+    threads: f32,
+    threads_v: f32,
 }
 
 struct Edge {
@@ -159,7 +171,68 @@ struct Edge {
 /// state is back on `self`.
 pub(crate) enum GraphAct {
     Open(Release),
+    /// A thread node was clicked: take that thread out of this record.
+    Thread(Release, DigThread),
 }
+
+/// A thread taken from the map, from the click to the landing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Await {
+    /// Standing on the record, waiting for its Discogs ids before the
+    /// thread can be asked for.
+    Resolve { from: u64, thread: DigThread },
+    /// The step is out; waiting for Discogs to answer with a record.
+    Land { from: u64, thread: DigThread },
+}
+
+impl Await {
+    pub(crate) fn is_for(self, release_id: u64, thread: DigThread) -> bool {
+        match self {
+            Await::Resolve { from, thread: t } | Await::Land { from, thread: t } => {
+                from == release_id && t == thread
+            }
+        }
+    }
+}
+
+/// What the map knows about a record's thread before it's taken.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Avail {
+    /// Not looked up yet: a click will stand on the record and find out.
+    Unknown,
+    /// The Discogs id or style tags are known; a click takes it.
+    Ready,
+    /// The release detail answered and this record has nothing down that
+    /// thread.
+    Missing,
+}
+
+/// The colour a thread wears on the map: its trails and its lit node.
+pub(crate) fn thread_tint(t: DigThread) -> egui::Color32 {
+    use crate::ui::tokens::color;
+    match t {
+        DigThread::Artist => color::TEAL,
+        DigThread::Label => color::YELLOW,
+        DigThread::Style => color::PURPLE,
+    }
+}
+
+/// The thread's mark, painted at `r` half-size.
+fn thread_glyph(p: &egui::Painter, t: DigThread, c: egui::Pos2, ink: egui::Color32, r: f32) {
+    match t {
+        DigThread::Artist => crate::ui::icon::artist(p, c, ink, r),
+        DigThread::Label => crate::ui::icon::house(p, c, ink, r),
+        DigThread::Style => crate::ui::icon::style(p, c, ink, r),
+    }
+}
+
+/// Screen radius of a thread node. Screen space, not world: the nodes are a
+/// control, and a control stays the same size however far out the map is.
+const THREAD_R: f32 = 10.0;
+/// Clear space between a cover's edge and its thread nodes.
+const THREAD_GAP: f32 = 12.0;
+/// Angle between neighbouring thread nodes.
+const THREAD_SPREAD: f32 = 0.74;
 
 /// The simulation, its camera and the interaction state. Lives on `App` and
 /// is rebuilt from the record lists whenever they change.
@@ -189,6 +262,23 @@ pub(crate) struct GraphState {
     hover: Option<usize>,
     /// The node being dragged, or `None` while a drag pans the canvas.
     drag: Option<usize>,
+    /// The record whose thread nodes are out for the pointer: the one under
+    /// it, held while the pointer crosses the gap to the nodes themselves.
+    shown: Option<String>,
+    /// The record the dig stands on. Its threads stay out without a hover,
+    /// and the radio lights it while it plays.
+    pub(crate) focus: Option<String>,
+    /// The thread node under the pointer: its record's index and the thread.
+    hover_thread: Option<(usize, DigThread)>,
+    /// A thread taken from the map, from click to landing.
+    pub(crate) awaiting: Option<Await>,
+    /// A record the camera should move to once it's on the map, and whether
+    /// to lean in on it or only bring it into view.
+    pub(crate) lean: Option<(String, bool)>,
+    /// Every thread ever taken this session, `(from, to, thread)` by release
+    /// id, drawn as a trail wherever both ends are on the map. Outlives the
+    /// dig web itself, so a fresh dig doesn't wipe the walk that came before.
+    trails: Vec<(u64, u64, DigThread)>,
     /// When the last simulation tick ran; `None` while asleep.
     last_tick: Option<Instant>,
     seed: u64,
@@ -212,6 +302,12 @@ impl Default for GraphState {
             follow_fit: true,
             hover: None,
             drag: None,
+            shown: None,
+            focus: None,
+            hover_thread: None,
+            awaiting: None,
+            lean: None,
+            trails: Vec::new(),
             last_tick: None,
             seed: 0x9E37_79B9_7F4A_7C15,
             energy: 0.0,
@@ -765,12 +861,14 @@ impl GraphState {
             alive: true,
             hay: String::new(),
             held: false,
+            threads: 0.0,
+            threads_v: 0.0,
         });
         self.index.insert(key.to_string(), i);
         i
     }
 
-    fn wake(&mut self) {
+    pub(crate) fn wake(&mut self) {
         if self.last_tick.is_none() {
             self.last_tick = Some(Instant::now());
         }
@@ -926,6 +1024,59 @@ impl GraphState {
         Some((b.center().to_vec2(), z.clamp(0.02, MAX_ZOOM)))
     }
 
+    /// Where record `i`'s three thread nodes sit on screen, fanned out on the
+    /// far side of the record from its cloud's centre and scaled by the
+    /// record's bloom, so they grow out of the cover rather than appear.
+    fn thread_slots(&self, i: usize, canvas_center: egui::Pos2) -> [(egui::Pos2, DigThread); 3] {
+        let n = &self.nodes[i];
+        let p = canvas_center + (n.pos - self.cam) * self.zoom;
+        let r = n.r * n.scale * self.zoom;
+        let mut top = n.hub;
+        if let Some(h) = top {
+            if self.nodes[h].kind == Kind::Sub {
+                top = self.nodes[h].hub;
+            }
+        }
+        let out = match top {
+            Some(h) => {
+                let d = n.pos - self.nodes[h].pos;
+                if d.length() > 1e-3 {
+                    d.normalized()
+                } else {
+                    egui::vec2(0.0, -1.0)
+                }
+            }
+            None => egui::vec2(0.0, -1.0),
+        };
+        let base = out.angle();
+        let dist = (r + THREAD_GAP + THREAD_R) * n.threads.min(1.0);
+        let at = |k: f32, t: DigThread| {
+            let a = base + k * THREAD_SPREAD;
+            (p + egui::vec2(a.cos(), a.sin()) * dist, t)
+        };
+        [
+            at(-1.0, DigThread::Artist),
+            at(0.0, DigThread::Label),
+            at(1.0, DigThread::Style),
+        ]
+    }
+
+    /// The record filed under `key`, if it's on the map.
+    pub(crate) fn release_at_key(&self, key: &str) -> Option<Release> {
+        self.index
+            .get(key)
+            .and_then(|&i| self.nodes[i].release.clone())
+    }
+
+    /// The record the map is standing on: the dig's focus, or failing that
+    /// the one whose threads are out under the pointer.
+    pub(crate) fn standing_on(&self) -> Option<Release> {
+        self.focus
+            .as_deref()
+            .or(self.shown.as_deref())
+            .and_then(|k| self.release_at_key(k))
+    }
+
     /// Aim the camera at the whole map.
     pub(crate) fn fit(&mut self, canvas: egui::Rect) {
         self.follow_fit = true;
@@ -949,6 +1100,7 @@ impl App {
         let mut g = std::mem::take(&mut self.graph);
         let arrange = Arrange::from_key(&self.config.graph_arrange);
         g.sync(arrange, &self.vinyl, &self.wantlist, &self.dug, &self.dug_genres);
+        self.map_dig_tick(&mut g);
 
         let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let painter = ui.painter().with_clip_rect(rect);
@@ -999,6 +1151,20 @@ impl App {
             }
         }
         let min_zoom = fit.map(|(_, z)| z).unwrap_or(0.05);
+        // A landing the map was asked to go to: lean in on it once it's
+        // here, or just bring it into view.
+        if let Some((key, lean_in)) = g.lean.take() {
+            match g.index.get(&key).copied() {
+                Some(i) => {
+                    g.cam_goal = g.nodes[i].pos;
+                    if lean_in {
+                        g.zoom_goal = 1.1f32.clamp(min_zoom, MAX_ZOOM);
+                    }
+                    g.follow_fit = false;
+                }
+                None => g.lean = Some((key, lean_in)),
+            }
+        }
         let center = rect.center();
         let to_screen = |cam: egui::Vec2, zoom: f32, p: egui::Vec2| -> egui::Pos2 {
             center + (p - cam) * zoom
@@ -1059,14 +1225,70 @@ impl App {
             }
             best.map(|(i, _)| i)
         };
-        let hovered_now = if resp.hovered() && g.drag.is_none() && !resp.dragged() {
-            pointer.and_then(|p| hit(&g, p))
+        // Thread nodes first: they sit outside their record, over whatever
+        // the cloud has there, so a pointer on one must not read as the
+        // neighbour under it.
+        let thread_hit = |g: &GraphState, p: egui::Pos2| -> Option<(usize, DigThread)> {
+            let mut best: Option<((usize, DigThread), f32)> = None;
+            for (i, n) in g.nodes.iter().enumerate() {
+                if n.kind != Kind::Release || n.threads < 0.6 {
+                    continue;
+                }
+                for (c, t) in g.thread_slots(i, center) {
+                    let d = (p - c).length();
+                    if d <= THREAD_R + 3.0 && best.is_none_or(|(_, bd)| d < bd) {
+                        best = Some(((i, t), d));
+                    }
+                }
+            }
+            best.map(|(h, _)| h)
+        };
+        let pointer_free = resp.hovered() && g.drag.is_none() && !resp.dragged();
+        let thread_now = if pointer_free {
+            pointer.and_then(|p| thread_hit(&g, p))
+        } else {
+            None
+        };
+        let hovered_now = if pointer_free {
+            match thread_now {
+                Some((i, _)) => Some(i),
+                None => pointer.and_then(|p| hit(&g, p)),
+            }
         } else {
             None
         };
         if hovered_now != g.hover {
             g.hover = hovered_now;
             g.wake();
+        }
+        if thread_now != g.hover_thread {
+            g.hover_thread = thread_now;
+            g.wake();
+        }
+        // Which record has its threads out for the pointer: the one under
+        // it, held while the pointer crosses the gap to the nodes, let go
+        // once it's away.
+        match hovered_now.filter(|&i| g.nodes[i].kind == Kind::Release) {
+            Some(i) => {
+                if g.shown.as_deref() != Some(g.nodes[i].key.as_str()) {
+                    g.shown = Some(g.nodes[i].key.clone());
+                    g.wake();
+                }
+            }
+            None => {
+                let keep = match (&g.shown, pointer) {
+                    (Some(k), Some(p)) if pointer_free => g.index.get(k).is_some_and(|&i| {
+                        let s = to_screen(g.cam, g.zoom, g.nodes[i].pos);
+                        let r = g.nodes[i].r * g.zoom;
+                        (p - s).length() <= r + THREAD_GAP + THREAD_R * 2.0 + 24.0
+                    }),
+                    _ => false,
+                };
+                if !keep && g.shown.is_some() {
+                    g.shown = None;
+                    g.wake();
+                }
+            }
         }
 
         // --- Drag: a node follows the pointer and flies on release; empty
@@ -1131,7 +1353,13 @@ impl App {
                 None => g.fit(rect),
             }
         } else if resp.clicked() {
-            if let Some(i) = pointer.and_then(|p| hit(&g, p)) {
+            if let Some((i, thread)) = g.hover_thread {
+                if let Some(r) = &g.nodes[i].release {
+                    if self.thread_avail(r.release_id, thread) != Avail::Missing {
+                        act = Some(GraphAct::Thread(r.clone(), thread));
+                    }
+                }
+            } else if let Some(i) = pointer.and_then(|p| hit(&g, p)) {
                 match g.nodes[i].kind {
                     Kind::Release => {
                         if let Some(r) = &g.nodes[i].release {
@@ -1144,6 +1372,10 @@ impl App {
                         g.follow_fit = false;
                     }
                 }
+            } else if !self.radio.on {
+                // Empty canvas: the dig's record lets go of its threads. The
+                // radio keeps its record lit; it's what's playing.
+                g.focus = None;
             }
         }
 
@@ -1201,6 +1433,27 @@ impl App {
             } else {
                 n.scale = target;
                 n.scale_v = 0.0;
+            }
+        }
+        // The thread nodes' bloom: out for the record under the pointer and
+        // the one the dig stands on, folded away everywhere else.
+        let shown_idx = g.shown.as_ref().and_then(|k| g.index.get(k).copied());
+        let focus_idx = g.focus.as_ref().and_then(|k| g.index.get(k).copied());
+        for (i, n) in g.nodes.iter_mut().enumerate() {
+            let target = if n.kind == Kind::Release && (Some(i) == shown_idx || Some(i) == focus_idx)
+            {
+                1.0
+            } else {
+                0.0
+            };
+            let a = 320.0 * (target - n.threads) - 30.0 * n.threads_v;
+            n.threads_v += a * sdt;
+            n.threads = (n.threads + n.threads_v * sdt).clamp(0.0, 1.2);
+            if (n.threads - target).abs() > 0.003 || n.threads_v.abs() > 0.02 {
+                moving = true;
+            } else {
+                n.threads = target;
+                n.threads_v = 0.0;
             }
         }
         g.last_tick = if moving || cam_moving { Some(now) } else { None };
@@ -1282,6 +1535,39 @@ impl App {
             }
             // Spokes aren't drawn: the area under a cloud is what says which
             // records belong to it.
+        }
+
+        // Dig trails: every thread taken, from the record it was taken out
+        // of to the record it found, in the thread's colour. The dig web
+        // feeds them in as it grows; the map keeps them once it's gone.
+        if let Some(dig) = &self.dig {
+            for s in &dig.steps {
+                if let (Some(p), Some((t, _))) = (s.parent, s.via.as_ref()) {
+                    let from = dig.steps[p].release_id;
+                    let to = s.release_id;
+                    if !g.trails.iter().any(|x| x.0 == from && x.1 == to) {
+                        g.trails.push((from, to, *t));
+                    }
+                }
+            }
+        }
+        let trail_w = (1.8 * zoom.sqrt()).clamp(0.9, 2.4);
+        for &(from, to, t) in &g.trails {
+            let (Some(&a), Some(&b)) = (
+                g.index.get(&format!("r:{from}")),
+                g.index.get(&format!("r:{to}")),
+            ) else {
+                continue;
+            };
+            let pa = to_screen(cam, zoom, g.nodes[a].pos);
+            let pb = to_screen(cam, zoom, g.nodes[b].pos);
+            if !visible(pa, 0.0) && !visible(pb, 0.0) {
+                continue;
+            }
+            let on = matches[a] || matches[b];
+            let lit = Some(a) == g.hover || Some(b) == g.hover;
+            let tint = thread_tint(t).gamma_multiply(if lit { 0.95 } else { 0.55 });
+            painter.line_segment([pa, pb], egui::Stroke::new(trail_w, dim(tint, on)));
         }
 
         // Hubs under, records over, the hovered node last so it sits on top.
@@ -1446,6 +1732,89 @@ impl App {
             }
         }
 
+        // Thread nodes, and the radio's light on the record it's playing.
+        let radio_on = self.radio.on;
+        let t_now = ctx.input(|i| i.time) as f32;
+        for i in 0..g.nodes.len() {
+            let n = &g.nodes[i];
+            if n.kind != Kind::Release || n.threads <= 0.01 {
+                continue;
+            }
+            let Some(rel) = &n.release else { continue };
+            let p = to_screen(cam, zoom, n.pos);
+            let r = n.r * n.scale * zoom;
+            if !visible(p, r + 60.0) {
+                continue;
+            }
+            let is_focus = g.focus.as_deref() == Some(n.key.as_str());
+            if is_focus && radio_on {
+                // A breathing ring: this is the record you're hearing.
+                let breath = 0.5 + 0.5 * (t_now * 2.2).sin();
+                let ring = egui::Rect::from_center_size(
+                    p,
+                    egui::Vec2::splat(r * 2.0 + 10.0 + 6.0 * breath),
+                );
+                painter.rect_stroke(
+                    ring,
+                    (r * 0.18).clamp(2.0, 6.0) + 5.0,
+                    egui::Stroke::new(2.0, color::ACCENT.gamma_multiply(0.35 + 0.45 * breath)),
+                );
+                ctx.request_repaint();
+            }
+            let bloom = n.threads.min(1.0);
+            for (c, thread) in g.thread_slots(i, center) {
+                let avail = self.thread_avail(rel.release_id, thread);
+                let busy = g.awaiting.is_some_and(|a| a.is_for(rel.release_id, thread));
+                let lit = g.hover_thread == Some((i, thread));
+                let tint = thread_tint(thread);
+                let tr = THREAD_R * bloom;
+                if tr < 1.0 {
+                    continue;
+                }
+                let dir = (c - p).normalized();
+                let a = p + dir * (r + 1.0);
+                let b = c - dir * tr;
+                painter.line_segment(
+                    [a, b],
+                    egui::Stroke::new(
+                        1.0,
+                        if lit { tint } else { color::LABEL_4 }.gamma_multiply(bloom),
+                    ),
+                );
+                painter.circle_filled(
+                    c,
+                    tr,
+                    if lit { color::SURFACE_HOVER } else { color::SURFACE_HI },
+                );
+                let edge = match (lit, avail) {
+                    (true, _) => tint,
+                    (_, Avail::Missing) => color::LABEL_4.gamma_multiply(0.6),
+                    _ => color::LABEL_3,
+                };
+                painter.circle_stroke(c, tr, egui::Stroke::new(1.2, edge));
+                let ink = match (lit, avail) {
+                    (true, _) => color::LABEL,
+                    (_, Avail::Missing) => color::LABEL_4,
+                    _ => color::LABEL_2,
+                };
+                if tr >= 4.0 {
+                    thread_glyph(&painter, thread, c, ink, tr * 0.5);
+                }
+                if busy {
+                    // An arc chasing round the node while Discogs answers.
+                    let a0 = t_now * 5.0;
+                    let pts: Vec<egui::Pos2> = (0..=10)
+                        .map(|k| {
+                            let a = a0 + k as f32 / 10.0 * 1.7;
+                            c + egui::vec2(a.cos(), a.sin()) * (tr + 3.0)
+                        })
+                        .collect();
+                    painter.add(egui::Shape::line(pts, egui::Stroke::new(1.6, tint)));
+                    ctx.request_repaint();
+                }
+            }
+        }
+
         for (p, area, name, ink) in hub_names {
             let size = (13.0 * zoom.sqrt()).clamp(9.0, 16.0);
             let galley = painter.layout_no_wrap(name, font::strong(size), ink);
@@ -1463,8 +1832,21 @@ impl App {
             painter.galley(pos, galley, ink);
         }
 
-        // The hovered record, in words.
-        if let Some(i) = g.hover {
+        // The hovered thread node, or the hovered record, in words.
+        if let Some((i, thread)) = g.hover_thread {
+            if let Some(rel) = g.nodes[i].release.clone() {
+                let avail = self.thread_avail(rel.release_id, thread);
+                let busy = g.awaiting.is_some_and(|a| a.is_for(rel.release_id, thread));
+                if avail != Avail::Missing {
+                    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let words = self.thread_words(&rel, thread, avail, busy);
+                resp.clone().on_hover_ui_at_pointer(|ui| {
+                    ui.set_max_width(260.0);
+                    ui.label(crate::ui::hover::note(words));
+                });
+            }
+        } else if let Some(i) = g.hover {
             if let Some(rel) = g.nodes[i].release.clone() {
                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                 resp.clone().on_hover_ui_at_pointer(|ui| {
@@ -1547,6 +1929,21 @@ impl App {
             );
             x += 15.0;
             caption(&mut x, format!("Dug {dug}"));
+            // The trails' key, once there are trails to read.
+            if !g.trails.is_empty() {
+                for (t, word) in [
+                    (DigThread::Artist, "artist"),
+                    (DigThread::Label, "label"),
+                    (DigThread::Style, "style"),
+                ] {
+                    painter.line_segment(
+                        [egui::pos2(x, y), egui::pos2(x + 12.0, y)],
+                        egui::Stroke::new(2.0, thread_tint(t)),
+                    );
+                    x += 16.0;
+                    caption(&mut x, word.to_string());
+                }
+            }
             let count = match g.arrange {
                 Arrange::Artists => format!("{artists} artists"),
                 Arrange::Genres => format!("{artists} styles"),
@@ -1561,7 +1958,149 @@ impl App {
         }
 
         self.graph = g;
+        self.draw_radio_bar(ui, rect, &ctx);
         act
+    }
+
+    /// Take `thread` out of `rel` from the map: stand the dig on the record
+    /// and ask for the thread once its ids are in. The find lands on the map
+    /// through the same path a strip step takes.
+    pub(crate) fn map_take_thread(&mut self, rel: &Release, thread: DigThread) {
+        self.map_stand_on(rel);
+        self.graph.focus = Some(format!("r:{}", rel.release_id));
+        self.graph.awaiting = Some(Await::Resolve {
+            from: rel.release_id,
+            thread,
+        });
+        self.graph.wake();
+    }
+
+    /// Make `rel` the dig's head: a shelf record digs as that record, a bare
+    /// one as itself. A record already in the web is refocused, not re-dug.
+    pub(crate) fn map_stand_on(&mut self, rel: &Release) {
+        match rel.key {
+            Some(key) => self.start_dig(key),
+            None => self.start_dig_release(
+                rel.release_id,
+                rel.artist.clone(),
+                rel.title.clone(),
+                rel.label.clone(),
+                rel.sub.clone(),
+                rel.cover_url(),
+            ),
+        }
+    }
+
+    /// Carry a thread taken from the map through to its landing. Runs once
+    /// a frame, after the map has synced, so a find is already a node when
+    /// the camera is sent to it.
+    fn map_dig_tick(&mut self, g: &mut GraphState) {
+        let Some(aw) = g.awaiting else { return };
+        let Some(dig) = self.dig.as_ref() else {
+            g.awaiting = None;
+            return;
+        };
+        match aw {
+            Await::Resolve { from, thread } => {
+                if dig.head().release_id != from {
+                    g.awaiting = None;
+                    return;
+                }
+                if dig.pending.is_some() {
+                    return;
+                }
+                if dig.head().query(thread).is_some() {
+                    self.dig_step(thread);
+                    g.awaiting = Some(Await::Land { from, thread });
+                } else if dig.head().detail_resolved {
+                    self.status = match thread {
+                        DigThread::Artist => "Discogs lists no artist for this record",
+                        DigThread::Label => "Discogs lists no label for this record",
+                        DigThread::Style => "Discogs lists no style for this record",
+                    }
+                    .to_string();
+                    g.awaiting = None;
+                }
+            }
+            Await::Land { from, .. } => {
+                if dig.pending.is_some() {
+                    return;
+                }
+                if dig.head().release_id != from {
+                    let key = format!("r:{}", dig.head().release_id);
+                    g.focus = Some(key.clone());
+                    // A map fitting itself grows to take the find in; one
+                    // the user has framed pans to it and keeps the scale.
+                    if !g.follow_fit {
+                        g.lean = Some((key, false));
+                    }
+                    g.awaiting = None;
+                    self.dig_evict();
+                    self.dig_prime();
+                } else {
+                    if let Some(e) = &dig.error {
+                        self.status = e.clone();
+                    }
+                    g.awaiting = None;
+                }
+            }
+        }
+    }
+
+    /// What the map knows about `thread` out of `release_id`: only a dig
+    /// that has stood on the record knows for sure.
+    pub(crate) fn thread_avail(&self, release_id: u64, thread: DigThread) -> Avail {
+        let step = self
+            .dig
+            .as_ref()
+            .and_then(|d| d.steps.iter().find(|s| s.release_id == release_id));
+        match step {
+            Some(s) if s.query(thread).is_some() => Avail::Ready,
+            Some(s) if s.detail_resolved => Avail::Missing,
+            _ => Avail::Unknown,
+        }
+    }
+
+    /// The hover line for a thread node.
+    fn thread_words(&self, rel: &Release, thread: DigThread, avail: Avail, busy: bool) -> String {
+        if busy {
+            return "Searching Discogs…".to_string();
+        }
+        let artist = crate::dig::strip_disambiguator(&rel.artist).trim().to_string();
+        match (thread, avail) {
+            (DigThread::Artist, Avail::Missing) => {
+                "Discogs lists no artist for this record".to_string()
+            }
+            (DigThread::Artist, _) if artist.is_empty() => {
+                "Dig the artist: another record by this artist you don't own".to_string()
+            }
+            (DigThread::Artist, _) => {
+                format!("Dig the artist: another {artist} record you don't own")
+            }
+            (DigThread::Label, Avail::Missing) => {
+                "Discogs lists no label for this record".to_string()
+            }
+            (DigThread::Label, _) => match &rel.label {
+                Some(l) => format!("Dig the label: another record on {l} you don't own"),
+                None => "Dig the label: another record on this label you don't own".to_string(),
+            },
+            (DigThread::Style, Avail::Missing) => {
+                "Discogs lists no style for this record".to_string()
+            }
+            (DigThread::Style, _) => {
+                let step = self
+                    .dig
+                    .as_ref()
+                    .and_then(|d| d.steps.iter().find(|s| s.release_id == rel.release_id));
+                match step {
+                    Some(s) if !s.styles.is_empty() => {
+                        format!("Dig the style: {}", crate::dig::style_tip(&s.styles, true))
+                    }
+                    _ => "Dig the style: a record that sounds like this one, that you don't own"
+                        .to_string(),
+                }
+            }
+        }
     }
 
     /// Aim the map's camera at the whole map. `rect` is the canvas as last

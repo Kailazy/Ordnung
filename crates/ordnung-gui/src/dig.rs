@@ -177,7 +177,7 @@ impl DigStep {
     /// id, or the full set of style tags. `None` while the detail is still
     /// resolving (or when the release genuinely has none) — the buttons wait
     /// on it either way.
-    fn query(&self, thread: DigThread) -> Option<DigQuery> {
+    pub(crate) fn query(&self, thread: DigThread) -> Option<DigQuery> {
         match thread {
             DigThread::Artist => self
                 .artist_ids
@@ -1482,7 +1482,7 @@ impl App {
     /// each its own pacing and race the rate limit; sequential on one worker,
     /// the second simply follows the first a request-interval later, which is
     /// still well ahead of the user reading the cover that just appeared.
-    fn dig_prime(&mut self) {
+    pub(crate) fn dig_prime(&mut self) {
         let token = self.discogs_token();
         if token.trim().is_empty() {
             return;
@@ -2364,7 +2364,7 @@ impl App {
     /// backtrack onto one should find its threads as ready as when the user
     /// left. Only when the cache outgrows what a long dig plausibly revisits
     /// is it cut back to the head's own pages.
-    fn dig_evict(&mut self) {
+    pub(crate) fn dig_evict(&mut self) {
         /// Most primed pages kept at once: three threads' worth for a good
         /// stretch of records. Each page is a hundred small rows, so this is
         /// bounded memory, not bounded requests.
