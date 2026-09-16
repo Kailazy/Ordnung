@@ -1452,6 +1452,10 @@ struct App {
     dig_ids_rx: Receiver<(u64, (Vec<u64>, Vec<u64>, Option<String>, Vec<String>))>,
     /// Receives the finished Discogs browse for the step being dug.
     dig_rx: Option<Receiver<dig::DigFetched>>,
+    /// Releases whose detail a hover has already asked to warm this session,
+    /// so lingering on a cover starts one fetch, not one per frame. See
+    /// [`App::warm_release_detail`].
+    detail_warmed: HashSet<u64>,
     /// Receives speculative browses for the two threads out of the record on
     /// screen, fetched ahead of the click that takes one. A persistent channel
     /// rather than a one-shot `Option<Receiver>`: one prefetch worker delivers

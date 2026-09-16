@@ -798,6 +798,9 @@ impl App {
         if self.vinyl_sheet.is_none() {
             return;
         }
+        // A sheet is where videos get played from, so have the player built
+        // before the first track is clicked.
+        webview::prewarm();
         // The panel can be closed by its own title-bar button, which we only
         // find out about by asking.
         if let Some(sheet) = self.vinyl_sheet.as_mut() {

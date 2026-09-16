@@ -453,6 +453,10 @@ enum VinylGridAction {
     Open(VinylCoverKey),
     /// Open the sheet *and* start the record from its first playable track.
     Play(VinylCoverKey),
+    /// The pointer is resting on this record: warm its detail so whatever
+    /// the click turns out to be opens without a request. Only reported when
+    /// nothing was clicked.
+    Warm(u64),
     /// Start a dig from this record — see [`crate::dig`].
     Dig(VinylCoverKey),
     /// List every other pressing of this record, to swap one in — see
@@ -2030,6 +2034,7 @@ impl App {
             }
             Some(VinylGridAction::Open(key)) => self.open_vinyl_sheet(key, ctx),
             Some(VinylGridAction::Dig(key)) => self.start_dig(key),
+            Some(VinylGridAction::Warm(id)) => self.warm_release_detail(id),
             Some(VinylGridAction::Versions(key)) => self.open_versions(key, ctx),
             Some(VinylGridAction::Label(key)) => {
                 if let Some(record) = self.vinyl_record(key) {
@@ -2393,6 +2398,9 @@ impl App {
                                 dig_clicked = true;
                                 action = Some(VinylGridAction::Dig(c.key));
                             }
+                        }
+                        if card_hovered && action.is_none() {
+                            action = Some(VinylGridAction::Warm(c.release_id));
                         }
                         // Price chip, bottom-left of the cover: what the sort is
                         // ordering by, shown where it can't push the caption

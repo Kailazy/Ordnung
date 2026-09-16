@@ -449,6 +449,7 @@ impl App {
 
         let mut act: Option<Act> = None;
         let mut want_covers: Vec<String> = Vec::new();
+        let mut hover_row: Option<usize> = None;
         let mut open = true;
         let glyph = match thread {
             BrowseThread::Label => "⌂",
@@ -532,11 +533,13 @@ impl App {
                                         );
                                     }
                                 }
-                                if tresp
+                                let tresp = tresp
                                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    .on_hover_note("Open the record")
-                                    .clicked()
-                                {
+                                    .on_hover_note("Open the record");
+                                if tresp.hovered() {
+                                    hover_row = Some(i);
+                                }
+                                if tresp.clicked() {
                                     act = Some(Act::Open(i));
                                 }
                                 ui.add_space(8.0);
@@ -719,6 +722,16 @@ impl App {
             }
             Some(Act::Page(p)) => self.fetch_browse_page(p),
             None => {}
+        }
+        // Resting on a row: have its tracklist ready before the click.
+        let warm = hover_row.and_then(|i| {
+            self.browse_panel
+                .as_ref()
+                .and_then(|p| p.releases.get(i))
+                .map(|r| r.release_id)
+        });
+        if let Some(id) = warm {
+            self.warm_release_detail(id);
         }
     }
 }

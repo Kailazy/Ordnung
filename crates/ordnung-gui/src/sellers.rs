@@ -897,6 +897,7 @@ impl App {
         let highlighted = self.seller_highlight == Some(listing_id);
 
         let mut act: Option<SellerAct> = None;
+        let mut hovered = false;
         ui.allocate_ui_with_layout(
             egui::vec2(cover_side, cover_side + 58.0),
             egui::Layout::top_down(egui::Align::Min),
@@ -906,6 +907,7 @@ impl App {
                 let resp = resp
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .on_hover_note("Open the record — listen, wantlist, or buy");
+                hovered = resp.hovered();
                 // The dig disc's hit area is claimed before anything paints, so
                 // the cover's hover frame can see the disc's hover and the pair
                 // reveals together (same reasoning as the shelf grid).
@@ -1144,6 +1146,10 @@ impl App {
                 let _ = listing_id;
             },
         );
+        // Resting on a card: have its tracklist ready before the click.
+        if hovered {
+            self.warm_release_detail(release_id);
+        }
         act
     }
 

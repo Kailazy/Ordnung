@@ -46,6 +46,18 @@ pub fn play(_frame: &eframe::Frame, _youtube_ids: &[String], _title: &str) -> bo
     false
 }
 
+/// Build the mini-player ahead of its first use, on a blank page, so the
+/// first play doesn't pay for the panel and WebKit's content process on top
+/// of the page load. Idempotent and cheap once built; call it when a record
+/// sheet opens.
+#[cfg(target_os = "macos")]
+pub fn prewarm() {
+    imp::prewarm();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn prewarm() {}
+
 /// Hide the mini-player and stop playback. A no-op when nothing is open.
 #[cfg(target_os = "macos")]
 pub fn close() {
@@ -353,6 +365,22 @@ mod imp {
             load(mini, first);
             true
         })
+    }
+
+    pub fn prewarm() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        PANEL.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                let mini = build(mtm);
+                // A navigation is what launches the content process; a black
+                // page is what the panel shows between videos anyway.
+                blank(&mini.web);
+                *slot = Some(mini);
+            }
+        });
     }
 
     pub fn close() {

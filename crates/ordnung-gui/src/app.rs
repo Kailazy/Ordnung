@@ -200,6 +200,7 @@ impl App {
             dig: None,
             dig_seed: 0x853C_49E6_748F_EA9B,
             dig_rx: None,
+            detail_warmed: HashSet::new(),
             dig_prime_tx,
             dig_prime_rx,
             dig_ids_tx,

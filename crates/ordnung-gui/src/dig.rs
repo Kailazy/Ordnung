@@ -1408,6 +1408,35 @@ impl App {
         }
     }
 
+    /// Warm a release's detail into the cache because the pointer is resting
+    /// on it: the sheet's tracklist, the dig's ids and the label page's id all
+    /// come from that one row, so a hover that lands before the click makes
+    /// each of them open without a request. Cache-first and paced as
+    /// background, so it costs nothing when the row is already there and
+    /// never delays anything the user actually clicked. Once per release per
+    /// session; a fetch that fails is simply not retried by hovering.
+    pub(crate) fn warm_release_detail(&mut self, release_id: u64) {
+        if release_id == 0 || !self.detail_warmed.insert(release_id) {
+            return;
+        }
+        let token = self.discogs_token();
+        if token.trim().is_empty() {
+            return;
+        }
+        let db = self.db_path.clone();
+        thread::spawn(move || {
+            let id = release_id.to_string();
+            let Ok(cat) = Catalog::open(&db) else { return };
+            if matches!(cat.cached_release(&id), Ok(Some(_))) {
+                return;
+            }
+            let client =
+                discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/")
+                    .background();
+            let _ = cat.release_cached_or(&id, || client.fetch_release(&id));
+        });
+    }
+
     /// Fetch the artist and label ids for a release the dig just landed on, so
     /// its own two branches can be taken. Cache-first, like the sheet's own
     /// tracklist fetch — a record opened before answers without a request.
