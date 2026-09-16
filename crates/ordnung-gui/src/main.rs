@@ -1825,6 +1825,8 @@ struct App {
     /// Inline rename in progress for a sidebar entry, or `None` when no row is
     /// being edited.
     renaming: Option<Renaming>,
+    /// The icon-and-colour picker, while open. See `LookEditor`.
+    look_editor: Option<LookEditor>,
     /// Active table sort: which column and direction (`true` = ascending).
     /// `None` keeps the natural order (catalog order, or the playlist's manual
     /// order). Set by clicking a column header.
@@ -1999,6 +2001,16 @@ fn usb_track_index(id: Id) -> Option<usize> {
 }
 
 /// State for the inline text box that names a sidebar playlist.
+/// The open "Icon and color" picker for one catalog playlist or folder.
+/// Every pick is written to the catalog as it is made, so the sidebar shows
+/// the result live and there is nothing to confirm; closing the window is
+/// just closing it.
+struct LookEditor {
+    id: Id,
+    /// The icon search box's live text.
+    search: String,
+}
+
 struct Renaming {
     /// The playlist (or folder) being edited.
     id: Id,
@@ -2024,6 +2036,9 @@ enum SidebarAction {
     NewPlaylist(Option<Id>),
     Rename(Id, String),
     Delete(Id),
+    /// Right-click on a local playlist/folder: open the icon-and-colour
+    /// picker for it (see `LookEditor`).
+    EditLook(Id),
     /// Tracks dropped onto a playlist (playlist id, dragged track ids).
     AddTracks(Id, Vec<Id>),
     /// Open the Library Health window on whichever tab was last used.

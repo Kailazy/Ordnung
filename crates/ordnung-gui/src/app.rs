@@ -251,6 +251,7 @@ impl App {
             discogs_auth: DiscogsAuth::default(),
             discogs_auth_rx: None,
             confirm_clear_db: false,
+            look_editor: None,
             export_confirm: None,
             usb_setup_confirm: None,
             failure_report_title: String::new(),
@@ -3285,6 +3286,12 @@ impl eframe::App for App {
                 }
                 self.reload();
             }
+            Some(SidebarAction::EditLook(id)) => {
+                self.look_editor = Some(LookEditor {
+                    id,
+                    search: String::new(),
+                });
+            }
             Some(SidebarAction::Delete(id)) => {
                 if let Ok(cat) = Catalog::open(&self.db_path) {
                     let _ = cat.delete_playlist(id);
@@ -3745,6 +3752,7 @@ impl eframe::App for App {
         self.draw_artwork_review(ctx);
         self.draw_settings(ctx);
         self.draw_clear_db_confirm(ctx);
+        self.draw_look_editor(ctx);
         self.draw_bulk_write_confirm(ctx);
         self.draw_delete_confirm(ctx);
         self.draw_vinyl_edit_confirm(ctx);

@@ -104,6 +104,40 @@ pub mod color {
     pub const GREEN: Color32 = Color32::from_rgb(48, 209, 88);
     pub const BLUE: Color32 = Color32::from_rgb(10, 132, 255);
     pub const GRAY: Color32 = Color32::from_rgb(142, 142, 147);
+    pub const TEAL: Color32 = Color32::from_rgb(64, 200, 224);
+    pub const INDIGO: Color32 = Color32::from_rgb(94, 92, 230);
+    pub const PURPLE: Color32 = Color32::from_rgb(191, 90, 242);
+    pub const PINK: Color32 = Color32::from_rgb(255, 55, 95);
+    pub const MINT: Color32 = Color32::from_rgb(102, 212, 207);
+    pub const BROWN: Color32 = Color32::from_rgb(172, 142, 104);
+
+    /// The colours a user can give a playlist, in picker order. A fixed set
+    /// rather than a free wheel: the sidebar reads as one palette, and every
+    /// hue here is checked against the dark surfaces it sits on.
+    pub const TAG_PALETTE: &[(&str, Color32)] = &[
+        ("Red", RED),
+        ("Orange", ORANGE),
+        ("Yellow", YELLOW),
+        ("Green", GREEN),
+        ("Mint", MINT),
+        ("Teal", TEAL),
+        ("Blue", BLUE),
+        ("Indigo", INDIGO),
+        ("Purple", PURPLE),
+        ("Pink", PINK),
+        ("Brown", BROWN),
+        ("Gray", GRAY),
+    ];
+
+    /// Unpack a catalog colour (`0xRRGGBB`, see `Playlist::color`).
+    pub fn from_packed(c: u32) -> Color32 {
+        Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
+    }
+
+    /// Pack a colour for the catalog (`0xRRGGBB`). Alpha is dropped.
+    pub fn to_packed(c: Color32) -> u32 {
+        ((c.r() as u32) << 16) | ((c.g() as u32) << 8) | c.b() as u32
+    }
 }
 
 /// A size ramp for consistent text hierarchy, named after the role each size

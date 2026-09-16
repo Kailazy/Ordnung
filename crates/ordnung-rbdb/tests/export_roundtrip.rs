@@ -103,6 +103,8 @@ fn export_then_read_back_full_surface() {
             parent: None,
             is_folder: true,
             track_ids: vec![],
+            icon: None,
+            color: None,
         },
         Playlist {
             id: 11,
@@ -110,6 +112,8 @@ fn export_then_read_back_full_surface() {
             parent: Some(10),
             is_folder: false,
             track_ids: vec![102, 101, 103], // order matters; 103 is skipped
+            icon: None,
+            color: None,
         },
     ];
 
@@ -238,6 +242,8 @@ fn merge_adds_to_an_existing_export_without_clobbering_it() {
         parent: None,
         is_folder: false,
         track_ids: vec![10, 11],
+        icon: None,
+        color: None,
     }];
     let tracks_a = vec![
         track(10, &a, Format::Mp3, "Alpha", "AA"),
@@ -253,6 +259,8 @@ fn merge_adds_to_an_existing_export_without_clobbering_it() {
         parent: None,
         is_folder: false,
         track_ids: vec![12, 10],
+        icon: None,
+        color: None,
     }];
     let tracks_b = vec![
         track(12, &c, Format::Mp3, "Gamma", "CC"),
@@ -397,6 +405,8 @@ fn export_leaves_no_temp_files_and_passes_validation() {
         parent: None,
         is_folder: false,
         track_ids: vec![1, 2],
+        icon: None,
+        color: None,
     }];
     let cancel = AtomicBool::new(false);
     // export_usb returning Ok already means validate_export passed.

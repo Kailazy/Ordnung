@@ -3366,3 +3366,196 @@ fn subsection_header(ui: &mut egui::Ui, title: &str) -> bool {
     });
     reset
 }
+
+// ── Playlist icon and colour ─────────────────────────────────────────────────
+
+impl App {
+    /// The "Icon and color" picker for one playlist or folder: a row of colour
+    /// swatches, a searchable grid of every icon in the icon font, and a live
+    /// preview of the row as the sidebar will draw it. Each pick is written to
+    /// the catalog at once, so the sidebar behind the window updates as you
+    /// click; there is nothing to confirm.
+    pub(crate) fn draw_look_editor(&mut self, ctx: &egui::Context) {
+        use crate::ui::tokens::{color, font, radius, space};
+        let Some(ed) = self.look_editor.as_mut() else { return };
+        let id = ed.id;
+        let Some(p) = self.playlists.iter().find(|p| p.id == id).cloned() else {
+            // Deleted underneath the window (a sync, another edit): close it.
+            self.look_editor = None;
+            return;
+        };
+        let mut open = true;
+        let mut done = false;
+        // A pick, applied after the window closure so it can't borrow `self`
+        // while the editor state is borrowed: `Some((icon, color))`.
+        let mut pick: Option<(Option<String>, Option<u32>)> = None;
+        let title = if p.is_folder {
+            "Folder icon and color"
+        } else {
+            "Playlist icon and color"
+        };
+        egui::Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.set_width(384.0);
+                let current_glyph = p
+                    .icon
+                    .as_deref()
+                    .and_then(crate::ui::phosphor_icons::glyph);
+                let tint = p.color.map(color::from_packed);
+
+                // Preview: the mark and the name, as the sidebar row shows them.
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, radius::SM, color::SURFACE_HI);
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        current_glyph.unwrap_or(if p.is_folder { "" } else { "♪" }),
+                        egui::FontId::proportional(18.0),
+                        tint.unwrap_or(egui::Color32::from_gray(190)),
+                    );
+                    ui.add_space(space::S2);
+                    ui.label(egui::RichText::new(&p.name).font(font::body()).strong());
+                });
+                ui.add_space(space::S4);
+
+                // Colour: one swatch per palette entry, plus "none" first.
+                // A ring marks the current pick.
+                ui.label(egui::RichText::new("Color").font(font::footnote()).color(color::LABEL_2));
+                ui.add_space(space::S2);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = space::S2;
+                    let d = 22.0;
+                    let swatch = |ui: &mut egui::Ui, fill: Option<egui::Color32>, name: &str, chosen: bool| -> bool {
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::click());
+                        let c = rect.center();
+                        match fill {
+                            Some(f) => {
+                                ui.painter().circle_filled(c, d * 0.36, f);
+                            }
+                            None => {
+                                // "No colour": an empty ring with a slash.
+                                ui.painter().circle_stroke(c, d * 0.36, egui::Stroke::new(1.5, color::LABEL_3));
+                                let k = d * 0.26;
+                                ui.painter().line_segment(
+                                    [c + egui::vec2(-k, k), c + egui::vec2(k, -k)],
+                                    egui::Stroke::new(1.5, color::LABEL_3),
+                                );
+                            }
+                        }
+                        if chosen || resp.hovered() {
+                            ui.painter().circle_stroke(
+                                c,
+                                d * 0.5,
+                                egui::Stroke::new(
+                                    if chosen { 2.0 } else { 1.0 },
+                                    if chosen { color::LABEL } else { color::LABEL_3 },
+                                ),
+                            );
+                        }
+                        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(name)
+                            .clicked()
+                    };
+                    if swatch(ui, None, "No color", p.color.is_none()) {
+                        pick = Some((p.icon.clone(), None));
+                    }
+                    for (name, c) in color::TAG_PALETTE {
+                        let packed = color::to_packed(*c);
+                        if swatch(ui, Some(*c), name, p.color == Some(packed)) {
+                            pick = Some((p.icon.clone(), Some(packed)));
+                        }
+                    }
+                });
+                ui.add_space(space::S4);
+
+                // Icon: search over the whole icon set, then a grid of the
+                // matches. Only the visible rows are laid out.
+                ui.label(egui::RichText::new("Icon").font(font::footnote()).color(color::LABEL_2));
+                ui.add_space(space::S2);
+                let search = &mut self.look_editor.as_mut().expect("editor open").search;
+                ui.add(
+                    egui::TextEdit::singleline(search)
+                        .hint_text("Search icons")
+                        .desired_width(f32::INFINITY),
+                );
+                let needle = search.trim().to_ascii_lowercase();
+                let matches: Vec<&(&str, &str)> = crate::ui::phosphor_icons::ICONS
+                    .iter()
+                    .filter(|(n, _)| needle.is_empty() || n.contains(needle.as_str()))
+                    .collect();
+                ui.add_space(space::S2);
+                const CELL: f32 = 34.0;
+                const GAP: f32 = 4.0;
+                let cols = ((ui.available_width() + GAP) / (CELL + GAP)).floor().max(1.0) as usize;
+                let rows = matches.len().div_ceil(cols);
+                egui::ScrollArea::vertical()
+                    .max_height(CELL * 6.0 + GAP * 5.0)
+                    .auto_shrink([false, false])
+                    .show_rows(ui, CELL, rows, |ui, range| {
+                        ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+                        for row in range {
+                            ui.horizontal(|ui| {
+                                for (name, glyph) in matches.iter().skip(row * cols).take(cols) {
+                                    let chosen = p.icon.as_deref() == Some(name);
+                                    let mut btn = egui::Button::new(
+                                        egui::RichText::new(*glyph).size(18.0).color(
+                                            if chosen {
+                                                egui::Color32::WHITE
+                                            } else {
+                                                tint.unwrap_or(color::LABEL)
+                                            },
+                                        ),
+                                    )
+                                    .min_size(egui::vec2(CELL, CELL))
+                                    .rounding(radius::SM);
+                                    if chosen {
+                                        btn = btn.fill(color::ACCENT);
+                                    }
+                                    if ui.add(btn).on_hover_text(*name).clicked() {
+                                        pick = Some((Some((*name).to_string()), p.color));
+                                    }
+                                }
+                            });
+                        }
+                    });
+                if matches.is_empty() {
+                    ui.label(egui::RichText::new("No icons match.").weak());
+                }
+                ui.add_space(space::S4);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            p.icon.is_some() || p.color.is_some(),
+                            egui::Button::new("Reset to default"),
+                        )
+                        .clicked()
+                    {
+                        pick = Some((None, None));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Done").clicked() {
+                            done = true;
+                        }
+                    });
+                });
+            });
+
+        if let Some((icon, color)) = pick {
+            match Catalog::open(&self.db_path)
+                .and_then(|c| c.set_playlist_look(id, icon.as_deref(), color))
+            {
+                Ok(()) => self.reload(),
+                Err(e) => self.status = format!("Couldn't save the playlist look: {e}"),
+            }
+        }
+        if !open || done {
+            self.look_editor = None;
+        }
+    }
+}

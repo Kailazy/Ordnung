@@ -316,6 +316,13 @@ pub struct Playlist {
     pub parent: Option<Id>,
     pub is_folder: bool,
     pub track_ids: Vec<Id>,
+    /// The user's chosen icon, as an icon-library name ("vinyl-record"), or
+    /// `None` for the front-end's default mark. Stored by name rather than
+    /// glyph so the catalog stays readable and survives a font swap.
+    pub icon: Option<String>,
+    /// The user's chosen accent for the icon, packed `0xRRGGBB`, or `None`
+    /// for the front-end's default ink.
+    pub color: Option<u32>,
 }
 
 /// Which Discogs list a [`VinylRecord`] came from: records the user owns, or

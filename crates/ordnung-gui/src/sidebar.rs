@@ -267,9 +267,39 @@ pub(crate) fn draw_playlist_nodes(
                 );
                 continue;
             }
-            egui::CollapsingHeader::new(
-                egui::RichText::new(p.name.as_str()).font(crate::ui::tokens::font::body()),
-            )
+            // A folder the user gave an icon or a colour leads with that mark
+            // in its own hue; an untouched folder is just its name, the
+            // disclosure triangle being mark enough.
+            let header: egui::WidgetText = match RowMark::of_folder(p) {
+                None => egui::RichText::new(p.name.as_str())
+                    .font(crate::ui::tokens::font::body())
+                    .into(),
+                Some(mark) => {
+                    let mut job = egui::text::LayoutJob::default();
+                    job.append(
+                        mark.glyph,
+                        0.0,
+                        egui::TextFormat {
+                            font_id: egui::FontId::proportional(PLAYLIST_TEXT_SIZE + 1.5),
+                            color: mark.tint.unwrap_or(egui::Color32::from_gray(190)),
+                            valign: egui::Align::Center,
+                            ..Default::default()
+                        },
+                    );
+                    job.append(
+                        p.name.as_str(),
+                        crate::ui::tokens::space::S3,
+                        egui::TextFormat {
+                            font_id: crate::ui::tokens::font::body(),
+                            color: crate::ui::tokens::color::LABEL,
+                            valign: egui::Align::Center,
+                            ..Default::default()
+                        },
+                    );
+                    job.into()
+                }
+            };
+            egui::CollapsingHeader::new(header)
             .id_salt(("pl-folder", p.id))
             .default_open(true)
             .show(ui, |ui| {
@@ -449,6 +479,56 @@ fn inline_rename_editor(
     }
 }
 
+/// The leading mark of a playlist row: a glyph and, when the user gave the
+/// playlist a colour, the ink to paint it in. `None` follows the row's own
+/// text colour.
+#[derive(Clone, Copy)]
+pub(crate) struct RowMark {
+    pub glyph: &'static str,
+    pub tint: Option<egui::Color32>,
+}
+
+impl RowMark {
+    /// The stock mark every playlist starts with.
+    pub const DEFAULT: RowMark = RowMark {
+        glyph: "♪",
+        tint: None,
+    };
+
+    /// A catalog playlist's mark: its chosen icon and colour, each falling
+    /// back to the default half when unset (or when the icon name is one this
+    /// build's icon set doesn't know).
+    pub fn of(p: &Playlist) -> RowMark {
+        RowMark {
+            glyph: p
+                .icon
+                .as_deref()
+                .and_then(crate::ui::phosphor_icons::glyph)
+                .unwrap_or(RowMark::DEFAULT.glyph),
+            tint: p.color.map(crate::ui::tokens::color::from_packed),
+        }
+    }
+
+    /// A folder's mark. A folder has no glyph of its own until the user
+    /// gives it one — the disclosure triangle is its mark — so this is
+    /// `None` for an untouched folder, and the folder icon in the chosen
+    /// colour when only a colour was set.
+    pub fn of_folder(p: &Playlist) -> Option<RowMark> {
+        if p.icon.is_none() && p.color.is_none() {
+            return None;
+        }
+        Some(RowMark {
+            glyph: p
+                .icon
+                .as_deref()
+                .and_then(crate::ui::phosphor_icons::glyph)
+                .or_else(|| crate::ui::phosphor_icons::glyph("folder"))
+                .unwrap_or(RowMark::DEFAULT.glyph),
+            tint: p.color.map(crate::ui::tokens::color::from_packed),
+        })
+    }
+}
+
 // ── Shared playlist-row metrics ───────────────────────────────────────────────
 // One set of numbers for a playlist row wherever it appears — the catalog tree
 // and a USB device's rekordbox tree — so the two sources read as the same
@@ -476,6 +556,7 @@ fn playlist_row(
     ui: &mut egui::Ui,
     density: NavDensity,
     name: &str,
+    mark: RowMark,
     selected: bool,
     count: usize,
     note: &str,
@@ -485,17 +566,23 @@ fn playlist_row(
     // "Traumprinz", so names wrapped to three lines and no two tiles were the
     // same height. The name goes in the tooltip instead — the rail is for
     // "which one of these did I have open", the wider tiers are for reading.
+    //
+    // The leading mark is painted over the tile rather than set in its label,
+    // the way `nav_button_painted` does it, so it can carry its own colour:
+    // a playlist's chosen icon keeps its chosen hue whether or not the row
+    // is selected.
     let resp = if density.icons_only() {
-        rail_tile(ui, "♪", selected).on_hover_text(name)
+        rail_tile(ui, "", selected).on_hover_text(name)
     } else {
         // The track count is painted over the tile's right end, so the name is
         // truncated to leave that lane clear — otherwise a long name runs
         // straight under the number. `nav_button` reserves the space; the
         // ellipsis tells the user the name is longer than shown, and the
-        // tooltip carries it in full.
+        // tooltip carries it in full. The blank "icon" indents the name past
+        // the painted mark.
         nav_button_truncated(
             ui,
-            "♪",
+            "     ",
             name,
             selected,
             PLAYLIST_ROW_H,
@@ -505,6 +592,26 @@ fn playlist_row(
         .on_hover_text(name)
         .on_hover_note(note)
     };
+    let (mark_pos, mark_size) = if density.icons_only() {
+        (resp.rect.center(), RAIL_GLYPH)
+    } else {
+        (
+            egui::pos2(resp.rect.left() + 12.0 + 7.5, resp.rect.center().y),
+            PLAYLIST_TEXT_SIZE + 1.5,
+        )
+    };
+    let ink = mark.tint.unwrap_or(if selected {
+        egui::Color32::WHITE
+    } else {
+        egui::Color32::from_gray(190)
+    });
+    ui.painter().text(
+        mark_pos,
+        egui::Align2::CENTER_CENTER,
+        mark.glyph,
+        egui::FontId::proportional(mark_size),
+        ink,
+    );
     if !density.icons_only() {
         // Small right-aligned track count inside the tile. Muted so the name
         // stays the focus; brighter on the accent fill so it's still readable
@@ -553,6 +660,7 @@ pub(crate) fn draw_playlist_leaf(
         ui,
         density,
         &p.name,
+        RowMark::of(p),
         selected,
         p.track_ids.len(),
         "Click to view. Drag tracks here to add them",
@@ -593,6 +701,14 @@ pub(crate) fn draw_playlist_leaf(
                 is_new: false,
                 needs_focus: true,
             });
+            ui.close_menu();
+        }
+        if ui
+            .button("Icon and color…")
+            .on_hover_note("Pick an icon and a color for this playlist")
+            .clicked()
+        {
+            *action = Some(SidebarAction::EditLook(p.id));
             ui.close_menu();
         }
         if ui.button("Delete").clicked() {
@@ -696,6 +812,7 @@ pub(crate) fn draw_usb_playlist_nodes(
                 ui,
                 density,
                 &p.name,
+                RowMark::DEFAULT,
                 selected,
                 tracks_by_playlist.get(&p.id).map(Vec::len).unwrap_or(0),
                 "Click to view. Drag device tracks here to add them",
@@ -975,6 +1092,14 @@ pub(crate) fn folder_context_menu(
             is_new: false,
             needs_focus: true,
         });
+        ui.close_menu();
+    }
+    if ui
+        .button("Icon and color…")
+        .on_hover_note("Pick an icon and a color for this folder")
+        .clicked()
+    {
+        *action = Some(SidebarAction::EditLook(p.id));
         ui.close_menu();
     }
     if ui.button("Delete folder").clicked() {

@@ -65,6 +65,10 @@ fn install_fonts(ctx: &egui::Context) {
             chain.insert(2 + i, name.clone());
         }
     }
+    // The Phosphor icon face, for a playlist's chosen icon. Its glyphs live in
+    // the private-use area, so it can sit right behind Inter without ever
+    // shadowing a real character in any face after it.
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     fonts.families.insert(
         FontFamily::Name(super::hover::SERIF_FAMILY.into()),
         vec!["SourceSerif".to_owned(), "DejaVuSans".to_owned()],

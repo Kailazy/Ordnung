@@ -299,7 +299,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 impl Catalog {
     /// Open (creating if needed) a catalog at `path` and ensure the schema exists.
@@ -489,7 +489,9 @@ impl Catalog {
                 parent_id  INTEGER REFERENCES playlists(id) ON DELETE CASCADE,
                 is_folder  INTEGER NOT NULL DEFAULT 0,
                 position   INTEGER NOT NULL DEFAULT 0,  -- order among siblings
-                created_at INTEGER NOT NULL DEFAULT (unixepoch())
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                icon       TEXT,                        -- icon-library name, NULL = default
+                color      INTEGER                      -- 0xRRGGBB, NULL = default
             );
             CREATE INDEX IF NOT EXISTS idx_playlists_parent ON playlists(parent_id);
 
@@ -675,6 +677,9 @@ impl Catalog {
     fn migrate(&self) -> Result<()> {
         // Phase 1.1 — track-level user-edit flag.
         self.add_column_if_missing("tracks", "user_edited", "INTEGER NOT NULL DEFAULT 0")?;
+        // Schema 14 — a playlist's own icon and colour (see `Playlist::icon`).
+        self.add_column_if_missing("playlists", "icon", "TEXT")?;
+        self.add_column_if_missing("playlists", "color", "INTEGER")?;
 
         // Full standardized tag set (added later — DBs created before now lose
         // these by default; rescanning fills them in).
@@ -3640,7 +3645,7 @@ impl Catalog {
     /// (parent, sibling position). Callers render the tree from `parent`.
     pub fn list_playlists(&self) -> Result<Vec<Playlist>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, parent_id, is_folder FROM playlists
+            "SELECT id, name, parent_id, is_folder, icon, color FROM playlists
              ORDER BY parent_id IS NOT NULL, parent_id, position, id",
         )?;
         let metas = stmt
@@ -3650,12 +3655,14 @@ impl Catalog {
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<i64>>(2)?.map(|v| v as Id),
                     r.get::<_, i64>(3)? != 0,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<i64>>(5)?.map(|c| c as u32),
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let mut out = Vec::with_capacity(metas.len());
-        for (id, name, parent, is_folder) in metas {
+        for (id, name, parent, is_folder, icon, color) in metas {
             let track_ids = if is_folder {
                 Vec::new()
             } else {
@@ -3667,6 +3674,8 @@ impl Catalog {
                 parent,
                 is_folder,
                 track_ids,
+                icon,
+                color,
             });
         }
         Ok(out)
@@ -3674,16 +3683,18 @@ impl Catalog {
 
     /// One playlist (or folder) with its ordered `track_ids`.
     pub fn get_playlist(&self, id: Id) -> Result<Playlist> {
-        let (name, parent, is_folder) = self
+        let (name, parent, is_folder, icon, color) = self
             .conn
             .query_row(
-                "SELECT name, parent_id, is_folder FROM playlists WHERE id=?1",
+                "SELECT name, parent_id, is_folder, icon, color FROM playlists WHERE id=?1",
                 params![id as i64],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, Option<i64>>(1)?.map(|v| v as Id),
                         r.get::<_, i64>(2)? != 0,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<i64>>(4)?.map(|c| c as u32),
                     ))
                 },
             )
@@ -3700,7 +3711,22 @@ impl Catalog {
             parent,
             is_folder,
             track_ids,
+            icon,
+            color,
         })
+    }
+
+    /// Set a playlist's or folder's icon (an icon-library name) and colour
+    /// (`0xRRGGBB`). `None` for either restores that half of the default look.
+    pub fn set_playlist_look(&self, id: Id, icon: Option<&str>, color: Option<u32>) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE playlists SET icon=?2, color=?3 WHERE id=?1",
+            params![id as i64, icon, color.map(|c| c as i64)],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("playlist {id}")));
+        }
+        Ok(())
     }
 
     /// Rename a playlist or folder.
@@ -5085,6 +5111,33 @@ mod tests {
 
         // The playlist is nested under the folder.
         assert_eq!(cat.get_playlist(pl).unwrap().parent, Some(folder));
+    }
+
+    #[test]
+    fn playlist_look_round_trips_and_clears() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let pl = cat.create_playlist("Warmup", None, false).unwrap();
+        let fresh = cat.get_playlist(pl).unwrap();
+        assert_eq!((fresh.icon, fresh.color), (None, None), "default look");
+
+        cat.set_playlist_look(pl, Some("vinyl-record"), Some(0xFF9F0A))
+            .unwrap();
+        let got = cat.get_playlist(pl).unwrap();
+        assert_eq!(got.icon.as_deref(), Some("vinyl-record"));
+        assert_eq!(got.color, Some(0xFF9F0A));
+        let listed = cat.list_playlists().unwrap();
+        assert_eq!(listed[0].icon.as_deref(), Some("vinyl-record"));
+        assert_eq!(listed[0].color, Some(0xFF9F0A));
+
+        // Either half clears on its own.
+        cat.set_playlist_look(pl, None, Some(0xFF9F0A)).unwrap();
+        let got = cat.get_playlist(pl).unwrap();
+        assert_eq!((got.icon, got.color), (None, Some(0xFF9F0A)));
+        cat.set_playlist_look(pl, None, None).unwrap();
+        let got = cat.get_playlist(pl).unwrap();
+        assert_eq!((got.icon, got.color), (None, None));
+
+        assert!(cat.set_playlist_look(999, Some("x"), None).is_err());
     }
 
     #[test]

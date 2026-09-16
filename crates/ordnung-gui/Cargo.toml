@@ -33,6 +33,9 @@ egui = "0.29"
 # *persisted* egui memory instead of transient temp memory; only persisted memory
 # is written to disk by eframe, so without this the column widths reset each launch.
 egui_extras = { version = "0.29", features = ["serde"] }
+# The Phosphor icon font, for the icon a user can put on a playlist. Only the
+# regular weight is compiled in; `ui::phosphor_icons` carries the name table.
+egui-phosphor = "0.7"
 # Decode the cover-art thumbnail bytes the catalog stores (PNG written by scan),
 # plus JPEG/WebP so a cover image dragged onto a track (often a JPEG) decodes too.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
