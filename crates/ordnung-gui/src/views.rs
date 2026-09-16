@@ -69,7 +69,6 @@ fn vinyl_tabs(
     current: VinylTab,
     owned: usize,
     wanted: usize,
-    sellers: usize,
 ) -> Option<VinylTab> {
     use crate::ui::tokens::{color, font, radius, space};
 
@@ -228,17 +227,12 @@ fn vinyl_tabs(
     ) {
         clicked = Some(VinylTab::Shelf(VinylList::Wantlist));
     }
-    // Other people's crates: saved Discogs sellers whose swept
-    // inventory can be dug through offline. Unlabelled by count until a
-    // seller is saved, for the same reason.
-    let sellers_label = if sellers > 0 {
-        format!("Sellers ({sellers})")
-    } else {
-        "Sellers".to_string()
-    };
+    // Other people's crates: saved Discogs sellers whose swept inventory
+    // can be dug through offline. No count: the shelves count records, and
+    // a count of sellers next to them would read as one.
     if tab(
         ui,
-        sellers_label,
+        "Market".to_string(),
         current == VinylTab::Sellers,
         "Dig through a Discogs seller's crates",
         None,
@@ -1641,7 +1635,6 @@ impl App {
                 self.vinyl_tab,
                 owned_recs.len(),
                 wanted_recs.len(),
-                self.sellers.len(),
             ) {
                 self.vinyl_tab = tab;
             }
