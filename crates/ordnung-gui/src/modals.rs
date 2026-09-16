@@ -2420,6 +2420,72 @@ files elsewhere on the device stay plain storage.",
         }
     }
 
+    /// "Take it off your wantlist?" prompt, shown when a record being added to
+    /// the collection is still on the wantlist. Adding a copy on Discogs leaves
+    /// the want in place, so a collected record would otherwise sit on both
+    /// shelves until the user noticed. Either answer adds the copy: "Keep
+    /// wanted" is the plain collect, "Remove from wantlist" is a move, which
+    /// takes the want off Discogs in the same edit.
+    pub(crate) fn draw_collect_wanted(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.collect_wanted.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut choice: Option<VinylEdit> = None;
+        egui::Window::new("Also remove from your wantlist?")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.set_min_width(400.0);
+                ui.label(egui::RichText::new(&pending.label).strong());
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "This record is on your wantlist. It's being added to your \
+                         collection either way; the want can come off at the same time \
+                         or stay put.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.collect_wanted = None;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let remove = egui::Button::new(
+                            egui::RichText::new("Remove from wantlist").color(egui::Color32::WHITE),
+                        )
+                        .fill(crate::ui::tokens::color::ACCENT);
+                        if ui.add(remove).clicked() {
+                            choice = Some(VinylEdit::Move {
+                                from: VinylList::Wantlist,
+                                record: pending.record.clone(),
+                            });
+                        }
+                        if ui.button("Keep wanted").clicked() {
+                            choice = Some(VinylEdit::Collect {
+                                release_id: pending.release_id,
+                                label: pending.label.clone(),
+                            });
+                        }
+                    });
+                });
+            });
+
+        if let Some(edit) = choice {
+            self.collect_wanted = None;
+            self.spawn_vinyl_edit(ctx.clone(), edit);
+        }
+        if !open {
+            self.collect_wanted = None;
+        }
+    }
+
     /// Modal picker: shows every Discogs release candidate found for the front
     /// track and lets the user choose one (or skip). Nothing is written to the
     /// catalog until Save; the full-resolution image for the chosen release is

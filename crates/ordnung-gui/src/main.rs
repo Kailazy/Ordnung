@@ -928,6 +928,18 @@ pub(crate) enum VinylEdit {
     },
 }
 
+/// A collect that landed on a wanted record. Collecting doesn't touch the
+/// wantlist on Discogs, so the want would linger after the copy arrives; the
+/// user is asked whether to take it off as part of the same edit. Holds both
+/// answers ready: the bare collect (keep the want) and the cached wantlist row
+/// a [`VinylEdit::Move`] needs (drop it).
+#[derive(Debug, Clone)]
+pub(crate) struct CollectWanted {
+    pub(crate) release_id: u64,
+    pub(crate) label: String,
+    pub(crate) record: Box<VinylRecord>,
+}
+
 impl VinylEdit {
     /// Whether this edit destroys a collection copy on Discogs — its date added,
     /// rating and notes go with it, and Ordnung can't put them back. True for
@@ -1346,6 +1358,10 @@ struct App {
     /// destroy collection metadata on the user's account (see [`VinylEdit`]).
     /// `Some` shows the confirm modal; the edit only runs if they say yes.
     confirm_vinyl_edit: Option<VinylEdit>,
+    /// An "Add to collection" on a record that's still on the wantlist, parked
+    /// while the user says whether the want should go with it (see
+    /// [`CollectWanted`]). `Some` shows the prompt.
+    collect_wanted: Option<CollectWanted>,
     /// Shelf changes Discogs acknowledged recently, so no shelf download —
     /// after an edit or from the Sync button — prunes a record Discogs is
     /// still catching up on (see [`jobs::Confirmed`]). Shared with the jobs.

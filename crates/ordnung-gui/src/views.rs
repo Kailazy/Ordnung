@@ -2086,12 +2086,27 @@ impl App {
     /// Run a vinyl list edit, or park it for confirmation first when it would
     /// destroy a collection copy on Discogs — that copy's date added, rating and
     /// notes go with it, and Ordnung can't put them back.
+    ///
+    /// A collect on a record that's still wanted is parked too, for a different
+    /// question: whether the want comes off now that the copy's arriving. Both
+    /// answers are one edit (see [`CollectWanted`]), so the prompt decides
+    /// which runs rather than tacking a second removal on afterwards.
     pub(crate) fn request_vinyl_edit(&mut self, ctx: egui::Context, edit: VinylEdit) {
         if edit.destroys_collection_copy() {
             self.confirm_vinyl_edit = Some(edit);
-        } else {
-            self.spawn_vinyl_edit(ctx, edit);
+            return;
         }
+        if let VinylEdit::Collect { release_id, label } = &edit {
+            if let Some(record) = self.vinyl_record_in(VinylList::Wantlist, *release_id) {
+                self.collect_wanted = Some(CollectWanted {
+                    release_id: *release_id,
+                    label: label.clone(),
+                    record: Box::new(record),
+                });
+                return;
+            }
+        }
+        self.spawn_vinyl_edit(ctx, edit);
     }
 
     /// Build the render-ready cells for one vinyl list: display strings resolved

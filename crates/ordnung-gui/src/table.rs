@@ -119,6 +119,7 @@ impl App {
             || self.batch_convert.is_some()
             || self.confirm_delete.is_some()
             || self.confirm_vinyl_edit.is_some()
+            || self.collect_wanted.is_some()
             || self.settings_open
             || !self.artwork_queue.is_empty()
     }

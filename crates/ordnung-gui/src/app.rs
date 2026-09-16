@@ -186,6 +186,7 @@ impl App {
             vinyl_tail_tx,
             vinyl_tail_rx,
             confirm_vinyl_edit: None,
+            collect_wanted: None,
             vinyl_sheet: None,
             sheet_follows_dig: false,
             sheet_rx: None,
@@ -3747,6 +3748,7 @@ impl eframe::App for App {
         self.draw_bulk_write_confirm(ctx);
         self.draw_delete_confirm(ctx);
         self.draw_vinyl_edit_confirm(ctx);
+        self.draw_collect_wanted(ctx);
         self.draw_vinyl_sheet(ctx, frame);
         self.draw_versions(ctx);
         self.draw_wantlist_watch(ctx);
