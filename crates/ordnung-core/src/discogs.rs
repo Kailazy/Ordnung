@@ -397,33 +397,113 @@ pub struct FieldFill {
     pub value: String,
 }
 
+/// What [`ReleaseDetail::match_videos`] found: `tracks[i]` is the index into
+/// `videos` playing tracklist position `i`, and `leftover` the videos no
+/// track claimed, in release order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoMatches {
+    pub tracks: Vec<Option<usize>>,
+    pub leftover: Vec<usize>,
+}
+
+/// One reading of a video title, normalized. A `literal` reading is the
+/// title as typed (or its tail after a separator), and settles first: a video
+/// that plainly says `Confusion` beats one that says so only once `(Official
+/// Music Video) [HD Upgrade]` is trimmed away. `exact_only` readings — the
+/// inside of a quoted or parenthesized run — may equal a track title but never
+/// claim one by prefix: "(Be My Love)" names the track, "(Miss Yetti Remix)"
+/// merely starts with a word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Cand {
+    text: String,
+    exact_only: bool,
+    literal: bool,
+    /// The pressing position this reading was peeled from, normalized —
+    /// `a2` for `Valis 003` read out of `A2 Valis 003`. Only the track at
+    /// that position may use it: six tracks all called `Valis 003` are told
+    /// apart by nothing else.
+    position: Option<String>,
+}
+
+impl Cand {
+    fn literal(text: String) -> Self {
+        Cand {
+            text,
+            exact_only: false,
+            literal: true,
+            position: None,
+        }
+    }
+}
+
+/// The matching rules, in the order they're settled (see
+/// [`ReleaseDetail::match_videos`]).
+#[derive(Clone, Copy)]
+enum Rule {
+    ExactLiteral,
+    ExactDerived,
+    Prefix,
+    Fuzzy,
+}
+
 impl ReleaseDetail {
     /// Which video plays each track: one entry per `tracklist` position, holding
     /// an index into `videos` (or `None` when nothing on the release matches).
+    /// [`match_videos`](Self::match_videos) without a release artist — see
+    /// there for the rules.
+    pub fn video_matches(&self) -> Vec<Option<usize>> {
+        self.match_videos("").tracks
+    }
+
+    /// Pair this release's videos with its tracklist. `release_artist` is the
+    /// name the release is credited to, which Discogs's own detail doesn't
+    /// carry; it lets a video titled `Artist Title` (no separator at all) be
+    /// read past the artist. Pass `""` when it isn't known.
     ///
     /// Discogs video titles are free text typed by whoever attached them —
-    /// `"Massive Attack - Safe From Harm"`, `"A1. Safe From Harm"`, or just the
-    /// track name — so matching is deliberately conservative: a video is claimed
-    /// only when its title (or the part after an `Artist -` prefix) *starts with*
-    /// the track's title, or when it opens with the track's pressing position.
-    /// Anything looser makes a short title like "Love" swallow the wrong video.
-    /// Each video is claimed at most once; whatever is left over (album rips,
-    /// live sets) stays available via [`unmatched_videos`](Self::unmatched_videos).
-    pub fn video_matches(&self) -> Vec<Option<usize>> {
-        let candidates: Vec<Vec<String>> = self
+    /// `Massive Attack - Safe From Harm`, `A1. Safe From Harm`, `Dntel
+    /// "Snowshoe" (Greer 2018)`, `C3D-E – The Perfect Memory B1` — so a video
+    /// is read every way it might name a track (see [`video_title_candidates`])
+    /// and claimed, at most once, by the first rule that fits. Each rule is
+    /// settled across the whole tracklist before the next, looser one runs:
+    ///
+    /// 1. the same title as typed, ignoring case, punctuation, diacritics, a
+    ///    leading "The" and an "(Original Mix)" marker on either side;
+    /// 2. a title naming the track's pressing position (`B1`) and no other;
+    /// 3. the same title once the release's name, an artist, a position, a
+    ///    bracketed catalogue number or upload filler is read past;
+    /// 4. a title that *starts with* the track's (a differently-mixed video
+    ///    beats none);
+    /// 5. a title one or two typos away from the track's, when it's that close
+    ///    to no other track on the release.
+    ///
+    /// Anything looser makes a short title like "Love" swallow the wrong
+    /// video. Whatever no track claims (album rips, live sets, interviews)
+    /// comes back in `leftover`.
+    pub fn match_videos(&self, release_artist: &str) -> VideoMatches {
+        let cx = TitleContext::new(self, release_artist);
+        let candidates: Vec<Vec<Cand>> = self
             .videos
             .iter()
-            .map(|v| video_title_candidates(&v.title))
+            .map(|v| video_title_candidates(&v.title, &cx))
             .collect();
-        self.claim_by_title(&candidates, true)
+        let tracks = self.claim_by_title(&candidates, true);
+        let claimed: std::collections::HashSet<usize> = tracks.iter().flatten().copied().collect();
+        let leftover = (0..self.videos.len())
+            .filter(|i| !claimed.contains(i))
+            .collect();
+        VideoMatches { tracks, leftover }
     }
 
     /// Which of `titles` (the track titles of local files linked to this
     /// release) plays each tracklist position. Same conservative matching as
-    /// [`video_matches`](Self::video_matches), minus the positional fallback —
+    /// [`match_videos`](Self::match_videos), minus the positional fallback —
     /// a file named `A1` is a filename convention, not a title.
     pub fn file_matches(&self, titles: &[String]) -> Vec<Option<usize>> {
-        let candidates: Vec<Vec<String>> = titles.iter().map(|t| vec![norm_loose(t)]).collect();
+        let candidates: Vec<Vec<Cand>> = titles
+            .iter()
+            .map(|t| title_forms(t).into_iter().map(Cand::literal).collect())
+            .collect();
         self.claim_by_title(&candidates, false)
     }
 
@@ -431,51 +511,80 @@ impl ReleaseDetail {
     /// the set of normalized forms item `i` may match under; the first item that
     /// matches a track claims it and is not offered to later tracks.
     ///
-    /// Exact titles are settled across the *whole* tracklist before any looser
-    /// rule runs. The loose rules (a candidate that merely starts with the
-    /// track title, or names its position) are fallbacks for what exact
-    /// matching left over — run per track instead, an early "Dreamuniverse"
-    /// would claim the file for "Dreamuniverse Pt.II" by prefix before that
-    /// later track ever got to match it exactly.
-    fn claim_by_title(
-        &self,
-        candidates: &[Vec<String>],
-        allow_position: bool,
-    ) -> Vec<Option<usize>> {
+    /// Each rule is settled across the *whole* tracklist before the next,
+    /// looser one runs — run per track instead, an early "Dreamuniverse" would
+    /// claim the file for "Dreamuniverse Pt.II" by prefix before that later
+    /// track ever got to match it exactly.
+    fn claim_by_title(&self, candidates: &[Vec<Cand>], allow_position: bool) -> Vec<Option<usize>> {
+        let wants: Vec<Vec<String>> = self
+            .tracklist
+            .iter()
+            .map(|t| title_forms(&t.title))
+            .collect();
+        let keys: Vec<Vec<String>> = wants
+            .iter()
+            .map(|ws| ws.iter().map(|w| title_key(w)).collect())
+            .collect();
         let mut used = vec![false; candidates.len()];
         let mut out: Vec<Option<usize>> = vec![None; self.tracklist.len()];
-        for exact_only in [true, false] {
-            for (slot, t) in out.iter_mut().zip(&self.tracklist) {
-                if slot.is_some() {
-                    continue;
-                }
-                let want = norm_loose(&t.title);
-                if want.is_empty() {
+        for rule in [
+            Rule::ExactLiteral,
+            Rule::ExactDerived,
+            Rule::Prefix,
+            Rule::Fuzzy,
+        ] {
+            for (ti, t) in self.tracklist.iter().enumerate() {
+                if out[ti].is_some() || wants[ti].is_empty() {
                     continue;
                 }
                 let pos = norm_loose(&t.position);
-                for (i, cands) in candidates.iter().enumerate() {
-                    if used[i] {
-                        continue;
+                // A position match needs the position to be a real side/track
+                // marker (`a1`, `aa`), not a bare digit that would collide with
+                // any number in a video title.
+                let pos_marker = allow_position
+                    && pos.len() >= 2
+                    && pos.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                    && !pos.contains(' ');
+                let same = |c: &Cand| keys[ti].iter().any(|k| title_key(&c.text) == *k);
+                // A reading peeled from a position belongs to that position.
+                let placed = |c: &Cand| {
+                    c.position
+                        .as_ref()
+                        .is_none_or(|p| pos.is_empty() || same_position(p, &pos))
+                };
+                let fits = |c: &Cand| match rule {
+                    Rule::ExactLiteral => c.literal && same(c),
+                    Rule::ExactDerived => placed(c) && same(c),
+                    Rule::Prefix => {
+                        let by_title = !c.exact_only
+                            && placed(c)
+                            && wants[ti]
+                                .iter()
+                                .any(|w| dethe(&c.text).starts_with(&format!("{} ", dethe(w))));
+                        by_title || (pos_marker && names_position(&c.text, &pos))
                     }
-                    let title_hit = cands.iter().any(|c| {
-                        c == &want || (!exact_only && c.starts_with(&format!("{want} ")))
-                    });
-                    // A position match needs the position to be a real
-                    // side/track marker (`a1`), not a bare digit that would
-                    // collide with any number in a video title.
-                    let pos_hit = allow_position
-                        && !exact_only
-                        && pos.len() >= 2
-                        && pos.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-                        && cands
-                            .iter()
-                            .any(|c| c == &pos || c.starts_with(&format!("{pos} ")));
-                    if title_hit || pos_hit {
-                        *slot = Some(i);
-                        used[i] = true;
-                        break;
+                    Rule::Fuzzy => {
+                        if !placed(c) {
+                            return false;
+                        }
+                        let ck = title_key(&c.text);
+                        let near = |k: &String| levenshtein(&ck, k) <= typo_budget(k);
+                        // Close to this track only: "Untitled 3" is one typo
+                        // from "Untitled 2" as well, and must not settle there.
+                        keys[ti].iter().any(near)
+                            && !keys
+                                .iter()
+                                .enumerate()
+                                .any(|(o, ks)| o != ti && ks.iter().any(near))
                     }
+                };
+                let hit = candidates
+                    .iter()
+                    .enumerate()
+                    .position(|(i, cands)| !used[i] && cands.iter().any(fits));
+                if let Some(i) = hit {
+                    out[ti] = Some(i);
+                    used[i] = true;
                 }
             }
         }
@@ -484,14 +593,13 @@ impl ReleaseDetail {
 
     /// The videos no track claimed, as `(index, video)` pairs in release order.
     /// These are the full-album rips, live sets and interviews Discogs carries
-    /// alongside the per-track links.
+    /// alongside the per-track links. [`match_videos`](Self::match_videos)
+    /// without a release artist.
     pub fn unmatched_videos(&self) -> Vec<(usize, &ReleaseVideo)> {
-        let claimed: std::collections::HashSet<usize> =
-            self.video_matches().into_iter().flatten().collect();
-        self.videos
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !claimed.contains(i))
+        self.match_videos("")
+            .leftover
+            .into_iter()
+            .map(|i| (i, &self.videos[i]))
             .collect()
     }
 
@@ -2074,33 +2182,381 @@ impl BasicInformation {
 
 /// Case- and punctuation-insensitive form used to compare video titles against
 /// track titles. Keeps word order (so `starts_with` stays meaningful) but drops
-/// everything that varies between a tag and a YouTube title.
+/// everything that varies between a tag and a YouTube title: case, punctuation,
+/// diacritics (`Áttfalt` / `Attfalt`), and the spelling of a few words that
+/// uploaders and Discogs never agree on (`&` / `and`, `Pt.` / `Part`).
 fn norm_loose(s: &str) -> String {
-    s.to_lowercase()
+    let mut folded = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            // `&` and `+` are words, not punctuation: `Bits + Pieces` is
+            // `Bits & Pieces` is `Bits And Pieces`.
+            '&' | '+' => folded.push_str(" and "),
+            c => match fold_diacritic(c) {
+                Some(plain) => folded.push_str(plain),
+                None => folded.push(c),
+            },
+        }
+    }
+    folded
+        .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|p| !p.is_empty())
+        .map(|w| match w {
+            "pt" => "part",
+            "vol" => "volume",
+            "feat" | "ft" => "featuring",
+            "rmx" => "remix",
+            w => w,
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-/// The forms a Discogs video title might match a track under: the whole title,
-/// and the tail after each separator. Uploaders stack prefixes — `Artist -
-/// Title`, `Label • Artist - Release | A1 Title` — so every tail is a candidate,
-/// and one of them is usually the bare track. Normalizing *after* the split is
-/// what makes the separators survive long enough to be useful.
-fn video_title_candidates(title: &str) -> Vec<String> {
-    const SEPARATORS: [char; 5] = ['-', '–', '—', '|', '•'];
+/// A Latin letter with its diacritic dropped, or `None` for anything that
+/// isn't one. Covers Latin-1 and Latin Extended-A, which is what record
+/// titles in the catalogue actually carry (`Í`, `ø`, `ł`).
+fn fold_diacritic(c: char) -> Option<&'static str> {
+    const TABLE: &[(&str, &str)] = &[
+        ("ÀÁÂÃÄÅĀĂĄàáâãäåāăą", "a"),
+        ("ÆæǢǣ", "ae"),
+        ("ÇĆĈĊČçćĉċč", "c"),
+        ("ÐĎĐðďđ", "d"),
+        ("ÈÉÊËĒĔĖĘĚèéêëēĕėęě", "e"),
+        ("ĜĞĠĢĝğġģ", "g"),
+        ("ĤĦĥħ", "h"),
+        ("ÌÍÎÏĨĪĬĮİìíîïĩīĭįı", "i"),
+        ("Ĵĵ", "j"),
+        ("Ķķ", "k"),
+        ("ĹĻĽĿŁĺļľŀł", "l"),
+        ("ÑŃŅŇñńņňŉ", "n"),
+        ("ÒÓÔÕÖØŌŎŐòóôõöøōŏő", "o"),
+        ("Œœ", "oe"),
+        ("ŔŖŘŕŗř", "r"),
+        ("ŚŜŞŠśŝşš", "s"),
+        ("ß", "ss"),
+        ("ŢŤŦţťŧ", "t"),
+        ("ÙÚÛÜŨŪŬŮŰŲùúûüũūŭůűų", "u"),
+        ("Ŵŵ", "w"),
+        ("ÝŶŸýÿŷ", "y"),
+        ("ŹŻŽźżž", "z"),
+        ("Þþ", "th"),
+    ];
+    if c.is_ascii() {
+        return None;
+    }
+    TABLE
+        .iter()
+        .find(|(from, _)| from.contains(c))
+        .map(|(_, to)| *to)
+}
+
+/// The normalized forms a title is compared under: as written, and with an
+/// "(Original Mix)" marker dropped — Discogs lists the marker on some
+/// pressings and uploaders leave it off, or the reverse. Empty forms are
+/// dropped, so a title that *is* the marker compares under nothing.
+fn title_forms(title: &str) -> Vec<String> {
     let mut out = vec![norm_loose(title)];
-    let mut rest = title;
-    while let Some(i) = rest.find(SEPARATORS) {
-        rest = &rest[i + rest[i..].chars().next().map_or(1, |c| c.len_utf8())..];
-        let cand = norm_loose(rest);
-        if !cand.is_empty() && !out.contains(&cand) {
-            out.push(cand);
+    let bare = norm_loose(strip_original_mix(title));
+    if bare != out[0] {
+        out.push(bare);
+    }
+    out.retain(|w| !w.is_empty());
+    out
+}
+
+/// A normalized title without a leading "The": `The Road Of Life` and `Road
+/// Of Life` are the same track, whichever side wrote the article.
+fn dethe(s: &str) -> &str {
+    s.strip_prefix("the ").unwrap_or(s)
+}
+
+/// The form two normalized titles are judged equal under: no leading "The",
+/// no spaces — `Boz Boz` and `Bozboz` are one title. Also what the typo
+/// distance is measured over.
+fn title_key(s: &str) -> String {
+    dethe(s).replace(' ', "")
+}
+
+/// Whether a normalized video title names pressing position `pos` (`b1`) as a
+/// word of its own — `[ARMA02] B1 - Djungl - Rakataka`, `The Perfect Memory
+/// B1` — and names no *other* position, so `A1 & B2 (mix)` claims neither.
+fn names_position(text: &str, pos: &str) -> bool {
+    let looks_positional = |w: &str| {
+        let letters = w.chars().take_while(|c| c.is_ascii_alphabetic()).count();
+        (1..=2).contains(&letters)
+            && w.len() > letters
+            && w.len() - letters <= 2
+            && w[letters..].bytes().all(|b| b.is_ascii_digit())
+    };
+    let mut named = false;
+    for w in text.split(' ') {
+        if w == pos {
+            named = true;
+        } else if looks_positional(w) {
+            return false;
         }
     }
-    out.retain(|c| !c.is_empty());
+    named
+}
+
+/// Whether two normalized positions name the same slot: `b1` and `b1`, or
+/// `01` and `1` on a release that numbers its tracks.
+fn same_position(a: &str, b: &str) -> bool {
+    let (a_bare, b_bare) = (a.trim_start_matches('0'), b.trim_start_matches('0'));
+    a == b || (!a_bare.is_empty() && a_bare == b_bare)
+}
+
+/// How many typos a title of `key.len()` characters may carry and still be
+/// read as the same title: none while it's short enough that one changed
+/// letter is a different word, then one, then two.
+fn typo_budget(key: &str) -> usize {
+    match key.len() {
+        0..=7 => 0,
+        8..=15 => 1,
+        _ => 2,
+    }
+}
+
+/// Edit distance between two short strings — insert, delete or replace one
+/// character each. Titles run to a few dozen characters, so the plain
+/// quadratic form is fine.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let sub = prev[j] + usize::from(ca != cb);
+            cur[j + 1] = sub.min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// What a release knows about itself that a video title might repeat before
+/// getting to the track: its own title, and the names it's credited to.
+/// [`video_title_candidates`] peels these off the front of a title so
+/// `Finale Underground Vol 3 Hakim Murphy Slowdown` reads as `Slowdown`.
+struct TitleContext {
+    /// The release title, normalized.
+    title: String,
+    /// The title and every credited name, normalized, longest first, so
+    /// `Skudge Presents X` peels before `Skudge`.
+    prefixes: Vec<String>,
+}
+
+impl TitleContext {
+    fn new(detail: &ReleaseDetail, release_artist: &str) -> Self {
+        let mut prefixes: Vec<String> = Vec::new();
+        let mut add = |name: &str| {
+            let n = norm_loose(name);
+            if !n.is_empty() && !prefixes.contains(&n) {
+                prefixes.push(n);
+            }
+        };
+        add(&detail.title);
+        // Credits joined by Discogs connectors name several artists at once;
+        // a video usually names one.
+        for credit in std::iter::once(release_artist)
+            .chain(detail.tracklist.iter().filter_map(|t| t.artist.as_deref()))
+        {
+            add(credit);
+            for name in credit.split([',', '/']).flat_map(|c| c.split(" & ")) {
+                add(name);
+            }
+        }
+        prefixes.sort_by_key(|p| std::cmp::Reverse(p.len()));
+        TitleContext {
+            title: norm_loose(&detail.title),
+            prefixes,
+        }
+    }
+}
+
+/// The forms a Discogs video title might match a track under.
+///
+/// Uploaders stack prefixes — `Artist - Title`, `Label • Artist - Release |
+/// A1 Title`, `Artist "Title" (Official Video)`, `Release B2` — so a title is
+/// read two ways. *Literally*: the whole thing and the tail after each
+/// separator, which is how a video that plainly names the track is found.
+/// Then *derived*: bracketed runs and a file extension dropped, the tail after
+/// each of a wider set of separators, the inside of each quoted or
+/// parenthesized run (exact matches only, see [`Cand`]), and each of those
+/// with an "(Original Mix)" marker, the release's own title, an artist, or a
+/// position marker peeled off the front and filler (`official video`, a
+/// year) off the back. Normalizing *after* the split is what makes the
+/// separators survive long enough to be useful. The whole title comes first,
+/// so a track that really is called `Untitled 1` still wins it outright.
+fn video_title_candidates(title: &str, cx: &TitleContext) -> Vec<Cand> {
+    const SEPARATORS: [char; 5] = ['-', '–', '—', '|', '•'];
+    const WIDER_SEPARATORS: [char; 8] = ['-', '–', '—', '|', '•', '/', ':', '~'];
+    const EXTENSIONS: [&str; 7] = [".wmv", ".mp4", ".avi", ".mov", ".flv", ".mkv", ".mp3"];
+
+    let mut out: Vec<Cand> = Vec::new();
+    let mut push = |text: String, exact_only: bool, literal: bool, position: Option<String>| {
+        if text.is_empty() {
+            return;
+        }
+        match out.iter_mut().find(|c| c.text == text) {
+            // Read more than one way, the least constrained reading wins.
+            Some(c) => {
+                c.exact_only &= exact_only;
+                c.literal |= literal;
+                if c.position != position {
+                    c.position = None;
+                }
+            }
+            None => out.push(Cand {
+                text,
+                exact_only,
+                literal,
+                position,
+            }),
+        }
+    };
+    for seg in tails(title, &SEPARATORS) {
+        push(norm_loose(seg), false, true, None);
+    }
+
+    // Bracketed runs are catalogue numbers and labels (`[XOZ010]`, `[Limited
+    // Vinyl]`), never the track; drop them before anything else is read.
+    let mut raw = String::with_capacity(title.len());
+    let mut depth = 0usize;
+    for c in title.chars() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            c if depth == 0 => raw.push(c),
+            _ => {}
+        }
+    }
+    let raw = raw.trim();
+    let raw = EXTENSIONS
+        .iter()
+        .find_map(|e| {
+            let cut = raw.len().checked_sub(e.len())?;
+            (raw.is_char_boundary(cut) && raw[cut..].eq_ignore_ascii_case(e)).then(|| &raw[..cut])
+        })
+        .unwrap_or(raw)
+        .trim();
+
+    let mut segments: Vec<(&str, bool)> = tails(raw, &WIDER_SEPARATORS)
+        .into_iter()
+        .map(|s| (s, false))
+        .collect();
+    // A run quoted inside the *release's* name — `Loops Of Infinity (A Rave
+    // Loveletter)` — is part of that name, not a track called "A Rave
+    // Loveletter", so it's read only when the video isn't naming the release.
+    let names_release = norm_loose(raw).contains(cx.title.as_str());
+    for (open, close) in [('"', '"'), ('“', '”'), ('(', ')'), ('\'', '\'')] {
+        let mut rest = raw;
+        while let Some(start) = rest.find(open) {
+            let inner = &rest[start + open.len_utf8()..];
+            let Some(end) = inner.find(close) else { break };
+            let quoted = &inner[..end];
+            if !(names_release && cx.title.contains(norm_loose(quoted).as_str())) {
+                segments.push((quoted, true));
+            }
+            rest = &inner[end + close.len_utf8()..];
+        }
+    }
+
+    for (seg, exact_only) in segments {
+        for seg in [seg, strip_original_mix(seg)] {
+            let full = norm_loose(seg);
+            push(full.clone(), exact_only, false, None);
+            let mut text = trim_filler(full);
+            push(text.clone(), exact_only, false, None);
+            let mut position: Option<String> = None;
+            // Peel what the release already told us, one layer at a time:
+            // `finale underground volume 3 hakim murphy slowdown` reads down to
+            // `slowdown`.
+            loop {
+                let peeled = cx
+                    .prefixes
+                    .iter()
+                    .find_map(|p| {
+                        text.strip_prefix(p.as_str())
+                            .and_then(|r| r.strip_prefix(' '))
+                    })
+                    .or_else(|| {
+                        let (head, tail) = text.split_once(' ')?;
+                        // A leading position or track number: `a1 title`,
+                        // `01 title`, `1. title`. What's read past it is
+                        // that position's.
+                        let positional = head.len() <= 4
+                            && head.bytes().any(|b| b.is_ascii_digit())
+                            && head.chars().take_while(|c| c.is_ascii_alphabetic()).count() <= 2;
+                        if positional && position.is_none() {
+                            position = Some(head.to_string());
+                        }
+                        positional.then_some(tail)
+                    })
+                    .map(|t| trim_filler(t.to_string()));
+                match peeled {
+                    Some(p) if !p.is_empty() && p != text => {
+                        text = p;
+                        push(text.clone(), exact_only, false, position.clone());
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
     out
+}
+
+/// `text` and the tail after each character of `seps` in it: `A - B | C`
+/// reads as itself, `B | C` and `C`.
+fn tails<'a>(text: &'a str, seps: &[char]) -> Vec<&'a str> {
+    let mut out = vec![text];
+    let mut rest = text;
+    while let Some(i) = rest.find(seps) {
+        rest = &rest[i + rest[i..].chars().next().map_or(1, |c| c.len_utf8())..];
+        out.push(rest);
+    }
+    out
+}
+
+/// Drop trailing words that describe the upload rather than the track:
+/// `official video`, `hd`, a year, `remastered`.
+fn trim_filler(text: String) -> String {
+    const FILLER: [&str; 18] = [
+        "official",
+        "video",
+        "audio",
+        "hd",
+        "hq",
+        "4k",
+        "lyric",
+        "lyrics",
+        "visualizer",
+        "visualiser",
+        "remastered",
+        "remaster",
+        "clip",
+        "videoclip",
+        "music",
+        "promo",
+        "vinyl",
+        "rip",
+    ];
+    let mut words: Vec<&str> = text.split(' ').collect();
+    while let Some(last) = words.last() {
+        let year = last.len() == 4
+            && (last.starts_with("19") || last.starts_with("20"))
+            && last.bytes().all(|b| b.is_ascii_digit());
+        if words.len() > 1 && (year || FILLER.contains(last)) {
+            words.pop();
+        } else {
+            break;
+        }
+    }
+    words.join(" ")
 }
 
 /// Drop a trailing "(Original Mix)"-style marker from a title before searching
@@ -2979,6 +3435,158 @@ mod tests {
         // The prefix rule still serves when nothing exact exists for a track.
         let mixes = vec!["dreamuniverse (original mix)".to_string()];
         assert_eq!(d.file_matches(&mixes), vec![Some(0), None, None]);
+    }
+
+    #[test]
+    fn videos_match_through_uploader_noise() {
+        let mut d = detail();
+        d.tracklist = vec![
+            track("A1", "Atman (Original Mix)"),
+            track("A2", "Áttfalt"),
+            track("B1", "Double Jointed Sex Freak (Part 2)"),
+            track("B2", "Lost & Found"),
+            track("C1", "Snowshoe"),
+            track("C2", "Be My Love"),
+            track("D1", "Steeler"),
+            track("D2", "Lastday Cookie [No Hats]"),
+            track("E1", "The Road Of Life"),
+        ];
+        d.videos = vec![
+            video("https://youtu.be/v1", "YokoO & Atish - Atman"),
+            video("https://youtu.be/v2", "Exos - Attfalt [XOZ010]"),
+            video(
+                "https://youtu.be/v3",
+                "Levon Vincent - Double Jointed Sex Freak Pt. 2",
+            ),
+            video("https://youtu.be/v4", "Lost and Found (Official Video)"),
+            video("https://youtu.be/v5", "Dntel \"Snowshoe\" (Greer 2018)"),
+            video("https://youtu.be/v6", "Frederic Blais (Be My Love) 2000"),
+            video("https://youtu.be/v7", "Steeler (original version).wmv"),
+            video("https://youtu.be/v8", "SnPLO - Lastday cookie [no hats]"),
+            video("https://youtu.be/v9", "Road Of Life"),
+        ];
+        // An "(Original Mix)" marker on either side, diacritics, `Pt.` for
+        // `Part`, `and` for `&`, a quoted or parenthesized title, a file
+        // extension, a bracketed catalogue number and a leading "The" all
+        // read past.
+        assert_eq!(d.video_matches(), (0..9).map(Some).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn videos_name_a_track_by_position_anywhere_in_the_title() {
+        let mut d = detail();
+        d.tracklist = vec![track("A1", "Untitled 1"), track("A2", "Untitled 2")];
+        d.videos = vec![
+            video("https://youtu.be/v1", "C3D E – The Perfect Memory A2"),
+            video("https://youtu.be/v2", "C3D E – The Perfect Memory A1"),
+            video(
+                "https://youtu.be/v3",
+                "C3D E – The Perfect Memory A1 & A2 (full)",
+            ),
+        ];
+        // Each side takes its own; a title naming two positions names neither.
+        assert_eq!(d.video_matches(), vec![Some(1), Some(0)]);
+    }
+
+    #[test]
+    fn identical_titles_are_told_apart_by_the_position_read_off_the_video() {
+        let mut d = detail();
+        d.tracklist = vec![
+            track("A1", "Valis 003"),
+            track("A2", "Valis 003"),
+            track("A3", "Valis 003"),
+        ];
+        d.videos = vec![
+            video("https://youtu.be/v1", "A2 VALIS 003"),
+            video("https://youtu.be/v2", "A3 VALIS 003"),
+        ];
+        // `VALIS 003` read past the `A2` is A2's alone — A1 can't take it
+        // just because its title is the same.
+        assert_eq!(d.video_matches(), vec![None, Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn videos_read_past_the_release_and_artist_names() {
+        let mut d = detail();
+        d.title = "Finale Underground Vol. 3: Future Chicago".into();
+        d.tracklist = vec![
+            ReleaseTrack {
+                artist: Some("Hakim Murphy".into()),
+                ..track("B1", "Slowdown")
+            },
+            track("B2", "Ottagone 016"),
+        ];
+        d.videos = vec![
+            video(
+                "https://youtu.be/v1",
+                "Finale Underground Vol 3   Future Chicago   Hakim Murphy   Slowdown",
+            ),
+            video("https://youtu.be/v2", "Ottagone Ottagone 016"),
+        ];
+        // The per-track credit is known to the detail; the release artist is
+        // the sheet's to pass in.
+        assert_eq!(d.video_matches(), vec![Some(0), None]);
+        assert_eq!(d.match_videos("Ottagone").tracks, vec![Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn a_typo_away_still_matches_when_no_other_track_is_that_close() {
+        let mut d = detail();
+        d.tracklist = vec![
+            track("A1", "Wrapped In Spaces Between Us"),
+            track("B1", "Untitled 2"),
+            track("B2", "Untitled 3"),
+            track("C1", "Love"),
+        ];
+        d.videos = vec![
+            video(
+                "https://youtu.be/v1",
+                "Dolomea - Wrapped in Space Between Us",
+            ),
+            video("https://youtu.be/v2", "Untitled 4"),
+            video("https://youtu.be/v3", "Lave"),
+        ];
+        // One letter off a long title is the same title; "Untitled 4" is one
+        // off *two* tracks and so belongs to neither; a four-letter title
+        // gets no slack at all.
+        assert_eq!(d.video_matches(), vec![Some(0), None, None, None]);
+    }
+
+    #[test]
+    fn a_literal_video_title_beats_a_trimmed_one_and_a_remix_goes_to_the_remix() {
+        let mut d = detail();
+        d.tracklist = vec![
+            track("A1", "Confusion"),
+            track("B1", "Resiclaps"),
+            track("B2", "Resiclaps (Andrei Ciubuc Remix)"),
+        ];
+        d.videos = vec![
+            video(
+                "https://youtu.be/v1",
+                "New Order - Confusion (Official Music Video) [HD Upgrade]",
+            ),
+            video("https://youtu.be/v2", "Confusion"),
+            video(
+                "https://youtu.be/v3",
+                "PREMIERE: Firesc - Resiclaps (Andrei Ciubuc Remix) [_NRV]",
+            ),
+        ];
+        assert_eq!(d.video_matches(), vec![Some(1), None, Some(2)]);
+    }
+
+    #[test]
+    fn a_run_quoted_in_the_release_name_is_not_a_track() {
+        let mut d = detail();
+        d.title = "Loops Of Infinity (A Rave Loveletter)".into();
+        d.tracklist = vec![track("C1", "A Rave Loveletter")];
+        d.videos = vec![video(
+            "https://youtu.be/v1",
+            "DJ Metatron – Loops Of Infinity (A Rave Loveletter) [APW3]",
+        )];
+        // The full-album upload names the release, not the track that
+        // happens to share the parenthetical.
+        assert_eq!(d.match_videos("DJ Metatron").tracks, vec![None]);
+        assert_eq!(d.match_videos("DJ Metatron").leftover, vec![0]);
     }
 
     #[test]

@@ -583,14 +583,16 @@ impl App {
                 let local_titles: Vec<String> =
                     sheet.local.iter().map(|l| l.title.clone()).collect();
                 let files = detail.file_matches(&local_titles);
-                let videos = detail.video_matches();
+                // The sheet's artist lets a video titled `Artist Title`, with
+                // no separator at all, be read past the artist.
+                let videos = detail.match_videos(release_artist);
                 sheet.rows = detail
                     .tracklist
                     .iter()
                     .enumerate()
                     .map(|(i, t)| {
                         let file = files.get(i).copied().flatten();
-                        let video = videos.get(i).copied().flatten();
+                        let video = videos.tracks.get(i).copied().flatten();
                         SheetRow {
                             position: t.position.clone(),
                             title: t.title.clone(),
@@ -620,7 +622,7 @@ impl App {
                         }
                     })
                     .collect();
-                sheet.extra_videos = detail.unmatched_videos().iter().map(|(i, _)| *i).collect();
+                sheet.extra_videos = videos.leftover;
                 // A release with no tracklist at all (Discogs has plenty) still
                 // has its videos — show them as the record's only contents
                 // rather than an empty sheet.
