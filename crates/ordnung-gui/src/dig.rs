@@ -815,61 +815,147 @@ fn split_title(combined: &str) -> (String, String) {
     }
 }
 
-/// One browse down `thread`, with the unknown-format rows on the page resolved.
+/// One browse down `thread`, with the page's pick already made.
 ///
 /// Shared by the explicit step and the speculative prefetch so both pages are
-/// judged the same way — a prefetched page has to be *pickable* the moment it's
-/// wanted, and the format resolution is what makes a row pickable.
+/// judged the same way. The rows are filtered as [`App::apply_page`] will
+/// filter them (nothing in `skip`, one pressing per release, one release per
+/// record, nothing known not to be vinyl), the start point is rolled from
+/// `seed`, and the page comes back **rotated so the pick is its first row**
+/// — `apply_page` takes the first row that still passes membership as it is
+/// at pick time.
 ///
-/// `cancel`, when raised, stops the format resolution early. The page is still
-/// returned — the rows resolved so far are perfectly good, and the unresolved
-/// ones stay `format_known: false`, which the pick already treats as "unknown,
-/// keep as a candidate" rather than "not vinyl". Only speculation passes a flag
-/// that ever rises; an explicit step passes one that never does.
+/// Master rows carry no format, so "is this a record?" can't be answered from
+/// the listing alone. Rather than resolve every such row up front — up to
+/// twelve paced requests before a click could land — the walk resolves only
+/// the rows it actually reaches, in pick order, and stops at the first one
+/// that turns out to be vinyl: one request on most pages, none when the row
+/// the roll lands on already knows its format. Each resolution goes through
+/// the release cache, so the detail of the record that's about to be picked
+/// is already on disk when the step needs its ids.
+///
+/// `cancel`, when raised, stops the walk early. The page is still returned —
+/// the rows judged so far are perfectly good, and the unresolved ones stay
+/// `format_known: false`, which the pick already treats as "unknown, keep as
+/// a candidate" rather than "not vinyl". Only speculation passes a flag that
+/// ever rises; an explicit step passes one that never does.
+#[allow(clippy::too_many_arguments)]
 fn browse_step(
     client: &discogs::Client,
+    db: &Path,
     query: &DigQuery,
     page: u32,
     skip: &HashSet<u64>,
+    works: &HashSet<String>,
+    seed: u64,
     cancel: &AtomicBool,
 ) -> std::result::Result<BrowsePage, String> {
-    match query {
+    let mut p = match query {
         DigQuery::Browse(thread, entity) => client.browse_by_id(*thread, *entity, page),
         // The style search filters to vinyl server-side and returns each row's
         // format, so the resolution below is a no-op for nearly every row.
         DigQuery::Style(styles) => client.search_by_style(styles, page),
     }
-    .map(|mut p| {
-        // Master rows carry no format, so "is this a record?" can't be
-        // answered from the listing alone. Resolve a bounded number of them
-        // here, on this worker, rather than handing the UI thread rows it
-        // can't judge — each costs one paced request, so only the rows that
-        // could still be picked are worth resolving.
-        let mut budget = MAX_FORMAT_LOOKUPS;
-        for r in p.releases.iter_mut() {
-            if r.format_known || budget == 0 {
-                continue;
-            }
-            // Each lookup is another paced request. If a click is waiting,
-            // stop refining and give the pace back — a page with some rows
-            // still unresolved is usable, just slightly less pre-judged.
-            if cancel.load(Ordering::Relaxed) {
+    .map_err(|e| e.to_string())?;
+
+    // Candidate rows, judged as `apply_page` judges them.
+    let mut ids = HashSet::new();
+    let mut seen_works = HashSet::new();
+    let mut candidates: Vec<usize> = Vec::new();
+    for (i, r) in p.releases.iter().enumerate() {
+        if skip.contains(&r.release_id) || !ids.insert(r.release_id) {
+            continue;
+        }
+        let (a, t) = row_artist_title(r);
+        let work = work_key(&a, &t);
+        if works.contains(&work) || !seen_works.insert(work) {
+            continue;
+        }
+        if r.format_known && !is_vinyl(&r.format) {
+            continue;
+        }
+        candidates.push(i);
+    }
+    // Prefer the artist's own records over ones they only remixed on — but
+    // fall back to the remixes rather than dead-ending, because whole pages
+    // of a prolific artist's listing are nothing but remix credits.
+    let mut order: Vec<usize> = candidates
+        .iter()
+        .copied()
+        .filter(|&i| p.releases[i].main)
+        .collect();
+    if order.is_empty() {
+        order = candidates;
+    }
+    if order.is_empty() {
+        return Ok(p);
+    }
+    // The roll picks where the walk starts; from there it runs through the
+    // rest of the page in listing order, so a rejected row is followed by the
+    // next one rather than another roll.
+    let start = dig_roll_with(seed, order.len());
+    order.rotate_left(start);
+
+    let cat = Catalog::open(db).ok();
+    let mut budget = MAX_FORMAT_LOOKUPS;
+    let mut pick: Option<usize> = None;
+    for &i in &order {
+        let r = &mut p.releases[i];
+        if !r.format_known {
+            // Each lookup is another paced request. If a click is waiting, or
+            // the page is unusually thick with masters, stop refining: an
+            // unknown row is still a candidate, just not a pre-judged one.
+            if budget == 0 || cancel.load(Ordering::Relaxed) {
                 break;
             }
-            if skip.contains(&r.release_id) {
-                continue;
-            }
             budget -= 1;
-            if let Ok(f) = client.release_format(r.release_id) {
+            let id = r.release_id.to_string();
+            let cached = cat
+                .as_ref()
+                .and_then(|cat| cat.release_cached_or(&id, || client.fetch_release(&id)).ok())
+                .map(|d| d.format)
+                // A row cached before the detail carried a format has an
+                // empty one: not known, not "none". Ask for it the old way.
+                .filter(|f| !f.trim().is_empty())
+                .or_else(|| client.release_format(r.release_id).ok());
+            if let Some(f) = cached {
                 r.format = f;
             }
             // Judged now either way: a lookup that failed leaves an empty
             // format, which `is_vinyl` rejects.
             r.format_known = true;
+            if !is_vinyl(&r.format) {
+                continue;
+            }
         }
-        p
-    })
-    .map_err(|e| e.to_string())
+        pick = Some(i);
+        break;
+    }
+    let first = pick.unwrap_or(order[0]);
+    // Rotate the page so the pick leads and the walk order follows it. Rows
+    // that weren't candidates trail behind; `apply_page` filters them again.
+    let mut releases = Vec::with_capacity(p.releases.len());
+    let lead = order.iter().position(|&i| i == first).unwrap_or(0);
+    let mut slots: Vec<Option<BrowseRelease>> = p.releases.into_iter().map(Some).collect();
+    for &i in order[lead..].iter().chain(order[..lead].iter()) {
+        if let Some(r) = slots[i].take() {
+            releases.push(r);
+        }
+    }
+    releases.extend(slots.into_iter().flatten());
+    p.releases = releases;
+    Ok(p)
+}
+
+/// Whether the first row of a browsed page is a pick worth preparing for:
+/// not something the dig will reject, and not known to be something other
+/// than a record. True for every page [`browse_step`] found a candidate on.
+fn page_pick<'a>(page: &'a BrowsePage, skip: &HashSet<u64>) -> Option<&'a BrowseRelease> {
+    let r = page.releases.first()?;
+    if skip.contains(&r.release_id) || (r.format_known && !is_vinyl(&r.format)) {
+        return None;
+    }
+    Some(r)
 }
 
 impl App {
@@ -1087,9 +1173,13 @@ impl App {
         // request resolving the format of a record you already have.
         let mut skip = self.vinyl_owned.clone();
         skip.extend(self.vinyl_wanted.iter().copied());
+        let mut works = HashSet::new();
         if let Some(dig) = self.dig.as_ref() {
             skip.extend(dig.seen.iter().copied());
+            works = dig.works.clone();
         }
+        let seed = self.dig_seed;
+        let db = self.db_path.clone();
         let (tx, rx) = mpsc::channel();
         self.dig_rx = Some(rx);
         let ctx = self.egui_ctx.clone();
@@ -1098,7 +1188,8 @@ impl App {
                 discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
             // An explicit step is never stood down: it's the request the user
             // is waiting on, so it runs to completion.
-            let result = browse_step(&client, &query, page, &skip, &NEVER_CANCEL);
+            let result =
+                browse_step(&client, &db, &query, page, &skip, &works, seed, &NEVER_CANCEL);
             let _ = tx.send(DigFetched {
                 from,
                 thread,
@@ -1151,10 +1242,6 @@ impl App {
         page: BrowsePage,
         style: Option<String>,
     ) {
-        // `dig_roll` reads `self`, so roll before taking the mutable borrow below
-        // rather than in the middle of it. The value doesn't depend on the
-        // result, only on how many fresh candidates it turns out to hold.
-        let roll = self.dig_seed;
         // Membership snapshots, read before the mutable borrow: these are what
         // make a dig a discovery tool rather than a shuffle of what you have.
         let owned = self.vinyl_owned.clone();
@@ -1223,7 +1310,11 @@ impl App {
             ));
             return;
         }
-        let pick = fresh[dig_roll_with(roll, fresh.len())];
+        // The worker already rolled the start point and put its pick first
+        // (see `browse_step`); the first row still passing membership as it is
+        // *now* is the find, so a page fetched ahead of time can't offer a
+        // record bought in the meantime.
+        let pick = fresh[0];
         let release_id = pick.release_id;
         let (artist, title) = row_artist_title(pick);
         let sub = [
@@ -1321,8 +1412,7 @@ impl App {
     /// its own two branches can be taken. Cache-first, like the sheet's own
     /// tracklist fetch — a record opened before answers without a request.
     fn dig_resolve_ids(&mut self, release_id: u64) {
-        let (tx, rx) = mpsc::channel();
-        self.dig_ids_rx = Some(rx);
+        let tx = self.dig_ids_tx.clone();
         let db = self.db_path.clone();
         let token = self.discogs_token();
         let ctx = self.egui_ctx.clone();
@@ -1422,6 +1512,9 @@ impl App {
         let mut skip = self.vinyl_owned.clone();
         skip.extend(self.vinyl_wanted.iter().copied());
         skip.extend(dig.seen.iter().copied());
+        let works = dig.works.clone();
+        let seed = self.dig_seed;
+        let db = self.db_path.clone();
 
         // A fresh flag per worker: the previous one may already be raised by
         // the click that stood its worker down, and reusing it would cancel
@@ -1435,9 +1528,12 @@ impl App {
         let tx = self.dig_prime_tx.clone();
         let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
+            // Speculation stands aside for anything the user is waiting on:
+            // a click here or a sheet opened elsewhere takes the pace first.
             let client =
-                discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
-            for (thread, query, page) in jobs {
+                discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/")
+                    .background();
+            for (i, (thread, query, page)) in jobs.into_iter().enumerate() {
                 // Checked before each browse rather than only at the top: each
                 // thread's page is its own trip through the shared pace, and
                 // the click that cancels usually arrives during the first.
@@ -1445,7 +1541,26 @@ impl App {
                     return;
                 }
                 let entity = query.entity();
-                let result = browse_step(&client, &query, page, &skip, &cancel);
+                // Offset the roll per job so the threads of one record don't
+                // all start from the same slot.
+                let seed = seed.wrapping_add(i as u64 * 0x9E37_79B9);
+                let result = browse_step(&client, &db, &query, page, &skip, &works, seed, &cancel);
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                // The pick is known now, so resolve what the step will need
+                // the moment it lands: its detail (ids, styles, tracklist)
+                // into the release cache. One more paced request per thread,
+                // and the record that's clicked next arrives with its own
+                // branches ready to take and its sheet's tracklist on disk.
+                if let Ok(page) = &result {
+                    if let Some(pick) = page_pick(page, &skip) {
+                        let id = pick.release_id.to_string();
+                        if let Ok(cat) = Catalog::open(&db) {
+                            let _ = cat.release_cached_or(&id, || client.fetch_release(&id));
+                        }
+                    }
+                }
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
@@ -1468,6 +1583,7 @@ impl App {
     /// Park finished speculative browses against the record they were fetched
     /// from, dropping any whose record is no longer the one on screen.
     pub(crate) fn poll_dig_primed(&mut self) {
+        let mut thumbs: Vec<String> = Vec::new();
         while let Ok(msg) = self.dig_prime_rx.try_recv() {
             let Some(dig) = self.dig.as_mut() else {
                 continue;
@@ -1480,13 +1596,6 @@ impl App {
                     }
                 }
             }
-            // Stale: the user took a branch or stepped back while this was in
-            // flight, so this page describes a record they've left. Dropping it
-            // is the whole invalidation rule — a cached page only ever belongs
-            // to the record it was speculated from.
-            if dig.head().release_id != msg.from {
-                continue;
-            }
             let Ok(page) = msg.result else {
                 // A failed speculation says nothing: leave the cache empty so
                 // the explicit click retries for real and reports its own error.
@@ -1495,27 +1604,40 @@ impl App {
             // Learn the page count even from a speculation, so the next roll
             // down this thread — prefetched or clicked — can walk deeper.
             dig.pages.insert((msg.thread, msg.entity), page.pages);
+            // Parked against the record it was speculated from, whether or
+            // not that's still the head: a page only ever belongs to its own
+            // record, and the web keeps every record, so a backtrack onto
+            // this one finds its threads still ready. `dig_evict` bounds it.
+            if let Some(first) = page.releases.first() {
+                if !first.thumb_url.trim().is_empty() {
+                    thumbs.push(first.thumb_url.clone());
+                }
+            }
             dig.ready.insert((msg.from, msg.thread, msg.entity), page);
+        }
+        // The pick's cover comes off the CDN, outside the request pace, so
+        // start it now and the card lands with its art already drawn.
+        for url in thumbs {
+            self.dig_cover(&url);
         }
     }
 
     /// Adopt resolved artist/label ids and style tags onto the step they
     /// belong to.
     pub(crate) fn poll_dig_ids(&mut self) {
-        let Some(rx) = &self.dig_ids_rx else { return };
-        let Ok((release_id, (artist_ids, label_ids, label, styles))) = rx.try_recv() else {
-            return;
-        };
-        self.dig_ids_rx = None;
-        let Some(dig) = self.dig.as_mut() else { return };
-        if let Some(step) = dig.steps.iter_mut().find(|s| s.release_id == release_id) {
-            step.artist_ids = artist_ids;
-            step.label_ids = label_ids;
-            step.styles = styles;
-            step.detail_resolved = true;
-            // Browse rows usually omit the label name; the detail has it.
-            if step.label.is_none() {
-                step.label = label.filter(|l| !l.trim().is_empty());
+        while let Ok((release_id, (artist_ids, label_ids, label, styles))) =
+            self.dig_ids_rx.try_recv()
+        {
+            let Some(dig) = self.dig.as_mut() else { return };
+            if let Some(step) = dig.steps.iter_mut().find(|s| s.release_id == release_id) {
+                step.artist_ids = artist_ids;
+                step.label_ids = label_ids;
+                step.styles = styles;
+                step.detail_resolved = true;
+                // Browse rows usually omit the label name; the detail has it.
+                if step.label.is_none() {
+                    step.label = label.filter(|l| !l.trim().is_empty());
+                }
             }
         }
     }
@@ -2204,13 +2326,25 @@ impl App {
         open
     }
 
-    /// Drop speculative pages that don't belong to the record on screen, and
-    /// forget an in-flight prefetch that was started for a record we've left so
-    /// the next head can be primed immediately rather than waiting it out.
+    /// Bound the speculative pages, and forget an in-flight prefetch that was
+    /// started for a record we've left so the next head can be primed
+    /// immediately rather than waiting it out.
+    ///
+    /// Pages for records other than the head are *kept*: they're keyed by the
+    /// record they were speculated from, every record stays in the web, and a
+    /// backtrack onto one should find its threads as ready as when the user
+    /// left. Only when the cache outgrows what a long dig plausibly revisits
+    /// is it cut back to the head's own pages.
     fn dig_evict(&mut self) {
+        /// Most primed pages kept at once: three threads' worth for a good
+        /// stretch of records. Each page is a hundred small rows, so this is
+        /// bounded memory, not bounded requests.
+        const READY_CAP: usize = 96;
         let Some(dig) = self.dig.as_mut() else { return };
         let head = dig.head().release_id;
-        dig.ready.retain(|(id, _, _), _| *id == head);
+        if dig.ready.len() > READY_CAP {
+            dig.ready.retain(|(id, _, _), _| *id == head);
+        }
         if let Some((from, _)) = &dig.priming {
             if *from != head {
                 // Its results would be dropped on arrival anyway, so stop it

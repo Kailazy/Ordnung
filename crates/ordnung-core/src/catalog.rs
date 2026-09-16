@@ -1565,6 +1565,22 @@ impl Catalog {
         if let Some(detail) = self.cached_release(release_id)? {
             return Ok(detail);
         }
+        // Coalesce concurrent misses for one release: a dig resolving a record's
+        // ids and the sheet opened on that same record both land here within a
+        // frame of each other, and each would spend a paced request on the
+        // same fetch. The second waits for the first and then reads its cache
+        // row.
+        let _guard = match DetailFetchGuard::acquire(release_id) {
+            Some(g) => g,
+            None => {
+                // Someone else fetched it while we waited; a miss now means
+                // their fetch failed, and ours should try for real.
+                if let Some(detail) = self.cached_release(release_id)? {
+                    return Ok(detail);
+                }
+                DetailFetchGuard::take(release_id)
+            }
+        };
         let detail = fetch()?;
         // A best-effort cache write must not fail the lookup the user asked for.
         let _ = self.cache_release(&detail);
@@ -4206,6 +4222,52 @@ fn row_to_track(r: &Row) -> rusqlite::Result<Track> {
     })
 }
 
+/// The set of release ids whose detail is being fetched right now, process
+/// wide, so concurrent misses for one release coalesce into one request (see
+/// [`Catalog::release_cached_or`]).
+static DETAIL_FETCHES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static DETAIL_FETCHED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// Membership of [`DETAIL_FETCHES`] for one id, released (and every waiter
+/// woken) on drop.
+struct DetailFetchGuard(String);
+
+impl DetailFetchGuard {
+    /// Claim `id` if nobody is fetching it. Otherwise wait until the fetch in
+    /// flight finishes and return `None`, so the caller can re-read the cache.
+    fn acquire(id: &str) -> Option<Self> {
+        let mut set = DETAIL_FETCHES.lock().unwrap_or_else(|e| e.into_inner());
+        if !set.iter().any(|s| s == id) {
+            set.push(id.to_string());
+            return Some(DetailFetchGuard(id.to_string()));
+        }
+        while set.iter().any(|s| s == id) {
+            set = DETAIL_FETCHED
+                .wait(set)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+        None
+    }
+
+    /// Claim `id` unconditionally — for the caller that waited out another
+    /// fetch, found nothing cached, and is going to fetch itself.
+    fn take(id: &str) -> Self {
+        let mut set = DETAIL_FETCHES.lock().unwrap_or_else(|e| e.into_inner());
+        set.push(id.to_string());
+        DetailFetchGuard(id.to_string())
+    }
+}
+
+impl Drop for DetailFetchGuard {
+    fn drop(&mut self) {
+        let mut set = DETAIL_FETCHES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = set.iter().position(|s| *s == self.0) {
+            set.swap_remove(i);
+        }
+        DETAIL_FETCHED.notify_all();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6057,6 +6119,7 @@ mod tests {
             artist_ids: vec![42],
             label_ids: vec![99],
             master_id: None,
+            format: String::new(),
             tracklist: Vec::new(),
             videos: Vec::new(),
         }

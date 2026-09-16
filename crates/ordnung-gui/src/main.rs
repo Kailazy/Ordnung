@@ -1439,8 +1439,13 @@ struct App {
     /// Receives a dug release's Discogs artist/label ids and style tags,
     /// which are what its own branches query by.
     /// `(release_id, (artist_ids, label_ids, label, styles))`.
+    ///
+    /// A persistent channel rather than a one-shot slot: a step landing while
+    /// the previous step's ids are still resolving must not lose either.
     #[allow(clippy::type_complexity)]
-    dig_ids_rx: Option<Receiver<(u64, (Vec<u64>, Vec<u64>, Option<String>, Vec<String>))>>,
+    dig_ids_tx: Sender<(u64, (Vec<u64>, Vec<u64>, Option<String>, Vec<String>))>,
+    #[allow(clippy::type_complexity)]
+    dig_ids_rx: Receiver<(u64, (Vec<u64>, Vec<u64>, Option<String>, Vec<String>))>,
     /// Receives the finished Discogs browse for the step being dug.
     dig_rx: Option<Receiver<dig::DigFetched>>,
     /// Receives speculative browses for the two threads out of the record on

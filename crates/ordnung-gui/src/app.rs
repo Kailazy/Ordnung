@@ -43,6 +43,7 @@ impl App {
         // routing to do).
         let (dig_cover_tx, dig_cover_rx) = mpsc::channel();
         let (dig_prime_tx, dig_prime_rx) = mpsc::channel();
+        let (dig_ids_tx, dig_ids_rx) = mpsc::channel();
         // Clone the context before it's moved into the audio engine below, so we
         // can hand it to the startup background refresh once the app is built.
         let startup_ctx = egui_ctx.clone();
@@ -199,7 +200,8 @@ impl App {
             dig_rx: None,
             dig_prime_tx,
             dig_prime_rx,
-            dig_ids_rx: None,
+            dig_ids_tx,
+            dig_ids_rx,
             dig_covers: HashMap::new(),
             dig_cover_order: VecDeque::new(),
             dig_cover_tx,

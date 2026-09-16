@@ -16,7 +16,8 @@ use crate::error::{Error, Result};
 use crate::model::{SellerListing, Tags, VinylRecord};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const SEARCH_URL: &str = "https://api.discogs.com/database/search";
@@ -53,6 +54,21 @@ const VINYL_COVER_MAX_SIDE: u32 = 400;
 /// undercounts and bursts straight through the limit. CDN image downloads are
 /// exempt: they don't count against the API rate limit.
 const MIN_API_INTERVAL: Duration = Duration::from_millis(1100);
+/// Spacing while the rolling window still has room. Discogs reports how much
+/// of the 60/min window is left on every response (`X-Discogs-Ratelimit-
+/// Remaining`); while that stays above [`BURST_RESERVE`] the next request can
+/// follow the last almost immediately rather than a full second later, and the
+/// pace drops back to [`MIN_API_INTERVAL`] as the window fills. Not zero: a
+/// few concurrent workers each reading a stale "plenty left" would otherwise
+/// fire together, and the server counts what it *receives*.
+const BURST_INTERVAL: Duration = Duration::from_millis(200);
+/// Requests left in the window below which bursting stops. Holds back enough
+/// that a retry, or a worker whose response hasn't refreshed the count yet,
+/// can't tip the window into a 429.
+const BURST_RESERVE: u32 = 12;
+/// How long a background request sleeps before re-checking whether a
+/// foreground one is still waiting for the pace.
+const YIELD_SLICE: Duration = Duration::from_millis(40);
 /// How many times to retry an API request that comes back HTTP 429 before
 /// giving up and surfacing the error to the caller.
 const MAX_RETRIES: u32 = 3;
@@ -281,6 +297,13 @@ pub struct ReleaseDetail {
     /// buyable one is found. See [`Client::master_versions`].
     #[serde(default)]
     pub master_id: Option<u64>,
+    /// The pressing's format summary (`Vinyl, 12", 33 ⅓ RPM`), as
+    /// [`Client::release_format`] reports it — so a browse row that came
+    /// without one can be judged from the cached detail instead of another
+    /// request. `#[serde(default)]`: rows cached before this field existed
+    /// carry an empty string, which callers treat as "not known", not "none".
+    #[serde(default)]
+    pub format: String,
     /// The release's own track listing, in pressing order. Empty when Discogs
     /// lists none. `#[serde(default)]` so a `release_cache` row written before
     /// this field existed still deserializes (the cache's `detail_version`
@@ -737,17 +760,36 @@ fn push_fill(
     }
 }
 
-/// Thin wrapper around `ureq::Agent` carrying the Discogs token + User-Agent.
-/// Cheap to clone (`ureq::Agent` is `Arc` inside) so it can be moved into
-/// background workers.
+/// Who is waiting on a request: the user, or a speculation on their behalf.
+///
+/// Every Discogs request in the process shares one pace (see [`PACE`]), so
+/// without this a prefetch or a background sync sits *ahead* of the click the
+/// user is actually waiting on. Background requests yield the pace whenever a
+/// foreground one is queued, which is what lets the app speculate freely
+/// without ever making a click slower than it would have been alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Priority {
+    /// A request the user is waiting on: a dig step, a sheet's tracklist, a
+    /// search. Takes the pace as soon as it's free.
+    Foreground,
+    /// Speculation and sync: prefetches, tracklist warming, seller sweeps.
+    /// Stands aside while any foreground request is waiting.
+    Background,
+}
+
+/// Thin wrapper around the shared `ureq::Agent` carrying the Discogs token +
+/// User-Agent. Cheap to clone (`ureq::Agent` is `Arc` inside) so it can be
+/// moved into background workers.
 #[derive(Clone)]
 pub struct Client {
     token: String,
     user_agent: String,
     agent: ureq::Agent,
+    priority: Priority,
 }
 
-/// Timestamp of the last API request, process-wide.
+/// The process-wide request pace: when the last API request went out, and how
+/// much of the rolling window Discogs last said was left.
 ///
 /// Discogs rate-limits the *token*, so the clock has to be global to the
 /// process rather than owned by a `Client`: callers construct a fresh client
@@ -756,40 +798,181 @@ pub struct Client {
 /// through the limit together. That stayed latent while only one worker talked
 /// to Discogs at a time, and became a reliable 429 as soon as a second
 /// concurrent caller existed.
-///
-/// `None` until the first request.
-static LAST_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
+struct PaceState {
+    /// `None` until the first request.
+    last: Option<Instant>,
+    /// `X-Discogs-Ratelimit-Remaining` from the latest response, decremented
+    /// locally per request sent so concurrent workers can't all spend the same
+    /// headroom before a response refreshes it. `None` until a response has
+    /// carried the header; the pace is the conservative fixed interval then.
+    remaining: Option<u32>,
+}
+
+impl PaceState {
+    /// How long after the previous request the next may go out.
+    fn interval(&self) -> Duration {
+        match self.remaining {
+            Some(r) if r > BURST_RESERVE => BURST_INTERVAL,
+            _ => MIN_API_INTERVAL,
+        }
+    }
+}
+
+static PACE: Mutex<PaceState> = Mutex::new(PaceState {
+    last: None,
+    remaining: None,
+});
+
+/// How many foreground requests are currently waiting for the pace. Background
+/// requests check this before taking a slot and while sleeping for one, and
+/// stand aside while it's non-zero.
+static FOREGROUND_WAITING: AtomicUsize = AtomicUsize::new(0);
+
+/// The one HTTP agent every [`Client`] shares. A `ureq::Agent` owns its
+/// connection pool, so a fresh agent per worker thread meant a fresh TLS
+/// handshake for every detail fetch, price lookup and cover download. One pool
+/// keeps the connection to `api.discogs.com` (and the image CDN) open across
+/// workers, and a request that follows another reuses it.
+fn shared_agent() -> ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT
+        .get_or_init(|| {
+            ureq::AgentBuilder::new()
+                .timeout_connect(Duration::from_secs(10))
+                .timeout_read(Duration::from_secs(20))
+                // Covers download in parallel alongside API calls, so keep a
+                // few idle connections per host rather than ureq's default of
+                // one, which would tear the others down after each use.
+                .max_idle_connections_per_host(6)
+                .build()
+        })
+        .clone()
+}
 
 impl Client {
     /// `token` is a Discogs personal access token (https://www.discogs.com/settings/developers).
     /// `user_agent` must be set — Discogs rejects requests with a default
     /// `ureq` UA. Use something like `"Ordnung/0.1 +https://example.com"`.
+    ///
+    /// The client is [`Priority::Foreground`] — see [`Client::background`].
     pub fn new(token: impl Into<String>, user_agent: impl Into<String>) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(10))
-            .timeout_read(Duration::from_secs(20))
-            .build();
         Client {
             token: token.into(),
             user_agent: user_agent.into(),
-            agent,
+            agent: shared_agent(),
+            priority: Priority::Foreground,
         }
     }
 
-    /// Block until at least [`MIN_API_INTERVAL`] has elapsed since the previous
-    /// API request *anywhere in the process*, then stamp "now". Holding the
+    /// The same client, paced as [`Priority::Background`]: its requests wait
+    /// whenever a foreground request is queued. For prefetch workers and
+    /// syncs — anything the user didn't click for.
+    pub fn background(mut self) -> Self {
+        self.priority = Priority::Background;
+        self
+    }
+
+    /// Warm the shared connection to the API without spending a request slot:
+    /// a cheap unauthenticated round trip that opens (or refreshes) the pooled
+    /// TLS connection, so the next real request skips the handshake. Best
+    /// effort; failures are ignored.
+    pub fn prewarm(&self) {
+        let _ = self
+            .agent
+            .head("https://api.discogs.com/")
+            .set("User-Agent", &self.user_agent)
+            .call();
+    }
+
+    /// Block until the pace allows another API request, then claim the slot.
+    ///
+    /// Foreground callers announce themselves in [`FOREGROUND_WAITING`] and
+    /// take the pace as soon as the previous request's interval is up.
+    /// Background callers stand aside while any foreground caller is waiting —
+    /// before taking the lock, and in slices while sleeping out the interval,
+    /// so a click that arrives mid-sleep gets the slot instead. Holding the
     /// lock across the sleep is intentional: it serializes concurrent workers
     /// so they share one pace rather than each racing to the limit
-    /// independently. See [`LAST_REQUEST`] for why the clock is global.
+    /// independently. See [`PACE`] for why the clock is global.
     fn throttle(&self) {
-        let mut last = LAST_REQUEST.lock().expect("discogs throttle lock");
-        if let Some(prev) = *last {
-            let elapsed = prev.elapsed();
-            if elapsed < MIN_API_INTERVAL {
-                std::thread::sleep(MIN_API_INTERVAL - elapsed);
+        match self.priority {
+            Priority::Foreground => {
+                FOREGROUND_WAITING.fetch_add(1, Ordering::SeqCst);
+                let mut pace = PACE.lock().expect("discogs throttle lock");
+                if let Some(prev) = pace.last {
+                    let interval = pace.interval();
+                    let elapsed = prev.elapsed();
+                    if elapsed < interval {
+                        std::thread::sleep(interval - elapsed);
+                    }
+                }
+                Self::claim(&mut pace);
+                FOREGROUND_WAITING.fetch_sub(1, Ordering::SeqCst);
             }
+            Priority::Background => loop {
+                if FOREGROUND_WAITING.load(Ordering::SeqCst) > 0 {
+                    std::thread::sleep(YIELD_SLICE);
+                    continue;
+                }
+                let mut pace = PACE.lock().expect("discogs throttle lock");
+                let mut yielded = false;
+                if let Some(prev) = pace.last {
+                    // Sleep in slices so a foreground request that shows up
+                    // mid-wait can have this slot: drop the lock without
+                    // stamping and go back to standing aside.
+                    loop {
+                        let interval = pace.interval();
+                        let elapsed = prev.elapsed();
+                        if elapsed >= interval {
+                            break;
+                        }
+                        if FOREGROUND_WAITING.load(Ordering::SeqCst) > 0 {
+                            yielded = true;
+                            break;
+                        }
+                        std::thread::sleep((interval - elapsed).min(YIELD_SLICE));
+                    }
+                }
+                if yielded {
+                    drop(pace);
+                    continue;
+                }
+                Self::claim(&mut pace);
+                return;
+            },
         }
-        *last = Some(Instant::now());
+    }
+
+    /// Stamp the slot as taken: now is the last request, and the window has
+    /// one fewer left until a response says otherwise.
+    fn claim(pace: &mut PaceState) {
+        pace.last = Some(Instant::now());
+        if let Some(r) = pace.remaining.as_mut() {
+            *r = r.saturating_sub(1);
+        }
+    }
+
+    /// Learn how much of the rolling window is left from a response's
+    /// `X-Discogs-Ratelimit-Remaining`. A response that doesn't carry it (a
+    /// proxy, an error page) leaves the count as it was.
+    fn note_ratelimit(resp: &ureq::Response) {
+        let Some(remaining) = resp
+            .header("X-Discogs-Ratelimit-Remaining")
+            .and_then(|v| v.trim().parse::<u32>().ok())
+        else {
+            return;
+        };
+        if let Ok(mut pace) = PACE.lock() {
+            pace.remaining = Some(remaining);
+        }
+    }
+
+    /// The window is spent: go back to the fixed pace until a response says
+    /// there's room again.
+    fn note_limited() {
+        if let Ok(mut pace) = PACE.lock() {
+            pace.remaining = Some(0);
+        }
     }
 
     /// Run an API request, throttling before each attempt and retrying the
@@ -820,8 +1003,12 @@ impl Client {
             self.throttle();
             let backoff = || Duration::from_secs(2 * (attempt as u64 + 1));
             match build().call() {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    Self::note_ratelimit(&resp);
+                    return Ok(resp);
+                }
                 Err(ureq::Error::Status(429, resp)) if attempt < MAX_RETRIES => {
+                    Self::note_limited();
                     let wait = retry_after(&resp).unwrap_or_else(backoff);
                     std::thread::sleep(wait);
                     attempt += 1;
@@ -831,6 +1018,7 @@ impl Client {
                 Err(ureq::Error::Status(code, resp))
                     if (500..600).contains(&code) && attempt < MAX_RETRIES =>
                 {
+                    Self::note_ratelimit(&resp);
                     let wait = retry_after(&resp).unwrap_or_else(backoff);
                     std::thread::sleep(wait);
                     attempt += 1;
@@ -2819,6 +3007,7 @@ impl ReleaseResponse {
     }
 
     fn into_detail(self) -> ReleaseDetail {
+        let format = self.format_summary();
         // Discogs lists labels in release order; the first is the primary one.
         let label_ids: Vec<u64> = self
             .labels
@@ -2841,6 +3030,7 @@ impl ReleaseResponse {
             .collect();
         ReleaseDetail {
             release_id: self.id.to_string(),
+            format,
             title: self.title,
             // Discogs uses 0 for "unknown year"; treat it as absent.
             year: self.year.filter(|y| *y > 0),
@@ -3199,6 +3389,7 @@ mod tests {
             artist_ids: vec![11209],
             label_ids: vec![385],
             master_id: None,
+            format: String::new(),
             tracklist: Vec::new(),
             videos: Vec::new(),
         }

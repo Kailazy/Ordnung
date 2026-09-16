@@ -1617,10 +1617,13 @@ fn auto_match_tracks(
         hidden_release_mediums: spec.hidden_mediums.clone(),
         ..config::Config::default()
     };
+    // Paced as background: a click elsewhere in the app takes the request
+    // slot ahead of this sweep rather than queueing behind it.
     let client = discogs::Client::new(
         spec.token.clone(),
         "Ordnung/0.1 +https://kailazy.github.io/Ordnung/",
-    );
+    )
+    .background();
     let total = ids.len();
     let _ = tx.send(JobMsg::Progress { done: 0, total });
     ctx.request_repaint();
@@ -2318,7 +2321,10 @@ pub(crate) fn run_sweep_seller(
             return;
         }
     };
-    let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
+    // Paced as background: a click elsewhere in the app takes the request
+    // slot ahead of this sweep rather than queueing behind it.
+    let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/")
+        .background();
 
     let mut keep: Vec<u64> = Vec::new();
     let mut kept = 0usize;
@@ -2486,7 +2492,10 @@ pub(crate) fn run_refresh_vinyl(
             return;
         }
     };
-    let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
+    // Paced as background: a click elsewhere in the app takes the request
+    // slot ahead of this sweep rather than queueing behind it.
+    let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/")
+        .background();
 
     if !quiet {
         let _ = tx.send(JobMsg::Status("Fetching Discogs collection…".into()));
@@ -3360,7 +3369,10 @@ pub(crate) fn run_fetch_tracks(
             return;
         }
     };
-    let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
+    // Paced as background: a click elsewhere in the app takes the request
+    // slot ahead of this sweep rather than queueing behind it.
+    let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/")
+        .background();
     let total = ids.len();
     // Every Discogs search is paced to ~1.1 s (and a track can cost up to four
     // of them), so a multi-track fetch runs for minutes. Report determinate

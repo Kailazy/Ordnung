@@ -413,6 +413,7 @@ mod tests {
             artist_ids: Vec::new(),
             label_ids: Vec::new(),
             master_id: None,
+            format: String::new(),
             tracklist: vec![ReleaseTrack {
                 position: "B2".into(),
                 title: "Frocks (P.Scott Mix)".into(),
