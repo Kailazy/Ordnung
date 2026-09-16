@@ -299,7 +299,12 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
+
+/// How long a master's cached pressing list is served before it's re-listed.
+/// New pressings appear rarely, and the list only feeds "other pressings" and
+/// the sheet's search for a buyable copy — prices themselves are never cached.
+pub const MASTER_VERSIONS_MAX_AGE_SECS: i64 = 7 * 24 * 60 * 60;
 
 impl Catalog {
     /// Open (creating if needed) a catalog at `path` and ensure the schema exists.
@@ -871,6 +876,19 @@ impl Catalog {
         // instead, where the actual Add to Cart lives.
         self.conn
             .execute("DROP TABLE IF EXISTS cart_listings", [])?;
+
+        // Every pressing of a master (schema v15), so "other pressings" and
+        // the sheet's buyable-copy search don't re-list a record's siblings on
+        // every open. Pressings are added rarely, so the row is served for
+        // `MASTER_VERSIONS_MAX_AGE_SECS` and refreshed after.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS master_versions_cache (
+                master_id     INTEGER PRIMARY KEY,
+                versions_json TEXT NOT NULL,
+                fetched_at    INTEGER NOT NULL DEFAULT (unixepoch())
+            )",
+            [],
+        )?;
 
         // One-time data migration (user_version 0 → 1): adopt the "decide once,
         // at add time" model for the Discogs picker. Songs that were already
@@ -1546,6 +1564,63 @@ impl Catalog {
             params![detail.release_id, json, DETAIL_SCHEMA_VERSION],
         )?;
         Ok(())
+    }
+
+    /// The cached pressings of a master, if listed within `max_age_secs`.
+    /// A row that no longer deserializes is a miss, not an error.
+    pub fn cached_master_versions(
+        &self,
+        master_id: u64,
+        max_age_secs: i64,
+    ) -> Result<Option<Vec<crate::discogs::MasterVersion>>> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT versions_json FROM master_versions_cache
+                 WHERE master_id=?1 AND fetched_at >= unixepoch() - ?2",
+                params![master_id as i64, max_age_secs],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// Remember a master's pressings, replacing any older listing.
+    pub fn cache_master_versions(
+        &self,
+        master_id: u64,
+        versions: &[crate::discogs::MasterVersion],
+    ) -> Result<()> {
+        let json = serde_json::to_string(versions)
+            .map_err(|e| Error::Invalid(format!("serializing master versions: {e}")))?;
+        self.conn.execute(
+            "INSERT INTO master_versions_cache (master_id, versions_json, fetched_at)
+             VALUES (?1, ?2, unixepoch())
+             ON CONFLICT(master_id) DO UPDATE SET versions_json=excluded.versions_json,
+                                                  fetched_at=unixepoch()",
+            params![master_id as i64, json],
+        )?;
+        Ok(())
+    }
+
+    /// A master's pressings from the cache, or from `fetch` on a miss (or a
+    /// listing older than [`MASTER_VERSIONS_MAX_AGE_SECS`]), caching what comes
+    /// back. Same contract as [`Catalog::release_cached_or`]: a fetch error
+    /// propagates and nothing is cached.
+    pub fn master_versions_cached_or<F>(
+        &self,
+        master_id: u64,
+        fetch: F,
+    ) -> Result<Vec<crate::discogs::MasterVersion>>
+    where
+        F: FnOnce() -> Result<Vec<crate::discogs::MasterVersion>>,
+    {
+        if let Some(v) = self.cached_master_versions(master_id, MASTER_VERSIONS_MAX_AGE_SECS)? {
+            return Ok(v);
+        }
+        let versions = fetch()?;
+        let _ = self.cache_master_versions(master_id, &versions);
+        Ok(versions)
     }
 
     /// Resolve a release's detail from the cache, falling back to `fetch` (the

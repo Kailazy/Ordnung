@@ -44,6 +44,7 @@ impl App {
         let (dig_cover_tx, dig_cover_rx) = mpsc::channel();
         let (dig_prime_tx, dig_prime_rx) = mpsc::channel();
         let (dig_ids_tx, dig_ids_rx) = mpsc::channel();
+        let (browse_tx, browse_rx) = mpsc::channel();
         // Clone the context before it's moved into the audio engine below, so we
         // can hand it to the startup background refresh once the app is built.
         let startup_ctx = egui_ctx.clone();
@@ -163,7 +164,8 @@ impl App {
             wantlist_watch: Vec::new(),
             show_watch: false,
             browse_panel: None,
-            browse_rx: None,
+            browse_tx,
+            browse_rx,
             vinyl_filter: String::new(),
             vinyl_flt: VinylFilters::default(),
             vinyl_genre_fallback: HashMap::new(),

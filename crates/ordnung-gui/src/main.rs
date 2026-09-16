@@ -1414,7 +1414,11 @@ struct App {
     /// Receives the open browse page's fetches (the id resolution + first
     /// page, then page turns). Tagged with the thread and id, so a reply for a
     /// panel since re-pointed elsewhere is dropped.
-    browse_rx: Option<Receiver<browse_page::BrowseFetched>>,
+    ///
+    /// A persistent channel: a page read ahead and a page the user turned to
+    /// can be in flight together.
+    browse_tx: Sender<browse_page::BrowseFetched>,
+    browse_rx: Receiver<browse_page::BrowseFetched>,
     /// The open "other pressings" panel — every release hanging off the same
     /// Discogs master as one record, and the swap that trades your copy for one
     /// of them. `None` when it isn't open. See [`versions`].

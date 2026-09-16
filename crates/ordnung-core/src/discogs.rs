@@ -178,7 +178,7 @@ pub struct RecordSearchPage {
 
 /// One pressing of a master — a specific release, with how many people own and
 /// want it. See [`Client::master_versions`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MasterVersion {
     pub release_id: u64,
     pub title: String,

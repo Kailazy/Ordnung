@@ -80,6 +80,9 @@ struct Row {
     /// both draw the same placeholder, since a sleeve arriving a moment later
     /// shouldn't make the row jump.
     cover: Option<Tex>,
+    /// Where the sleeve comes from, for the rows that scroll into view before
+    /// theirs has been asked for.
+    thumb: Option<String>,
     title: String,
     format: String,
     label: String,
@@ -178,6 +181,7 @@ impl App {
             .map(|v| Row {
                 release_id: v.release_id,
                 cover: None,
+                thumb: Some(v.thumb_url.clone()).filter(|u| !u.trim().is_empty()),
                 title: v.title.clone(),
                 format: v.format.clone(),
                 label: v.label.clone(),
@@ -192,19 +196,18 @@ impl App {
             .collect();
         // Thumbnails, keyed by URL in the same cache the dig strip uses — a
         // pressing already seen there (or listed twice) costs no second
-        // download. Only the rows actually on screen are fetched; the panel caps
-        // at `MAX_VERSIONS`, so this is a bounded set either way.
-        let thumbs: Vec<Option<String>> = panel
-            .versions
-            .iter()
-            .take(MAX_VERSIONS)
-            .map(|v| Some(v.thumb_url.clone()).filter(|u| !u.trim().is_empty()))
-            .collect();
-        for (row, url) in rows.iter_mut().zip(thumbs) {
-            if let Some(u) = url {
-                row.cover = self.dig_cover(&u).cloned();
+        // download. Only what's already decoded is read here; the rows that
+        // are actually on screen ask for theirs as they draw (see
+        // `want_covers` below), so a hundred-pressing master doesn't start a
+        // hundred downloads for the eight rows the window shows.
+        for row in rows.iter_mut() {
+            if let Some(u) = &row.thumb {
+                if let Some(ThumbState::Ready(t)) = self.dig_covers.get(u) {
+                    row.cover = t.clone();
+                }
             }
         }
+        let mut want_covers: Vec<String> = Vec::new();
         // A swap rewrites the record this window is open on, so it waits out
         // the edit already in flight rather than queueing a second against it.
         let busy = self.vinyl_edit_running();
@@ -261,6 +264,11 @@ impl App {
                                     egui::vec2(THUMB, THUMB),
                                     egui::Sense::hover(),
                                 );
+                                if r.cover.is_none() && ui.is_rect_visible(trect) {
+                                    if let Some(u) = &r.thumb {
+                                        want_covers.push(u.clone());
+                                    }
+                                }
                                 match &r.cover {
                                     Some(t) => {
                                         egui::Image::new(t)
@@ -384,6 +392,12 @@ impl App {
                     });
             });
 
+        // Sleeves for the rows that were on screen, requested once the window
+        // has released its borrows. CDN downloads, outside the request pace.
+        for u in want_covers {
+            self.dig_cover(&u);
+        }
+
         match act {
             Some(Act::Web(id)) => open_url(&format!("https://www.discogs.com/release/{id}")),
             Some(Act::Open(id)) => {
@@ -502,13 +516,17 @@ fn versions_for(
         token.to_string(),
         "Ordnung/0.1 +https://kailazy.github.io/Ordnung/",
     );
+    let cat = Catalog::open(db).ok();
     let master_id = match cached_master {
         Some(m) => Some(m),
         None => {
-            client
-                .fetch_release(&id)
-                .map_err(|e| format!("Couldn't reach Discogs: {e}"))?
-                .master_id
+            let fetch = || client.fetch_release(&id);
+            match &cat {
+                Some(cat) => cat.release_cached_or(&id, fetch),
+                None => fetch(),
+            }
+            .map_err(|e| format!("Couldn't reach Discogs: {e}"))?
+            .master_id
         }
     };
     // No master means Discogs files this release on its own — a one-off with no
@@ -516,7 +534,12 @@ fn versions_for(
     let Some(master_id) = master_id else {
         return Ok(Vec::new());
     };
-    client
-        .master_versions(master_id)
-        .map_err(|e| format!("Couldn't load other pressings: {e}"))
+    // The pressing list is cached for a week: reopening the panel, or the
+    // sheet pricing a sibling copy, reads it back without a request.
+    let fetch = || client.master_versions(master_id);
+    match &cat {
+        Some(cat) => cat.master_versions_cached_or(master_id, fetch),
+        None => fetch(),
+    }
+    .map_err(|e| format!("Couldn't load other pressings: {e}"))
 }

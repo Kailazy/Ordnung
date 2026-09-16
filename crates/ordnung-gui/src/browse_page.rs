@@ -49,6 +49,13 @@ pub(crate) struct BrowsePanel {
     pub loading: bool,
     /// Why there's nothing to show, when there isn't.
     pub error: Option<String>,
+    /// Every page of this run fetched so far, raw, keyed by page number — a
+    /// turn back to a page already read costs nothing, and the page after
+    /// the one on screen is read ahead into here (see
+    /// [`App::browse_lookahead`]).
+    pub cache: HashMap<u32, BrowsePage>,
+    /// The page being read ahead, if one is.
+    pub ahead: Option<u32>,
 }
 
 /// One finished browse-page fetch, handed back to the UI thread.
@@ -62,6 +69,9 @@ pub(crate) struct BrowseFetched {
     pub name: Option<String>,
     pub page: u32,
     pub result: std::result::Result<BrowsePage, String>,
+    /// Read ahead rather than asked for: parked in the panel's cache without
+    /// turning the page, unless the user has since turned to it.
+    pub prefetch: bool,
 }
 
 /// What a row asked for, applied after the window releases its borrows.
@@ -140,11 +150,12 @@ impl App {
             releases: Vec::new(),
             loading: true,
             error: None,
+            cache: HashMap::new(),
+            ahead: None,
         });
         let token = self.discogs_token();
         let db = self.db_path.clone();
-        let (tx, rx) = mpsc::channel();
-        self.browse_rx = Some(rx);
+        let tx = self.browse_tx.clone();
         let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
             let client =
@@ -168,6 +179,7 @@ impl App {
                     name: label_name,
                     page: 1,
                     result: Err("Discogs lists no label for this record.".to_string()),
+                    prefetch: false,
                 });
                 ctx.request_repaint();
                 return;
@@ -181,6 +193,7 @@ impl App {
                 name: label_name,
                 page: 1,
                 result,
+                prefetch: false,
             });
             ctx.request_repaint();
         });
@@ -200,12 +213,15 @@ impl App {
             releases: Vec::new(),
             loading: false,
             error: None,
+            cache: HashMap::new(),
+            ahead: None,
         });
         self.fetch_browse_page(1);
     }
 
-    /// Fetch a page of the open run (the first, for an artist page; another,
-    /// on a page turn).
+    /// Show a page of the open run (the first, for an artist page; another,
+    /// on a page turn) — from the panel's cache when it's been read already,
+    /// else fetched.
     fn fetch_browse_page(&mut self, page: u32) {
         let Some(panel) = self.browse_panel.as_mut() else {
             return;
@@ -213,16 +229,57 @@ impl App {
         if panel.id == 0 || panel.loading {
             return;
         }
+        if let Some(cached) = panel.cache.get(&page).cloned() {
+            panel.page = page;
+            panel.error = None;
+            self.adopt_browse_page(page, &cached);
+            self.browse_lookahead();
+            return;
+        }
         let (thread, id) = (panel.thread, panel.id);
         panel.loading = true;
         panel.page = page;
+        panel.error = None;
+        // Already being read ahead: wait for that rather than asking twice.
+        // `poll_browse_page` turns to it on arrival because the panel now
+        // says it's loading this page.
+        if panel.ahead == Some(page) {
+            return;
+        }
+        self.spawn_browse_fetch(thread, id, page, false);
+    }
+
+    /// Read the page after the one on screen into the cache, so the next
+    /// turn forward is instant. Paced as background, so it never delays a
+    /// click; at most one page is ever in flight ahead.
+    fn browse_lookahead(&mut self) {
+        let Some(panel) = self.browse_panel.as_ref() else {
+            return;
+        };
+        if panel.id == 0 || panel.loading || panel.ahead.is_some() {
+            return;
+        }
+        let next = panel.page + 1;
+        if next > panel.pages || panel.cache.contains_key(&next) {
+            return;
+        }
+        let (thread, id) = (panel.thread, panel.id);
+        if let Some(panel) = self.browse_panel.as_mut() {
+            panel.ahead = Some(next);
+        }
+        self.spawn_browse_fetch(thread, id, next, true);
+    }
+
+    fn spawn_browse_fetch(&mut self, thread: BrowseThread, id: u64, page: u32, prefetch: bool) {
         let token = self.discogs_token();
-        let (tx, rx) = mpsc::channel();
-        self.browse_rx = Some(rx);
+        let tx = self.browse_tx.clone();
         let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
-            let client =
+            let mut client =
                 discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
+            if prefetch {
+                client = client.background();
+            }
             let result = client
                 .browse_by_id(thread, id, page)
                 .map_err(|e| e.to_string());
@@ -232,39 +289,64 @@ impl App {
                 name: None,
                 page,
                 result,
+                prefetch,
             });
             ctx.request_repaint();
         });
     }
 
-    /// Adopt a finished browse-page fetch onto the open panel.
-    pub(crate) fn poll_browse_page(&mut self) {
-        let Some(rx) = &self.browse_rx else { return };
-        let Ok(msg) = rx.try_recv() else { return };
-        self.browse_rx = None;
+    /// Turn the panel to `page`, building its rows.
+    fn adopt_browse_page(&mut self, page_no: u32, page: &BrowsePage) {
+        let rows = crate_rows(page, &self.vinyl_owned, &self.vinyl_wanted);
         let Some(panel) = self.browse_panel.as_mut() else {
             return;
         };
-        // A label page's first fetch is the only one that arrives while the
-        // panel still has no id; everything else must match the run on screen.
-        if msg.thread != panel.thread || (panel.id != 0 && msg.id != panel.id) {
-            return;
-        }
-        panel.loading = false;
-        if msg.id != 0 {
-            panel.id = msg.id;
-        }
-        if let Some(name) = msg.name.filter(|n| !n.trim().is_empty()) {
-            panel.name = name;
-        }
-        match msg.result {
-            Ok(page) => {
-                panel.page = msg.page;
-                panel.pages = page.pages.max(1);
-                panel.items = page.items;
-                panel.releases = crate_rows(&page, &self.vinyl_owned, &self.vinyl_wanted);
+        panel.page = page_no;
+        panel.pages = page.pages.max(1);
+        panel.items = page.items;
+        panel.releases = rows;
+    }
+
+    /// Adopt finished browse-page fetches onto the open panel.
+    pub(crate) fn poll_browse_page(&mut self) {
+        while let Ok(msg) = self.browse_rx.try_recv() {
+            let Some(panel) = self.browse_panel.as_mut() else {
+                continue;
+            };
+            // A label page's first fetch is the only one that arrives while
+            // the panel still has no id; everything else must match the run
+            // on screen.
+            if msg.thread != panel.thread || (panel.id != 0 && msg.id != panel.id) {
+                continue;
             }
-            Err(e) => panel.error = Some(e),
+            if msg.prefetch && panel.ahead == Some(msg.page) {
+                panel.ahead = None;
+            }
+            // A read-ahead page the user hasn't turned to yet is parked; one
+            // they turned to while it was in flight is shown like any fetch.
+            let wanted = !msg.prefetch || (panel.loading && panel.page == msg.page);
+            if msg.id != 0 {
+                panel.id = msg.id;
+            }
+            if let Some(name) = msg.name.filter(|n| !n.trim().is_empty()) {
+                panel.name = name;
+            }
+            match msg.result {
+                Ok(page) => {
+                    panel.cache.insert(msg.page, page.clone());
+                    if wanted {
+                        panel.loading = false;
+                        self.adopt_browse_page(msg.page, &page);
+                    }
+                }
+                Err(e) => {
+                    if wanted {
+                        panel.loading = false;
+                        panel.error = Some(e);
+                    }
+                }
+            }
+            self.browse_lookahead();
         }
     }
 
@@ -287,6 +369,9 @@ impl App {
         // panel).
         struct Row {
             cover: Option<Tex>,
+            /// Where the sleeve comes from, for rows that scroll into view
+            /// before theirs has been asked for.
+            thumb: Option<String>,
             artist: String,
             title: String,
             /// `1994 · 12" · CR-03`, whichever parts exist. An artist's rows
@@ -341,10 +426,17 @@ impl App {
             let owned = self.owns_record(release_id, &artist, &title);
             let wanted = self.wants_record(release_id, &artist, &title);
             let pending = self.vinyl_pending(VinylList::Wantlist, release_id).is_some();
+            // Only what's already decoded is read here; the rows on screen
+            // ask for theirs as they draw (`want_covers`), so a hundred-row
+            // page doesn't start a hundred downloads for the eight it shows.
+            let thumb = (!thumb.trim().is_empty()).then_some(thumb);
+            let cover = thumb.as_ref().and_then(|u| match self.dig_covers.get(u) {
+                Some(ThumbState::Ready(t)) => t.clone(),
+                _ => None,
+            });
             rows.push(Row {
-                cover: (!thumb.trim().is_empty())
-                    .then(|| self.dig_cover(&thumb).cloned())
-                    .flatten(),
+                cover,
+                thumb,
                 artist,
                 title,
                 sub,
@@ -356,6 +448,7 @@ impl App {
         }
 
         let mut act: Option<Act> = None;
+        let mut want_covers: Vec<String> = Vec::new();
         let mut open = true;
         let glyph = match thread {
             BrowseThread::Label => "⌂",
@@ -419,6 +512,11 @@ impl App {
                                     egui::vec2(THUMB, THUMB),
                                     egui::Sense::click(),
                                 );
+                                if r.cover.is_none() && ui.is_rect_visible(trect) {
+                                    if let Some(u) = &r.thumb {
+                                        want_covers.push(u.clone());
+                                    }
+                                }
                                 match &r.cover {
                                     Some(t) => {
                                         egui::Image::new(t)
@@ -558,6 +656,11 @@ impl App {
             return;
         }
 
+        // Sleeves for the rows that were on screen, requested once the window
+        // has released its borrows. CDN downloads, outside the request pace.
+        for u in want_covers {
+            self.dig_cover(&u);
+        }
         let row_of = |i: usize| -> Option<&BrowseRelease> {
             self.browse_panel.as_ref().and_then(|p| p.releases.get(i))
         };
