@@ -51,8 +51,8 @@ pub(crate) struct RadioStop {
     /// The thread that led here from the stop before, and what was matched.
     pub via: Option<(DigThread, String)>,
     /// A fresh start: nothing led here from the stop before it. The first
-    /// stop, a restart when a record ran dry, or a record you pointed the
-    /// radio at yourself.
+    /// stop, or a restart when a record ran dry. (A record you point the
+    /// radio at yourself starts a new walk instead.)
     pub fresh: bool,
 }
 
@@ -166,22 +166,22 @@ impl App {
         }
     }
 
-    /// Start the radio on `rel`, from its node on the map. A radio already
-    /// playing moves here rather than stopping first.
+    /// Start the radio on `rel`, from its node on the map. Pointing the
+    /// radio at a record by hand begins a new journey: a radio already
+    /// playing drops its walk and starts over here, so a path you left is
+    /// not counted as the start of the one you chose instead.
     pub(crate) fn radio_start_from(&mut self, rel: &crate::graph::Release) {
         self.map_stand_on(rel);
         let Some(id) = self.dig.as_ref().map(|d| d.head().release_id) else {
             return;
         };
-        if !self.radio.on {
-            self.radio = Radio {
-                on: true,
-                ..Radio::default()
-            };
+        let was_on = self.radio.on;
+        self.radio = Radio {
+            on: true,
+            ..Radio::default()
+        };
+        if !was_on {
             webview::prewarm();
-        } else {
-            self.radio.reseeds = 0;
-            self.radio.skip = false;
         }
         self.radio_ready(id, true);
     }
