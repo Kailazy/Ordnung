@@ -106,6 +106,14 @@ pub fn skip_next(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
     );
 }
 
+/// A disclosure chevron, pointing down (closed) or up (open), `r` wide each side.
+pub fn chevron(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32, down: bool) {
+    let s = egui::Stroke::new(MARK, col);
+    let (a, b) = if down { (-r * 0.5, r * 0.5) } else { (r * 0.5, -r * 0.5) };
+    p.line_segment([egui::pos2(c.x - r, c.y + a), egui::pos2(c.x, c.y + b)], s);
+    p.line_segment([egui::pos2(c.x, c.y + b), egui::pos2(c.x + r, c.y + a)], s);
+}
+
 /// A frameless square button carrying one painted mark: `side` on each edge,
 /// the mark drawn by `paint` at the centre in the ink the pointer earns it.
 /// Rests grey, goes white under the pointer on a soft rounded ground, and dims

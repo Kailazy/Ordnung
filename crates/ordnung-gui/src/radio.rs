@@ -37,6 +37,57 @@ pub(crate) struct RadioNow {
     pub via: Option<(DigThread, String)>,
     /// A wantlist add has been asked for; the button waits on Discogs.
     pub want_sent: bool,
+    /// The record's songs that have a video, tracklist order first, then
+    /// the videos no track claimed. Empty until the detail is in.
+    pub songs: Vec<RadioSong>,
+    /// Which of `songs` is on.
+    pub song: usize,
+}
+
+/// One playable song of the record on the radio.
+#[derive(Clone)]
+pub(crate) struct RadioSong {
+    pub youtube_id: String,
+    /// Side and position as pressed (`A2`); empty for a video no track claimed.
+    pub position: String,
+    pub title: String,
+    /// As Discogs writes it (`5:18`), or empty.
+    pub duration: String,
+}
+
+/// The record's songs, for the bar's list: every tracklist position whose
+/// video was matched, in order, then the videos no track claimed under
+/// their own titles.
+fn radio_songs(d: &discogs::ReleaseDetail, artist: &str) -> Vec<RadioSong> {
+    let m = d.match_videos(artist);
+    let mut out = Vec::new();
+    for (i, t) in d.tracklist.iter().enumerate() {
+        let Some(v) = m.tracks.get(i).copied().flatten().and_then(|v| d.videos.get(v)) else {
+            continue;
+        };
+        if let Some(id) = v.youtube_id() {
+            out.push(RadioSong {
+                youtube_id: id.to_string(),
+                position: t.position.clone(),
+                title: t.title.clone(),
+                duration: t.duration.clone(),
+            });
+        }
+    }
+    for v in m.leftover.iter().filter_map(|&v| d.videos.get(v)) {
+        if let Some(id) = v.youtube_id() {
+            out.push(RadioSong {
+                youtube_id: id.to_string(),
+                position: String::new(),
+                title: v.title.clone(),
+                duration: v
+                    .duration_secs
+                    .map(|s| format!("{}:{:02}", s / 60, s % 60))
+                    .unwrap_or_default(),
+            });
+        }
+    }
+    out
 }
 
 /// One record the radio has stood on, in the order it came: the walk the
@@ -142,8 +193,15 @@ pub(crate) struct Radio {
     /// top-left corner and the bar's size when it was picked up, so it
     /// rides under the hand as it was.
     pub drag: Option<(egui::Vec2, egui::Vec2)>,
-    /// The bar sliding home after a drop: where it was let go, and when.
-    pub slide: Option<(egui::Rect, Instant)>,
+    /// The bar away from its slot: where it is and how fast its corner is
+    /// moving. Set while it's held and while it springs home after a drop;
+    /// `None` once it's settled.
+    pub fly: Option<(egui::Rect, egui::Vec2)>,
+    /// The bar's song list is open.
+    pub expanded: bool,
+    /// A song picked from the list, for the next tick to put on (the tick
+    /// has the window handle the player needs; the bar doesn't).
+    pub pick: Option<usize>,
 }
 
 impl Default for Radio {
@@ -160,7 +218,9 @@ impl Default for Radio {
             walk: Vec::new(),
             scrub: None,
             drag: None,
-            slide: None,
+            fly: None,
+            expanded: false,
+            pick: None,
         }
     }
 }
@@ -334,13 +394,15 @@ impl App {
                 match answer {
                     Some((id, detail)) if id == release_id => {
                         self.radio.detail_rx = None;
-                        let video = detail.as_ref().and_then(|d| {
-                            d.videos
-                                .iter()
-                                .find_map(|v| v.youtube_id().map(str::to_string))
-                        });
+                        let artist = self.radio.now.as_ref().map(|n| n.artist.clone()).unwrap_or_default();
+                        let songs = detail.as_ref().map(|d| radio_songs(d, &artist)).unwrap_or_default();
+                        let video = songs.first().map(|s| s.youtube_id.clone());
+                        if let Some(n) = self.radio.now.as_mut() {
+                            n.songs = songs;
+                            n.song = 0;
+                        }
                         match video {
-                            Some(v) => self.radio_play(release_id, v, frame),
+                            Some(v) => self.radio_play(release_id, v, true, frame),
                             None => {
                                 if let Some(n) = &self.radio.now {
                                     self.status = format!(
@@ -373,6 +435,23 @@ impl App {
                 if std::mem::take(&mut self.radio.skip) {
                     self.radio_step_from(release_id, Vec::new());
                     return;
+                }
+                // A song picked from the bar's list: the same record, another
+                // of its videos.
+                if let Some(i) = self.radio.pick.take() {
+                    let id = self
+                        .radio
+                        .now
+                        .as_ref()
+                        .and_then(|n| n.songs.get(i))
+                        .map(|s| s.youtube_id.clone());
+                    if let Some(id) = id {
+                        if let Some(n) = self.radio.now.as_mut() {
+                            n.song = i;
+                        }
+                        self.radio_play(release_id, id, false, frame);
+                        return;
+                    }
                 }
                 if !webview::is_open() {
                     // Closed from the panel itself, or by a stop elsewhere.
@@ -493,6 +572,8 @@ impl App {
                 key: self.dig_start_keys.get(&release_id).copied(),
                 via: s.via.clone(),
                 want_sent: false,
+                songs: Vec::new(),
+                song: 0,
             })
         });
         if let Some(n) = &now {
@@ -621,8 +702,10 @@ impl App {
         });
     }
 
-    /// Put `video` on in the mini-player for `release_id`.
-    fn radio_play(&mut self, release_id: u64, video: String, frame: &eframe::Frame) {
+    /// Put `video` on in the mini-player for `release_id`. `new_record` is
+    /// false for another song of the record already on, which doesn't count
+    /// as a record played.
+    fn radio_play(&mut self, release_id: u64, video: String, new_record: bool, frame: &eframe::Frame) {
         let title = match &self.radio.now {
             Some(n) => format!("{} — {}", n.artist, n.title),
             None => "Radio".to_string(),
@@ -637,7 +720,9 @@ impl App {
             self.radio_stop("The radio needs the video player, which isn't available here.");
             return;
         }
-        self.radio.played += 1;
+        if new_record {
+            self.radio.played += 1;
+        }
         if let Some(n) = &self.radio.now {
             self.status = match &n.via {
                 Some((t, m)) => format!("Radio: {} – {} (via {} {})", n.artist, n.title, t.label(), m),
@@ -670,10 +755,14 @@ impl App {
         const BTN: f32 = 28.0;
         /// A docked bar's inset from the map's edge.
         const EDGE: f32 = 12.0;
-        /// How long the bar takes to slide home after a drop.
-        const SLIDE: f32 = 0.28;
+        /// The spring that carries a dropped bar to its slot: stiffness and,
+        /// at critical damping, the matching drag, so it arrives without a
+        /// wobble. The same figure the map uses for a record and its ring slot.
+        const SLOT_K: f32 = 70.0;
         /// How far off the map's centre line a drop must land to take a side.
         const SIDE_PULL: f32 = 0.22;
+        /// One song in the list.
+        const ROW_H: f32 = 22.0;
 
         let dock = RadioDock::from_key(&self.config.radio_dock);
         let now = self.radio.now.clone();
@@ -681,14 +770,27 @@ impl App {
         let body_h = ui.fonts(|f| f.row_height(&font::body()));
         let cap_h = ui.fonts(|f| f.row_height(&font::caption()));
 
+        // The song list, opening and closing under the scrubber. A record
+        // with one song has nothing to choose between, so no list.
+        let songs_n = now.as_ref().map_or(0, |n| n.songs.len());
+        let listable = songs_n > 1;
+        let open = ctx.animate_bool_with_time(
+            ui.id().with("radio_songs_open"),
+            self.radio.expanded && listable,
+            0.2,
+        );
+        let list_full = songs_n as f32 * ROW_H + space::S2;
+        let list_h = list_full * open;
+
         // Each slot, sized for the bar's format there.
         let flat_cover = 44.0;
-        let flat_h = PAD + flat_cover + SCRUB_H + PAD * 0.4;
+        let flat_h = PAD + flat_cover + SCRUB_H + list_h + PAD * 0.4;
         let tall_w = 232.0_f32.min((canvas.width() * 0.4).max(160.0));
         let tall_cover = tall_w - PAD * 2.0;
         let tall_words_h = body_h * 2.0 + 2.0 + cap_h;
         let tall_h = PAD + tall_cover + space::S3 + tall_words_h + space::S3 + BTN + space::S2
             + SCRUB_H
+            + list_h
             + PAD * 0.4;
         let slot = |d: RadioDock| -> egui::Rect {
             match d {
@@ -732,26 +834,43 @@ impl App {
         };
         let home = slot(dock);
 
-        // Where the bar is this frame: under the hand while it's held, on
-        // its way home after a drop, else home. While sliding, the content
-        // is laid out for home and clipped to the bar on its way there, so
-        // a flat bar morphs into an upright one rather than snapping.
+        // Where the bar is this frame: under the hand while it's held, on a
+        // spring home after a drop, else home. Like a record on the map, it
+        // follows the pointer directly and, let go, is carried to its slot
+        // by a critically damped spring; its size eases from the format it
+        // left in to the one it arrives in, with the content laid out for
+        // home and clipped to the bar on its way, so a flat bar grows into
+        // an upright one rather than snapping.
+        let dt = ctx.input(|i| i.stable_dt).clamp(1.0 / 240.0, 1.0 / 30.0);
         let drag_pos = self
             .radio
             .drag
             .and_then(|(off, size)| ctx.pointer_latest_pos().map(|p| (p - off, size)));
         let (bar, lay) = if let Some((min, size)) = drag_pos {
             let r = egui::Rect::from_min_size(min, size);
+            let vel = match self.radio.fly {
+                Some((prev, v)) => v * 0.5 + (min - prev.min) / dt * 0.5,
+                None => egui::Vec2::ZERO,
+            };
+            self.radio.fly = Some((r, vel));
             (r, r)
-        } else if let Some((from, t0)) = self.radio.slide {
-            let t = (t0.elapsed().as_secs_f32() / SLIDE).min(1.0);
-            if t >= 1.0 {
-                self.radio.slide = None;
+        } else if let Some((r, v)) = self.radio.fly {
+            let k = SLOT_K;
+            let a = (home.min - r.min) * k - v * 2.0 * k.sqrt();
+            let v = v + a * dt;
+            let min = r.min + v * dt;
+            let ease = 1.0 - (-dt * 11.0).exp();
+            let size = r.size() + (home.size() - r.size()) * ease;
+            let settled = (home.min - min).length() < 0.3
+                && v.length() < 4.0
+                && (home.size() - size).length() < 0.5;
+            if settled {
+                self.radio.fly = None;
                 (home, home)
             } else {
                 ctx.request_repaint();
-                let e = 1.0 - (1.0 - t).powi(3);
-                let r = egui::Rect::from_min_max(from.min.lerp(home.min, e), from.max.lerp(home.max, e));
+                let r = egui::Rect::from_min_size(min, size);
+                self.radio.fly = Some((r, v));
                 (r, egui::Rect::from_min_size(r.min, home.size()))
             }
         } else {
@@ -766,20 +885,11 @@ impl App {
         if shade.drag_started() {
             if let Some(p) = shade.interact_pointer_pos() {
                 self.radio.drag = Some((p - bar.min, bar.size()));
-                self.radio.slide = None;
             }
         }
         if self.radio.drag.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
             ctx.request_repaint();
-            // The slot it would take, outlined where it is.
-            let would = slot(slot_for(bar.center()));
-            ui.painter().rect(
-                would,
-                radius::LG,
-                color::ACCENT.gamma_multiply(0.10),
-                egui::Stroke::new(1.5, color::ACCENT.gamma_multiply(0.7)),
-            );
         } else if shade.hovered() {
             ctx.set_cursor_icon(egui::CursorIcon::Grab);
         }
@@ -791,7 +901,12 @@ impl App {
                     self.status = format!("Couldn't save settings: {e}");
                 }
             }
-            self.radio.slide = Some((bar, Instant::now()));
+            // A released bar keeps a little of the hand's motion and is
+            // drawn home from there, rather than flying off like a slingshot.
+            if let Some((_, v)) = self.radio.fly.as_mut() {
+                *v *= 0.3;
+            }
+            ctx.request_repaint();
         }
 
         ui.painter().rect(
@@ -815,7 +930,7 @@ impl App {
         // The fraction the bar shows: the drag in flight, else the live one.
         let shown = self.radio.scrub.unwrap_or(live);
 
-        let (stop, skip, want, strip) = if dock.upright() {
+        let (stop, skip, want, toggle, strip) = if dock.upright() {
             let cover = egui::Rect::from_min_size(lay.min + egui::vec2(PAD, PAD), egui::Vec2::splat(tall_cover));
             paint_cover(bui.painter(), cover, tex);
             let words = egui::Rect::from_min_size(
@@ -834,14 +949,17 @@ impl App {
             );
             // Centred: the row is as wide as its marks, and starts half the
             // slack in from the right.
-            let n = 3 + usize::from(now.as_ref().is_some_and(|n| !self.vinyl_owned.contains(&n.release_id)));
+            let n = 3
+                + usize::from(now.as_ref().is_some_and(|n| !self.vinyl_owned.contains(&n.release_id)))
+                + usize::from(listable);
             let row_w = n as f32 * BTN + (n - 1) as f32 * cui.spacing().item_spacing.x;
-            let (stop, skip, want) = self.radio_controls(&mut cui, &now, tr, ((tall_cover - row_w) * 0.5).max(0.0), BTN);
+            let (stop, skip, want, toggle) =
+                self.radio_controls(&mut cui, &now, tr, ((tall_cover - row_w) * 0.5).max(0.0), BTN);
             let strip = egui::Rect::from_min_size(
                 egui::pos2(cover.left(), ctl.bottom() + space::S2),
                 egui::vec2(tall_cover, SCRUB_H),
             );
-            (stop, skip, want, strip)
+            (stop, skip, want, toggle, strip)
         } else {
             let cover = egui::Rect::from_min_size(lay.min + egui::vec2(PAD, PAD), egui::Vec2::splat(flat_cover));
             paint_cover(bui.painter(), cover, tex);
@@ -856,7 +974,7 @@ impl App {
                     .max_rect(row)
                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
             );
-            let (stop, skip, want) = self.radio_controls(&mut cui, &now, tr, PAD, BTN);
+            let (stop, skip, want, toggle) = self.radio_controls(&mut cui, &now, tr, PAD, BTN);
             let words = egui::Rect::from_min_max(
                 row.min,
                 egui::pos2(cui.min_rect().left() - PAD, row.bottom()),
@@ -866,9 +984,21 @@ impl App {
                 egui::pos2(cover.left(), cover.bottom()),
                 egui::pos2(lay.right() - PAD, cover.bottom() + SCRUB_H),
             );
-            (stop, skip, want, strip)
+            (stop, skip, want, toggle, strip)
         };
         self.radio_scrubber(&mut bui, strip, tr, seekable, shown);
+        if listable {
+            let list = egui::Rect::from_min_size(
+                egui::pos2(strip.left(), strip.bottom() + space::S2),
+                egui::vec2(strip.width(), songs_n as f32 * ROW_H),
+            );
+            // Rows only answer the pointer through the open part of the bar:
+            // egui clips a widget's hit area to its ui's clip rect.
+            self.radio_song_rows(&mut bui, list, &now, ROW_H);
+        }
+        if toggle {
+            self.radio.expanded = !self.radio.expanded;
+        }
 
         self.draw_radio_walk(ui, bar, dock == RadioDock::Bottom);
 
@@ -897,8 +1027,9 @@ impl App {
     /// wantlist heart, stop. Marks, not words: a "Play" that turns into
     /// "Pause" shoves the row sideways under the pointer, and four labels of
     /// differing width in button chrome never read as one transport. `lead`
-    /// is the space before the first (rightmost) mark. Returns what was
-    /// asked for: stop, skip, and the record to want.
+    /// is the space before the first (rightmost) mark. A record with songs
+    /// to choose between gets a chevron last, for the list. Returns what was
+    /// asked for: stop, skip, the record to want, and the list toggled.
     fn radio_controls(
         &self,
         cui: &mut egui::Ui,
@@ -906,11 +1037,12 @@ impl App {
         tr: webview::Transport,
         lead: f32,
         btn: f32,
-    ) -> (bool, bool, Option<u64>) {
+    ) -> (bool, bool, Option<u64>, bool) {
         use crate::ui::icon;
         let mut stop = false;
         let mut skip = false;
         let mut want: Option<u64> = None;
+        let mut toggle = false;
         cui.add_space(lead);
         if icon::mark_button(cui, btn, true, "Switch the radio off", |p, c, ink| {
             icon::stop(p, c, ink, 5.5)
@@ -963,7 +1095,88 @@ impl App {
         {
             webview::toggle_pause();
         }
-        (stop, skip, want)
+        if now.as_ref().is_some_and(|n| n.songs.len() > 1) {
+            let open = self.radio.expanded;
+            let tip = if open {
+                "Hide the record's songs"
+            } else {
+                "Show the record's songs"
+            };
+            if icon::mark_button(cui, btn, true, tip, |p, c, ink| {
+                icon::chevron(p, c, ink, 5.0, !open)
+            })
+            .clicked()
+            {
+                toggle = true;
+            }
+        }
+        (stop, skip, want, toggle)
+    }
+
+    /// The record's songs, one row each in `list`: position, title, length,
+    /// the one that's on marked in the accent. Click a row to put that song
+    /// on. Kept to the caption size: it's a list to pick from, not a sheet.
+    fn radio_song_rows(&mut self, ui: &mut egui::Ui, list: egui::Rect, now: &Option<RadioNow>, row_h: f32) {
+        use crate::ui::tokens::{color, font, radius, space};
+        let Some(n) = now else {
+            return;
+        };
+        const POS_W: f32 = 26.0;
+        let mut pick: Option<usize> = None;
+        for (i, song) in n.songs.iter().enumerate() {
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(list.left(), list.top() + row_h * i as f32),
+                egui::vec2(list.width(), row_h),
+            );
+            let resp = ui.interact(rect, ui.id().with(("radio_song", i)), egui::Sense::click());
+            let on = i == n.song;
+            let p = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+            if resp.hovered() {
+                p.rect_filled(rect, radius::XS, color::SURFACE_HOVER);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            let cy = rect.center().y;
+            let x0 = rect.left() + space::S2;
+            // Position, or the playing mark where there's none to show.
+            if on {
+                p.circle_filled(egui::pos2(x0 + 4.0, cy), 2.5, color::ACCENT);
+            }
+            if !song.position.is_empty() {
+                p.text(
+                    egui::pos2(x0 + POS_W, cy),
+                    egui::Align2::RIGHT_CENTER,
+                    &song.position,
+                    font::caption(),
+                    if on { color::ACCENT } else { color::LABEL_4 },
+                );
+            }
+            let dur = p.layout_no_wrap(song.duration.clone(), font::caption(), color::LABEL_4);
+            let dur_w = dur.size().x;
+            let right = rect.right() - space::S2;
+            p.galley(
+                egui::pos2(right - dur_w, cy - dur.size().y * 0.5),
+                dur,
+                color::LABEL_4,
+            );
+            let title_left = x0 + POS_W + space::S3;
+            let title_clip = p.with_clip_rect(egui::Rect::from_min_max(
+                egui::pos2(title_left, rect.top()),
+                egui::pos2(right - dur_w - space::S3, rect.bottom()),
+            ));
+            title_clip.text(
+                egui::pos2(title_left, cy),
+                egui::Align2::LEFT_CENTER,
+                &song.title,
+                font::caption(),
+                if on { color::LABEL } else { color::LABEL_2 },
+            );
+            if resp.clicked() && !on {
+                pick = Some(i);
+            }
+        }
+        if pick.is_some() {
+            self.radio.pick = pick;
+        }
     }
 
     /// The record's name and its caption in `rect`: the pressing, how it was
@@ -984,14 +1197,21 @@ impl App {
         use crate::ui::tokens::{color, font};
         let (line1, line2) = match now {
             Some(n) => {
-                let mut sub = n.sub.clone();
-                if !sub.is_empty() {
-                    sub.push_str(" · ");
+                let mut parts: Vec<String> = Vec::new();
+                // The song, when the record has more than one to tell apart.
+                if n.songs.len() > 1 {
+                    if let Some(s) = n.songs.get(n.song) {
+                        parts.push(s.title.clone());
+                    }
                 }
-                sub.push_str(&match &n.via {
+                if !n.sub.is_empty() {
+                    parts.push(n.sub.clone());
+                }
+                parts.push(match &n.via {
                     Some((t, m)) => format!("via {} {}", t.label(), m),
                     None => "where the radio started".to_string(),
                 });
+                let mut sub = parts.join(" · ");
                 if seekable {
                     sub.push_str(&format!(
                         " · {} / {}",
