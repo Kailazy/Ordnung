@@ -449,15 +449,19 @@ fn inline_rename_editor(
     // the panel's clip boundary — at full width the blue outline lands on the edge
     // and gets clipped, leaving the "cut off" look. The inner margin gives the text
     // tile-like padding and lifts the box to roughly the height of a nav row.
+    // `desired_width` is the *inner* text width: egui adds the margin on top, so
+    // subtract it here or the box overruns the panel on the right.
+    let inset = 3.0;
+    let margin = egui::Margin::symmetric(10.0, 7.0);
     let avail = ui.available_width();
     let resp = ui
         .horizontal(|ui| {
-            ui.add_space(3.0);
+            ui.add_space(inset);
             ui.add(
                 egui::TextEdit::singleline(&mut state.buf)
                     .hint_text(hint)
-                    .desired_width(avail - 6.0)
-                    .margin(egui::Margin::symmetric(10.0, 7.0)),
+                    .desired_width(avail - 2.0 * inset - margin.sum().x)
+                    .margin(margin),
             )
         })
         .inner;
@@ -1363,6 +1367,61 @@ pub(crate) const RAIL_GLYPH: f32 = 17.0;
 /// to rank it, so size is the only thing left to say which entries are the
 /// top-level libraries and which are the list of playlists under them.
 pub(crate) const RAIL_GLYPH_LEAD: f32 = 24.0;
+
+/// The rail's "new playlist" target. It keeps the tile's square and column so
+/// the rail stays one aligned stack, but it is drawn as a ghost: no fill, a
+/// dashed outline, a dim "+". A filled tile in that slot read as one more
+/// playlist you could open; the empty dashed square is the shape of a thing
+/// not yet there, so it reads as "make one" instead. Hover solidifies the
+/// outline in the accent and brightens the glyph so it still feels pressable.
+pub(crate) fn rail_add_tile(ui: &mut egui::Ui) -> egui::Response {
+    use crate::ui::tokens::color;
+    let side = NavDensity::RAIL_TILE;
+    let indent = ((ui.available_width() - side) / 2.0).max(0.0);
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+        if !ui.is_rect_visible(rect) {
+            return resp;
+        }
+        let hovered = resp.hovered();
+        let rounding = egui::Rounding::same(6.0);
+        // Inset by half the stroke so the outline sits fully inside the square.
+        let outline = rect.shrink(1.0);
+        let painter = ui.painter();
+        if hovered {
+            painter.rect(
+                outline,
+                rounding,
+                color::SURFACE_HI,
+                egui::Stroke::new(1.0, color::ACCENT),
+            );
+        } else {
+            let mut path = Vec::new();
+            egui::epaint::tessellator::path::rounded_rectangle(&mut path, outline, rounding);
+            if let Some(first) = path.first().copied() {
+                path.push(first);
+            }
+            painter.extend(egui::Shape::dashed_line(
+                &path,
+                egui::Stroke::new(1.0, color::LABEL_4),
+                3.0,
+                3.0,
+            ));
+        }
+        let glyph = if hovered { color::LABEL } else { color::LABEL_2 };
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "+",
+            egui::FontId::proportional(RAIL_GLYPH + 3.0),
+            glyph,
+        );
+        resp
+    })
+    .inner
+}
 
 /// [`rail_tile`] with an explicit glyph size, so the rail can rank its entries.
 pub(crate) fn rail_tile_sized(

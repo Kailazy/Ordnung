@@ -2929,11 +2929,11 @@ impl eframe::App for App {
                         if density.icons_only() {
                             // In the rail the caption is gone, so right-aligning
                             // the "+" left it floating in an empty row with
-                            // nothing to align against. It becomes a rail tile
-                            // like every other target instead — same square, same
-                            // column, so it reads as "add to this list" rather
-                            // than as a stray button.
-                            if rail_tile(ui, "+", false)
+                            // nothing to align against. It takes the rail's
+                            // square and column instead, drawn as a ghost
+                            // (dashed, unfilled) so it reads as "add one" and
+                            // not as another playlist in the stack.
+                            if crate::sidebar::rail_add_tile(ui)
                                 .on_hover_text("New playlist")
                                 .clicked()
                             {
