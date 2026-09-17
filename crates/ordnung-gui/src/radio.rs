@@ -74,7 +74,23 @@ fn radio_songs(d: &discogs::ReleaseDetail, artist: &str) -> Vec<RadioSong> {
             });
         }
     }
+    // A video no track claimed is often a second upload of one that was
+    // ("Artist - Title [CAT001]" beside "Title"): it says nothing new, so
+    // the list leaves it out. What's left is another thing entirely, a full
+    // side or a mix, which is worth a row.
+    let matched: Vec<String> = out
+        .iter()
+        .filter(|s| s.title.len() >= 4)
+        .map(|s| s.title.to_lowercase())
+        .collect();
+    let repeats = |title: &str| {
+        let t = title.to_lowercase();
+        matched.iter().any(|m| t.contains(m.as_str()))
+    };
     for v in m.leftover.iter().filter_map(|&v| d.videos.get(v)) {
+        if repeats(&v.title) {
+            continue;
+        }
         if let Some(id) = v.youtube_id() {
             out.push(RadioSong {
                 youtube_id: id.to_string(),
@@ -165,6 +181,37 @@ impl RadioDock {
     }
 }
 
+/// The radio bar away from its slot. While held, `rect` is where the hand
+/// has it; let go, each corner of `rect` is carried to the slot's by its
+/// own spring, so a bar dropped anywhere simply moves its corners to
+/// where they belong, whatever shape it changes on the way.
+#[derive(Clone, Copy)]
+pub(crate) struct RadioFly {
+    pub rect: egui::Rect,
+    /// Velocity of the top-left and bottom-right corners.
+    pub v_min: egui::Vec2,
+    pub v_max: egui::Vec2,
+    /// The dock the bar left, so its old layout can fade out under the new.
+    pub from: RadioDock,
+    /// Its size when it was picked up: the old layout keeps it while fading.
+    pub from_size: egui::Vec2,
+    /// When it was let go; `None` while it's still held.
+    pub released: Option<Instant>,
+}
+
+/// The bar's measurements, shared by its two layouts.
+struct BarGeo {
+    pad: f32,
+    btn: f32,
+    scrub_h: f32,
+    row_h: f32,
+    flat_cover: f32,
+    tall_cover: f32,
+    tall_words_h: f32,
+    /// How much of the song list is open, in points.
+    list_h: f32,
+}
+
 pub(crate) struct Radio {
     pub on: bool,
     phase: Phase,
@@ -193,10 +240,9 @@ pub(crate) struct Radio {
     /// top-left corner and the bar's size when it was picked up, so it
     /// rides under the hand as it was.
     pub drag: Option<(egui::Vec2, egui::Vec2)>,
-    /// The bar away from its slot: where it is and how fast its corner is
-    /// moving. Set while it's held and while it springs home after a drop;
+    /// The bar away from its slot: held, or on its way home after a drop.
     /// `None` once it's settled.
-    pub fly: Option<(egui::Rect, egui::Vec2)>,
+    pub fly: Option<RadioFly>,
     /// The bar's song list is open.
     pub expanded: bool,
     /// A song picked from the list, for the next tick to put on (the tick
@@ -834,48 +880,58 @@ impl App {
         };
         let home = slot(dock);
 
-        // Where the bar is this frame: under the hand while it's held, on a
-        // spring home after a drop, else home. Like a record on the map, it
-        // follows the pointer directly and, let go, is carried to its slot
-        // by a critically damped spring; its size eases from the format it
-        // left in to the one it arrives in, with the content laid out for
-        // home and clipped to the bar on its way, so a flat bar grows into
-        // an upright one rather than snapping.
+        // Where the bar is this frame: under the hand while it's held, on
+        // springs home after a drop, else home. Like a record on the map it
+        // follows the pointer directly; let go, each corner is carried to
+        // the slot's own corner by a critically damped spring, so the bar
+        // simply moves from where it was dropped, every edge to its new
+        // place, with no reframing in between. The layout it left in fades
+        // out under the one it arrives in while it travels.
         let dt = ctx.input(|i| i.stable_dt).clamp(1.0 / 240.0, 1.0 / 30.0);
         let drag_pos = self
             .radio
             .drag
             .and_then(|(off, size)| ctx.pointer_latest_pos().map(|p| (p - off, size)));
-        let (bar, lay) = if let Some((min, size)) = drag_pos {
+        let bar = if let Some((min, size)) = drag_pos {
             let r = egui::Rect::from_min_size(min, size);
             let vel = match self.radio.fly {
-                Some((prev, v)) => v * 0.5 + (min - prev.min) / dt * 0.5,
+                Some(f) => f.v_min * 0.5 + (min - f.rect.min) / dt * 0.5,
                 None => egui::Vec2::ZERO,
             };
-            self.radio.fly = Some((r, vel));
-            (r, r)
-        } else if let Some((r, v)) = self.radio.fly {
+            self.radio.fly = Some(RadioFly {
+                rect: r,
+                v_min: vel,
+                v_max: vel,
+                from: dock,
+                from_size: size,
+                released: None,
+            });
+            r
+        } else if let Some(mut f) = self.radio.fly {
             let k = SLOT_K;
-            let a = (home.min - r.min) * k - v * 2.0 * k.sqrt();
-            let v = v + a * dt;
-            let min = r.min + v * dt;
-            let ease = 1.0 - (-dt * 11.0).exp();
-            let size = r.size() + (home.size() - r.size()) * ease;
+            let d = 2.0 * k.sqrt();
+            f.v_min += ((home.min - f.rect.min) * k - f.v_min * d) * dt;
+            f.v_max += ((home.max - f.rect.max) * k - f.v_max * d) * dt;
+            let min = f.rect.min + f.v_min * dt;
+            let max = f.rect.max + f.v_max * dt;
             let settled = (home.min - min).length() < 0.3
-                && v.length() < 4.0
-                && (home.size() - size).length() < 0.5;
+                && (home.max - max).length() < 0.3
+                && f.v_min.length() < 4.0
+                && f.v_max.length() < 4.0;
             if settled {
                 self.radio.fly = None;
-                (home, home)
+                home
             } else {
                 ctx.request_repaint();
-                let r = egui::Rect::from_min_size(min, size);
-                self.radio.fly = Some((r, v));
-                (r, egui::Rect::from_min_size(r.min, home.size()))
+                f.rect = egui::Rect::from_min_max(min, max);
+                self.radio.fly = Some(f);
+                f.rect
             }
         } else {
-            (home, home)
+            home
         };
+        // The arriving layout: laid out for home, anchored where the bar is.
+        let lay = egui::Rect::from_min_size(bar.min, home.size());
 
         // The bar shadows the map: a pointer on it is on the bar, not on the
         // record under it, so nothing behind lights, drags or opens. The
@@ -903,8 +959,10 @@ impl App {
             }
             // A released bar keeps a little of the hand's motion and is
             // drawn home from there, rather than flying off like a slingshot.
-            if let Some((_, v)) = self.radio.fly.as_mut() {
-                *v *= 0.3;
+            if let Some(f) = self.radio.fly.as_mut() {
+                f.v_min *= 0.3;
+                f.v_max = f.v_min;
+                f.released = Some(Instant::now());
             }
             ctx.request_repaint();
         }
@@ -930,72 +988,59 @@ impl App {
         // The fraction the bar shows: the drag in flight, else the live one.
         let shown = self.radio.scrub.unwrap_or(live);
 
-        let (stop, skip, want, toggle, strip) = if dock.upright() {
-            let cover = egui::Rect::from_min_size(lay.min + egui::vec2(PAD, PAD), egui::Vec2::splat(tall_cover));
-            paint_cover(bui.painter(), cover, tex);
-            let words = egui::Rect::from_min_size(
-                egui::pos2(cover.left(), cover.bottom() + space::S3),
-                egui::vec2(tall_cover, tall_words_h),
-            );
-            self.radio_words(&bui, words, &now, tr, seekable, shown, true);
-            let ctl = egui::Rect::from_min_size(
-                egui::pos2(cover.left(), words.bottom() + space::S3),
-                egui::vec2(tall_cover, BTN),
-            );
-            let mut cui = bui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(ctl)
-                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
-            );
-            // Centred: the row is as wide as its marks, and starts half the
-            // slack in from the right.
-            let n = 3
-                + usize::from(now.as_ref().is_some_and(|n| !self.vinyl_owned.contains(&n.release_id)))
-                + usize::from(listable);
-            let row_w = n as f32 * BTN + (n - 1) as f32 * cui.spacing().item_spacing.x;
-            let (stop, skip, want, toggle) =
-                self.radio_controls(&mut cui, &now, tr, ((tall_cover - row_w) * 0.5).max(0.0), BTN);
-            let strip = egui::Rect::from_min_size(
-                egui::pos2(cover.left(), ctl.bottom() + space::S2),
-                egui::vec2(tall_cover, SCRUB_H),
-            );
-            (stop, skip, want, toggle, strip)
-        } else {
-            let cover = egui::Rect::from_min_size(lay.min + egui::vec2(PAD, PAD), egui::Vec2::splat(flat_cover));
-            paint_cover(bui.painter(), cover, tex);
-            // The top row, level with the cover: the controls take the right
-            // end, as much as they need; the words get what's left.
-            let row = egui::Rect::from_min_max(
-                egui::pos2(cover.right() + PAD, cover.top()),
-                egui::pos2(lay.right(), cover.bottom()),
-            );
-            let mut cui = bui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(row)
-                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
-            );
-            let (stop, skip, want, toggle) = self.radio_controls(&mut cui, &now, tr, PAD, BTN);
-            let words = egui::Rect::from_min_max(
-                row.min,
-                egui::pos2(cui.min_rect().left() - PAD, row.bottom()),
-            );
-            self.radio_words(&bui, words, &now, tr, seekable, shown, false);
-            let strip = egui::Rect::from_min_max(
-                egui::pos2(cover.left(), cover.bottom()),
-                egui::pos2(lay.right() - PAD, cover.bottom() + SCRUB_H),
-            );
-            (stop, skip, want, toggle, strip)
+        let g = BarGeo {
+            pad: PAD,
+            btn: BTN,
+            scrub_h: SCRUB_H,
+            row_h: ROW_H,
+            flat_cover,
+            tall_cover,
+            tall_words_h,
+            list_h,
         };
-        self.radio_scrubber(&mut bui, strip, tr, seekable, shown);
-        if listable {
-            let list = egui::Rect::from_min_size(
-                egui::pos2(strip.left(), strip.bottom() + space::S2),
-                egui::vec2(strip.width(), songs_n as f32 * ROW_H),
+        // On the way home from another format, the layout it left in fades
+        // out at its old size under the arriving one.
+        let crossfade = self.radio.fly.and_then(|f| {
+            let t0 = f.released?;
+            (f.from.upright() != dock.upright()).then(|| (f, (t0.elapsed().as_secs_f32() / 0.3).min(1.0)))
+        });
+        if let Some((f, t)) = crossfade {
+            let mut dui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_size(bar.min, f.from_size))
+                    .id_salt("radio_departing"),
             );
-            // Rows only answer the pointer through the open part of the bar:
-            // egui clips a widget's hit area to its ui's clip rect.
-            self.radio_song_rows(&mut bui, list, &now, ROW_H);
+            dui.set_clip_rect(bar);
+            dui.set_opacity(1.0 - t);
+            let _ = self.radio_bar_body(
+                &mut dui,
+                egui::Rect::from_min_size(bar.min, f.from_size),
+                f.from.upright(),
+                &g,
+                &now,
+                tr,
+                tex,
+                seekable,
+                shown,
+                listable,
+                songs_n,
+            );
+            bui.set_opacity(t);
+            ctx.request_repaint();
         }
+        let (stop, skip, want, toggle) = self.radio_bar_body(
+            &mut bui,
+            lay,
+            dock.upright(),
+            &g,
+            &now,
+            tr,
+            tex,
+            seekable,
+            shown,
+            listable,
+            songs_n,
+        );
         if toggle {
             self.radio.expanded = !self.radio.expanded;
         }
@@ -1021,6 +1066,99 @@ impl App {
                 );
             }
         }
+    }
+
+    /// The bar's contents, laid out `upright` or flat in `lay`: cover, words,
+    /// transport, scrubber and the song list. Returns what the transport
+    /// asked for: stop, skip, the record to want, and the list toggled.
+    #[allow(clippy::too_many_arguments)]
+    fn radio_bar_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        lay: egui::Rect,
+        upright: bool,
+        g: &BarGeo,
+        now: &Option<RadioNow>,
+        tr: webview::Transport,
+        tex: Option<egui::TextureId>,
+        seekable: bool,
+        shown: f32,
+        listable: bool,
+        songs_n: usize,
+    ) -> (bool, bool, Option<u64>, bool) {
+        use crate::ui::tokens::space;
+        let (stop, skip, want, toggle, strip) = if upright {
+            let cover = egui::Rect::from_min_size(lay.min + egui::vec2(g.pad, g.pad), egui::Vec2::splat(g.tall_cover));
+            paint_cover(ui.painter(), cover, tex);
+            let words = egui::Rect::from_min_size(
+                egui::pos2(cover.left(), cover.bottom() + space::S3),
+                egui::vec2(g.tall_cover, g.tall_words_h),
+            );
+            self.radio_words(&ui, words, &now, tr, seekable, shown, true);
+            let ctl = egui::Rect::from_min_size(
+                egui::pos2(cover.left(), words.bottom() + space::S3),
+                egui::vec2(g.tall_cover, g.btn),
+            );
+            let mut cui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(ctl)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            // Centred: the row is as wide as its marks, and starts half the
+            // slack in from the right.
+            let n = 3
+                + usize::from(now.as_ref().is_some_and(|n| !self.vinyl_owned.contains(&n.release_id)))
+                + usize::from(listable);
+            let row_w = n as f32 * g.btn + (n - 1) as f32 * cui.spacing().item_spacing.x;
+            let (stop, skip, want, toggle) =
+                self.radio_controls(&mut cui, &now, tr, ((g.tall_cover - row_w) * 0.5).max(0.0), g.btn);
+            let strip = egui::Rect::from_min_size(
+                egui::pos2(cover.left(), ctl.bottom() + space::S2),
+                egui::vec2(g.tall_cover, g.scrub_h),
+            );
+            (stop, skip, want, toggle, strip)
+        } else {
+            let cover = egui::Rect::from_min_size(lay.min + egui::vec2(g.pad, g.pad), egui::Vec2::splat(g.flat_cover));
+            paint_cover(ui.painter(), cover, tex);
+            // The top row, level with the cover: the controls take the right
+            // end, as much as they need; the words get what's left.
+            let row = egui::Rect::from_min_max(
+                egui::pos2(cover.right() + g.pad, cover.top()),
+                egui::pos2(lay.right(), cover.bottom()),
+            );
+            let mut cui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(row)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            let (stop, skip, want, toggle) = self.radio_controls(&mut cui, &now, tr, g.pad, g.btn);
+            let words = egui::Rect::from_min_max(
+                row.min,
+                egui::pos2(cui.min_rect().left() - g.pad, row.bottom()),
+            );
+            self.radio_words(&ui, words, &now, tr, seekable, shown, false);
+            let strip = egui::Rect::from_min_max(
+                egui::pos2(cover.left(), cover.bottom()),
+                egui::pos2(lay.right() - g.pad, cover.bottom() + g.scrub_h),
+            );
+            (stop, skip, want, toggle, strip)
+        };
+        self.radio_scrubber(ui, strip, tr, seekable, shown);
+        // The list shows through exactly as far as it's open, however tall
+        // the bar happens to be (in flight it can be taller than home), and
+        // rows only answer the pointer through that part: egui clips a
+        // widget's hit area to its ui's clip rect.
+        if listable && g.list_h > space::S2 {
+            let list = egui::Rect::from_min_size(
+                egui::pos2(strip.left(), strip.bottom() + space::S2),
+                egui::vec2(strip.width(), songs_n as f32 * g.row_h),
+            );
+            let open = egui::Rect::from_min_size(list.min, egui::vec2(list.width(), g.list_h - space::S2));
+            let mut lui = ui.new_child(egui::UiBuilder::new().max_rect(list).id_salt("radio_list"));
+            lui.set_clip_rect(open.intersect(ui.clip_rect()));
+            self.radio_song_rows(&mut lui, list, now, g.row_h);
+        }
+        (stop, skip, want, toggle)
     }
 
     /// The bar's transport, right to left in `cui`: play/pause, skip, the
