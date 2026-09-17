@@ -186,6 +186,7 @@ fn export_then_read_back_full_surface() {
     assert_eq!(alpha.artist.as_deref(), Some("Artist One"));
     assert_eq!(alpha.album.as_deref(), Some("Test Album"));
     assert_eq!(alpha.genre.as_deref(), Some("Techno"));
+    assert_eq!(alpha.label.as_deref(), Some("Test Label"));
     assert_eq!(alpha.comment, "hello");
     assert_eq!(alpha.duration_s, 120);
     assert_eq!(alpha.bitrate_kbps, 1_411);
@@ -355,6 +356,20 @@ fn merge_adds_to_an_existing_export_without_clobbering_it() {
     assert_eq!(a_titles, ["Alpha", "Beta"], "set A membership preserved");
     assert_eq!(b_titles, ["Gamma", "Alpha"], "set B membership added");
 
+    // Beta was carried over, not re-exported: its browse metadata must still
+    // resolve through the rewritten intern tables.
+    let beta = export.tracks.values().find(|t| t.title == "Beta").unwrap();
+    assert_eq!(beta.artist.as_deref(), Some("BB"));
+    assert_eq!(beta.album.as_deref(), Some("Test Album"));
+    assert_eq!(beta.genre.as_deref(), Some("Techno"));
+    assert_eq!(beta.label.as_deref(), Some("Test Label"));
+    assert_eq!(beta.key.as_deref(), Some("8A"));
+    assert_eq!(beta.tempo_centi_bpm, 12_800);
+    // …and the intern tables hold each name once, shared with the re-exported
+    // rows rather than duplicated.
+    let alpha = export.tracks.values().find(|t| t.title == "Alpha").unwrap();
+    assert_eq!(alpha.album.as_deref(), Some("Test Album"));
+
     // DLP mirrors the merged tree too.
     let dlp = dlp::read_playlists(&usb.join("PIONEER/rekordbox/exportLibrary.db")).unwrap();
     assert_eq!(dlp.playlists.len(), 2);
@@ -408,15 +423,15 @@ fn embedded_cover_becomes_stick_artwork() {
     let cover = ordnung_core::tag::CoverArt::from_png(
         include_bytes!("fixtures/cover.png").to_vec(),
     );
-    let with_a = wav_file(&src, "with_a.wav");
+    let with_a_path = wav_file(&src, "with_a.wav");
     let with_b = wav_file(&src, "with_b.wav");
     let without = wav_file(&src, "without.wav");
-    for p in [&with_a, &with_b] {
+    for p in [&with_a_path, &with_b] {
         ordnung_core::tag::embed_full(p, &Tags::default(), Some(&cover)).unwrap();
     }
 
     let tracks = vec![
-        track(1, &with_a, Format::Wav, "With A", "Artist"),
+        track(1, &with_a_path, Format::Wav, "With A", "Artist"),
         track(2, &with_b, Format::Wav, "With B", "Artist"),
         track(3, &without, Format::Wav, "Without", "Artist"),
     ];
@@ -432,6 +447,33 @@ fn embedded_cover_becomes_stick_artwork() {
         !art.join("a2.jpg").exists(),
         "shared cover must intern to one artwork id"
     );
+
+    // Merge a coverless track: the carried rows keep their artwork (same id,
+    // same files), and nothing overwrites a1.jpg.
+    let before = std::fs::read(art.join("a1.jpg")).unwrap();
+    let later = wav_file(&src, "later.wav");
+    let extra = vec![track(4, &later, Format::Wav, "Later", "Artist")];
+    export_usb(&usb, &extra, &[], ExportMode::Merge, &mut |_| {}, &cancel).unwrap();
+    let export = pdb::read_export(&usb.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let with_a = export.tracks.values().find(|t| t.title == "With A").unwrap();
+    assert_eq!(with_a.artwork_path.as_deref(), Some("/PIONEER/Artwork/00001/a1.jpg"));
+    let with_b = export.tracks.values().find(|t| t.title == "With B").unwrap();
+    assert_eq!(with_b.artwork_id, with_a.artwork_id);
+    let later_row = export.tracks.values().find(|t| t.title == "Later").unwrap();
+    assert_eq!(later_row.artwork_id, 0);
+    assert_eq!(std::fs::read(art.join("a1.jpg")).unwrap(), before);
+
+    // Re-exporting a covered track onto the stick numbers its cover past the
+    // existing artwork instead of clobbering id 1.
+    let covered_again = vec![track(5, &with_a_path, Format::Wav, "With A again", "Artist")];
+    export_usb(&usb, &covered_again, &[], ExportMode::Merge, &mut |_| {}, &cancel).unwrap();
+    let export = pdb::read_export(&usb.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let again = export.tracks.values().find(|t| t.title == "With A again");
+    // Same /Contents path as "With A" ⇒ the merge reused that slot and re-wrote
+    // the row under the new title, with a fresh artwork id above the old one.
+    let again = again.or_else(|| export.tracks.values().find(|t| t.title == "With A")).unwrap();
+    assert!(again.artwork_id >= 1);
+    assert_eq!(std::fs::read(art.join("a1.jpg")).unwrap(), before, "id 1 files untouched");
 
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&usb);

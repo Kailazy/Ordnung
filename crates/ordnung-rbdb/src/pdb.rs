@@ -66,6 +66,11 @@ pub struct RbTrack {
     pub album: Option<String>,
     /// Genre name resolved through the Genres table.
     pub genre: Option<String>,
+    /// Label name resolved through the Labels table.
+    pub label: Option<String>,
+    /// The row's artwork id (0 = none), kept alongside `artwork_path` so a
+    /// merge can carry the existing artwork entry verbatim.
+    pub artwork_id: u32,
     /// Comment string from the row; empty when absent.
     pub comment: String,
     /// Cover-art image file resolved through the Artwork table — a small JPEG
@@ -112,6 +117,7 @@ const TYPE_TRACKS: u32 = 0;
 const TYPE_GENRES: u32 = 1;
 const TYPE_ARTISTS: u32 = 2;
 const TYPE_ALBUMS: u32 = 3;
+const TYPE_LABELS: u32 = 4;
 const TYPE_KEYS: u32 = 5;
 const TYPE_PLAYLIST_TREE: u32 = 7;
 const TYPE_PLAYLIST_ENTRIES: u32 = 8;
@@ -200,9 +206,10 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
     let mut artist_names: HashMap<u32, String> = HashMap::new();
     let mut album_names: HashMap<u32, String> = HashMap::new();
     let mut genre_names: HashMap<u32, String> = HashMap::new();
+    let mut label_names: HashMap<u32, String> = HashMap::new();
     let mut artwork_paths: HashMap<u32, String> = HashMap::new();
-    // track id → (key_id, artist_id, album_id, genre_id, artwork_id).
-    let mut track_refs: HashMap<u32, [u32; 5]> = HashMap::new();
+    // track id → (key_id, artist_id, album_id, genre_id, artwork_id, label_id).
+    let mut track_refs: HashMap<u32, [u32; 6]> = HashMap::new();
 
     for t in 0..num_tables {
         let base = 0x1C + t * 16;
@@ -215,6 +222,7 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
                 | TYPE_GENRES
                 | TYPE_ARTISTS
                 | TYPE_ALBUMS
+                | TYPE_LABELS
                 | TYPE_KEYS
                 | TYPE_PLAYLIST_TREE
                 | TYPE_PLAYLIST_ENTRIES
@@ -253,6 +261,7 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
                                 u32_at(data, row + 0x40).unwrap_or(0), // album
                                 u32_at(data, row + 0x3C).unwrap_or(0), // genre
                                 u32_at(data, row + 0x1C).unwrap_or(0), // artwork
+                                u32_at(data, row + 0x28).unwrap_or(0), // label
                             ],
                         );
                         let string_at = |idx: usize| {
@@ -269,6 +278,8 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
                                 artist: None,
                                 album: None,
                                 genre: None,
+                                label: None,
+                                artwork_id: 0,
                                 comment: string_at(16).unwrap_or_default(),
                                 artwork_path: None,
                                 duration_s: u16_at(data, row + 0x54).unwrap_or(0),
@@ -295,6 +306,15 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
                         };
                         if let Some(name) = dsql_string(data, row + 4) {
                             genre_names.insert(id, name);
+                        }
+                    }
+                    TYPE_LABELS => {
+                        // Label row: id u32 @0, name @4 (same shape as genres).
+                        let Some(id) = u32_at(data, row) else {
+                            continue;
+                        };
+                        if let Some(name) = dsql_string(data, row + 4) {
+                            label_names.insert(id, name);
                         }
                     }
                     TYPE_ARTISTS => {
@@ -387,13 +407,15 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
             .filter(|s| !s.is_empty())
             .cloned()
     };
-    for (track_id, [key, artist, album, genre, artwork]) in track_refs {
+    for (track_id, [key, artist, album, genre, artwork, label]) in track_refs {
         if let Some(track) = out.tracks.get_mut(&track_id) {
             track.key = lookup(&key_names, key);
             track.artist = lookup(&artist_names, artist);
             track.album = lookup(&album_names, album);
             track.genre = lookup(&genre_names, genre);
+            track.label = lookup(&label_names, label);
             track.artwork_path = lookup(&artwork_paths, artwork);
+            track.artwork_id = if track.artwork_path.is_some() { artwork } else { 0 };
         }
     }
 

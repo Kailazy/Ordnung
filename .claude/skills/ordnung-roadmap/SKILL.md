@@ -108,11 +108,12 @@ export adds to whatever is already on the stick — tracks already present
 (matched by `/Contents` path) keep their id/filename/ANLZ files, new tracks
 append after the max id, and playlists merge by name (same name updates its
 membership, new name is added). `ExportMode::Replace` rebuilds from the
-selection alone (the whole-library button, or CLI `--replace`). Known
-limitation: carried-over tracks (on the stick but not in the current
-selection) keep title/BPM/key/waveform but their artist/album/genre/label
-interned refs resolve to 0, since the read-side pdb view is lossy — re-export
-including them (or a Replace) restores full browse metadata. Surfaced as CLI
+selection alone (the whole-library button, or CLI `--replace`). Carried-over
+tracks (on the stick but not in the current selection) keep everything
+since 2026-09-17: the pdb reader resolves labels and artwork ids too, the
+merge re-interns artist/album/genre/label/key names into the new tables and
+carries the artwork entry verbatim, and new covers number on from the
+stick's highest artwork id so nothing overwrites files still referenced. Surfaced as CLI
 `export DEST [--playlist ID]… [--replace]` and, in the GUI: the USB
 view's confirm-gated "⇪ Export entire library" button, per-playlist/folder
 right-click "Export to <device>…" (rekordbox-style scoped export via

@@ -30,9 +30,21 @@ pub(crate) struct ArtworkFiles {
 pub(crate) struct ArtworkStore {
     by_hash: HashMap<u64, u32>,
     pub files: Vec<ArtworkFiles>,
+    /// New ids start above this, so a merge never overwrites artwork files
+    /// that tracks already on the stick still reference.
+    base: u32,
 }
 
 impl ArtworkStore {
+    /// A store whose ids continue after `max_existing` (the highest artwork
+    /// id already on the stick; 0 for a fresh export).
+    pub fn starting_after(max_existing: u32) -> Self {
+        Self {
+            base: max_existing,
+            ..Self::default()
+        }
+    }
+
     /// Intern one cover; returns its artwork id, or 0 if it can't be decoded.
     pub fn intern(&mut self, raw: &[u8]) -> u32 {
         let mut h = DefaultHasher::new();
@@ -45,7 +57,7 @@ impl ArtworkStore {
             self.by_hash.insert(key, 0);
             return 0;
         };
-        let id = self.files.len() as u32 + 1;
+        let id = self.base + self.files.len() as u32 + 1;
         self.by_hash.insert(key, id);
         self.files.push(ArtworkFiles { id, small, medium });
         id

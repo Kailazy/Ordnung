@@ -322,6 +322,15 @@ struct ExistingTrack {
     id: u32,
     usb_path: String,
     row: TrackRow,
+    /// Interned names read back off the stick, re-interned into this
+    /// export's tables when the row is carried over.
+    artist: Option<String>,
+    album: Option<String>,
+    genre: Option<String>,
+    label: Option<String>,
+    key: Option<String>,
+    /// The stick's artwork entry for this row (id, pdb path), kept verbatim.
+    artwork: Option<(u32, String)>,
 }
 
 /// Read the export already at `dest_root` for a merge. Returns the existing
@@ -372,6 +381,16 @@ fn read_existing(dest_root: &Path) -> (Vec<ExistingTrack>, Vec<PlaylistRow>) {
             id: *id,
             usb_path: t.file_path.clone(),
             row,
+            artist: t.artist.clone(),
+            album: t.album.clone(),
+            genre: t.genre.clone(),
+            label: t.label.clone(),
+            key: t.key.clone(),
+            artwork: t
+                .artwork_path
+                .clone()
+                .filter(|_| t.artwork_id != 0)
+                .map(|p| (t.artwork_id, p)),
         });
     }
     let playlists = export
@@ -560,7 +579,14 @@ fn export_impl(
     let mut genres = Intern::default();
     let mut labels = Intern::default();
     let mut keys = Intern::default();
-    let mut covers = crate::artwork::ArtworkStore::default();
+    // New covers number on from the stick's highest artwork id, so carried
+    // rows keep pointing at files nobody overwrites.
+    let max_art = existing_tracks
+        .iter()
+        .filter_map(|e| e.artwork.as_ref().map(|(id, _)| *id))
+        .max()
+        .unwrap_or(0);
+    let mut covers = crate::artwork::ArtworkStore::starting_after(max_art);
 
     // Filenames already taken (existing rows + rows we assign this pass).
     let mut taken: HashSet<String> = existing_tracks
@@ -706,23 +732,36 @@ fn export_impl(
     // ---- carry over existing tracks the selection didn't re-cover --------
     // Their audio and ANLZ files already sit on the stick, so they need a row
     // (with re-interned metadata) but no copy and no ANLZ write. Re-interning
-    // pulls their artist/album/genre/label names out of the row strings we
-    // read back, so the browse tables stay populated for them too.
+    // pulls their artist/album/genre/label/key names out of the tables we
+    // read back, so the browse menus stay populated for them too, and their
+    // artwork entry is carried as-is (same id, same files).
     let mut carried: Vec<TrackRow> = Vec::new();
+    let mut carried_art: Vec<(u32, String)> = Vec::new();
     for e in &existing_tracks {
         if placed_ids.contains(&e.id) {
             continue; // the new selection re-covered this track
         }
-        // The read side didn't preserve interned *names*, only that the row had
-        // them; re-intern from the DLP mirror is out of reach here, so carried
-        // rows keep their text fields but resolve id references to 0 (the
-        // player still lists them by title/filename). Their date_added is set
-        // to this export's date for consistency.
         let mut row = e.row.clone();
+        row.artist_id = artists.get(e.artist.as_deref());
+        row.album_id = albums.get(e.album.as_deref());
+        row.genre_id = genres.get(e.genre.as_deref());
+        row.label_id = labels.get(e.label.as_deref());
+        row.key_id = keys.get(e.key.as_deref());
+        row.artwork_id = match &e.artwork {
+            Some((id, path)) => {
+                if !carried_art.iter().any(|(a, _)| a == id) {
+                    carried_art.push((*id, path.clone()));
+                }
+                *id
+            }
+            None => 0,
+        };
+        // Their date_added is set to this export's date for consistency.
         row.date_added = date.clone();
         row.analyze_date = date.clone();
         carried.push(row);
     }
+    carried_art.sort_by_key(|(id, _)| *id);
 
     if resolved.is_empty() && carried.is_empty() && !allow_empty {
         return Err(ExportError::NoTracks);
@@ -925,10 +964,10 @@ fn export_impl(
         albums: albums.rows,
         labels: labels.rows,
         keys: keys.rows,
-        artwork: covers
-            .files
+        artwork: carried_art
             .iter()
-            .map(|a| (a.id, crate::artwork::pdb_path(a.id)))
+            .cloned()
+            .chain(covers.files.iter().map(|a| (a.id, crate::artwork::pdb_path(a.id))))
             .collect(),
         playlists: playlist_rows,
         playlist_entries: entries,
