@@ -80,6 +80,40 @@ enum Phase {
     },
 }
 
+/// Where the radio bar sits on the map. Along the top or bottom it lies
+/// flat; dragged to a side it stands upright, cover on top.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RadioDock {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl RadioDock {
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            RadioDock::Top => "top",
+            RadioDock::Bottom => "bottom",
+            RadioDock::Left => "left",
+            RadioDock::Right => "right",
+        }
+    }
+
+    pub(crate) fn from_key(key: &str) -> Self {
+        match key {
+            "bottom" => RadioDock::Bottom,
+            "left" => RadioDock::Left,
+            "right" => RadioDock::Right,
+            _ => RadioDock::Top,
+        }
+    }
+
+    fn upright(self) -> bool {
+        matches!(self, RadioDock::Left | RadioDock::Right)
+    }
+}
+
 pub(crate) struct Radio {
     pub on: bool,
     phase: Phase,
@@ -104,6 +138,12 @@ pub(crate) struct Radio {
     /// pointer, which the bar paints instead of the live position until
     /// the drag lands and seeks.
     pub scrub: Option<f32>,
+    /// A drag of the bar in flight: the pointer's offset from the bar's
+    /// top-left corner and the bar's size when it was picked up, so it
+    /// rides under the hand as it was.
+    pub drag: Option<(egui::Vec2, egui::Vec2)>,
+    /// The bar sliding home after a drop: where it was let go, and when.
+    pub slide: Option<(egui::Rect, Instant)>,
 }
 
 impl Default for Radio {
@@ -119,6 +159,8 @@ impl Default for Radio {
             played: 0,
             walk: Vec::new(),
             scrub: None,
+            drag: None,
+            slide: None,
         }
     }
 }
@@ -610,69 +652,274 @@ impl App {
 
     /// The bar over the map while the radio is on: cover, record, how it was
     /// found, the clock, the controls, and a scrubber along the foot.
+    ///
+    /// It docks to one of four slots. Pick it up anywhere that isn't a
+    /// control and it rides under the hand, with the slot it would take
+    /// outlined; let go and it slides home. Flat along the top or bottom,
+    /// upright at a side with the cover on top and the words beneath.
     pub(crate) fn draw_radio_bar(&mut self, ui: &mut egui::Ui, canvas: egui::Rect, ctx: &egui::Context) {
-        use crate::ui::icon;
-        use crate::ui::tokens::{color, font, radius};
+        use crate::ui::tokens::{color, font, radius, space};
         if !self.radio.on {
             return;
         }
-        const W: f32 = 660.0;
         const PAD: f32 = 10.0;
-        const COVER: f32 = 44.0;
-        /// The strip under the cover and words the scrubber lives in: a
-        /// hairline with a comfortable hit area around it.
+        /// The strip the scrubber lives in: a hairline with a comfortable
+        /// hit area around it.
         const SCRUB_H: f32 = 16.0;
-        const H: f32 = PAD + COVER + SCRUB_H + PAD * 0.4;
         /// The painted controls' square.
         const BTN: f32 = 28.0;
-        let w = W.min(canvas.width() - 24.0);
-        let bar = egui::Rect::from_min_size(
-            egui::pos2(canvas.center().x - w * 0.5, canvas.top() + 12.0),
-            egui::vec2(w, H),
-        );
+        /// A docked bar's inset from the map's edge.
+        const EDGE: f32 = 12.0;
+        /// How long the bar takes to slide home after a drop.
+        const SLIDE: f32 = 0.28;
+        /// How far off the map's centre line a drop must land to take a side.
+        const SIDE_PULL: f32 = 0.22;
+
+        let dock = RadioDock::from_key(&self.config.radio_dock);
+        let now = self.radio.now.clone();
+        let tr = webview::transport();
+        let body_h = ui.fonts(|f| f.row_height(&font::body()));
+        let cap_h = ui.fonts(|f| f.row_height(&font::caption()));
+
+        // Each slot, sized for the bar's format there.
+        let flat_cover = 44.0;
+        let flat_h = PAD + flat_cover + SCRUB_H + PAD * 0.4;
+        let tall_w = 232.0_f32.min((canvas.width() * 0.4).max(160.0));
+        let tall_cover = tall_w - PAD * 2.0;
+        let tall_words_h = body_h * 2.0 + 2.0 + cap_h;
+        let tall_h = PAD + tall_cover + space::S3 + tall_words_h + space::S3 + BTN + space::S2
+            + SCRUB_H
+            + PAD * 0.4;
+        let slot = |d: RadioDock| -> egui::Rect {
+            match d {
+                RadioDock::Top | RadioDock::Bottom => {
+                    let w = 660.0_f32.min(canvas.width() - EDGE * 2.0);
+                    let y = if d == RadioDock::Top {
+                        canvas.top() + EDGE
+                    } else {
+                        canvas.bottom() - EDGE - flat_h
+                    };
+                    egui::Rect::from_min_size(
+                        egui::pos2(canvas.center().x - w * 0.5, y),
+                        egui::vec2(w, flat_h),
+                    )
+                }
+                RadioDock::Left => egui::Rect::from_min_size(
+                    egui::pos2(canvas.left() + EDGE, canvas.top() + EDGE),
+                    egui::vec2(tall_w, tall_h),
+                ),
+                RadioDock::Right => egui::Rect::from_min_size(
+                    egui::pos2(canvas.right() - EDGE - tall_w, canvas.top() + EDGE),
+                    egui::vec2(tall_w, tall_h),
+                ),
+            }
+        };
+        // The slot a bar centred at `c` would take when dropped.
+        let slot_for = |c: egui::Pos2| -> RadioDock {
+            let dx = (c.x - canvas.center().x) / canvas.width().max(1.0);
+            let dy = (c.y - canvas.center().y) / canvas.height().max(1.0);
+            if dx.abs() > SIDE_PULL {
+                if dx < 0.0 {
+                    RadioDock::Left
+                } else {
+                    RadioDock::Right
+                }
+            } else if dy > 0.0 {
+                RadioDock::Bottom
+            } else {
+                RadioDock::Top
+            }
+        };
+        let home = slot(dock);
+
+        // Where the bar is this frame: under the hand while it's held, on
+        // its way home after a drop, else home. While sliding, the content
+        // is laid out for home and clipped to the bar on its way there, so
+        // a flat bar morphs into an upright one rather than snapping.
+        let drag_pos = self
+            .radio
+            .drag
+            .and_then(|(off, size)| ctx.pointer_latest_pos().map(|p| (p - off, size)));
+        let (bar, lay) = if let Some((min, size)) = drag_pos {
+            let r = egui::Rect::from_min_size(min, size);
+            (r, r)
+        } else if let Some((from, t0)) = self.radio.slide {
+            let t = (t0.elapsed().as_secs_f32() / SLIDE).min(1.0);
+            if t >= 1.0 {
+                self.radio.slide = None;
+                (home, home)
+            } else {
+                ctx.request_repaint();
+                let e = 1.0 - (1.0 - t).powi(3);
+                let r = egui::Rect::from_min_max(from.min.lerp(home.min, e), from.max.lerp(home.max, e));
+                (r, egui::Rect::from_min_size(r.min, home.size()))
+            }
+        } else {
+            (home, home)
+        };
+
         // The bar shadows the map: a pointer on it is on the bar, not on the
         // record under it, so nothing behind lights, drags or opens. The
-        // controls and scrubber register after this and so sit on top of it.
-        ui.interact(bar, ui.id().with("radio_bar_shade"), egui::Sense::click_and_drag());
+        // controls and scrubber register after this and so sit on top of it;
+        // anywhere else on the bar picks it up.
+        let shade = ui.interact(bar, ui.id().with("radio_bar_shade"), egui::Sense::click_and_drag());
+        if shade.drag_started() {
+            if let Some(p) = shade.interact_pointer_pos() {
+                self.radio.drag = Some((p - bar.min, bar.size()));
+                self.radio.slide = None;
+            }
+        }
+        if self.radio.drag.is_some() {
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+            ctx.request_repaint();
+            // The slot it would take, outlined where it is.
+            let would = slot(slot_for(bar.center()));
+            ui.painter().rect(
+                would,
+                radius::LG,
+                color::ACCENT.gamma_multiply(0.10),
+                egui::Stroke::new(1.5, color::ACCENT.gamma_multiply(0.7)),
+            );
+        } else if shade.hovered() {
+            ctx.set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        if shade.drag_stopped() && self.radio.drag.take().is_some() {
+            let new = slot_for(bar.center());
+            if new != dock {
+                self.config.radio_dock = new.key().to_string();
+                if let Err(e) = self.config.save() {
+                    self.status = format!("Couldn't save settings: {e}");
+                }
+            }
+            self.radio.slide = Some((bar, Instant::now()));
+        }
+
         ui.painter().rect(
             bar,
             radius::LG,
             color::SURFACE.gamma_multiply(0.96),
             egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE),
         );
-        let now = self.radio.now.clone();
-        let cover = egui::Rect::from_min_size(bar.min + egui::vec2(PAD, PAD), egui::Vec2::splat(COVER));
         let tex = now
             .as_ref()
             .and_then(|n| self.radio_cover(n.key, n.thumb_url.as_deref()));
-        paint_cover(ui.painter(), cover, tex);
-        let tr = webview::transport();
-        // The top row, level with the cover: the controls take the right
-        // end, as much as they need; the words get what's left.
-        let row = egui::Rect::from_min_max(
-            egui::pos2(cover.right() + PAD, cover.top()),
-            egui::pos2(bar.right(), cover.bottom()),
-        );
-        let mut cui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(row)
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
-        );
+        // Everything inside is clipped to the bar as it is this frame.
+        let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(lay));
+        bui.set_clip_rect(bar);
+        let seekable = tr.ready && tr.duration > 0.0;
+        let live = if seekable {
+            (tr.position / tr.duration).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        // The fraction the bar shows: the drag in flight, else the live one.
+        let shown = self.radio.scrub.unwrap_or(live);
+
+        let (stop, skip, want, strip) = if dock.upright() {
+            let cover = egui::Rect::from_min_size(lay.min + egui::vec2(PAD, PAD), egui::Vec2::splat(tall_cover));
+            paint_cover(bui.painter(), cover, tex);
+            let words = egui::Rect::from_min_size(
+                egui::pos2(cover.left(), cover.bottom() + space::S3),
+                egui::vec2(tall_cover, tall_words_h),
+            );
+            self.radio_words(&bui, words, &now, tr, seekable, shown, true);
+            let ctl = egui::Rect::from_min_size(
+                egui::pos2(cover.left(), words.bottom() + space::S3),
+                egui::vec2(tall_cover, BTN),
+            );
+            let mut cui = bui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(ctl)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            // Centred: the row is as wide as its marks, and starts half the
+            // slack in from the right.
+            let n = 3 + usize::from(now.as_ref().is_some_and(|n| !self.vinyl_owned.contains(&n.release_id)));
+            let row_w = n as f32 * BTN + (n - 1) as f32 * cui.spacing().item_spacing.x;
+            let (stop, skip, want) = self.radio_controls(&mut cui, &now, tr, ((tall_cover - row_w) * 0.5).max(0.0), BTN);
+            let strip = egui::Rect::from_min_size(
+                egui::pos2(cover.left(), ctl.bottom() + space::S2),
+                egui::vec2(tall_cover, SCRUB_H),
+            );
+            (stop, skip, want, strip)
+        } else {
+            let cover = egui::Rect::from_min_size(lay.min + egui::vec2(PAD, PAD), egui::Vec2::splat(flat_cover));
+            paint_cover(bui.painter(), cover, tex);
+            // The top row, level with the cover: the controls take the right
+            // end, as much as they need; the words get what's left.
+            let row = egui::Rect::from_min_max(
+                egui::pos2(cover.right() + PAD, cover.top()),
+                egui::pos2(lay.right(), cover.bottom()),
+            );
+            let mut cui = bui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(row)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            let (stop, skip, want) = self.radio_controls(&mut cui, &now, tr, PAD, BTN);
+            let words = egui::Rect::from_min_max(
+                row.min,
+                egui::pos2(cui.min_rect().left() - PAD, row.bottom()),
+            );
+            self.radio_words(&bui, words, &now, tr, seekable, shown, false);
+            let strip = egui::Rect::from_min_max(
+                egui::pos2(cover.left(), cover.bottom()),
+                egui::pos2(lay.right() - PAD, cover.bottom() + SCRUB_H),
+            );
+            (stop, skip, want, strip)
+        };
+        self.radio_scrubber(&mut bui, strip, tr, seekable, shown);
+
+        self.draw_radio_walk(ui, bar, dock == RadioDock::Bottom);
+
+        if stop {
+            self.radio_stop("Radio off");
+        }
+        if skip {
+            self.radio.skip = true;
+        }
+        if let Some(id) = want {
+            if let Some(n) = self.radio.now.as_mut() {
+                n.want_sent = true;
+                let label = format!("{} — {}", n.artist, n.title);
+                self.request_vinyl_edit(
+                    ctx.clone(),
+                    VinylEdit::Want {
+                        release_ids: vec![id],
+                        label,
+                    },
+                );
+            }
+        }
+    }
+
+    /// The bar's transport, right to left in `cui`: play/pause, skip, the
+    /// wantlist heart, stop. Marks, not words: a "Play" that turns into
+    /// "Pause" shoves the row sideways under the pointer, and four labels of
+    /// differing width in button chrome never read as one transport. `lead`
+    /// is the space before the first (rightmost) mark. Returns what was
+    /// asked for: stop, skip, and the record to want.
+    fn radio_controls(
+        &self,
+        cui: &mut egui::Ui,
+        now: &Option<RadioNow>,
+        tr: webview::Transport,
+        lead: f32,
+        btn: f32,
+    ) -> (bool, bool, Option<u64>) {
+        use crate::ui::icon;
         let mut stop = false;
         let mut skip = false;
         let mut want: Option<u64> = None;
-        // Marks, not words: a "Play" that turns into "Pause" shoves the row
-        // sideways under the pointer, and four labels of differing width in
-        // button chrome never read as one transport.
-        cui.add_space(PAD);
-        if icon::mark_button(&mut cui, BTN, true, "Switch the radio off", |p, c, ink| {
+        cui.add_space(lead);
+        if icon::mark_button(cui, btn, true, "Switch the radio off", |p, c, ink| {
             icon::stop(p, c, ink, 5.5)
         })
         .clicked()
         {
             stop = true;
         }
-        if let Some(n) = &now {
+        if let Some(n) = now {
             let owned = self.vinyl_owned.contains(&n.release_id);
             let wanted = self.vinyl_wanted.contains(&n.release_id) || n.want_sent;
             if !owned {
@@ -683,7 +930,7 @@ impl App {
                 };
                 // Once it's wanted the heart fills in the wantlist's own
                 // amber and stops answering the pointer.
-                let resp = icon::mark_button(&mut cui, BTN, !wanted, tip, |p, c, ink| {
+                let resp = icon::mark_button(cui, btn, !wanted, tip, |p, c, ink| {
                     let ink = if wanted {
                         icon::shelf_fill(VinylList::Wantlist)
                     } else {
@@ -696,7 +943,7 @@ impl App {
                 }
             }
         }
-        if icon::mark_button(&mut cui, BTN, true, "Skip to the next record", |p, c, ink| {
+        if icon::mark_button(cui, btn, true, "Skip to the next record", |p, c, ink| {
             icon::skip_next(p, c, ink, 6.0)
         })
         .clicked()
@@ -709,26 +956,33 @@ impl App {
         } else {
             "Play the record"
         };
-        if icon::mark_button(&mut cui, BTN, playing_phase && tr.ready, tip, |p, c, ink| {
+        if icon::mark_button(cui, btn, playing_phase && tr.ready, tip, |p, c, ink| {
             icon::play_pause(p, c, ink, tr.playing)
         })
         .clicked()
         {
             webview::toggle_pause();
         }
-        let words = egui::Rect::from_min_max(
-            row.min,
-            egui::pos2(cui.min_rect().left() - PAD, row.bottom()),
-        );
-        let seekable = tr.ready && tr.duration > 0.0;
-        let live = if seekable {
-            (tr.position / tr.duration).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        // The fraction the bar shows: the drag in flight, else the live one.
-        let shown = self.radio.scrub.unwrap_or(live);
-        let (line1, line2) = match &now {
+        (stop, skip, want)
+    }
+
+    /// The record's name and its caption in `rect`: the pressing, how it was
+    /// found, and the clock. Flat, both lines run on one row each, centred
+    /// on the rect and cut at its edge; upright (`wrap`), the name may take
+    /// two rows and the caption follows beneath.
+    #[allow(clippy::too_many_arguments)]
+    fn radio_words(
+        &self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        now: &Option<RadioNow>,
+        tr: webview::Transport,
+        seekable: bool,
+        shown: f32,
+        wrap: bool,
+    ) {
+        use crate::ui::tokens::{color, font};
+        let (line1, line2) = match now {
             Some(n) => {
                 let mut sub = n.sub.clone();
                 if !sub.is_empty() {
@@ -753,22 +1007,42 @@ impl App {
             }
             None => ("Finding a record to start from".to_string(), String::new()),
         };
-        let painter = ui.painter();
-        let clip = painter.with_clip_rect(words);
-        let g1 = clip.layout_no_wrap(line1, font::strong(font::body().size), color::LABEL);
-        let g2 = clip.layout_no_wrap(line2, font::caption(), color::LABEL_3);
-        let total = g1.size().y + 2.0 + g2.size().y;
-        let y0 = words.center().y - total * 0.5;
-        clip.galley(egui::pos2(words.left(), y0), g1.clone(), color::LABEL);
-        clip.galley(egui::pos2(words.left(), y0 + g1.size().y + 2.0), g2, color::LABEL_3);
+        let clip = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+        let title_font = font::strong(font::body().size);
+        if wrap {
+            let g1 = clip.layout(line1, title_font, color::LABEL, rect.width());
+            let two_rows = ui.fonts(|f| f.row_height(&font::body())) * 2.0 + 1.0;
+            let title_h = g1.size().y.min(two_rows);
+            let title_clip = clip.with_clip_rect(egui::Rect::from_min_size(
+                rect.min,
+                egui::vec2(rect.width(), title_h),
+            ));
+            title_clip.galley(rect.min, g1, color::LABEL);
+            let g2 = clip.layout_no_wrap(line2, font::caption(), color::LABEL_3);
+            clip.galley(egui::pos2(rect.left(), rect.top() + title_h + 2.0), g2, color::LABEL_3);
+        } else {
+            let g1 = clip.layout_no_wrap(line1, title_font, color::LABEL);
+            let g2 = clip.layout_no_wrap(line2, font::caption(), color::LABEL_3);
+            let total = g1.size().y + 2.0 + g2.size().y;
+            let y0 = rect.center().y - total * 0.5;
+            let h1 = g1.size().y;
+            clip.galley(egui::pos2(rect.left(), y0), g1, color::LABEL);
+            clip.galley(egui::pos2(rect.left(), y0 + h1 + 2.0), g2, color::LABEL_3);
+        }
+    }
 
-        // The scrubber: a hairline along the foot of the bar, the played
-        // part in the accent, a knob only once the pointer is on it. It
-        // reads as a progress line until you reach for it.
-        let strip = egui::Rect::from_min_max(
-            egui::pos2(cover.left(), cover.bottom()),
-            egui::pos2(bar.right() - PAD, cover.bottom() + SCRUB_H),
-        );
+    /// The scrubber in `strip`: a hairline, the played part in the accent,
+    /// a knob only once the pointer is on it. It reads as a progress line
+    /// until you reach for it; a click or a drag seeks the record.
+    fn radio_scrubber(
+        &mut self,
+        ui: &mut egui::Ui,
+        strip: egui::Rect,
+        tr: webview::Transport,
+        seekable: bool,
+        shown: f32,
+    ) {
+        use crate::ui::tokens::color;
         let sense = if seekable {
             egui::Sense::click_and_drag()
         } else {
@@ -814,28 +1088,6 @@ impl App {
         } else {
             self.radio.scrub = None;
         }
-
-        self.draw_radio_walk(ui, bar);
-
-        if stop {
-            self.radio_stop("Radio off");
-        }
-        if skip {
-            self.radio.skip = true;
-        }
-        if let Some(id) = want {
-            if let Some(n) = self.radio.now.as_mut() {
-                n.want_sent = true;
-                let label = format!("{} — {}", n.artist, n.title);
-                self.request_vinyl_edit(
-                    ctx.clone(),
-                    VinylEdit::Want {
-                        release_ids: vec![id],
-                        label,
-                    },
-                );
-            }
-        }
     }
 
     /// A radio record's cover: the local cache for a shelf record, the
@@ -858,7 +1110,7 @@ impl App {
     /// map and joined to the next by the thread that led there. A fresh
     /// start breaks the row. Hover a stop for how it was found; click it to
     /// lean the map in on it.
-    fn draw_radio_walk(&mut self, ui: &mut egui::Ui, bar: egui::Rect) {
+    fn draw_radio_walk(&mut self, ui: &mut egui::Ui, bar: egui::Rect, above: bool) {
         use crate::ui::tokens::{color, font, radius};
         let walk = self.radio.walk.clone();
         if walk.len() < 2 {
@@ -890,7 +1142,10 @@ impl App {
             + more_w.unwrap_or(0.0);
         let h = PAD + THUMB + 2.0 + NUM_H + PAD * 0.6;
         let row = egui::Rect::from_min_size(
-            egui::pos2(bar.center().x - w * 0.5, bar.bottom() + 8.0),
+            egui::pos2(
+                bar.center().x - w * 0.5,
+                if above { bar.top() - 8.0 - h } else { bar.bottom() + 8.0 },
+            ),
             egui::vec2(w, h),
         );
         // Shadows the map the same way the bar does.

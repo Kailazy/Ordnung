@@ -94,6 +94,11 @@ pub struct Config {
     /// browsing. Unknown values fall back to grid.
     #[serde(default = "default_vinyl_view")]
     pub vinyl_view: String,
+    /// Where the radio bar sits on the map: `"top"` (the default), `"bottom"`,
+    /// `"left"` or `"right"`. Set by dragging the bar; at a side it stands
+    /// upright with the cover on top.
+    #[serde(default = "default_radio_dock")]
+    pub radio_dock: String,
     /// How the record map gathers its records: `"artists"` (hubs are
     /// artists, the default) or `"genres"` (hubs are styles, so the map
     /// reads as genre clouds). Unknown values fall back to artists.
@@ -308,6 +313,10 @@ fn default_vinyl_sort() -> String {
 
 fn default_vinyl_view() -> String {
     "grid".to_string()
+}
+
+fn default_radio_dock() -> String {
+    "top".to_string()
 }
 
 fn default_nav_density() -> String {
@@ -675,6 +684,7 @@ impl Default for Config {
             vinyl_sort: default_vinyl_sort(),
             vinyl_sort_ascending: false,
             vinyl_view: default_vinyl_view(),
+            radio_dock: default_radio_dock(),
             graph_arrange: String::new(),
             nav_primary: default_nav_primary(),
             export_convert_for_older_players: false,
