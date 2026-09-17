@@ -26,12 +26,20 @@ review surface instead of a silent commit.
 
 ## 2. What the user does
 
-1. In the vinyl view, open the new **Tracklists** tab and press **Paste
-   tracklist…** (or ⌘V with a tracklist on the clipboard while the tab is
-   focused).
-2. A modal shows a text area, a name field (pre-filled from a `Tracklist:` /
-   title line, else "Pasted 17 Sep 2026") and a live parse preview:
-   *"24 tracks · 3 IDs · 2 lines skipped"*. Press **Match**.
+1. In the vinyl view, open the new **Tracklists** tab. There is no big
+   call-to-action: a small, quiet **Paste tracklist** text button sits at the
+   top of the tab in the same weight as the shelf's secondary controls (no
+   fill, no accent, hover reveals it). ⌘V with text on the clipboard while
+   the tab is focused does the same thing without the button.
+2. Pressing it opens a compact inline paste box, not a modal: a single-line
+   text field at the reference `control_row` height, with the name field and
+   a **Match** button on the same row. The box grows only as pasted text
+   grows: one line stays one line, a 25-line paste stretches it to fit those
+   lines (capped at about a third of the view, then it scrolls inside), and
+   deleting text shrinks it back. The row directly under it is the live
+   parse preview, *"24 tracks · 3 IDs · 2 lines skipped"*, which appears
+   only once there is text. The name pre-fills from a `Tracklist:` / title
+   line, else "Pasted 17 Sep 2026". Press **Match**.
 3. The list appears at once with every line in pasted order. A background
    job resolves lines top to bottom; each row fills in as its answer lands
    (cover thumb, record title, year, label + catno, format, confidence pip).
@@ -204,7 +212,7 @@ shelves do.
 | `best_candidate` | moves from `gui/jobs.rs` into `discogs.rs` | shared with the import auto-match |
 | tables + CRUD, schema v17 | `ordnung-core/src/catalog.rs` | |
 | `spawn_match_tracklist` / `run_match_tracklist` | `ordnung-gui/src/jobs.rs` | streams `JobMsg::LineMatched` per row; Abort via the existing cancel flag |
-| Tracklists tab, paste modal, row table | new `ordnung-gui/src/tracklists.rs` | `VinylTab::Tracklists`; rows through `control_row` and `ui/tokens.rs` |
+| Tracklists tab, inline paste box, row table | new `ordnung-gui/src/tracklists.rs` | `VinylTab::Tracklists`; the paste box is a `TextEdit::multiline` with `desired_rows(1)` and a height clamp that follows the galley, so it sizes to its text; rows through `control_row` and `ui/tokens.rs` |
 | Sheet / dig / map hooks | existing `open_release_sheet`, dig, graph | no new engines |
 
 Core stays explicit-only: matching runs only when the user presses Match or
@@ -221,7 +229,7 @@ touched. The CLI gets nothing in v1 (GUI is the primary front-end).
   tables, the background job, and `best_candidate` shared. DoD: a 25-line
   paste resolves end to end in the log with confidences; unit tests on
   scoring; a catalog test proving user picks survive re-match.
-- **C. Tracklists tab** (1–2 days). Paste modal with live preview, streaming
+- **C. Tracklists tab** (1–2 days). Subtle paste button, text-sized paste box with live preview, streaming
   row table with badges and actions, sheet/dig/map hooks, saved lists.
   DoD: verified in `make run`, rows share one control height, a full mix
   matched and wanted from the tab without leaving the app.
@@ -250,7 +258,7 @@ as one MINOR bump.
   other-pressings list. The row should say which pressing it chose (label +
   catno + year) so a wrong pick is visible at a glance.
 - **Rate limit.** One paste of 100 lines is about three minutes. Show the
-  estimate in the modal ("about 2 min") and keep Abort live; a second paste
+  estimate in the preview line ("about 2 min") and keep Abort live; a second paste
   queues behind the first rather than doubling the request rate.
 - **Non-Latin and transliterated names.** Fold accents; do not attempt
   transliteration in v1.
