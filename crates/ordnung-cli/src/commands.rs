@@ -843,8 +843,8 @@ fn parse_note(s: &str) -> Result<u8> {
     Ok((base + accidental).rem_euclid(12) as u8)
 }
 
-/// `export DEST [--playlist ID]... [--replace] [--player P]` — build a native
-/// rekordbox USB.
+/// `export DEST [--playlist ID]... [--replace] [--convert-for-older-players]`
+/// — build a native rekordbox USB.
 pub fn export(
     db: &Path,
     dest: &Path,

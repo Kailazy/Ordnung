@@ -106,12 +106,12 @@ pub struct Config {
     /// values fall back to `"digital"`. See `NavPrimary`.
     #[serde(default = "default_nav_primary")]
     pub nav_primary: String,
-    /// Which players USB exports are cut for: "modern" (CDJ-2000NXS2/3000
-    /// and newer, FLAC copied as-is) or "classic" (CDJ-2000/NXS/900 and
-    /// older, FLAC and >48 kHz converted to AIFF on the stick). Remembered
-    /// from the last export confirm; see `ordnung_rbdb::export::PlayerTarget`.
-    #[serde(default = "default_export_player")]
-    pub export_player: String,
+    /// USB exports convert FLAC and anything above 48 kHz to AIFF on the
+    /// stick, for players that can't play them (CDJ-2000/NXS/900 and
+    /// older). Remembered from the export confirm's checkbox; maps to
+    /// `ordnung_rbdb::export::PlayerTarget::Classic`.
+    #[serde(default)]
+    pub export_convert_for_older_players: bool,
     /// Which of the sidebar's three width tiers is in force: `"icon"`,
     /// `"narrow"` or `"wide"` (the default). The sidebar snaps between designed
     /// layouts rather than resizing freely, so what persists is the chosen tier,
@@ -318,9 +318,6 @@ fn default_nav_primary() -> String {
     "digital".to_string()
 }
 
-fn default_export_player() -> String {
-    "modern".to_string()
-}
 
 fn default_startup_view() -> String {
     "library".to_string()
@@ -680,7 +677,7 @@ impl Default for Config {
             vinyl_view: default_vinyl_view(),
             graph_arrange: String::new(),
             nav_primary: default_nav_primary(),
-            export_player: default_export_player(),
+            export_convert_for_older_players: false,
             nav_density: default_nav_density(),
             inspector_open: false,
             startup_view: default_startup_view(),

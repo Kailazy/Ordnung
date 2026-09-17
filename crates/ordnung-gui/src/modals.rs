@@ -2026,36 +2026,31 @@ selection.",
                         .weak(),
                     );
                 }
-                // Player generation: the one export-time policy with a real
-                // consequence for the audio written. Older players can't read
-                // FLAC or >48 kHz, so for them those files go over as AIFF.
+                // The one export-time audio policy, framed the way rekordbox
+                // frames it: a conversion checkbox, not a player model. Older
+                // players can't read FLAC or >48 kHz, so for them those files
+                // go over as AIFF.
                 use ordnung_rbdb::export::PlayerTarget;
                 ui.add_space(8.0);
-                let mut player = confirm.player;
-                ui.horizontal(|ui| {
-                    ui.label("For:");
-                    ui.selectable_value(&mut player, PlayerTarget::Modern, "CDJ-3000 / NXS2")
-                        .on_hover_note("CDJ-2000NXS2, XDJ-1000MK2, CDJ-3000 and newer. FLAC plays as-is.");
-                    ui.selectable_value(&mut player, PlayerTarget::Classic, "CDJ-2000 / NXS / older")
-                        .on_hover_note("CDJ-2000, CDJ-2000NXS, CDJ-900. FLAC and above 48 kHz become AIFF on the stick.");
-                });
-                if player == PlayerTarget::Classic {
-                    ui.label(
-                        egui::RichText::new(
-                            "FLAC and anything above 48 kHz is converted to 16-bit AIFF on the \
-stick (needs ffmpeg). Your library files stay as they are.",
-                        )
-                        .weak(),
-                    );
-                }
+                let mut convert = confirm.player == PlayerTarget::Classic;
+                ui.checkbox(
+                    &mut convert,
+                    "Convert FLAC and above 48 kHz to AIFF for older players",
+                )
+                .on_hover_note(
+                    "CDJ-2000, 2000NXS and 900 can't play FLAC or above 48 kHz. \
+Converted copies go on the stick; your library files stay as they are. Needs ffmpeg.",
+                );
+                let player = if convert {
+                    PlayerTarget::Classic
+                } else {
+                    PlayerTarget::Modern
+                };
                 if player != confirm.player {
                     if let Some(c) = self.export_confirm.as_mut() {
                         c.player = player;
                     }
-                    self.config.export_player = match player {
-                        PlayerTarget::Classic => "classic".into(),
-                        PlayerTarget::Modern => "modern".into(),
-                    };
+                    self.config.export_convert_for_older_players = convert;
                     if let Err(e) = self.config.save() {
                         self.status = format!("Couldn't save settings: {e}");
                     }

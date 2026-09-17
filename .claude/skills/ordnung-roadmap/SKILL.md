@@ -150,8 +150,10 @@ anything above 48 kHz to 16-bit AIFF *on the stick only* through the Phase 4
 ffmpeg engine (`convert_file_resampled`), refusing up front with
 `NeedsFfmpeg` when ffmpeg is missing. Converted files take the `.aiff` name
 under `/Contents` (so merges find them), rows carry the real size/rate, and
-the report counts `transcoded`. CLI `--player modern|classic`; GUI: a "For:"
-toggle in the export confirm, remembered in `Config::export_player`. **Golden-fixture diffing (same day):** `ordnung_rbdb::golden::diff_pdb`
+the report counts `transcoded`. CLI `--convert-for-older-players`; GUI: a
+checkbox in the export confirm (framed like rekordbox's own conversion
+preference, not a player picker), remembered in
+`Config::export_convert_for_older_players`. **Golden-fixture diffing (same day):** `ordnung_rbdb::golden::diff_pdb`
 walks a rekordbox-made and an Ordnung-made `export.pdb` raw — header, every
 table's page/row accounting, every track row field at its documented
 offset plus the resolved intern names — and labels each delta explained
