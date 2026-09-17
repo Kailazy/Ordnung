@@ -109,7 +109,10 @@ write only under `/Contents`; the library file is never touched.
 
 1. Export a tiny library (2–3 tracks, 1 playlist, a few cues) from Ordnung.
 2. Re-parse our `export.pdb`/ANLZ with rekordcrate; diff structure vs a reference
-   export produced by rekordbox for the same files.
+   export produced by rekordbox for the same files:
+   `cargo run -p ordnung-rbdb --example golden_diff -- GOLDEN.pdb OURS.pdb`
+   (`golden::diff_pdb`; every delta is marked explained or `!!`, exit 1 on
+   any `!!`). `tests/golden_diff.rs` keeps the demo fixture fully explained.
 3. Load on real CDJ/XDJ (or rekordbox in export mode) and confirm tracks, waveforms,
    beatgrids, cues, and playlists appear.
 

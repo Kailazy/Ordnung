@@ -151,9 +151,19 @@ ffmpeg engine (`convert_file_resampled`), refusing up front with
 `NeedsFfmpeg` when ffmpeg is missing. Converted files take the `.aiff` name
 under `/Contents` (so merges find them), rows carry the real size/rate, and
 the report counts `transcoded`. CLI `--player modern|classic`; GUI: a "For:"
-toggle in the export confirm, remembered in `Config::export_player`. Still
-open here: golden-fixture diffing, the compatibility matrix, and the DLP
-`cue` table (cue banks — left empty).
+toggle in the export confirm, remembered in `Config::export_player`. **Golden-fixture diffing (same day):** `ordnung_rbdb::golden::diff_pdb`
+walks a rekordbox-made and an Ordnung-made `export.pdb` raw — header, every
+table's page/row accounting, every track row field at its documented
+offset plus the resolved intern names — and labels each delta explained
+(ids, dates, per-export interning, fixture audio, older-rekordbox constants,
+pages the golden rewrote) or not. `tests/golden_diff.rs` rebuilds the demo
+fixture's tracks from its own rows, exports them, and fails on any
+unexplained delta (and proves a bumped tempo is caught);
+`examples/golden_diff.rs` runs it on any two files. Still open here: the
+hardware compatibility matrix (needs players; only one generation has
+accepted a stick so far), ANLZ golden diffing (needs the EYEBAGS stick
+mounted — no ANLZ fixture is in the repo), and the DLP `cue` table (cue
+banks — left empty).
 
 ## Later — GUI  `[~]`
 `ordnung-gui` wraps `ordnung-core` (library grid, harmonic mixing view).

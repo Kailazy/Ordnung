@@ -113,7 +113,7 @@ pub struct RbExport {
 }
 
 // Table/page type ids (DeviceSQL `PageType`).
-const TYPE_TRACKS: u32 = 0;
+pub(crate) const TYPE_TRACKS: u32 = 0;
 const TYPE_GENRES: u32 = 1;
 const TYPE_ARTISTS: u32 = 2;
 const TYPE_ALBUMS: u32 = 3;
@@ -124,7 +124,7 @@ const TYPE_PLAYLIST_ENTRIES: u32 = 8;
 const TYPE_ARTWORK: u32 = 13;
 
 /// Byte size of a page header; the row heap starts right after it.
-const PAGE_HEADER: usize = 0x28;
+pub(crate) const PAGE_HEADER: usize = 0x28;
 /// Byte size of one row group in the page footer: 16 u16 row offsets, a u16
 /// presence bitmask, and a u16 of padding.
 const ROW_GROUP: usize = 36;
@@ -179,6 +179,12 @@ pub fn read_export(pdb_path: &Path) -> Result<RbExport, ReadError> {
         source,
     })?;
     parse_export(&data)
+}
+
+/// Parse an `export.pdb` already in memory (the golden differ reads both
+/// files once and walks them raw as well as through this view).
+pub fn read_export_bytes(data: &[u8]) -> Result<RbExport, ReadError> {
+    parse_export(data)
 }
 
 fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
@@ -430,7 +436,7 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
 
 /// Follow one table's linked list of pages, returning each page's byte offset.
 /// Cycles and out-of-file links terminate the walk instead of hanging it.
-fn table_pages(data: &[u8], page_size: usize, first: u32, last: u32) -> Vec<usize> {
+pub(crate) fn table_pages(data: &[u8], page_size: usize, first: u32, last: u32) -> Vec<usize> {
     let max_pages = data.len() / page_size + 1;
     let mut pages = Vec::new();
     let mut index = first;
@@ -458,7 +464,7 @@ fn table_pages(data: &[u8], page_size: usize, first: u32, last: u32) -> Vec<usiz
 /// Yield the absolute byte offset of every present row on a data page. Row
 /// offsets live in 36-byte groups at the page's end: 16 u16 offsets (relative
 /// to the heap at `page + 0x28`), then a presence bitmask.
-fn page_rows(data: &[u8], page_size: usize, page_off: usize, want_type: u32) -> Vec<usize> {
+pub(crate) fn page_rows(data: &[u8], page_size: usize, page_off: usize, want_type: u32) -> Vec<usize> {
     let mut rows = Vec::new();
     if u32_at(data, page_off + 8) != Some(want_type) {
         return rows;
@@ -508,7 +514,7 @@ fn page_rows(data: &[u8], page_size: usize, page_off: usize, want_type: u32) -> 
 /// `(len+1)*2+1` header, bytes follow) and long (`0x40` ASCII / `0x90`
 /// UTF-16LE or ISRC, u16 total length including the 4-byte header).
 /// Malformed → `None`.
-fn dsql_string(data: &[u8], pos: usize) -> Option<String> {
+pub(crate) fn dsql_string(data: &[u8], pos: usize) -> Option<String> {
     let b0 = *data.get(pos)?;
     if b0 & 1 == 1 {
         let len = ((b0 >> 1) as usize).checked_sub(1)?;
@@ -539,12 +545,12 @@ fn dsql_string(data: &[u8], pos: usize) -> Option<String> {
     }
 }
 
-fn u16_at(data: &[u8], pos: usize) -> Option<u16> {
+pub(crate) fn u16_at(data: &[u8], pos: usize) -> Option<u16> {
     data.get(pos..pos + 2)
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
 }
 
-fn u32_at(data: &[u8], pos: usize) -> Option<u32> {
+pub(crate) fn u32_at(data: &[u8], pos: usize) -> Option<u32> {
     data.get(pos..pos + 4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
