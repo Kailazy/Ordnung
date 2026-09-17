@@ -19,7 +19,8 @@
 //! the release cache, and playback is the same YouTube panel the sheet uses.
 
 use super::*;
-use crate::dig::DigThread;
+use crate::dig::{DigQuery, DigThread, VARIOUS_ARTIST_ID};
+use ordnung_core::discogs::BrowseThread;
 use std::sync::mpsc::Receiver;
 
 /// The record on air, as the map's bar shows it.
@@ -50,6 +51,9 @@ pub(crate) struct RadioSong {
     pub youtube_id: String,
     /// Side and position as pressed (`A2`); empty for a video no track claimed.
     pub position: String,
+    /// Who performs this track, when the record itself doesn't say: set on
+    /// compilations and splits, empty on a single-artist record.
+    pub artist: String,
     pub title: String,
     /// As Discogs writes it (`5:18`), or empty.
     pub duration: String,
@@ -69,6 +73,7 @@ fn radio_songs(d: &discogs::ReleaseDetail, artist: &str) -> Vec<RadioSong> {
             out.push(RadioSong {
                 youtube_id: id.to_string(),
                 position: t.position.clone(),
+                artist: t.artist.clone().unwrap_or_default(),
                 title: t.title.clone(),
                 duration: t.duration.clone(),
             });
@@ -95,6 +100,7 @@ fn radio_songs(d: &discogs::ReleaseDetail, artist: &str) -> Vec<RadioSong> {
             out.push(RadioSong {
                 youtube_id: id.to_string(),
                 position: String::new(),
+                artist: String::new(),
                 title: v.title.clone(),
                 duration: v
                     .duration_secs
@@ -442,10 +448,22 @@ impl App {
                         self.radio.detail_rx = None;
                         let artist = self.radio.now.as_ref().map(|n| n.artist.clone()).unwrap_or_default();
                         let songs = detail.as_ref().map(|d| radio_songs(d, &artist)).unwrap_or_default();
-                        let video = songs.first().map(|s| s.youtube_id.clone());
+                        // One song of the record, at random: a walk that
+                        // always opened at A1 would hear every record's
+                        // lead cut and nothing else. A pressed track over a
+                        // stray upload (a full side, a mix) when there is one.
+                        let tracks: Vec<usize> = (0..songs.len())
+                            .filter(|&i| !songs[i].position.is_empty())
+                            .collect();
+                        let pick = if tracks.is_empty() {
+                            (!songs.is_empty()).then(|| self.radio_roll(songs.len()))
+                        } else {
+                            Some(tracks[self.radio_roll(tracks.len())])
+                        };
+                        let video = pick.and_then(|i| songs.get(i)).map(|s| s.youtube_id.clone());
                         if let Some(n) = self.radio.now.as_mut() {
                             n.songs = songs;
-                            n.song = 0;
+                            n.song = pick.unwrap_or(0);
                         }
                         match video {
                             Some(v) => self.radio_play(release_id, v, true, frame),
@@ -529,9 +547,26 @@ impl App {
                 } else {
                     from
                 };
+                // A compilation names no artist to follow ("Various" is a
+                // placeholder), so its artist thread is closed, unless the
+                // walk came onto it down a real artist: that artist is on
+                // the record, so the thread carries on as it was.
+                let own_artist = head.query(DigThread::Artist).is_some();
+                let carry: Option<u64> = if !own_artist
+                    && matches!(head.via, Some((DigThread::Artist, _)))
+                {
+                    head.parent
+                        .and_then(|p| dig.steps.get(p))
+                        .and_then(|p| p.artist_ids.iter().copied().find(|id| *id != VARIOUS_ARTIST_ID))
+                } else {
+                    None
+                };
                 let open: Vec<DigThread> = [DigThread::Artist, DigThread::Label, DigThread::Style]
                     .into_iter()
-                    .filter(|t| !tried.contains(t) && head.query(*t).is_some())
+                    .filter(|t| {
+                        !tried.contains(t)
+                            && (head.query(*t).is_some() || (*t == DigThread::Artist && carry.is_some()))
+                    })
                     .collect();
                 if open.is_empty() {
                     if head.detail_resolved || since.elapsed() > WAIT_IDS {
@@ -557,7 +592,15 @@ impl App {
                     .collect();
                 let pool = if fresh.is_empty() { open } else { fresh };
                 let thread = pool[self.radio_roll(pool.len())];
-                self.dig_step(thread);
+                match (thread, carry) {
+                    (DigThread::Artist, Some(id)) if !own_artist => {
+                        self.dig_take(
+                            DigThread::Artist,
+                            DigQuery::Browse(BrowseThread::Artist, id),
+                        );
+                    }
+                    _ => self.dig_step(thread),
+                }
                 self.radio.phase = Phase::Landing {
                     from,
                     thread,
@@ -753,7 +796,10 @@ impl App {
     /// as a record played.
     fn radio_play(&mut self, release_id: u64, video: String, new_record: bool, frame: &eframe::Frame) {
         let title = match &self.radio.now {
-            Some(n) => format!("{} — {}", n.artist, n.title),
+            Some(n) => match n.songs.get(n.song).filter(|s| !s.artist.is_empty()) {
+                Some(s) => format!("{} — {}", s.artist, s.title),
+                None => format!("{} — {}", n.artist, n.title),
+            },
             None => "Radio".to_string(),
         };
         // One sound at a time: the radio takes over from the player bar.
@@ -1301,10 +1347,17 @@ impl App {
                 egui::pos2(title_left, rect.top()),
                 egui::pos2(right - dur_w - space::S3, rect.bottom()),
             ));
+            // The performer leads on a compilation, where the record's own
+            // credit says "Various" and the song's says who.
+            let words = if song.artist.is_empty() {
+                song.title.clone()
+            } else {
+                format!("{} – {}", song.artist, song.title)
+            };
             title_clip.text(
                 egui::pos2(title_left, cy),
                 egui::Align2::LEFT_CENTER,
-                &song.title,
+                words,
                 font::caption(),
                 if on { color::LABEL } else { color::LABEL_2 },
             );
@@ -1339,7 +1392,11 @@ impl App {
                 // The song, when the record has more than one to tell apart.
                 if n.songs.len() > 1 {
                     if let Some(s) = n.songs.get(n.song) {
-                        parts.push(s.title.clone());
+                        parts.push(if s.artist.is_empty() {
+                            s.title.clone()
+                        } else {
+                            format!("{} – {}", s.artist, s.title)
+                        });
                     }
                 }
                 if !n.sub.is_empty() {

@@ -122,6 +122,9 @@ fn style_entity(styles: &[String]) -> u64 {
     h
 }
 
+/// Discogs's placeholder artist for a compilation: names nobody.
+pub(crate) const VARIOUS_ARTIST_ID: u64 = 194;
+
 /// One record on the dig path.
 pub(crate) struct DigStep {
     /// Discogs release id. The identity of a step even for the first one, which
@@ -179,9 +182,13 @@ impl DigStep {
     /// on it either way.
     pub(crate) fn query(&self, thread: DigThread) -> Option<DigQuery> {
         match thread {
+            // "Various" (Discogs id 194) is a compilation's placeholder, not
+            // an artist to follow. The detail fetch already drops it; this
+            // catches a detail cached before it did.
             DigThread::Artist => self
                 .artist_ids
-                .first()
+                .iter()
+                .find(|id| **id != VARIOUS_ARTIST_ID)
                 .map(|id| DigQuery::Browse(BrowseThread::Artist, *id)),
             DigThread::Label => self
                 .label_ids
@@ -1252,7 +1259,7 @@ impl App {
 
     /// Take one concrete query out of the record on screen, spending the
     /// primed page when this exact query was the one speculated.
-    fn dig_take(&mut self, thread: DigThread, query: DigQuery) {
+    pub(crate) fn dig_take(&mut self, thread: DigThread, query: DigQuery) {
         if let Some(dig) = self.dig.as_mut() {
             let key = (dig.head().release_id, thread, query.entity());
             if let Some(page) = dig.ready.remove(&key) {
