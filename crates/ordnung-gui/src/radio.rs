@@ -100,6 +100,10 @@ pub(crate) struct Radio {
     /// Kept after the radio goes off, so the map still reads; a fresh
     /// switch-on starts a new walk.
     pub walk: Vec<RadioStop>,
+    /// A drag on the bar's scrubber in flight: the fraction under the
+    /// pointer, which the bar paints instead of the live position until
+    /// the drag lands and seeks.
+    pub scrub: Option<f32>,
 }
 
 impl Default for Radio {
@@ -114,6 +118,7 @@ impl Default for Radio {
             reseeds: 0,
             played: 0,
             walk: Vec::new(),
+            scrub: None,
         }
     }
 }
@@ -555,15 +560,22 @@ impl App {
     }
 
     /// The bar over the map while the radio is on: cover, record, how it was
-    /// found, the clock, and the controls.
+    /// found, the clock, the controls, and a scrubber along the foot.
     pub(crate) fn draw_radio_bar(&mut self, ui: &mut egui::Ui, canvas: egui::Rect, ctx: &egui::Context) {
+        use crate::ui::icon;
         use crate::ui::tokens::{color, font, radius};
         if !self.radio.on {
             return;
         }
         const W: f32 = 660.0;
-        const H: f32 = 64.0;
         const PAD: f32 = 10.0;
+        const COVER: f32 = 44.0;
+        /// The strip under the cover and words the scrubber lives in: a
+        /// hairline with a comfortable hit area around it.
+        const SCRUB_H: f32 = 16.0;
+        const H: f32 = PAD + COVER + SCRUB_H + PAD * 0.4;
+        /// The painted controls' square.
+        const BTN: f32 = 28.0;
         let w = W.min(canvas.width() - 24.0);
         let bar = egui::Rect::from_min_size(
             egui::pos2(canvas.center().x - w * 0.5, canvas.top() + 12.0),
@@ -576,71 +588,93 @@ impl App {
             egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE),
         );
         let now = self.radio.now.clone();
-        let cover = egui::Rect::from_min_size(
-            bar.min + egui::vec2(PAD, PAD),
-            egui::Vec2::splat(H - PAD * 2.0),
-        );
+        let cover = egui::Rect::from_min_size(bar.min + egui::vec2(PAD, PAD), egui::Vec2::splat(COVER));
         let tex = now
             .as_ref()
             .and_then(|n| self.radio_cover(n.key, n.thumb_url.as_deref()));
         paint_cover(ui.painter(), cover, tex);
-        // The controls take the right end, as much as they need; the words
-        // get what's left.
-        let ctl = egui::Rect::from_min_max(egui::pos2(cover.right() + PAD, bar.top()), bar.max);
+        let tr = webview::transport();
+        // The top row, level with the cover: the controls take the right
+        // end, as much as they need; the words get what's left.
+        let row = egui::Rect::from_min_max(
+            egui::pos2(cover.right() + PAD, cover.top()),
+            egui::pos2(bar.right(), cover.bottom()),
+        );
         let mut cui = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(ctl)
+                .max_rect(row)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
         let mut stop = false;
         let mut skip = false;
         let mut want: Option<u64> = None;
-        crate::ui::control_row(&mut cui, |ui| {
-            ui.add_space(PAD);
-            if ui.button("Stop").on_hover_note("Switch the radio off").clicked() {
-                stop = true;
-            }
-            if let Some(n) = &now {
-                let owned = self.vinyl_owned.contains(&n.release_id);
-                let wanted = self.vinyl_wanted.contains(&n.release_id) || n.want_sent;
-                if !owned {
-                    let label = if wanted { "Wanted" } else { "Want" };
-                    let tip = if wanted {
-                        "On your Discogs wantlist"
+        // Marks, not words: a "Play" that turns into "Pause" shoves the row
+        // sideways under the pointer, and four labels of differing width in
+        // button chrome never read as one transport.
+        cui.add_space(PAD);
+        if icon::mark_button(&mut cui, BTN, true, "Switch the radio off", |p, c, ink| {
+            icon::stop(p, c, ink, 5.5)
+        })
+        .clicked()
+        {
+            stop = true;
+        }
+        if let Some(n) = &now {
+            let owned = self.vinyl_owned.contains(&n.release_id);
+            let wanted = self.vinyl_wanted.contains(&n.release_id) || n.want_sent;
+            if !owned {
+                let tip = if wanted {
+                    "On your Discogs wantlist"
+                } else {
+                    "Put this record on your Discogs wantlist"
+                };
+                // Once it's wanted the heart fills in the wantlist's own
+                // amber and stops answering the pointer.
+                let resp = icon::mark_button(&mut cui, BTN, !wanted, tip, |p, c, ink| {
+                    let ink = if wanted {
+                        icon::shelf_fill(VinylList::Wantlist)
                     } else {
-                        "Put this record on your Discogs wantlist"
+                        ink
                     };
-                    if ui
-                        .add_enabled(!wanted, egui::Button::new(label))
-                        .on_hover_note(tip)
-                        .clicked()
-                    {
-                        want = Some(n.release_id);
-                    }
+                    icon::wantlist(p, c, 7.0, ink, wanted)
+                });
+                if resp.clicked() {
+                    want = Some(n.release_id);
                 }
             }
-            if ui.button("Next").on_hover_note("Skip to the next record").clicked() {
-                skip = true;
-            }
-            let tr = webview::transport();
-            let playing_phase = matches!(self.radio.phase, Phase::Playing { .. });
-            let (label, tip) = if tr.playing {
-                ("Pause", "Pause the record")
-            } else {
-                ("Play", "Play the record")
-            };
-            if ui
-                .add_enabled(playing_phase && tr.ready, egui::Button::new(label))
-                .on_hover_note(tip)
-                .clicked()
-            {
-                webview::toggle_pause();
-            }
-        });
+        }
+        if icon::mark_button(&mut cui, BTN, true, "Skip to the next record", |p, c, ink| {
+            icon::skip_next(p, c, ink, 6.0)
+        })
+        .clicked()
+        {
+            skip = true;
+        }
+        let playing_phase = matches!(self.radio.phase, Phase::Playing { .. });
+        let tip = if tr.playing {
+            "Pause the record"
+        } else {
+            "Play the record"
+        };
+        if icon::mark_button(&mut cui, BTN, playing_phase && tr.ready, tip, |p, c, ink| {
+            icon::play_pause(p, c, ink, tr.playing)
+        })
+        .clicked()
+        {
+            webview::toggle_pause();
+        }
         let words = egui::Rect::from_min_max(
-            egui::pos2(cover.right() + PAD, bar.top()),
-            egui::pos2(cui.min_rect().left() - PAD, bar.bottom()),
+            row.min,
+            egui::pos2(cui.min_rect().left() - PAD, row.bottom()),
         );
+        let seekable = tr.ready && tr.duration > 0.0;
+        let live = if seekable {
+            (tr.position / tr.duration).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        // The fraction the bar shows: the drag in flight, else the live one.
+        let shown = self.radio.scrub.unwrap_or(live);
         let (line1, line2) = match &now {
             Some(n) => {
                 let mut sub = n.sub.clone();
@@ -651,11 +685,10 @@ impl App {
                     Some((t, m)) => format!("via {} {}", t.label(), m),
                     None => "where the radio started".to_string(),
                 });
-                let tr = webview::transport();
-                if tr.ready && tr.duration > 0.0 {
+                if seekable {
                     sub.push_str(&format!(
                         " · {} / {}",
-                        crate::audio::fmt_time(tr.position),
+                        crate::audio::fmt_time(shown * tr.duration),
                         crate::audio::fmt_time(tr.duration)
                     ));
                 } else if matches!(self.radio.phase, Phase::Loading { .. }) {
@@ -675,6 +708,59 @@ impl App {
         let y0 = words.center().y - total * 0.5;
         clip.galley(egui::pos2(words.left(), y0), g1.clone(), color::LABEL);
         clip.galley(egui::pos2(words.left(), y0 + g1.size().y + 2.0), g2, color::LABEL_3);
+
+        // The scrubber: a hairline along the foot of the bar, the played
+        // part in the accent, a knob only once the pointer is on it. It
+        // reads as a progress line until you reach for it.
+        let strip = egui::Rect::from_min_max(
+            egui::pos2(cover.left(), cover.bottom()),
+            egui::pos2(bar.right() - PAD, cover.bottom() + SCRUB_H),
+        );
+        let sense = if seekable {
+            egui::Sense::click_and_drag()
+        } else {
+            egui::Sense::hover()
+        };
+        let resp = ui.interact(strip, ui.id().with("radio_scrub"), sense);
+        let hot = seekable && (resp.hovered() || resp.dragged() || self.radio.scrub.is_some());
+        let y = strip.center().y + 1.0;
+        let (x0, x1) = (strip.left(), strip.right());
+        let track = if hot { 3.0 } else { 2.0 };
+        let p = ui.painter();
+        p.line_segment(
+            [egui::pos2(x0, y), egui::pos2(x1, y)],
+            egui::Stroke::new(track, color::SEPARATOR_OPAQUE),
+        );
+        if seekable {
+            let kx = x0 + shown * (x1 - x0);
+            p.line_segment(
+                [egui::pos2(x0, y), egui::pos2(kx, y)],
+                egui::Stroke::new(track, if hot { color::ACCENT_HOVER } else { color::ACCENT }),
+            );
+            if hot {
+                p.circle_filled(egui::pos2(kx, y), 5.0, egui::Color32::WHITE);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            let frac_at = |pos: egui::Pos2| ((pos.x - x0) / (x1 - x0)).clamp(0.0, 1.0);
+            if resp.dragged() || resp.drag_started() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    self.radio.scrub = Some(frac_at(pos));
+                }
+            }
+            if resp.drag_stopped() {
+                if let Some(f) = self.radio.scrub.take() {
+                    webview::seek(f * tr.duration);
+                }
+            }
+            if resp.clicked() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    webview::seek(frac_at(pos) * tr.duration);
+                }
+                self.radio.scrub = None;
+            }
+        } else {
+            self.radio.scrub = None;
+        }
 
         self.draw_radio_walk(ui, bar);
 

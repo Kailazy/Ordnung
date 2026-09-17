@@ -82,6 +82,68 @@ pub fn play_pause(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, playing:
     }
 }
 
+/// A stop square centred on `c`, `r` to each edge.
+pub fn stop(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
+    p.rect_filled(egui::Rect::from_center_size(c, egui::Vec2::splat(r * 2.0)), 1.5, col);
+}
+
+/// Skip: a play triangle running into a bar, the next-track mark.
+pub fn skip_next(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
+    let h = r * 0.9;
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(c.x - r, c.y - h),
+            egui::pos2(c.x + r * 0.45, c.y),
+            egui::pos2(c.x - r, c.y + h),
+        ],
+        col,
+        egui::Stroke::NONE,
+    ));
+    p.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(c.x + r * 0.6, c.y - h), egui::pos2(c.x + r, c.y + h)),
+        0.5,
+        col,
+    );
+}
+
+/// A frameless square button carrying one painted mark: `side` on each edge,
+/// the mark drawn by `paint` at the centre in the ink the pointer earns it.
+/// Rests grey, goes white under the pointer on a soft rounded ground, and dims
+/// with the pointer ignored when `enabled` is false. `tip` is the hover note.
+///
+/// The transport rows use this so a pause, a skip and a stop read as one set of
+/// marks rather than four words of differing width in button chrome.
+pub fn mark_button(
+    ui: &mut egui::Ui,
+    side: f32,
+    enabled: bool,
+    tip: &str,
+    paint: impl FnOnce(&egui::Painter, egui::Pos2, egui::Color32),
+) -> egui::Response {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(egui::Vec2::splat(side), sense);
+    let resp = if enabled {
+        resp.on_hover_note(tip)
+    } else {
+        resp.on_disabled_hover_text(super::hover::note(tip))
+    };
+    let ink = if !enabled {
+        REST.gamma_multiply(0.45)
+    } else {
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, radius::SM, color::SURFACE_HOVER);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        col(&resp)
+    };
+    paint(ui.painter(), rect.center(), ink);
+    resp
+}
+
 // --- Tour / feature marks -------------------------------------------------
 //
 // Drawn rather than set as text, for the reason in the module doc: a font glyph
