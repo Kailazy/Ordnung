@@ -155,12 +155,13 @@ struct TrackRow {
     /// Per-bin peak envelope (`Analysis::waveform_preview`) for the inline
     /// Waveform column; empty when the track isn't analyzed. Loaded alongside the
     /// other analysis-derived fields in `load_rows`, so the cell paints with no
-    /// extra query.
-    waveform: Vec<u8>,
+    /// extra query. Shared with `RowSources`' cache rather than copied: a
+    /// reload that found the catalog unchanged rebuilds rows from it.
+    waveform: Arc<Vec<u8>>,
     /// Per-bin `[low, mid, high]` band energy (`Analysis::waveform_bands`) for the
     /// Waveform column's colour; empty for pre-v10 analyses (cell degrades to a
     /// height ramp).
-    waveform_bands: Vec<u8>,
+    waveform_bands: Arc<Vec<u8>>,
     /// Raw `added_at` unix timestamp (seconds) behind `added`, so the Added
     /// column sorts by true recency rather than the rounded label.
     added_at: i64,
@@ -1076,6 +1077,18 @@ struct NavDrag {
 
 struct App {
     db_path: PathBuf,
+    /// Tells `reload` whether anything has written the catalog since it last
+    /// ran, so a view switch or a search keystroke re-queries only its rows.
+    /// `None` when the probe couldn't open, which just means every reload
+    /// does the full refresh.
+    catalog_probe: Option<ordnung_core::catalog::ChangeProbe>,
+    /// The catalog-wide inputs `load_rows` needs (every track's analysis,
+    /// added-at stamp and external-artwork flag), kept between reloads.
+    row_sources: crate::table::RowSources,
+    /// Whether the Vinyl section's record lists have been loaded since the
+    /// catalog last changed. They stay loaded when the section is left; only
+    /// the cover textures and the seller listing cache are dropped.
+    vinyl_loaded: bool,
     rows: Vec<TrackRow>,
     filter: String,
     /// When a pending search-box edit should be applied, if any.

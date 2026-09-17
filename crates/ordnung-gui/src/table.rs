@@ -2611,19 +2611,124 @@ pub(crate) fn fmt_added(added_at: i64, now: i64) -> String {
     }
 }
 
-/// Load the rows for `view`.
+/// The catalog-wide inputs to [`load_rows`] that depend on neither the view
+/// nor the search text, kept between reloads so a view switch or a keystroke
+/// re-queries only the rows themselves. The analyses are the bulk of it
+/// (~31 KB of waveform per track, every track in the catalog), so the rows
+/// share those buffers by `Arc` instead of each reload copying them out
+/// again. Refilled only when the catalog has changed (see `App::reload`).
+pub(crate) struct RowSources {
+    /// Set by [`RowSources::invalidate`] when the catalog changed; the next
+    /// [`load_rows`] re-reads everything before building rows.
+    stale: bool,
+    /// The unfiltered Library listing, the one view whose row query is itself
+    /// a full-table read. Filled on the first unfiltered Library load after a
+    /// change; searches and playlists still query the catalog directly.
+    library: Option<Vec<Track>>,
+    /// Tracks with a successfully fetched external (Discogs) cover.
+    ext_art: HashSet<Id>,
+    /// Every track's `added_at` unix timestamp.
+    added_at: HashMap<Id, i64>,
+    /// Every analyzed track's analysis, envelopes split out for sharing.
+    analyses: HashMap<Id, RowAnalysis>,
+}
+
+/// One track's analysis as the table needs it: the scalar fields, plus the
+/// two envelopes moved out into buffers a row can hold without copying.
+struct RowAnalysis {
+    analysis: Analysis,
+    waveform: Arc<Vec<u8>>,
+    waveform_bands: Arc<Vec<u8>>,
+}
+
+impl Default for RowSources {
+    /// Empty and stale, so the first load reads the catalog.
+    fn default() -> Self {
+        Self {
+            stale: true,
+            library: None,
+            ext_art: HashSet::new(),
+            added_at: HashMap::new(),
+            analyses: HashMap::new(),
+        }
+    }
+}
+
+impl RowSources {
+    /// Mark everything held here as out of date.
+    pub(crate) fn invalidate(&mut self) {
+        self.stale = true;
+        self.library = None;
+    }
+
+    /// Re-read the catalog-wide inputs from `catalog` if they are stale.
+    fn ensure_fresh(&mut self, catalog: &Catalog) -> Result<(), String> {
+        if !self.stale {
+            return Ok(());
+        }
+        self.ext_art = catalog
+            .external_artwork_ids()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .collect();
+        // `added_at` is catalog bookkeeping (not on `Track`), pulled in one
+        // query; `load_rows` formats it relative to now.
+        self.added_at = catalog
+            .added_at_all()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .collect();
+        // Every track's analysis in one query rather than one query per row.
+        // The envelopes (~31 KB apiece) are *moved* out of each `Analysis`
+        // into their shared buffers, never cloned.
+        self.analyses = catalog
+            .analyses_by_track()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(id, mut a)| {
+                let waveform = std::mem::take(&mut a.waveform_preview);
+                let waveform_bands = std::mem::take(&mut a.waveform_bands);
+                (
+                    id,
+                    RowAnalysis {
+                        analysis: a,
+                        waveform: Arc::new(waveform),
+                        waveform_bands: Arc::new(waveform_bands),
+                    },
+                )
+            })
+            .collect();
+        self.stale = false;
+        Ok(())
+    }
+}
+
+/// Load the rows for `view`, re-reading `sources` from the catalog first when
+/// it has been invalidated.
 pub(crate) fn load_rows(
     db: &Path,
     filter: &str,
     view: &LibraryView,
+    sources: &mut RowSources,
 ) -> Result<Vec<TrackRow>, String> {
     let catalog = Catalog::open(db).map_err(|e| e.to_string())?;
+    sources.ensure_fresh(&catalog)?;
     let q = if filter.trim().is_empty() {
         None
     } else {
         Some(filter.trim())
     };
     let tracks = match view {
+        // The whole, unfiltered library is the one listing worth keeping: it's
+        // a full read of the tracks table, and it's what every switch back
+        // from a playlist or the Vinyl section lands on.
+        LibraryView::Library if q.is_none() => match &sources.library {
+            Some(all) => Ok(all.clone()),
+            None => catalog.list_tracks(None, 0).map(|all| {
+                sources.library = Some(all.clone());
+                all
+            }),
+        },
         LibraryView::Library => catalog.list_tracks(q, 0),
         LibraryView::RecentlyAdded => catalog.list_recently_added(q),
         LibraryView::Playlist(id) => catalog.list_playlist_tracks(*id, q),
@@ -2636,29 +2741,22 @@ pub(crate) fn load_rows(
         | LibraryView::Usb(..) => Ok(Vec::new()),
     }
     .map_err(|e| e.to_string())?;
-    let ext_art: HashSet<Id> = catalog
-        .external_artwork_ids()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .collect();
-    // `added_at` is catalog bookkeeping (not on `Track`), pulled in one query and
-    // formatted relative to now so the Added column reads "today / 3d ago".
-    let added_at: HashMap<Id, i64> = catalog
-        .added_at_all()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .collect();
+    let RowSources {
+        ext_art,
+        added_at,
+        analyses,
+        ..
+    } = &*sources;
+    // `added_at` is formatted relative to now so the Added column reads
+    // "today / 3d ago".
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    // Every row's analysis in one query rather than one query per row. `remove`
-    // below hands each row an *owned* `Analysis`, so its waveform blobs (~31 KB
-    // apiece) move into the `TrackRow` instead of being cloned out of it.
-    let mut analyses = catalog.analyses_by_track().map_err(|e| e.to_string())?;
     let mut rows = Vec::with_capacity(tracks.len());
     for t in tracks {
-        let analysis = analyses.remove(&t.id);
+        let cached = analyses.get(&t.id);
+        let analysis = cached.map(|c| &c.analysis);
         let bpm_val = analysis.as_ref().and_then(|a| a.bpm);
         let camelot = analysis.as_ref().and_then(|a| a.key).map(|k| k.camelot());
         let key_sort = camelot.map(|c| u16::from(c.number) * 2 + u16::from(c.major));
@@ -2698,18 +2796,18 @@ pub(crate) fn load_rows(
             ),
             None => ("—".into(), "—".into()),
         };
-        // Take the envelopes out of the owned `Analysis` — a move, not a copy.
+        // Share the cached envelopes — an `Arc` clone, not a copy.
         // Only show waveform data that spans the full track (v13+). Earlier
         // versions covered just the first 150 s, so the renderer — which maps
         // the bar across the whole track — would stretch ~150 s across it and
         // put the wrong section under the playhead. Treat stale data as absent
         // (cells draw flat) until `needs_analysis` re-analyzes to the current
         // version. This also subsumes the old v11 4-byte-stride guard.
-        let (waveform, waveform_bands) = match analysis {
-            Some(a) if a.analyzer_version >= WAVEFORM_FULLTRACK_VERSION => {
-                (a.waveform_preview, a.waveform_bands)
+        let (waveform, waveform_bands) = match cached {
+            Some(c) if c.analysis.analyzer_version >= WAVEFORM_FULLTRACK_VERSION => {
+                (Arc::clone(&c.waveform), Arc::clone(&c.waveform_bands))
             }
-            _ => (Vec::new(), Vec::new()),
+            _ => (Arc::new(Vec::new()), Arc::new(Vec::new())),
         };
         rows.push(TrackRow {
             id: t.id,

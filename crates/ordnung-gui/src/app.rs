@@ -94,7 +94,10 @@ impl App {
         let (media_cover_tx, media_cover_rx) = mpsc::channel::<(Id, Option<String>)>();
         let (hires_tx, hires_rx) = mpsc::channel::<(Id, Vec<u8>)>();
         let mut app = App {
+            catalog_probe: None,
             db_path,
+            row_sources: crate::table::RowSources::default(),
+            vinyl_loaded: false,
             rows: Vec::new(),
             filter: String::new(),
             filter_apply_at: None,
@@ -557,17 +560,37 @@ impl App {
     }
 
     pub(crate) fn reload(&mut self) {
-        // Rows are about to be rebuilt from the catalog, so any waveform bytes a
-        // (re)analysis rewrote are now stale in the smoothing cache — and its key
-        // can't see a change that kept the envelope's length. Reload is the one
-        // choke point every catalog write funnels through, so drop it here.
-        crate::player::clear_smooth_cache();
-        // Refresh the sidebar's playlist tree first. If the viewed playlist was
-        // deleted (or turned out to be a folder), fall back to the Library so the
-        // table never queries a playlist that no longer exists.
-        (self.playlists, self.playlist_stats) = Catalog::open(&self.db_path)
-            .and_then(|c| Ok((c.list_playlists()?, c.playlist_stats()?)))
-            .unwrap_or_default();
+        // One question first: has anything written the catalog since the last
+        // reload? A view switch or a search keystroke hasn't, and then every
+        // catalog-wide refresh below (playlist stats, the analysis blobs, the
+        // vinyl cross-references) would only re-read what's already held.
+        // Unchanged means only the view's own rows are queried. The probe
+        // answers "changed" on its first call and on any failure, so nothing
+        // is ever skipped without proof.
+        if self.catalog_probe.is_none() {
+            // Lazily, and retried: on a first launch the file doesn't exist
+            // until the `Catalog::open` below creates it.
+            self.catalog_probe = ordnung_core::catalog::ChangeProbe::open(&self.db_path).ok();
+        }
+        let changed = self.catalog_probe.as_mut().map_or(true, |p| p.changed());
+        if changed {
+            // Whatever view is showing, every cache built from the catalog is
+            // now stale; each refills on its next use.
+            self.row_sources.invalidate();
+            self.vinyl_loaded = false;
+            // Rows are about to be rebuilt from the catalog, so any waveform
+            // bytes a (re)analysis rewrote are now stale in the smoothing cache
+            // — and its key can't see a change that kept the envelope's length.
+            // Reload is the one choke point every catalog write funnels
+            // through, so drop it here.
+            crate::player::clear_smooth_cache();
+            // Refresh the sidebar's playlist tree. If the viewed playlist was
+            // deleted (or turned out to be a folder), fall back to the Library
+            // below so the table never queries a playlist that no longer exists.
+            (self.playlists, self.playlist_stats) = Catalog::open(&self.db_path)
+                .and_then(|c| Ok((c.list_playlists()?, c.playlist_stats()?)))
+                .unwrap_or_default();
+        }
         if let LibraryView::Playlist(id) = self.view {
             let still_valid = self.playlists.iter().any(|p| p.id == id && !p.is_folder);
             if !still_valid {
@@ -580,7 +603,12 @@ impl App {
         let loaded = if matches!(self.view, LibraryView::Usb(..)) {
             Ok(self.usb_rows())
         } else {
-            load_rows(&self.db_path, &self.filter, &self.view)
+            load_rows(
+                &self.db_path,
+                &self.filter,
+                &self.view,
+                &mut self.row_sources,
+            )
         };
         match loaded {
             Ok(rows) => {
@@ -619,17 +647,21 @@ impl App {
         // Refresh the count of tracks pending a source-file write (drives the
         // bulk-write button). Independent of the visible filter — it reflects the
         // whole catalog. A failure here just leaves the button hidden.
-        self.edited_count = Catalog::open(&self.db_path)
-            .and_then(|c| c.count_edited())
-            .unwrap_or(0);
+        if changed {
+            self.edited_count = Catalog::open(&self.db_path)
+                .and_then(|c| c.count_edited())
+                .unwrap_or(0);
+        }
 
         // The "recently added" count drives the sidebar badge: how many tracks
         // were added in the last day. It's a cheap count (no Track building) and
         // view-independent, so refresh it on every reload. A failure just hides
         // the badge.
-        self.recent_count = Catalog::open(&self.db_path)
-            .and_then(|c| c.count_recently_added())
-            .unwrap_or(0);
+        if changed {
+            self.recent_count = Catalog::open(&self.db_path)
+                .and_then(|c| c.count_recently_added())
+                .unwrap_or(0);
+        }
 
         // The duplicate finder is a full-catalog scan (the acoustic pass decodes and
         // slides every fingerprint against its duration neighbours), so it must not
@@ -673,54 +705,60 @@ impl App {
             self.missing_list = Vec::new();
         }
 
-        // Keep the sidebar's vinyl badge current from the cache count regardless
-        // of the active view; only hold the full record list (and its cover
-        // textures) while the grid is actually showing.
-        self.vinyl_count = Catalog::open(&self.db_path)
-            .and_then(|c| c.vinyl_count(VinylList::Collection))
-            .unwrap_or(0);
-        // track → Discogs release, so the library's right-click menu knows which
-        // tracks have a release worth wantlisting. Loaded in every view (unlike
-        // the grid's reverse map below) because that menu is the library's.
-        self.track_releases = Catalog::open(&self.db_path)
-            .and_then(|c| c.release_track_links())
-            .map(|pairs| pairs.into_iter().map(|(rid, tid)| (tid, rid)).collect())
-            .unwrap_or_default();
-        // …and which records are already yours, so the menu can say where one
-        // already is instead of offering to want it again. Two views of the same
-        // membership: by release (the grid's both-lists check) and by track (the
-        // library's, which needs the metadata fallback since most tracks carry
-        // no Discogs release id).
-        for (list, releases, keys, tracks) in [
-            (
-                VinylList::Collection,
-                &mut self.vinyl_owned,
-                &mut self.vinyl_owned_keys,
-                &mut self.vinyl_owned_tracks,
-            ),
-            (
-                VinylList::Wantlist,
-                &mut self.vinyl_wanted,
-                &mut self.vinyl_wanted_keys,
-                &mut self.vinyl_wanted_tracks,
-            ),
-        ] {
-            // One pass over the rows feeds both the by-pressing and the
-            // by-record views, so they can never disagree about a shelf.
-            let rows = Catalog::open(&self.db_path)
-                .and_then(|c| c.vinyl_titles(list))
+        // The rest of this bookkeeping is catalog-wide, so it only moves when
+        // the catalog does.
+        if changed {
+            // Keep the sidebar's vinyl badge current from the cache count
+            // regardless of the active view.
+            self.vinyl_count = Catalog::open(&self.db_path)
+                .and_then(|c| c.vinyl_count(VinylList::Collection))
+                .unwrap_or(0);
+            // track → Discogs release, so the library's right-click menu knows which
+            // tracks have a release worth wantlisting. Loaded in every view (unlike
+            // the grid's reverse map below) because that menu is the library's.
+            self.track_releases = Catalog::open(&self.db_path)
+                .and_then(|c| c.release_track_links())
+                .map(|pairs| pairs.into_iter().map(|(rid, tid)| (tid, rid)).collect())
                 .unwrap_or_default();
-            *releases = rows.iter().map(|(id, _, _)| *id).collect();
-            *keys = rows
-                .iter()
-                .map(|(_, artist, title)| crate::dig::work_key(artist, title))
-                .collect();
-            *tracks = Catalog::open(&self.db_path)
-                .and_then(|c| c.vinyl_tracks_in(list))
-                .map(|ids| ids.into_iter().collect())
-                .unwrap_or_default();
+            // …and which records are already yours, so the menu can say where one
+            // already is instead of offering to want it again. Two views of the same
+            // membership: by release (the grid's both-lists check) and by track (the
+            // library's, which needs the metadata fallback since most tracks carry
+            // no Discogs release id).
+            for (list, releases, keys, tracks) in [
+                (
+                    VinylList::Collection,
+                    &mut self.vinyl_owned,
+                    &mut self.vinyl_owned_keys,
+                    &mut self.vinyl_owned_tracks,
+                ),
+                (
+                    VinylList::Wantlist,
+                    &mut self.vinyl_wanted,
+                    &mut self.vinyl_wanted_keys,
+                    &mut self.vinyl_wanted_tracks,
+                ),
+            ] {
+                // One pass over the rows feeds both the by-pressing and the
+                // by-record views, so they can never disagree about a shelf.
+                let rows = Catalog::open(&self.db_path)
+                    .and_then(|c| c.vinyl_titles(list))
+                    .unwrap_or_default();
+                *releases = rows.iter().map(|(id, _, _)| *id).collect();
+                *keys = rows
+                    .iter()
+                    .map(|(_, artist, title)| crate::dig::work_key(artist, title))
+                    .collect();
+                *tracks = Catalog::open(&self.db_path)
+                    .and_then(|c| c.vinyl_tracks_in(list))
+                    .map(|ids| ids.into_iter().collect())
+                    .unwrap_or_default();
+            }
         }
-        if self.view == LibraryView::Vinyl {
+        // The Vinyl section's lists load on the first visit and again whenever
+        // the catalog changes; a plain switch back to the section reuses them.
+        if self.view == LibraryView::Vinyl && (changed || !self.vinyl_loaded) {
+            self.vinyl_loaded = true;
             self.vinyl = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_vinyl(VinylList::Collection))
                 .unwrap_or_default();
@@ -888,21 +926,21 @@ impl App {
                     m
                 })
                 .unwrap_or_default();
-        } else if !self.vinyl.is_empty() || !self.wantlist.is_empty() {
-            self.vinyl = Vec::new();
-            self.wantlist = Vec::new();
-            // Drop the (potentially huge) seller listing cache with the record
-            // lists; the Sellers tab re-reads it on the next visit.
+        } else if self.view != LibraryView::Vinyl
+            && (!self.seller_listings.is_empty() || !self.vinyl_covers.is_empty())
+        {
+            // Leaving the section keeps the (small) record lists, so coming
+            // back is instant, but drops the two heavy caches: the seller
+            // listings (the Sellers tab re-reads them on the next visit) and
+            // the cover textures. The latter runs mid-frame when the grid's
+            // "in catalog" badge jumps to the Library after painting these
+            // covers; safe because `Tex` defers the frees to the next frame
+            // (see `tex.rs`).
             self.seller_listings = Vec::new();
             self.seller_hay = Vec::new();
             self.seller_genres = HashMap::new();
             self.seller_listings_for = None;
-            self.wantlist_watch = Vec::new();
-            // Runs mid-frame when the grid's "in catalog" badge jumps to the
-            // Library after painting these covers; safe because `Tex` defers
-            // the frees to the next frame (see `tex.rs`).
             self.vinyl_covers.clear();
-            self.vinyl_links = HashMap::new();
         }
     }
 
@@ -1629,16 +1667,18 @@ impl App {
                     // The stick's own ANLZ waveform first (free, matches what
                     // the player draws); our analyzer's when the export never
                     // had one.
-                    waveform: pdb
-                        .filter(|p| !p.waveform.is_empty())
-                        .map(|p| p.waveform.clone())
-                        .or_else(|| analyzed.map(|a| a.waveform.clone()))
-                        .unwrap_or_default(),
-                    waveform_bands: pdb
-                        .filter(|p| !p.waveform.is_empty())
-                        .map(|p| p.waveform_bands.clone())
-                        .or_else(|| analyzed.map(|a| a.waveform_bands.clone()))
-                        .unwrap_or_default(),
+                    waveform: Arc::new(
+                        pdb.filter(|p| !p.waveform.is_empty())
+                            .map(|p| p.waveform.clone())
+                            .or_else(|| analyzed.map(|a| a.waveform.clone()))
+                            .unwrap_or_default(),
+                    ),
+                    waveform_bands: Arc::new(
+                        pdb.filter(|p| !p.waveform.is_empty())
+                            .map(|p| p.waveform_bands.clone())
+                            .or_else(|| analyzed.map(|a| a.waveform_bands.clone()))
+                            .unwrap_or_default(),
+                    ),
                     source_path: PathBuf::from(&t.source_path),
                     // The scan already extracted the file's embedded art into
                     // `cover_thumb`; the cover cell decodes it straight from

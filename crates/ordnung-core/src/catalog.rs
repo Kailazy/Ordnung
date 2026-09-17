@@ -121,6 +121,61 @@ pub struct Catalog {
     conn: Connection,
 }
 
+/// Answers "has anyone written the catalog since I last asked?" without
+/// reading a single row.
+///
+/// The GUI's `reload` refreshes every catalog-wide table it caches (playlist
+/// stats, every analysis blob, the vinyl cross-references) and it runs on
+/// every view switch and search keystroke, so it was re-reading ~100 MB to
+/// discover nothing had changed. SQLite keeps a per-connection `data_version`
+/// that moves whenever *another* connection commits, so one long-lived
+/// connection that never writes is a change detector for the whole file: the
+/// GUI opens a fresh `Catalog` for each write, and every worker has its own,
+/// so all of them count as "another connection" to this one.
+///
+/// Only ever ask through [`ChangeProbe::changed`]; issuing a write on this
+/// connection would make its own commits invisible to itself. Note that an
+/// `UPDATE` which leaves every byte as it was is not a write to SQLite (the
+/// b-tree skips the identical cell), so it doesn't move the version either;
+/// nothing on screen could have changed from it, so that's the right answer.
+pub struct ChangeProbe {
+    conn: Connection,
+    last: Option<i64>,
+}
+
+impl ChangeProbe {
+    /// Open a probe on the catalog at `path`. Fails if the file doesn't exist
+    /// yet: the catalog proper is created (and migrated) by [`Catalog::open`],
+    /// and the caller retries after that. Opened read-write rather than
+    /// read-only only because a read-only WAL connection can't create the
+    /// shared-memory index when it's the first one in; it never writes.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        Ok(Self { conn, last: None })
+    }
+
+    /// True when the catalog has been written since the previous call. The
+    /// first call, and any call that fails to read the version, report a
+    /// change, so a caller that skips work on `false` can never skip it
+    /// without proof.
+    pub fn changed(&mut self) -> bool {
+        let now: Option<i64> = self
+            .conn
+            .query_row("PRAGMA data_version", [], |r| r.get(0))
+            .ok();
+        let changed = match (self.last, now) {
+            (Some(prev), Some(cur)) => prev != cur,
+            _ => true,
+        };
+        self.last = now;
+        changed
+    }
+}
+
 /// One other track sharing an album with a given track. Returned by
 /// [`Catalog::album_siblings_detailed`] so the GUI can present album-mates by
 /// name (with whether each already has a cover) when applying a dropped or

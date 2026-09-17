@@ -87,8 +87,8 @@ impl App {
             // — so the bar draws the same as for a library track.
             if waveform.is_empty() {
                 if let Some(r) = self.rows.iter().find(|r| r.id == id) {
-                    waveform = r.waveform.clone();
-                    waveform_bands = r.waveform_bands.clone();
+                    waveform = r.waveform.as_ref().clone();
+                    waveform_bands = r.waveform_bands.as_ref().clone();
                 }
             }
             let (waveform, waveform_bands) = (Arc::new(waveform), Arc::new(waveform_bands));
