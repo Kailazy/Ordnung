@@ -489,6 +489,11 @@ fn ring_slots(n: usize, inner: f32, body: f32, phase: f32) -> (Vec<egui::Vec2>, 
     (out, outer)
 }
 
+/// The cloud for records with no genre or style at all. It holds them like
+/// any other cloud but wears no caption: a word for the absence of a tag
+/// is not a place on the map.
+const UNTAGGED: &str = "Untagged";
+
 /// Is this tag one of Discogs's coarse genres (as opposed to a style)?
 fn is_coarse_genre(tag: &str) -> bool {
     crate::DISCOGS_GENRES.iter().any(|g| g.eq_ignore_ascii_case(tag))
@@ -505,7 +510,7 @@ fn cloud_of(genres: &[String]) -> (String, Vec<String>) {
         Some(first) => (first, styles.take(2).collect()),
         None => match genres.first() {
             Some(g) => (g.trim().to_string(), Vec::new()),
-            None => ("Untagged".to_string(), Vec::new()),
+            None => (UNTAGGED.to_string(), Vec::new()),
         },
     }
 }
@@ -1795,7 +1800,7 @@ impl App {
                     // speck on screen stays unlabelled until you lean in,
                     // so the whole-map view isn't a carpet of type.
                     let area = n.reach * zoom;
-                    if area >= 26.0 || lit {
+                    if (area >= 26.0 || lit) && n.name != UNTAGGED {
                         hub_names.push((p, area, n.name.clone(), dim(color::LABEL, on)));
                     }
                 }
