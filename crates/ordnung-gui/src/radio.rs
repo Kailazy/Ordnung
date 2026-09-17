@@ -191,6 +191,55 @@ impl App {
         self.radio_ready(id, true);
     }
 
+    /// The record on air, or one on the walk, was traded for another
+    /// pressing: same music, new id and sleeve. A record still readying its
+    /// video is readied again as the new pressing; one already playing plays
+    /// on, since restarting the track for a sleeve would be a bad trade.
+    pub(crate) fn radio_remap(
+        &mut self,
+        from: u64,
+        to: u64,
+        title: &str,
+        sub: &str,
+        thumb_url: Option<String>,
+    ) {
+        for stop in self.radio.walk.iter_mut().filter(|s| s.release_id == from) {
+            stop.release_id = to;
+            if !title.is_empty() {
+                stop.title = title.to_string();
+            }
+            stop.thumb_url = thumb_url.clone();
+        }
+        if let Some(n) = self.radio.now.as_mut() {
+            if n.release_id == from {
+                n.release_id = to;
+                if !title.is_empty() {
+                    n.title = title.to_string();
+                }
+                if !sub.is_empty() {
+                    n.sub = sub.to_string();
+                }
+                n.thumb_url = thumb_url;
+            }
+        }
+        match &mut self.radio.phase {
+            Phase::Loading { release_id, since } if *release_id == from => {
+                *release_id = to;
+                *since = Instant::now();
+                self.radio.detail_rx = None;
+            }
+            Phase::Playing { release_id, .. } if *release_id == from => *release_id = to,
+            Phase::Stepping { from: f, .. } | Phase::Landing { from: f, .. } if *f == from => {
+                *f = to
+            }
+            _ => {}
+        }
+        let key = format!("r:{to}");
+        if self.graph.focus.as_deref() == Some(&format!("r:{from}")) {
+            self.graph.focus = Some(key);
+        }
+    }
+
     pub(crate) fn radio_stop(&mut self, why: &str) {
         let was_on = self.radio.on;
         self.radio.on = false;

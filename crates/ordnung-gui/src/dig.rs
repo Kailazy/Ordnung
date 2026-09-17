@@ -501,6 +501,88 @@ static NEVER_CANCEL: AtomicBool = AtomicBool::new(false);
 /// most pages have only a handful of master rows among the concrete releases.
 const MAX_FORMAT_LOOKUPS: usize = 12;
 
+/// How many candidate rows one browse will check against their master before
+/// taking a row as it is. Each check is the release detail (which the landing
+/// fetches anyway, so it's shared through the cache) plus the master's
+/// pressing list (cached a week), so the usual cost is one paced request.
+const MAX_CANON_LOOKUPS: usize = 4;
+
+/// What a candidate row's master says about it — see [`canonical_pressing`].
+enum Canon {
+    /// No master, or this row is already the pressing most people hold.
+    Keep,
+    /// The same record, in the pressing most people hold: land on that one.
+    Swap(Box<discogs::MasterVersion>),
+    /// Another pressing of this record is already yours, or already on the
+    /// path: the record isn't new, whatever id this row carries.
+    Taken,
+}
+
+/// Judge a candidate row by the record it belongs to rather than the
+/// pressing it happens to be. A dig is for hearing music you don't have, so
+/// a Japan edition of a record already walked is a repeat, not a find; and
+/// when a record is new, the pressing to land on is the common one, not the
+/// promo or the limited run a label page lists first.
+fn canonical_pressing(
+    client: &discogs::Client,
+    cat: Option<&Catalog>,
+    row: &BrowseRelease,
+    skip: &HashSet<u64>,
+) -> Canon {
+    let id = row.release_id.to_string();
+    let fetch = || client.fetch_release(&id);
+    let detail = match cat {
+        Some(cat) => cat.release_cached_or(&id, fetch),
+        None => fetch(),
+    };
+    let Ok(detail) = detail else { return Canon::Keep };
+    let Some(master) = detail.master_id else {
+        return Canon::Keep;
+    };
+    let fetch = || client.master_versions(master);
+    let versions = match cat {
+        Some(cat) => cat.master_versions_cached_or(master, fetch),
+        None => fetch(),
+    };
+    let Ok(versions) = versions else { return Canon::Keep };
+    if versions.iter().any(|v| skip.contains(&v.release_id)) {
+        return Canon::Taken;
+    }
+    let own = versions
+        .iter()
+        .find(|v| v.release_id == row.release_id)
+        .map(|v| v.in_collection)
+        .unwrap_or(0);
+    match versions.iter().max_by_key(|v| v.in_collection) {
+        Some(best) if best.release_id != row.release_id && best.in_collection > own => {
+            Canon::Swap(Box::new(best.clone()))
+        }
+        _ => Canon::Keep,
+    }
+}
+
+/// Rewrite a browse row as another pressing of the same record.
+fn adopt_pressing(row: &mut BrowseRelease, v: &discogs::MasterVersion) {
+    row.release_id = v.release_id;
+    if !v.title.trim().is_empty() {
+        row.title = v.title.clone();
+    }
+    row.format = v.format.clone();
+    row.format_known = !v.format.trim().is_empty();
+    if let Ok(y) = v.released.split('-').next().unwrap_or("").trim().parse::<u16>() {
+        row.year = Some(y);
+    }
+    if !v.label.trim().is_empty() {
+        row.label = v.label.clone();
+    }
+    if !v.catno.trim().is_empty() {
+        row.catno = v.catno.clone();
+    }
+    if !v.thumb_url.trim().is_empty() {
+        row.thumb_url = v.thumb_url.clone();
+    }
+}
+
 /// Whether a Discogs format string describes a record. The artist and label
 /// browse endpoints take no format filter, so they return CDs, cassettes and
 /// MP3 files alongside the pressings — and a crate dig only wants the wax.
@@ -597,6 +679,33 @@ const EDITION_WORDS: &[&str] = &[
 pub(crate) fn work_key(artist: &str, title: &str) -> String {
     fn fold(s: &str) -> String {
         let lower = s.to_lowercase();
+        // An edition note after a dash names a pressing too: `No. 9997 -
+        // Japan Edition` is the same record as `No. 9997`. Drop every
+        // dash-separated segment after the first that reads as an edition;
+        // a segment that doesn't (`- Remixes`) stays, since that's another
+        // record. Only a spaced dash splits, so `Hi-Fi` and `re-edition`
+        // stay whole.
+        let lower = {
+            let dashed = lower.replace(" – ", " - ").replace(" — ", " - ");
+            let mut parts = dashed.split(" - ");
+            let mut kept: Vec<&str> = Vec::new();
+            if let Some(first) = parts.next() {
+                kept.push(first);
+            }
+            for seg in parts {
+                let edition = EDITION_WORDS.iter().any(|w| {
+                    if w.contains(' ') {
+                        seg.contains(w)
+                    } else {
+                        seg.split(|c: char| !c.is_alphanumeric()).any(|word| word == *w)
+                    }
+                });
+                if !edition {
+                    kept.push(seg);
+                }
+            }
+            kept.join(" ")
+        };
         // Drop bracketed asides wholesale: they're where Discogs parks the
         // catalogue number, the edition and the disambiguator.
         let mut out = String::with_capacity(lower.len());
@@ -668,6 +777,12 @@ mod tests {
         same("XDB", "Jackintosh EP", "XDB", "Jackintosh  LP");
         // Punctuation and spacing vary between pressings.
         same("XDB", "Cagomi E.P.", "XDB", "Cagomi EP");
+        // An edition note after a dash, the way Discogs titles regional
+        // and limited pressings.
+        same("STABLO", "No. 9997", "STABLO", "No. 9997 - Japan Edition");
+        same("STABLO", "No. 9997", "STABLO", "No. 9997 – Limited Edition");
+        // A remix record is another record, dash or not.
+        differ("XDB", "Jackintosh", "XDB", "Jackintosh - Remixes");
         // But two actual records by one artist stay apart.
         differ("XDB", "Jackintosh EP", "XDB", "Cagomi EP");
         // And one title by two artists stays apart.
@@ -898,6 +1013,7 @@ fn browse_step(
 
     let cat = Catalog::open(db).ok();
     let mut budget = MAX_FORMAT_LOOKUPS;
+    let mut canon_budget = MAX_CANON_LOOKUPS;
     let mut pick: Option<usize> = None;
     for &i in &order {
         let r = &mut p.releases[i];
@@ -926,6 +1042,21 @@ fn browse_step(
             r.format_known = true;
             if !is_vinyl(&r.format) {
                 continue;
+            }
+        }
+        // The record, not the pressing: skip one already walked in another
+        // pressing, and land on the pressing most people hold.
+        if canon_budget > 0 && !cancel.load(Ordering::Relaxed) {
+            canon_budget -= 1;
+            match canonical_pressing(client, cat.as_ref(), r, skip) {
+                Canon::Taken => continue,
+                Canon::Swap(v) => {
+                    adopt_pressing(r, &v);
+                    if r.format_known && !is_vinyl(&r.format) {
+                        continue;
+                    }
+                }
+                Canon::Keep => {}
             }
         }
         pick = Some(i);
@@ -1058,6 +1189,15 @@ impl App {
         seen.insert(release_id);
         let mut works = HashSet::new();
         works.insert(work_key(&artist, &title));
+        // A dig the radio starts (a fresh start after a record ran dry)
+        // carries the walk so far: the records already played are not new
+        // finds, whichever pressing of them a page turns up.
+        if self.radio.on {
+            for stop in &self.radio.walk {
+                seen.insert(stop.release_id);
+                works.insert(work_key(&stop.artist, &stop.title));
+            }
+        }
         self.dig = Some(DigPath {
             steps: vec![DigStep {
                 release_id,
@@ -2383,6 +2523,123 @@ impl App {
                 dig.priming = None;
             }
         }
+    }
+
+    /// Trade a dug record for another pressing of it, everywhere this window
+    /// knows the record: the dig web, the map and its trails, the radio's
+    /// walk, the open sheet and the versions panel. The pressing is the same
+    /// music, so nothing about the walk changes but the id and the sleeve;
+    /// the dig's ids are re-resolved since a pressing carries its own.
+    pub(crate) fn swap_dug_release(
+        &mut self,
+        from: u64,
+        v: &discogs::MasterVersion,
+        artist: String,
+        ctx: &egui::Context,
+    ) {
+        let to = v.release_id;
+        if to == from || to == 0 {
+            return;
+        }
+        let year = v.released.split('-').next().unwrap_or("").trim();
+        let sub = [year, v.format.trim()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let thumb = (!v.thumb_url.trim().is_empty()).then(|| v.thumb_url.clone());
+        let label = (!v.label.trim().is_empty()).then(|| v.label.clone());
+        let title = if v.title.trim().is_empty() {
+            None
+        } else {
+            Some(v.title.clone())
+        };
+
+        let mut in_dig = false;
+        if let Some(dig) = self.dig.as_mut() {
+            for step in dig.steps.iter_mut().filter(|s| s.release_id == from) {
+                step.release_id = to;
+                if let Some(t) = &title {
+                    step.title = t.clone();
+                }
+                step.sub = sub.clone();
+                step.thumb_url = thumb.clone();
+                if label.is_some() {
+                    step.label = label.clone();
+                }
+                step.artist_ids.clear();
+                step.label_ids.clear();
+                step.styles.clear();
+                step.detail_resolved = false;
+                in_dig = true;
+            }
+            if in_dig {
+                dig.seen.insert(to);
+                dig.ready.retain(|(id, _, _), _| *id != from);
+                if dig.priming.as_ref().is_some_and(|(id, _)| *id == from) {
+                    dig.cancel_prime.store(true, Ordering::Relaxed);
+                    dig.priming = None;
+                }
+            }
+        }
+        if in_dig {
+            self.dig_resolve_ids(to);
+        }
+
+        if let Some(i) = self.dug.iter().position(|d| d.release_id == from) {
+            let mut d = self.dug[i].clone();
+            d.release_id = to;
+            if let Some(t) = &title {
+                d.title = t.clone();
+            }
+            d.sub = sub.clone();
+            d.thumb_url = thumb.clone();
+            if label.is_some() {
+                d.label = label.clone();
+            }
+            self.dug.retain(|x| x.release_id != to);
+            self.dug.insert(i.min(self.dug.len()), d.clone());
+            if let Ok(cat) = Catalog::open(&self.db_path) {
+                let _ = cat.replace_dug_release(from, &d);
+            }
+        }
+
+        self.graph.remap_release(from, to);
+        let title_now = title.clone().unwrap_or_default();
+        self.radio_remap(from, to, &title_now, &sub, thumb.clone());
+
+        if self
+            .vinyl_sheet
+            .as_ref()
+            .is_some_and(|s| s.release_id == from)
+        {
+            let t = title.clone().unwrap_or_else(|| {
+                self.vinyl_sheet.as_ref().map(|s| s.title.clone()).unwrap_or_default()
+            });
+            self.open_release_sheet(to, artist, t, sub.clone(), thumb.clone(), ctx);
+            if let Some(s) = self.vinyl_sheet.as_mut() {
+                if s.release_id == to && s.label.is_none() {
+                    s.label = crate::vinyl_sheet::imprint_line(Some(&v.label), Some(&v.catno));
+                }
+            }
+        }
+        if let Some(p) = self.versions.as_mut() {
+            if p.release_id == from {
+                p.release_id = to;
+                if let Some(t) = &title {
+                    p.title = t.clone();
+                }
+            }
+        }
+        let mut what = v.format.trim().to_string();
+        if !v.catno.trim().is_empty() {
+            what = format!("{what} · {}", v.catno.trim());
+        }
+        self.status = if what.is_empty() {
+            format!("Swapped to release {to}")
+        } else {
+            format!("Swapped to the {what} pressing")
+        };
     }
 
     /// Whether digging from `key` is possible at all — it needs an artist or a

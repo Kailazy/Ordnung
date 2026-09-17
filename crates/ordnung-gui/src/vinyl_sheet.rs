@@ -1072,6 +1072,8 @@ impl App {
             /// Look at that pressing here: swap the sheet over to it instead
             /// of sending the user to discogs.com.
             OpenAlternative,
+            /// Every pressing of this record, to swap one in.
+            Pressings,
         }
         let mut act: Option<Act> = None;
         // The transport bar's own action, kept apart from `act` so a scrub and
@@ -1285,10 +1287,20 @@ impl App {
                             {
                                 open_url(&format!("https://www.discogs.com/release/{release_id}"));
                             }
+                            // Which pressing is on the sheet is a choice, not
+                            // a fact: the one a dig landed on is whichever
+                            // the page listed. List the siblings and swap.
+                            if ui
+                                .button("Pressings")
+                                .on_hover_note("Other pressings of this record, to swap one in")
+                                .clicked()
+                            {
+                                act = Some(Act::Pressings);
+                            }
                             // The deliberate label move: not one random pull
                             // down the thread, the whole run as a list.
                             let label_page_tip = match &sheet_label {
-                                Some(l) => format!("Read {l}'s whole run, your shelves marked"),
+                                Some(l) => format!("Every release on {l}"),
                                 None => "Looking up this record's label…".to_string(),
                             };
                             if ui
@@ -1635,6 +1647,15 @@ impl App {
                         label: format!("{artist} — {title}"),
                     },
                 );
+            }
+            Some(Act::Pressings) => {
+                let sheet_key = self.vinyl_sheet.as_ref().and_then(|s| s.key);
+                match sheet_key {
+                    Some(k) => self.open_versions(k, ctx),
+                    None => {
+                        self.open_versions_release(release_id, artist.clone(), title.clone(), ctx)
+                    }
+                }
             }
             Some(Act::OpenAlternative) => {
                 // Pull the version row out of the sheet before it's replaced.

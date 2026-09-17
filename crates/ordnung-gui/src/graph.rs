@@ -901,6 +901,47 @@ impl GraphState {
         i
     }
 
+    /// A dug record traded for another pressing: the node, its trails and
+    /// the camera's interest in it carry over to the new id, so the swap
+    /// changes the sleeve and nothing about the shape of the map. The next
+    /// sync refreshes the node's words from the dug list.
+    pub(crate) fn remap_release(&mut self, from: u64, to: u64) {
+        let (old, new) = (format!("r:{from}"), format!("r:{to}"));
+        // If the new pressing already has a node of its own, the old one is
+        // left for the sync to retire: the sources no longer name it.
+        if !self.index.contains_key(&new) {
+            if let Some(i) = self.index.remove(&old) {
+                self.nodes[i].key = new.clone();
+                if let Some(r) = self.nodes[i].release.as_mut() {
+                    r.release_id = to;
+                }
+                self.index.insert(new.clone(), i);
+            }
+        }
+        for t in self.trails.iter_mut() {
+            if t.from == from {
+                t.from = to;
+            }
+            if t.to == from {
+                t.to = to;
+            }
+        }
+        let swap = |k: &mut Option<String>| {
+            if k.as_deref() == Some(old.as_str()) {
+                *k = Some(new.clone());
+            }
+        };
+        swap(&mut self.focus);
+        swap(&mut self.shown);
+        if let Some((k, _)) = self.lean.as_mut() {
+            if *k == old {
+                *k = new.clone();
+            }
+        }
+        self.sig = 0;
+        self.wake();
+    }
+
     pub(crate) fn wake(&mut self) {
         if self.last_tick.is_none() {
             self.last_tick = Some(Instant::now());

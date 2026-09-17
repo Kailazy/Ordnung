@@ -3755,6 +3755,26 @@ impl Catalog {
         Ok(())
     }
 
+    /// Trade a dug release for another pressing of the same record: the old
+    /// row goes, and `to` takes its place (merging into an existing row for
+    /// that pressing, if both were dug). One transaction, so a failure leaves
+    /// the record on the map under one id or the other, never neither.
+    pub fn replace_dug_release(&self, from: u64, to: &DugRelease) -> Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        let done = (|| -> Result<()> {
+            self.conn.execute(
+                "DELETE FROM dug_releases WHERE release_id = ?1 AND release_id != ?2",
+                params![from as i64, to.release_id as i64],
+            )?;
+            self.record_dug_release(to)
+        })();
+        match done {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(_) => self.conn.execute_batch("ROLLBACK")?,
+        }
+        done
+    }
+
     /// Flag a dug release as asked for on a Discogs list. A no-op for ids the
     /// map doesn't know (shelf records are already on the map by being
     /// shelved).

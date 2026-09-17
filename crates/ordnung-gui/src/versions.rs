@@ -1,5 +1,7 @@
 //! The versions panel: every other pressing of the record you're looking at, and
-//! the swap that trades your copy for one of them.
+//! the swap that trades your copy for one of them. For a record you don't
+//! hold (one a dig or the radio landed on) the swap trades the *dug* record
+//! instead: the map, the dig and the sheet move over to the chosen pressing.
 //!
 //! A record on Discogs is a *release* — one specific pressing — hanging off a
 //! *master* that gathers every pressing of the same music. Which pressing you
@@ -117,6 +119,28 @@ impl App {
             error: None,
         });
         self.spawn_versions_fetch(record.release_id, ctx.clone());
+    }
+
+    /// Open the versions panel for a record that isn't on a shelf: one the
+    /// dig or the radio landed on, from its sheet. A swap here re-points the
+    /// dug record at the chosen pressing rather than editing a list.
+    pub(crate) fn open_versions_release(
+        &mut self,
+        release_id: u64,
+        artist: String,
+        title: String,
+        ctx: &egui::Context,
+    ) {
+        self.versions = Some(VersionsPanel {
+            key: None,
+            release_id,
+            artist,
+            title,
+            versions: Vec::new(),
+            loading: true,
+            error: None,
+        });
+        self.spawn_versions_fetch(release_id, ctx.clone());
     }
 
     /// Look up every pressing of the open record's master, off the UI thread.
@@ -303,8 +327,16 @@ impl App {
                                         ui.spacing_mut().item_spacing.x = 5.0;
                                         ui.label(egui::RichText::new(head).strong());
                                         if is_current {
+                                            // A shelf record's row is your
+                                            // copy; a dug record's is only
+                                            // the one on the sheet.
+                                            let mark = if key.is_some() {
+                                                "· your copy"
+                                            } else {
+                                                "· this one"
+                                            };
                                             ui.label(
-                                                egui::RichText::new("· your copy")
+                                                egui::RichText::new(mark)
                                                     .small()
                                                     .color(egui::Color32::from_rgb(120, 200, 140)),
                                             );
@@ -347,12 +379,19 @@ impl App {
                                         // The pressing you already have needs no
                                         // action offered against it.
                                         if !is_current {
-                                            let can_swap = key.is_some() && !busy && !r.owned;
-                                            let tip = if key.is_none() {
-                                                "Open this record from your collection or \
-                                                 wantlist to swap it"
-                                            } else if r.owned {
+                                            // A shelf record's swap edits the
+                                            // list on Discogs; a dug record's
+                                            // swap is local and always ready.
+                                            let can_swap = if key.is_some() {
+                                                !busy && !r.owned
+                                            } else {
+                                                !r.owned
+                                            };
+                                            let tip = if r.owned {
                                                 "You already have this pressing"
+                                            } else if key.is_none() {
+                                                "Show this pressing instead, on the map, \
+                                                 in the dig and in the sheet"
                                             } else if busy {
                                                 "Wait for the current change to finish"
                                             } else {
@@ -422,7 +461,16 @@ impl App {
                 self.open_release_sheet(id, artist.clone(), v_title, sub, cover, ctx);
             }
             Some(Act::Swap(id)) => {
-                if let Some(k) = key {
+                if key.is_none() {
+                    let v = self
+                        .versions
+                        .as_ref()
+                        .and_then(|p| p.versions.iter().find(|v| v.release_id == id))
+                        .cloned();
+                    if let Some(v) = v {
+                        self.swap_dug_release(current, &v, artist.clone(), ctx);
+                    }
+                } else if let Some(k) = key {
                     if let Some(record) = self.vinyl_record(k) {
                         let to_label = self
                             .versions
