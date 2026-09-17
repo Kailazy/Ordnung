@@ -847,9 +847,22 @@ impl App {
             error,
             playing_video,
             video_open,
+            radio_here,
             has_video,
         ) = {
             let s = self.vinyl_sheet.as_ref().unwrap();
+            // The mini-player is shared with the radio. It belongs to this
+            // sheet only while it is playing this record: a video a row here
+            // started, or the radio standing on this very release. Otherwise
+            // an open panel is somebody else's music, and the sheet showing
+            // its transport (and a pause button for it) claimed the radio's
+            // song was this record's.
+            let radio_here = self.radio.on
+                && self
+                    .radio
+                    .now
+                    .as_ref()
+                    .is_some_and(|n| n.release_id == s.release_id);
             (
                 s.key,
                 s.cover_url.clone(),
@@ -859,8 +872,22 @@ impl App {
                 s.release_id,
                 s.loading,
                 s.error.clone(),
-                s.playing_video,
-                webview::is_open(),
+                // The row to mark: the sheet's own video, else the song the
+                // radio is on when it is this record's, found by youtube id.
+                s.playing_video.or_else(|| {
+                    if !radio_here {
+                        return None;
+                    }
+                    let now = self.radio.now.as_ref()?;
+                    let song = now.songs.get(now.song)?;
+                    s.detail
+                        .as_ref()?
+                        .videos
+                        .iter()
+                        .position(|v| v.youtube_id() == Some(song.youtube_id.as_str()))
+                }),
+                webview::is_open() && (s.playing_video.is_some() || radio_here),
+                radio_here,
                 // Can anything on this record play through the mini-player? Only
                 // then does the transport's slot need holding open.
                 s.rows
@@ -1628,7 +1655,17 @@ impl App {
         match video_act {
             Some(VideoAct::TogglePause) => webview::toggle_pause(),
             Some(VideoAct::Seek(secs)) => webview::seek(secs),
-            Some(VideoAct::Stop) => self.stop_sheet_video(),
+            Some(VideoAct::Stop) => {
+                let own = self
+                    .vinyl_sheet
+                    .as_ref()
+                    .is_some_and(|s| s.playing_video.is_some());
+                if own {
+                    self.stop_sheet_video();
+                } else if radio_here {
+                    self.radio_stop("Radio off");
+                }
+            }
             Some(VideoAct::ToggleVideo) => webview::set_video_visible(!webview::video_visible()),
             None => {}
         }
