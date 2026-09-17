@@ -58,6 +58,21 @@ pub fn prewarm() {
 #[cfg(not(target_os = "macos"))]
 pub fn prewarm() {}
 
+/// Ready `youtube_id` on a second page behind the one on air: its watch page
+/// is loaded now, muted, and held at its start as soon as its player is up,
+/// so a later [`play`] (or queue advance) whose first video is this one swaps
+/// the pages instead of navigating, and the next track starts the moment it's
+/// asked for rather than after a page load and a buffer. Idempotent for the
+/// same id; a different id replaces the page being readied. The page left
+/// behind by a swap is navigated away and taken out of the window.
+#[cfg(target_os = "macos")]
+pub fn preload(youtube_id: &str) {
+    imp::preload(youtube_id);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn preload(_youtube_id: &str) {}
+
 /// Hide the mini-player and stop playback. A no-op when nothing is open.
 #[cfg(target_os = "macos")]
 pub fn close() {
@@ -231,7 +246,8 @@ mod imp {
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2_app_kit::{
-        NSBackingStoreType, NSColor, NSPanel, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
+        NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSPanel, NSView, NSWindow,
+        NSWindowOrderingMode, NSWindowStyleMask,
     };
     use objc2_foundation::{
         MainThreadMarker, NSError, NSNumber, NSPoint, NSRect, NSSize, NSString, NSURLRequest, NSURL,
@@ -270,7 +286,8 @@ mod imp {
     /// yet. Much tighter, because this is the window the user is *watching* —
     /// every tick re-applies the styling to whatever DOM now exists, so the page
     /// snaps to the player as soon as it's there rather than at the next second
-    /// boundary.
+    /// boundary. (A page readied behind the scenes wants it just as tight, so
+    /// its video is caught and held within a frame or two of appearing.)
     const POLL_EVERY_SETTLING: Duration = Duration::from_millis(120);
     /// How long after a load the tight cadence applies, if the page hasn't
     /// started playing before then.
@@ -290,12 +307,62 @@ mod imp {
         /// panel is built lazily on the first `play`, and reads this to start
         /// at the right level instead of at the element's full-volume default.
         static VOLUME: Cell<f32> = const { Cell::new(1.0) };
+        /// Hands out [`Page::serial`]s.
+        static SERIAL: Cell<u64> = const { Cell::new(0) };
     }
 
-    impl Mini {
-        /// How long until this panel wants asking again. Tight while a fresh
+    /// One watch page: a web view and what it last said about its video.
+    ///
+    /// The panel holds two of these at most — the one on air, on top and
+    /// heard, and the next video readying underneath, muted and held at its
+    /// start. Moving on swaps them, so the page that was being readied comes
+    /// on already loaded and buffered, and the page that was on air is
+    /// navigated away and taken out of the window.
+    struct Page {
+        web: Retained<WKWebView>,
+        /// Which page an asynchronous answer from the web view was for. Pages
+        /// swap roles, so a reply is matched by this rather than by slot.
+        serial: u64,
+        /// The video loaded on it; empty on the black page.
+        id: String,
+        /// What the page last said (`playing`, `paused`, `ended`, `novideo`).
+        state: String,
+        /// Position and length the page last reported, and when it did. The
+        /// timestamp is what lets [`transport`] run the playhead forward
+        /// between polls instead of stepping it once per tick.
+        position: f32,
+        duration: f32,
+        reported_at: Instant,
+        /// When the current video was loaded, for the stuck check.
+        loaded_at: Instant,
+        /// When the page was last asked.
+        polled_at: Instant,
+    }
+
+    impl Page {
+        fn new(web: Retained<WKWebView>) -> Self {
+            let serial = SERIAL.with(|s| {
+                let n = s.get() + 1;
+                s.set(n);
+                n
+            });
+            Page {
+                web,
+                serial,
+                id: String::new(),
+                state: String::new(),
+                position: 0.0,
+                duration: 0.0,
+                reported_at: Instant::now(),
+                loaded_at: Instant::now(),
+                polled_at: Instant::now(),
+            }
+        }
+
+        /// How long until this page wants asking again. Tight while a fresh
         /// page is still finding its video, relaxed once it's playing — the
-        /// value the GUI's repaint scheduling follows too, via [`next_poll_in`].
+        /// value the GUI's repaint scheduling follows too, via
+        /// [`next_poll_in`].
         fn poll_interval(&self) -> Duration {
             let settling = self.state.is_empty() || self.state == "novideo";
             if settling && self.loaded_at.elapsed() < SETTLING_FOR {
@@ -306,11 +373,52 @@ mod imp {
                 POLL_EVERY
             }
         }
+
+        /// Point the page at one video's watch page.
+        fn load(&mut self, id: &str) {
+            // Ids are `[A-Za-z0-9_-]` (checked by `ReleaseVideo::youtube_id`),
+            // so the URL needs no escaping.
+            let url = format!("https://www.youtube.com/watch?v={id}");
+            self.id = id.to_string();
+            self.state.clear();
+            // The old video's clock must not show under the new one's title
+            // for the frame or two before the page answers.
+            self.position = 0.0;
+            self.duration = 0.0;
+            self.reported_at = Instant::now();
+            self.loaded_at = Instant::now();
+            // Due immediately: the same tick that reads the player's state also
+            // injects the styling, and waiting a full period would show
+            // YouTube's chrome for most of a second before it collapses to the
+            // video.
+            self.polled_at = Instant::now()
+                .checked_sub(POLL_EVERY)
+                .unwrap_or_else(Instant::now);
+            navigate(&self.web, &url);
+        }
+
+        /// Navigate away from the player, which unloads it and stops the
+        /// sound.
+        fn blank(&mut self) {
+            self.id.clear();
+            self.state.clear();
+            self.position = 0.0;
+            self.duration = 0.0;
+            blank(&self.web);
+        }
     }
 
     struct Mini {
         panel: Retained<NSPanel>,
-        web: Retained<WKWebView>,
+        /// The page on air: on top of the panel, and the one heard.
+        page: Page,
+        /// The next video, readied on a page under the first: muted, and held
+        /// at its start once its player is up, so the swap to it is instant.
+        next: Option<Page>,
+        /// A web view freed by a swap, kept for the next preload so that
+        /// doesn't pay for a fresh web view and content process. Out of the
+        /// window and on the black page meanwhile.
+        spare: Option<Retained<WKWebView>>,
         /// Whether a video is loaded and this panel owns the current session.
         /// This — not `isVisible` — is what every entry point below gates on,
         /// because the panel is normally parked off screen while playing and
@@ -323,14 +431,6 @@ mod imp {
         queue: Vec<String>,
         /// Panel title, reused when the queue advances on its own.
         title: String,
-        /// What the page last said (`playing`, `paused`, `ended`, `novideo`).
-        state: String,
-        /// Position and length the page last reported, and when it did. The
-        /// timestamp is what lets [`transport`] run the playhead forward
-        /// between polls instead of stepping it once per tick.
-        position: f32,
-        duration: f32,
-        reported_at: Instant,
         /// Master volume to hold the page's `<video>` at, `0.0`–`1.0`. Mirrors
         /// the app's own knob so YouTube audio and the file player answer to
         /// one control. Re-applied on every poll rather than only when the knob
@@ -338,10 +438,6 @@ mod imp {
         /// element default, so a set-once command would be lost at the first
         /// track change.
         volume: f32,
-        /// When the current video was loaded, for the stuck check.
-        loaded_at: Instant,
-        /// When the page was last asked.
-        polled_at: Instant,
     }
 
     pub fn play(frame: &eframe::Frame, youtube_ids: &[String], title: &str) -> bool {
@@ -375,7 +471,7 @@ mod imp {
             place(mini, &parent);
             mini.queue = rest.to_vec();
             mini.title = title.to_string();
-            load(mini, first);
+            put_on(mini, first);
             true
         })
     }
@@ -387,12 +483,42 @@ mod imp {
         PANEL.with(|slot| {
             let mut slot = slot.borrow_mut();
             if slot.is_none() {
-                let mini = build(mtm);
+                let mut mini = build(mtm);
                 // A navigation is what launches the content process; a black
                 // page is what the panel shows between videos anyway.
-                blank(&mini.web);
+                mini.page.blank();
                 *slot = Some(mini);
             }
+        });
+    }
+
+    pub fn preload(youtube_id: &str) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        PANEL.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let mini = slot.get_or_insert_with(|| build(mtm));
+            if mini.next.as_ref().is_some_and(|n| n.id == youtube_id) {
+                return;
+            }
+            // Already on air: nothing to ready.
+            if mini.live && mini.page.id == youtube_id {
+                return;
+            }
+            if mini.next.is_none() {
+                let web = mini.spare.take().unwrap_or_else(|| make_web(mtm));
+                // Under the page on air, so the picture stays that page's
+                // until the swap.
+                attach(&mini.panel, &web, Some(&mini.page.web));
+                mini.next = Some(Page::new(web));
+            }
+            let next = mini.next.as_mut().expect("set above");
+            // Silent from the client side from the first byte: the page is
+            // told nothing, so its own volume control is where the user left
+            // it when it comes on.
+            set_page_muted(&next.web, true);
+            next.load(youtube_id);
         });
     }
 
@@ -405,12 +531,12 @@ mod imp {
                 mini.live = false;
                 mini.visible = false;
                 mini.queue.clear();
-                mini.state.clear();
-                mini.position = 0.0;
-                mini.duration = 0.0;
+                if let Some(next) = mini.next.take() {
+                    retire(mini, next);
+                }
                 // Navigating away is what actually stops the audio — ordering the
                 // window out on its own leaves the video playing behind it.
-                blank(&mini.web);
+                mini.page.blank();
                 mini.panel.orderOut(None);
             }
         });
@@ -428,9 +554,9 @@ mod imp {
             return false;
         }
         PANEL.with(|slot| {
-            slot.borrow()
-                .as_ref()
-                .is_some_and(|mini| mini.live && mini.state == "ended" && mini.queue.is_empty())
+            slot.borrow().as_ref().is_some_and(|mini| {
+                mini.live && mini.page.state == "ended" && mini.queue.is_empty()
+            })
         })
     }
 
@@ -446,11 +572,11 @@ mod imp {
             if !mini.live {
                 return PlayerStatus::Unknown;
             }
-            match mini.state.as_str() {
+            match mini.page.state.as_str() {
                 "playing" | "paused" | "ended" => PlayerStatus::Running,
                 // A page with no video on it is only a problem once it's had
                 // time to load one.
-                "novideo" if mini.loaded_at.elapsed() > STUCK_AFTER => PlayerStatus::Stuck,
+                "novideo" if mini.page.loaded_at.elapsed() > STUCK_AFTER => PlayerStatus::Stuck,
                 _ => PlayerStatus::Unknown,
             }
         })
@@ -468,17 +594,18 @@ mod imp {
             if !mini.live {
                 return Transport::default();
             }
-            let playing = mini.state == "playing";
+            let page = &mini.page;
+            let playing = page.state == "playing";
             // Run the clock forward from the last answer while the video rolls,
             // so the playhead moves every frame rather than once per poll. The
             // next answer corrects it, and the drift in between is bounded by
             // the poll interval.
             let position = if playing {
-                mini.position + mini.reported_at.elapsed().as_secs_f32()
+                page.position + page.reported_at.elapsed().as_secs_f32()
             } else {
-                mini.position
+                page.position
             };
-            let duration = mini.duration;
+            let duration = page.duration;
             Transport {
                 position: if duration > 0.0 {
                     position.min(duration)
@@ -487,7 +614,7 @@ mod imp {
                 },
                 duration,
                 playing,
-                ready: matches!(mini.state.as_str(), "playing" | "paused" | "ended"),
+                ready: matches!(page.state.as_str(), "playing" | "paused" | "ended"),
             }
         })
     }
@@ -495,23 +622,23 @@ mod imp {
     pub fn toggle_pause() {
         // Assume the flip locally so the button responds on the click rather
         // than at the next poll; the page's own answer overwrites it either way.
-        with_video("v.paused?v.play():v.pause()", |mini| {
-            mini.state = if mini.state == "playing" {
+        with_video("v.paused?v.play():v.pause()", |page| {
+            page.state = if page.state == "playing" {
                 "paused".into()
             } else {
                 "playing".into()
             };
-            mini.reported_at = Instant::now();
+            page.reported_at = Instant::now();
         });
     }
 
     pub fn seek(secs: f32) {
         let secs = secs.max(0.0);
-        with_video(&format!("v.currentTime={secs}"), move |mini| {
+        with_video(&format!("v.currentTime={secs}"), move |page| {
             // Same reason as the pause flip: the scrubber must land where it
             // was dropped, not snap back until the page catches up.
-            mini.position = secs;
-            mini.reported_at = Instant::now();
+            page.position = secs;
+            page.reported_at = Instant::now();
         });
     }
 
@@ -561,7 +688,7 @@ mod imp {
             // Zero is a client-side mute, so nothing in the page changes and
             // YouTube's own mute button stays where the user left it. The
             // element is then left untouched — see `ask_state`.
-            set_page_muted(&mini.web, volume <= 0.0);
+            set_page_muted(&mini.page.web, volume <= 0.0);
             if volume > 0.0 {
                 let js = format!(
                     "(function(){{\
@@ -570,16 +697,18 @@ mod imp {
                      }})()"
                 );
                 unsafe {
-                    mini.web
+                    mini.page
+                        .web
                         .evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
                 }
             }
         });
     }
 
-    /// Run `body` against the page's `<video>` (bound as `v`), and apply
-    /// `optimistic` to the local state so the UI reflects the command now.
-    fn with_video(body: &str, optimistic: impl FnOnce(&mut Mini)) {
+    /// Run `body` against the on-air page's `<video>` (bound as `v`), and
+    /// apply `optimistic` to the local state so the UI reflects the command
+    /// now.
+    fn with_video(body: &str, optimistic: impl FnOnce(&mut Page)) {
         if MainThreadMarker::new().is_none() {
             return;
         }
@@ -592,10 +721,11 @@ mod imp {
             let js =
                 format!("(function(){{var v=document.querySelector('video');if(v){{{body}}}}})()");
             unsafe {
-                mini.web
+                mini.page
+                    .web
                     .evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
             }
-            optimistic(mini);
+            optimistic(&mut mini.page);
         });
     }
 
@@ -603,27 +733,49 @@ mod imp {
         if MainThreadMarker::new().is_none() {
             return;
         }
-        // The advance is decided under the borrow and applied after it, since
-        // loading the next video borrows the same slot again.
-        let next = PANEL.with(|slot| {
+        // What to do is decided under the borrow and done after it: putting
+        // the next video on is a separate entry point that takes the slot
+        // again.
+        let (advance, ready) = PANEL.with(|slot| {
             let mut slot = slot.borrow_mut();
-            let mini = slot.as_mut()?;
+            let Some(mini) = slot.as_mut() else {
+                return (None, None);
+            };
             if !mini.live {
-                return None;
+                return (None, None);
             }
-            if mini.polled_at.elapsed() >= mini.poll_interval() {
-                mini.polled_at = Instant::now();
-                ask_state(&mini.web, mini.volume);
+            let volume = mini.volume;
+            if mini.page.polled_at.elapsed() >= mini.page.poll_interval() {
+                mini.page.polled_at = Instant::now();
+                ask_state(&mini.page.web, mini.page.serial, volume, false);
+            }
+            if let Some(next) = mini.next.as_mut() {
+                if next.polled_at.elapsed() >= next.poll_interval() {
+                    next.polled_at = Instant::now();
+                    ask_state(&next.web, next.serial, volume, true);
+                }
             }
             // Take the next video the moment the current one reports it's done.
-            (mini.state == "ended" && !mini.queue.is_empty()).then(|| mini.queue.remove(0))
+            let advance =
+                (mini.page.state == "ended" && !mini.queue.is_empty()).then(|| mini.queue.remove(0));
+            // Otherwise ready the queue's next video behind the one playing,
+            // so that advance is a swap rather than a page load.
+            let ready = match (&advance, mini.queue.first()) {
+                (None, Some(id)) if mini.next.as_ref().map_or(true, |n| n.id != *id) => {
+                    Some(id.clone())
+                }
+                _ => None,
+            };
+            (advance, ready)
         });
-        if let Some(id) = next {
+        if let Some(id) = advance {
             PANEL.with(|slot| {
                 if let Some(mini) = slot.borrow_mut().as_mut() {
-                    load(mini, &id);
+                    put_on(mini, &id);
                 }
             });
+        } else if let Some(id) = ready {
+            preload(&id);
         }
     }
 
@@ -641,15 +793,17 @@ mod imp {
             if !mini.live {
                 return None;
             }
-            Some(
-                mini.poll_interval()
-                    .saturating_sub(mini.polled_at.elapsed()),
-            )
+            let due = |p: &Page| p.poll_interval().saturating_sub(p.polled_at.elapsed());
+            let mut soonest = due(&mini.page);
+            if let Some(next) = &mini.next {
+                soonest = soonest.min(due(next));
+            }
+            Some(soonest)
         })
     }
 
-    /// Create the panel and its web view. Called once, lazily, the first time a
-    /// video is played.
+    /// Create the panel and its first page. Called once, lazily, the first
+    /// time a video is played (or the player is prewarmed).
     fn build(mtm: MainThreadMarker) -> Mini {
         let content = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(W, H));
         let style = NSWindowStyleMask::Titled
@@ -683,6 +837,25 @@ mod imp {
             panel.setBackgroundColor(Some(&NSColor::blackColor()));
         }
 
+        let web = make_web(mtm);
+        attach(&panel, &web, None);
+
+        Mini {
+            panel,
+            page: Page::new(web),
+            next: None,
+            spare: None,
+            live: false,
+            visible: false,
+            queue: Vec::new(),
+            title: String::new(),
+            volume: VOLUME.with(|v| v.get()),
+        }
+    }
+
+    /// One web view, set up to play a watch page stripped to its player.
+    fn make_web(mtm: MainThreadMarker) -> Retained<WKWebView> {
+        let content = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(W, H));
         let config = unsafe { WKWebViewConfiguration::new() };
         unsafe {
             // Without this, WebKit blocks autoplay and the page opens paused —
@@ -714,48 +887,88 @@ mod imp {
             // loading panel is black rather than a white slab.
             let _: () = objc2::msg_send![&*web, setValue: &*NSNumber::numberWithBool(false),
                 forKey: &*NSString::from_str("drawsBackground")];
+            web.setAutoresizingMask(
+                NSAutoresizingMaskOptions::NSViewWidthSizable
+                    | NSAutoresizingMaskOptions::NSViewHeightSizable,
+            );
         }
-        panel.setContentView(Some(&web));
+        web
+    }
 
-        Mini {
-            panel,
-            web,
-            live: false,
-            visible: false,
-            queue: Vec::new(),
-            title: String::new(),
-            state: String::new(),
-            position: 0.0,
-            duration: 0.0,
-            reported_at: Instant::now(),
-            volume: VOLUME.with(|v| v.get()),
-            loaded_at: Instant::now(),
-            polled_at: Instant::now(),
+    /// Put `web` into the panel, filling it: on top when `below` is `None`,
+    /// else directly under that view. Every page fills the panel and follows
+    /// its resizes, so whichever is on top is the whole picture.
+    fn attach(panel: &NSPanel, web: &WKWebView, below: Option<&WKWebView>) {
+        let Some(content) = panel.contentView() else {
+            return;
+        };
+        unsafe {
+            web.setFrame(content.bounds());
+            let under: Option<&NSView> = below.map(|w| &**w);
+            content.addSubview_positioned_relativeTo(
+                web,
+                match under {
+                    Some(_) => NSWindowOrderingMode::NSWindowBelow,
+                    None => NSWindowOrderingMode::NSWindowAbove,
+                },
+                under,
+            );
         }
     }
 
-    /// Point the panel at one video's watch page.
-    fn load(mini: &mut Mini, id: &str) {
-        // Ids are `[A-Za-z0-9_-]` (checked by `ReleaseVideo::youtube_id`), so
-        // the URL needs no escaping.
-        let url = format!("https://www.youtube.com/watch?v={id}");
-        mini.state.clear();
-        // The old video's clock must not show under the new one's title for the
-        // frame or two before the page answers.
-        mini.position = 0.0;
-        mini.duration = 0.0;
-        mini.reported_at = Instant::now();
-        mini.loaded_at = Instant::now();
-        // Due immediately: the same tick that reads the player's state also
-        // injects the styling, and waiting a full period would show YouTube's
-        // chrome for most of a second before it collapses to the video.
-        mini.polled_at = Instant::now()
-            .checked_sub(POLL_EVERY)
-            .unwrap_or_else(Instant::now);
+    /// Put `id` on air: by swapping in the page it was readied on when there
+    /// is one, else by navigating the page on air to it.
+    fn put_on(mini: &mut Mini, id: &str) {
+        match mini.next.take() {
+            Some(next) if next.id == id => swap(mini, next),
+            Some(next) => {
+                retire(mini, next);
+                mini.page.load(id);
+            }
+            None => mini.page.load(id),
+        }
         if !mini.title.is_empty() {
             mini.panel.setTitle(&NSString::from_str(&mini.title));
         }
-        navigate(&mini.web, &url);
+    }
+
+    /// Bring the readied page on air in place of the one there. The old page
+    /// leaves the window first, so the new one is the picture the moment the
+    /// old one goes rather than after a re-add; then it's unmuted, wound to
+    /// its start (it may have rolled for a frame before it was caught and
+    /// held) and set going.
+    fn swap(mini: &mut Mini, next: Page) {
+        let old = std::mem::replace(&mut mini.page, next);
+        retire(mini, old);
+        let page = &mut mini.page;
+        set_page_muted(&page.web, mini.volume <= 0.0);
+        let js = "(function(){var v=document.querySelector('video');\
+                  if(v){v.currentTime=0;v.play();}})()";
+        unsafe {
+            page.web
+                .evaluateJavaScript_completionHandler(&NSString::from_str(js), None);
+        }
+        // A page still loading when it was asked for simply autoplays when it
+        // gets there; one already holding its video is rolling from here.
+        if !page.state.is_empty() && page.state != "novideo" {
+            page.state = "playing".into();
+        }
+        page.position = 0.0;
+        page.reported_at = Instant::now();
+        // Ask at once, so the transport reads the real state within a tick.
+        page.polled_at = Instant::now()
+            .checked_sub(POLL_EVERY)
+            .unwrap_or_else(Instant::now);
+    }
+
+    /// Take a page out of the window and off its video, keeping the web view
+    /// for the next preload.
+    fn retire(mini: &mut Mini, mut page: Page) {
+        page.blank();
+        unsafe {
+            page.web.removeFromSuperview();
+        }
+        mini.spare = Some(page.web);
     }
 
     fn navigate(web: &WKWebView, url: &str) {
@@ -831,9 +1044,13 @@ mod imp {
         )
     }
 
-    /// Ask the page what its video element is doing, and re-apply the styling
+    /// Ask a page what its video element is doing, and re-apply the styling
     /// and volume while we're in there (see [`inject_js`]). The answer lands
-    /// asynchronously in `Mini::state`; nothing waits on it.
+    /// asynchronously in the page with `serial`; nothing waits on it.
+    ///
+    /// `hold` is for the page being readied under the one on air: its video
+    /// is paused the moment it exists and kept paused, so the page loads and
+    /// buffers but never runs ahead of the swap that brings it on.
     ///
     /// Volume rides along here rather than being set once at load because each
     /// queued video is a fresh page that starts at the element default, and
@@ -844,9 +1061,12 @@ mod imp {
     /// A knob at zero is handled by [`set_page_muted`] instead, out here on the
     /// view — the page keeps whatever level it had, so unmuting restores it
     /// without this having to remember what YouTube's own default was.
-    fn ask_state(web: &WKWebView, volume: f32) {
+    fn ask_state(web: &WKWebView, serial: u64, volume: f32, hold: bool) {
         let muted = volume <= 0.0;
-        set_page_muted(web, muted);
+        // The readied page stays client-muted throughout; the swap unmutes it.
+        if !hold {
+            set_page_muted(web, muted);
+        }
         // While muted, the element is left completely alone: the client mute
         // already silences it, and writing 0 in here would throw away the
         // page's own level so unmuting couldn't restore it.
@@ -855,12 +1075,14 @@ mod imp {
         } else {
             format!("if(v.volume!={volume})v.volume={volume};")
         };
+        let hold_js = if hold { "if(!v.paused)v.pause();" } else { "" };
         let js = format!(
             "(function(){{\
                {inject};\
                var v=document.querySelector('video');\
                if(!v)return 'novideo';\
                {set_vol}\
+               {hold_js}\
                var s=v.ended?'ended':(v.paused?'paused':'playing');\
                var d=isFinite(v.duration)?v.duration:0;\
                return s+'|'+v.currentTime+'|'+d;\
@@ -884,16 +1106,25 @@ mod imp {
             let pos = parts.next().and_then(|s| s.parse::<f32>().ok());
             let dur = parts.next().and_then(|s| s.parse::<f32>().ok());
             // WebKit runs completion handlers on the main thread, which is the
-            // thread that owns `PANEL`.
+            // thread that owns `PANEL`. The answer is for whichever page was
+            // asked, wherever it has been moved to since — or for none, when
+            // that page has been retired meanwhile.
             PANEL.with(|slot| {
-                if let Some(mini) = slot.borrow_mut().as_mut() {
-                    mini.state = word;
+                let mut slot = slot.borrow_mut();
+                let Some(mini) = slot.as_mut() else { return };
+                let page = if mini.page.serial == serial {
+                    Some(&mut mini.page)
+                } else {
+                    mini.next.as_mut().filter(|n| n.serial == serial)
+                };
+                if let Some(page) = page {
+                    page.state = word;
                     if let Some(p) = pos {
-                        mini.position = p;
-                        mini.reported_at = Instant::now();
+                        page.position = p;
+                        page.reported_at = Instant::now();
                     }
                     if let Some(d) = dur {
-                        mini.duration = d;
+                        page.duration = d;
                     }
                 }
             });

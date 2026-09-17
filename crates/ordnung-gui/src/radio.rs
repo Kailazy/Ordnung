@@ -15,6 +15,13 @@
 //! only thing here is the clock: what to do when a video ends, a thread runs
 //! dry, or Discogs has nothing new down it.
 //!
+//! The clock runs ahead of the music. As soon as a record is on, the finder
+//! (see [`Find`]) steps out of it, lands the next record, fetches its videos
+//! and readies its first one in the player behind the one playing, so when
+//! the song ends the next starts at once rather than after a step, a detail
+//! fetch and a page load. The finder is one record ahead, never more: the
+//! next record is chosen from the one on air, as a walk should be.
+//!
 //! Pure GUI orchestration: nothing here touches the catalog beyond reading
 //! the release cache, and playback is the same YouTube panel the sheet uses.
 
@@ -129,15 +136,27 @@ pub(crate) struct RadioStop {
     pub fresh: bool,
 }
 
+/// What is on air.
 #[derive(Clone)]
 enum Phase {
-    /// Find a record to start from.
+    /// Nothing yet: find a record to start from.
     Seed,
-    /// Fetch the record's detail for its videos.
-    Loading { release_id: u64, since: Instant },
-    /// A video is on; wait for it to end.
+    /// Nothing: the last record ended, or was skipped, before the next was
+    /// ready. Goes on air the moment the finder has one.
+    Waiting,
+    /// A video is on; wait for it to end. The finder readies the next
+    /// record meanwhile.
     Playing { release_id: u64, since: Instant },
-    /// Pick a thread out of the record and take it.
+}
+
+/// The finder: the walk to the next record, run while the current one
+/// plays so the switch doesn't wait on Discogs or YouTube.
+#[derive(Clone)]
+enum Find {
+    /// Nothing sought. While a record plays this lasts one tick: the finder
+    /// steps out of it at once.
+    Idle,
+    /// Pick a thread out of `from` and take it.
     Stepping {
         from: u64,
         /// Threads already tried from this record that came back empty.
@@ -151,6 +170,19 @@ enum Phase {
         tried: Vec<DigThread>,
         since: Instant,
     },
+    /// Landed: the record's detail is being fetched for its videos.
+    Loading {
+        now: RadioNow,
+        fresh: bool,
+        since: Instant,
+    },
+    /// The next record, songs in hand, its first video readied in the
+    /// player behind the one on air. Waits there until the record on air
+    /// ends.
+    Ready { now: RadioNow, fresh: bool },
+    /// The walk ran out. The radio goes off with this message once the
+    /// record on air has ended, rather than cutting it short.
+    Dry(String),
 }
 
 /// Where the radio bar sits on the map. Along the top or bottom it lies
@@ -221,6 +253,8 @@ struct BarGeo {
 pub(crate) struct Radio {
     pub on: bool,
     phase: Phase,
+    /// The next record, in the making.
+    find: Find,
     pub now: Option<RadioNow>,
     /// The detail fetch for the record being readied.
     detail_rx: Option<Receiver<(u64, Option<discogs::ReleaseDetail>)>>,
@@ -261,6 +295,7 @@ impl Default for Radio {
         Self {
             on: false,
             phase: Phase::Seed,
+            find: Find::Idle,
             now: None,
             detail_rx: None,
             skip: false,
@@ -311,6 +346,7 @@ fn paint_cover(painter: &egui::Painter, rect: egui::Rect, tex: Option<egui::Text
 }
 
 impl App {
+
     /// The toolbar's switch.
     pub(crate) fn radio_toggle(&mut self) {
         if self.radio.on {
@@ -342,7 +378,8 @@ impl App {
         if !was_on {
             webview::prewarm();
         }
-        self.radio_ready(id, true);
+        self.radio.phase = Phase::Waiting;
+        self.radio_seek(id, true);
     }
 
     /// The record on air, or one on the walk, was traded for another
@@ -373,18 +410,44 @@ impl App {
                 if !sub.is_empty() {
                     n.sub = sub.to_string();
                 }
-                n.thumb_url = thumb_url;
+                n.thumb_url = thumb_url.clone();
             }
         }
-        match &mut self.radio.phase {
-            Phase::Loading { release_id, since } if *release_id == from => {
+        if let Phase::Playing { release_id, .. } = &mut self.radio.phase {
+            if *release_id == from {
                 *release_id = to;
+            }
+        }
+        // A record being readied is readied again as the new pressing, which
+        // carries its own videos.
+        let retrace = |n: &mut RadioNow| {
+            n.release_id = to;
+            if !title.is_empty() {
+                n.title = title.to_string();
+            }
+            if !sub.is_empty() {
+                n.sub = sub.to_string();
+            }
+            n.thumb_url = thumb_url.clone();
+            n.songs.clear();
+            n.song = 0;
+        };
+        match &mut self.radio.find {
+            Find::Stepping { from: f, .. } | Find::Landing { from: f, .. } if *f == from => *f = to,
+            Find::Loading { now, since, .. } if now.release_id == from => {
+                retrace(now);
                 *since = Instant::now();
                 self.radio.detail_rx = None;
             }
-            Phase::Playing { release_id, .. } if *release_id == from => *release_id = to,
-            Phase::Stepping { from: f, .. } | Phase::Landing { from: f, .. } if *f == from => {
-                *f = to
+            Find::Ready { now, fresh } if now.release_id == from => {
+                let mut now = now.clone();
+                retrace(&mut now);
+                self.radio.find = Find::Loading {
+                    now,
+                    fresh: *fresh,
+                    since: Instant::now(),
+                };
+                self.radio.detail_rx = None;
             }
             _ => {}
         }
@@ -400,6 +463,7 @@ impl App {
         self.radio.now = None;
         self.radio.detail_rx = None;
         self.radio.phase = Phase::Seed;
+        self.radio.find = Find::Idle;
         if was_on {
             webview::close();
             self.status = why.to_string();
@@ -432,63 +496,10 @@ impl App {
                     );
                     return;
                 };
-                self.radio_ready(id, true);
+                self.radio.phase = Phase::Waiting;
+                self.radio_seek(id, true);
             }
-            Phase::Loading { release_id, since } => {
-                if self.radio.detail_rx.is_none() {
-                    self.radio_fetch_detail(release_id, ctx.clone());
-                }
-                let answer = self
-                    .radio
-                    .detail_rx
-                    .as_ref()
-                    .and_then(|rx| rx.try_recv().ok());
-                match answer {
-                    Some((id, detail)) if id == release_id => {
-                        self.radio.detail_rx = None;
-                        let artist = self.radio.now.as_ref().map(|n| n.artist.clone()).unwrap_or_default();
-                        let songs = detail.as_ref().map(|d| radio_songs(d, &artist)).unwrap_or_default();
-                        // One song of the record, at random: a walk that
-                        // always opened at A1 would hear every record's
-                        // lead cut and nothing else. A pressed track over a
-                        // stray upload (a full side, a mix) when there is one.
-                        let tracks: Vec<usize> = (0..songs.len())
-                            .filter(|&i| !songs[i].position.is_empty())
-                            .collect();
-                        let pick = if tracks.is_empty() {
-                            (!songs.is_empty()).then(|| self.radio_roll(songs.len()))
-                        } else {
-                            Some(tracks[self.radio_roll(tracks.len())])
-                        };
-                        let video = pick.and_then(|i| songs.get(i)).map(|s| s.youtube_id.clone());
-                        if let Some(n) = self.radio.now.as_mut() {
-                            n.songs = songs;
-                            n.song = pick.unwrap_or(0);
-                        }
-                        match video {
-                            Some(v) => self.radio_play(release_id, v, true, frame),
-                            None => {
-                                if let Some(n) = &self.radio.now {
-                                    self.status = format!(
-                                        "No video on Discogs for {} – {}. Digging on.",
-                                        n.artist, n.title
-                                    );
-                                }
-                                self.radio_step_from(release_id, Vec::new());
-                            }
-                        }
-                    }
-                    Some(_) => {
-                        // An answer for a record we've already left.
-                        self.radio.detail_rx = None;
-                    }
-                    None if since.elapsed() > WAIT_VIDEO => {
-                        self.radio.detail_rx = None;
-                        self.radio_step_from(release_id, Vec::new());
-                    }
-                    None => {}
-                }
-            }
+            Phase::Waiting => {}
             Phase::Playing { release_id, since } => {
                 // The file player started: one sound at a time, and the
                 // listener chose that one.
@@ -497,7 +508,7 @@ impl App {
                     return;
                 }
                 if std::mem::take(&mut self.radio.skip) {
-                    self.radio_step_from(release_id, Vec::new());
+                    self.radio_advance(frame);
                     return;
                 }
                 // A song picked from the bar's list: the same record, another
@@ -524,14 +535,30 @@ impl App {
                 }
                 if webview::status() == webview::PlayerStatus::Stuck {
                     self.status = "That video wouldn't play. Digging on.".to_string();
-                    self.radio_step_from(release_id, Vec::new());
+                    self.radio_advance(frame);
                     return;
                 }
                 if webview::ended() || since.elapsed() > MAX_PLAY {
+                    self.radio_advance(frame);
+                    return;
+                }
+            }
+        }
+        self.drive_find(ctx, frame);
+    }
+
+    /// One tick of the finder. Runs whether or not a record is on air: with
+    /// one on, it works ahead; with none, what it finds goes on at once.
+    fn drive_find(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let find = self.radio.find.clone();
+        match find {
+            Find::Idle => {
+                // A record is on: start on the next straight away.
+                if let Phase::Playing { release_id, .. } = self.radio.phase {
                     self.radio_step_from(release_id, Vec::new());
                 }
             }
-            Phase::Stepping { from, tried, since } => {
+            Find::Stepping { from, tried, since } => {
                 // The dig must stand on the record. If the listener moved
                 // the dig elsewhere meanwhile, follow them.
                 let Some(dig) = self.dig.as_ref() else {
@@ -601,14 +628,14 @@ impl App {
                     }
                     _ => self.dig_step(thread),
                 }
-                self.radio.phase = Phase::Landing {
+                self.radio.find = Find::Landing {
                     from,
                     thread,
                     tried,
                     since: Instant::now(),
                 };
             }
-            Phase::Landing {
+            Find::Landing {
                 from,
                 thread,
                 mut tried,
@@ -626,13 +653,14 @@ impl App {
                     return;
                 }
                 if dig.head().release_id != from {
-                    // Landed. Light it, lean in, and ready its video.
+                    // Landed. Ready its video; it's lit and leaned on when
+                    // it comes on air.
                     let id = dig.head().release_id;
                     self.radio.last_thread = Some(thread);
                     self.radio.reseeds = 0;
                     self.dig_evict();
                     self.dig_prime();
-                    self.radio_ready(id, false);
+                    self.radio_seek(id, false);
                 } else {
                     // Nothing new down that thread: try another, then a
                     // fresh start.
@@ -640,19 +668,152 @@ impl App {
                     self.radio_step_from(from, tried);
                 }
             }
+            Find::Loading { now, fresh, since } => {
+                let release_id = now.release_id;
+                if self.radio.detail_rx.is_none() {
+                    self.radio_fetch_detail(release_id, ctx.clone());
+                }
+                let answer = self
+                    .radio
+                    .detail_rx
+                    .as_ref()
+                    .and_then(|rx| rx.try_recv().ok());
+                match answer {
+                    Some((id, detail)) if id == release_id => {
+                        self.radio.detail_rx = None;
+                        let songs = detail
+                            .as_ref()
+                            .map(|d| radio_songs(d, &now.artist))
+                            .unwrap_or_default();
+                        if songs.is_empty() {
+                            // Said only when the bar is waiting on it: while a
+                            // record plays, a record never heard is no news.
+                            if !matches!(self.radio.phase, Phase::Playing { .. }) {
+                                self.status = format!(
+                                    "No video on Discogs for {} – {}. Digging on.",
+                                    now.artist, now.title
+                                );
+                            }
+                            self.radio_step_from(release_id, Vec::new());
+                            return;
+                        }
+                        // One song of the record, at random: a walk that
+                        // always opened at A1 would hear every record's
+                        // lead cut and nothing else. A pressed track over a
+                        // stray upload (a full side, a mix) when there is one.
+                        let tracks: Vec<usize> = (0..songs.len())
+                            .filter(|&i| !songs[i].position.is_empty())
+                            .collect();
+                        let pick = if tracks.is_empty() {
+                            self.radio_roll(songs.len())
+                        } else {
+                            tracks[self.radio_roll(tracks.len())]
+                        };
+                        let mut now = now;
+                        now.songs = songs;
+                        now.song = pick;
+                        self.radio.find = Find::Ready { now, fresh };
+                        self.radio_offer(frame);
+                    }
+                    Some(_) => {
+                        // An answer for a record we've already left.
+                        self.radio.detail_rx = None;
+                    }
+                    None if since.elapsed() > WAIT_VIDEO => {
+                        self.radio.detail_rx = None;
+                        self.radio_step_from(release_id, Vec::new());
+                    }
+                    None => {}
+                }
+            }
+            Find::Ready { .. } | Find::Dry(_) => self.radio_offer(frame),
         }
     }
 
-    /// Point the radio at the record the dig now stands on: light it on the
-    /// map, lean the camera in, add it to the walk, and go fetch its videos.
-    /// `fresh` says nothing led here from the stop before.
-    fn radio_ready(&mut self, release_id: u64, fresh: bool) {
+    /// The finder has an answer. With nothing on air it goes on now; with a
+    /// record playing, a found record's first video is readied behind it
+    /// and a dry walk waits for the song to end.
+    fn radio_offer(&mut self, frame: &eframe::Frame) {
+        match (&self.radio.find, &self.radio.phase) {
+            (Find::Ready { now, .. }, Phase::Playing { .. }) => {
+                if let Some(song) = now.songs.get(now.song) {
+                    webview::preload(&song.youtube_id);
+                }
+            }
+            (Find::Ready { .. }, _) => self.radio_on_air(frame),
+            (Find::Dry(why), Phase::Seed | Phase::Waiting) => {
+                let why = why.clone();
+                self.radio_stop(&why);
+            }
+            _ => {}
+        }
+    }
+
+    /// The record on air is done with: skipped, ended, or stuck. The next
+    /// goes on if the finder has it; otherwise the radio waits on the
+    /// finder, and the sound stays up meanwhile rather than going quiet.
+    fn radio_advance(&mut self, frame: &eframe::Frame) {
+        match &self.radio.find {
+            Find::Ready { .. } => self.radio_on_air(frame),
+            Find::Dry(why) => {
+                let why = why.clone();
+                self.radio_stop(&why);
+            }
+            Find::Idle => {
+                if let Phase::Playing { release_id, .. } = self.radio.phase {
+                    self.radio_step_from(release_id, Vec::new());
+                }
+                self.radio.phase = Phase::Waiting;
+            }
+            _ => self.radio.phase = Phase::Waiting,
+        }
+    }
+
+    /// Put the finder's record on air: light it on the map, lean the camera
+    /// in, add it to the walk, and play its first song.
+    fn radio_on_air(&mut self, frame: &eframe::Frame) {
+        let Find::Ready { now, fresh } = std::mem::replace(&mut self.radio.find, Find::Idle) else {
+            return;
+        };
+        let release_id = now.release_id;
         let key = format!("r:{release_id}");
         self.graph.focus = Some(key.clone());
         self.graph.lean = Some((key, true));
         self.graph.wake();
-        let now = self.dig.as_ref().and_then(|d| {
-            d.steps.iter().find(|s| s.release_id == release_id).map(|s| RadioNow {
+        let last = self.radio.walk.last().map(|s| s.release_id);
+        if last != Some(release_id) {
+            self.radio.walk.push(RadioStop {
+                release_id,
+                artist: now.artist.clone(),
+                title: now.title.clone(),
+                thumb_url: now.thumb_url.clone(),
+                key: now.key,
+                // A landing is joined to the stop before it by the thread it
+                // came down; a start stands alone.
+                via: if fresh { None } else { now.via.clone() },
+                fresh: fresh || self.radio.walk.is_empty(),
+            });
+        }
+        let video = now.songs.get(now.song).map(|s| s.youtube_id.clone());
+        self.radio.now = Some(now);
+        match video {
+            Some(v) => self.radio_play(release_id, v, true, frame),
+            None => {
+                self.radio.phase = Phase::Waiting;
+                self.radio_step_from(release_id, Vec::new());
+            }
+        }
+    }
+
+    /// Point the finder at the record the dig now stands on: take down what
+    /// the bar will show of it, and go fetch its videos. `fresh` says nothing
+    /// led here from the stop before.
+    fn radio_seek(&mut self, release_id: u64, fresh: bool) {
+        let now = self
+            .dig
+            .as_ref()
+            .and_then(|d| d.steps.iter().find(|s| s.release_id == release_id))
+            .map(|s| RadioNow {
                 release_id,
                 artist: s.artist.clone(),
                 title: s.title.clone(),
@@ -664,27 +825,22 @@ impl App {
                 songs: Vec::new(),
                 song: 0,
             })
-        });
-        if let Some(n) = &now {
-            let last = self.radio.walk.last().map(|s| s.release_id);
-            if last != Some(release_id) {
-                self.radio.walk.push(RadioStop {
-                    release_id,
-                    artist: n.artist.clone(),
-                    title: n.title.clone(),
-                    thumb_url: n.thumb_url.clone(),
-                    key: n.key,
-                    // A landing is joined to the stop before it by the
-                    // thread it came down; a start stands alone.
-                    via: if fresh { None } else { n.via.clone() },
-                    fresh: fresh || self.radio.walk.is_empty(),
-                });
-            }
-        }
-        self.radio.now = now;
+            .unwrap_or(RadioNow {
+                release_id,
+                artist: String::new(),
+                title: String::new(),
+                sub: String::new(),
+                thumb_url: None,
+                key: None,
+                via: None,
+                want_sent: false,
+                songs: Vec::new(),
+                song: 0,
+            });
         self.radio.detail_rx = None;
-        self.radio.phase = Phase::Loading {
-            release_id,
+        self.radio.find = Find::Loading {
+            now,
+            fresh,
             since: Instant::now(),
         };
     }
@@ -692,7 +848,7 @@ impl App {
     /// Move on from `from`, with `tried` the threads that already came back
     /// empty out of it.
     fn radio_step_from(&mut self, from: u64, tried: Vec<DigThread>) {
-        self.radio.phase = Phase::Stepping {
+        self.radio.find = Find::Stepping {
             from,
             tried,
             since: Instant::now(),
@@ -704,17 +860,19 @@ impl App {
     fn radio_reseed(&mut self) {
         self.radio.reseeds += 1;
         if self.radio.reseeds > MAX_RESEEDS {
-            self.radio_stop("Radio off: ran out of threads to follow");
+            self.radio.find = Find::Dry("Radio off: ran out of threads to follow".to_string());
             return;
         }
         match self.radio_seed(true) {
             Some(id) => {
-                if let Some(n) = &self.radio.now {
+                if let (Some(n), false) = (&self.radio.now, matches!(self.radio.phase, Phase::Playing { .. })) {
                     self.status = format!("Nothing new near {} – {}. Fresh start.", n.artist, n.title);
                 }
-                self.radio_ready(id, true);
+                self.radio_seek(id, true);
             }
-            None => self.radio_stop("Radio off: nothing left to start from"),
+            None => {
+                self.radio.find = Find::Dry("Radio off: nothing left to start from".to_string());
+            }
         }
     }
 
@@ -1413,10 +1571,11 @@ impl App {
                         crate::audio::fmt_time(shown * tr.duration),
                         crate::audio::fmt_time(tr.duration)
                     ));
-                } else if matches!(self.radio.phase, Phase::Loading { .. }) {
-                    sub.push_str(" · loading");
-                } else if matches!(self.radio.phase, Phase::Stepping { .. } | Phase::Landing { .. }) {
-                    sub.push_str(" · digging for the next record");
+                } else if matches!(self.radio.phase, Phase::Waiting) {
+                    sub.push_str(match self.radio.find {
+                        Find::Loading { .. } | Find::Ready { .. } => " · loading",
+                        _ => " · digging for the next record",
+                    });
                 }
                 (format!("{} – {}", n.artist, n.title), sub)
             }
