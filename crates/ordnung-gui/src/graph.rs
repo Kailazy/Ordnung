@@ -158,6 +158,15 @@ struct Node {
     threads_v: f32,
 }
 
+/// A thread taken: from the record it was taken out of to the record it
+/// found, and what was matched on the way (the artist, label or style name).
+struct Trail {
+    from: u64,
+    to: u64,
+    thread: DigThread,
+    via: String,
+}
+
 struct Edge {
     a: usize,
     b: usize,
@@ -299,10 +308,10 @@ pub(crate) struct GraphState {
     /// A record the camera should move to once it's on the map, and whether
     /// to lean in on it or only bring it into view.
     pub(crate) lean: Option<(String, bool)>,
-    /// Every thread ever taken this session, `(from, to, thread)` by release
-    /// id, drawn as a trail wherever both ends are on the map. Outlives the
-    /// dig web itself, so a fresh dig doesn't wipe the walk that came before.
-    trails: Vec<(u64, u64, DigThread)>,
+    /// Every thread ever taken this session, by release id, drawn as a trail
+    /// wherever both ends are on the map. Outlives the dig web itself, so a
+    /// fresh dig doesn't wipe the walk that came before.
+    trails: Vec<Trail>,
     /// When the last simulation tick ran; `None` while asleep.
     last_tick: Option<Instant>,
     seed: u64,
@@ -1600,32 +1609,117 @@ impl App {
         // feeds them in as it grows; the map keeps them once it's gone.
         if let Some(dig) = &self.dig {
             for s in &dig.steps {
-                if let (Some(p), Some((t, _))) = (s.parent, s.via.as_ref()) {
+                if let (Some(p), Some((t, m))) = (s.parent, s.via.as_ref()) {
                     let from = dig.steps[p].release_id;
                     let to = s.release_id;
-                    if !g.trails.iter().any(|x| x.0 == from && x.1 == to) {
-                        g.trails.push((from, to, *t));
+                    if !g.trails.iter().any(|x| x.from == from && x.to == to) {
+                        g.trails.push(Trail {
+                            from,
+                            to,
+                            thread: *t,
+                            via: m.clone(),
+                        });
                     }
                 }
             }
         }
+        // A trail runs from the edge of one cover to the edge of the next
+        // and ends in an arrowhead, so it reads as "this led to that" and
+        // not just "these two are joined". Where there's room it carries the
+        // name that was matched, so the map says how one record led to the
+        // next without a trip to the sheet. The trail into the record on air
+        // is lit: that's the step you're hearing.
+        let on_air = self
+            .radio
+            .on
+            .then(|| self.radio.now.as_ref().map(|n| n.release_id))
+            .flatten();
         let trail_w = (1.8 * zoom.sqrt()).clamp(0.9, 2.4);
-        for &(from, to, t) in &g.trails {
+        let head_l = (4.0 + 3.0 * zoom.sqrt()).clamp(5.0, 9.0);
+        let word_size = (10.5 * zoom.sqrt()).clamp(9.0, 12.0);
+        for tr in &g.trails {
             let (Some(&a), Some(&b)) = (
-                g.index.get(&format!("r:{from}")),
-                g.index.get(&format!("r:{to}")),
+                g.index.get(&format!("r:{}", tr.from)),
+                g.index.get(&format!("r:{}", tr.to)),
             ) else {
                 continue;
             };
-            let pa = to_screen(cam, zoom, g.nodes[a].pos);
-            let pb = to_screen(cam, zoom, g.nodes[b].pos);
-            if !visible(pa, 0.0) && !visible(pb, 0.0) {
+            let ca = to_screen(cam, zoom, g.nodes[a].pos);
+            let cb = to_screen(cam, zoom, g.nodes[b].pos);
+            if !visible(ca, 0.0) && !visible(cb, 0.0) {
+                continue;
+            }
+            let d = cb - ca;
+            let len = d.length();
+            if len < 1.0 {
+                continue;
+            }
+            let dir = d / len;
+            // Where the line leaves a square cover, along this direction.
+            let exit = |i: usize| -> f32 {
+                let r = g.nodes[i].r * g.nodes[i].scale * zoom;
+                r / dir.x.abs().max(dir.y.abs()).max(0.01)
+            };
+            let pa = ca + dir * (exit(a) + 1.0);
+            let pb = cb - dir * (exit(b) + 1.0);
+            let run = (pb - pa).dot(dir);
+            if run < head_l {
+                // Covers touching: nothing to draw between them.
                 continue;
             }
             let on = matches[a] || matches[b];
-            let lit = Some(a) == g.hover || Some(b) == g.hover;
-            let tint = thread_tint(t).gamma_multiply(if lit { 0.95 } else { 0.55 });
-            painter.line_segment([pa, pb], egui::Stroke::new(trail_w, dim(tint, on)));
+            let lit = Some(a) == g.hover || Some(b) == g.hover || on_air == Some(tr.to);
+            let tint = dim(
+                thread_tint(tr.thread).gamma_multiply(if lit { 0.95 } else { 0.55 }),
+                on,
+            );
+            let w = if lit { trail_w + 0.6 } else { trail_w };
+            painter.line_segment([pa, pb], egui::Stroke::new(w, tint));
+            let perp = egui::vec2(-dir.y, dir.x);
+            let hl = if lit { head_l + 1.5 } else { head_l };
+            painter.add(egui::Shape::convex_polygon(
+                vec![pb, pb - dir * hl + perp * hl * 0.55, pb - dir * hl - perp * hl * 0.55],
+                tint,
+                egui::Stroke::NONE,
+            ));
+            // The matched name, on the trail, when the trail is long enough
+            // to carry it without the words swallowing the line.
+            if run < 44.0 || tr.via.trim().is_empty() {
+                continue;
+            }
+            let mut word = tr.via.trim().to_string();
+            if word.chars().count() > 20 {
+                word = word.chars().take(19).collect::<String>() + "…";
+            }
+            let ink = dim(if lit { color::LABEL } else { color::LABEL_2 }, on);
+            let galley = painter.layout_no_wrap(word, egui::FontId::proportional(word_size), ink);
+            let glyph_r = word_size * 0.38;
+            let tw = galley.size().x + glyph_r * 2.0 + 4.0;
+            if run - hl < tw + 18.0 {
+                continue;
+            }
+            let mid = pa + dir * ((run - hl) * 0.5);
+            let box_w = tw + 10.0;
+            let box_h = galley.size().y + 4.0;
+            let bg = egui::Rect::from_center_size(mid, egui::vec2(box_w, box_h));
+            painter.rect_filled(
+                bg,
+                box_h * 0.5,
+                dim(color::SURFACE.gamma_multiply(if lit { 0.96 } else { 0.86 }), on),
+            );
+            let gc = egui::pos2(bg.left() + 5.0 + glyph_r, mid.y);
+            knob_glyph(
+                &painter,
+                Knob::Thread(tr.thread),
+                gc,
+                dim(thread_tint(tr.thread).gamma_multiply(if lit { 1.0 } else { 0.8 }), on),
+                glyph_r,
+            );
+            painter.galley(
+                egui::pos2(gc.x + glyph_r + 4.0, mid.y - galley.size().y * 0.5),
+                galley,
+                ink,
+            );
         }
 
         // Hubs under, records over, the hovered node last so it sits on top.
@@ -1887,6 +1981,65 @@ impl App {
             }
         }
 
+        // The radio's walk: every record it has stood on wears its number
+        // at the corner, so the order the records came in reads off the map
+        // however the trails cross. The same numbers run along the row
+        // under the radio bar.
+        if !self.radio.walk.is_empty() {
+            let mut stops: HashMap<u64, Vec<usize>> = HashMap::new();
+            for (k, stop) in self.radio.walk.iter().enumerate() {
+                stops.entry(stop.release_id).or_default().push(k + 1);
+            }
+            for (id, nums) in stops {
+                let Some(&i) = g.index.get(&format!("r:{id}")) else {
+                    continue;
+                };
+                let n = &g.nodes[i];
+                let p = to_screen(cam, zoom, n.pos);
+                let r = n.r * n.scale * zoom;
+                if r < 4.0 || !visible(p, r + 20.0) {
+                    continue;
+                }
+                let on = matches[i];
+                let text = nums
+                    .iter()
+                    .map(|k| k.to_string())
+                    .collect::<Vec<_>>()
+                    .join("·");
+                let live = self.radio.on && on_air == Some(id);
+                let size = if r >= 14.0 { 10.5 } else { 9.0 };
+                let galley = painter.layout_no_wrap(
+                    text,
+                    font::strong(size),
+                    egui::Color32::WHITE,
+                );
+                let br = (size * 0.85).max(galley.size().x * 0.5 + 3.0);
+                let c = egui::pos2(p.x - r, p.y - r);
+                let pill = egui::Rect::from_center_size(
+                    c,
+                    egui::vec2(br * 2.0, size * 1.7),
+                );
+                painter.rect_filled(
+                    pill,
+                    pill.height() * 0.5,
+                    dim(
+                        if live { color::ACCENT_HOVER } else { color::ACCENT },
+                        on,
+                    ),
+                );
+                painter.rect_stroke(
+                    pill,
+                    pill.height() * 0.5,
+                    egui::Stroke::new(1.0, dim(color::BG, on)),
+                );
+                painter.galley(
+                    c - galley.size() * 0.5,
+                    galley,
+                    dim(egui::Color32::WHITE, on),
+                );
+            }
+        }
+
         for (p, area, name, ink) in hub_names {
             let size = (13.0 * zoom.sqrt()).clamp(9.0, 16.0);
             let galley = painter.layout_no_wrap(name, font::strong(size), ink);
@@ -2032,10 +2185,19 @@ impl App {
                     (DigThread::Style, "style"),
                 ] {
                     painter.line_segment(
-                        [egui::pos2(x, y), egui::pos2(x + 12.0, y)],
+                        [egui::pos2(x, y), egui::pos2(x + 10.0, y)],
                         egui::Stroke::new(2.0, thread_tint(t)),
                     );
-                    x += 16.0;
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            egui::pos2(x + 14.0, y),
+                            egui::pos2(x + 9.0, y - 3.0),
+                            egui::pos2(x + 9.0, y + 3.0),
+                        ],
+                        thread_tint(t),
+                        egui::Stroke::NONE,
+                    ));
+                    x += 18.0;
                     caption(&mut x, word.to_string());
                 }
             }

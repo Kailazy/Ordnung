@@ -39,6 +39,23 @@ pub(crate) struct RadioNow {
     pub want_sent: bool,
 }
 
+/// One record the radio has stood on, in the order it came: the walk the
+/// numbers on the map and the row under the bar both read from.
+#[derive(Clone)]
+pub(crate) struct RadioStop {
+    pub release_id: u64,
+    pub artist: String,
+    pub title: String,
+    pub thumb_url: Option<String>,
+    pub key: Option<VinylCoverKey>,
+    /// The thread that led here from the stop before, and what was matched.
+    pub via: Option<(DigThread, String)>,
+    /// A fresh start: nothing led here from the stop before it. The first
+    /// stop, a restart when a record ran dry, or a record you pointed the
+    /// radio at yourself.
+    pub fresh: bool,
+}
+
 #[derive(Clone)]
 enum Phase {
     /// Find a record to start from.
@@ -79,6 +96,10 @@ pub(crate) struct Radio {
     reseeds: u32,
     /// Records played since the radio came on.
     pub played: usize,
+    /// Every record the radio has stood on since it came on, oldest first.
+    /// Kept after the radio goes off, so the map still reads; a fresh
+    /// switch-on starts a new walk.
+    pub walk: Vec<RadioStop>,
 }
 
 impl Default for Radio {
@@ -92,6 +113,7 @@ impl Default for Radio {
             last_thread: None,
             reseeds: 0,
             played: 0,
+            walk: Vec::new(),
         }
     }
 }
@@ -106,6 +128,28 @@ const WAIT_VIDEO: Duration = Duration::from_secs(25);
 const MAX_PLAY: Duration = Duration::from_secs(20 * 60);
 /// Fresh starts in a row before the radio gives up.
 const MAX_RESEEDS: u32 = 4;
+
+/// A cover in `rect`, or a blank sleeve when the image isn't in yet.
+fn paint_cover(painter: &egui::Painter, rect: egui::Rect, tex: Option<egui::TextureId>) {
+    use crate::ui::tokens::{color, radius};
+    match tex {
+        Some(id) => {
+            painter.add(egui::Shape::Rect(egui::epaint::RectShape {
+                rect,
+                rounding: radius::XS.into(),
+                fill: egui::Color32::WHITE,
+                stroke: egui::Stroke::NONE,
+                blur_width: 0.0,
+                fill_texture_id: id,
+                uv: egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            }));
+        }
+        None => {
+            painter.rect_filled(rect, radius::XS, color::SURFACE_HI);
+            crate::ui::icon::record(painter, rect.center(), color::LABEL_4, rect.width() * 0.3);
+        }
+    }
+}
 
 impl App {
     /// The toolbar's switch.
@@ -139,7 +183,7 @@ impl App {
             self.radio.reseeds = 0;
             self.radio.skip = false;
         }
-        self.radio_ready(id);
+        self.radio_ready(id, true);
     }
 
     pub(crate) fn radio_stop(&mut self, why: &str) {
@@ -180,7 +224,7 @@ impl App {
                     );
                     return;
                 };
-                self.radio_ready(id);
+                self.radio_ready(id, true);
             }
             Phase::Loading { release_id, since } => {
                 if self.radio.detail_rx.is_none() {
@@ -324,7 +368,7 @@ impl App {
                     self.radio.reseeds = 0;
                     self.dig_evict();
                     self.dig_prime();
-                    self.radio_ready(id);
+                    self.radio_ready(id, false);
                 } else {
                     // Nothing new down that thread: try another, then a
                     // fresh start.
@@ -336,8 +380,9 @@ impl App {
     }
 
     /// Point the radio at the record the dig now stands on: light it on the
-    /// map, lean the camera in, and go fetch its videos.
-    fn radio_ready(&mut self, release_id: u64) {
+    /// map, lean the camera in, add it to the walk, and go fetch its videos.
+    /// `fresh` says nothing led here from the stop before.
+    fn radio_ready(&mut self, release_id: u64, fresh: bool) {
         let key = format!("r:{release_id}");
         self.graph.focus = Some(key.clone());
         self.graph.lean = Some((key, true));
@@ -354,6 +399,22 @@ impl App {
                 want_sent: false,
             })
         });
+        if let Some(n) = &now {
+            let last = self.radio.walk.last().map(|s| s.release_id);
+            if last != Some(release_id) {
+                self.radio.walk.push(RadioStop {
+                    release_id,
+                    artist: n.artist.clone(),
+                    title: n.title.clone(),
+                    thumb_url: n.thumb_url.clone(),
+                    key: n.key,
+                    // A landing is joined to the stop before it by the
+                    // thread it came down; a start stands alone.
+                    via: if fresh { None } else { n.via.clone() },
+                    fresh: fresh || self.radio.walk.is_empty(),
+                });
+            }
+        }
         self.radio.now = now;
         self.radio.detail_rx = None;
         self.radio.phase = Phase::Loading {
@@ -385,7 +446,7 @@ impl App {
                 if let Some(n) = &self.radio.now {
                     self.status = format!("Nothing new near {} – {}. Fresh start.", n.artist, n.title);
                 }
-                self.radio_ready(id);
+                self.radio_ready(id, true);
             }
             None => self.radio_stop("Radio off: nothing left to start from"),
         }
@@ -519,37 +580,10 @@ impl App {
             bar.min + egui::vec2(PAD, PAD),
             egui::Vec2::splat(H - PAD * 2.0),
         );
-        let tex = now.as_ref().and_then(|n| match n.key {
-            Some(k) => {
-                self.request_vinyl_cover(k);
-                match self.vinyl_covers.get(&k) {
-                    Some(ThumbState::Ready(Some(t))) => Some(t.id()),
-                    _ => None,
-                }
-            }
-            None => n
-                .thumb_url
-                .as_deref()
-                .and_then(|u| self.dig_cover(u).map(|t| t.id())),
-        });
-        let painter = ui.painter();
-        match tex {
-            Some(id) => {
-                painter.add(egui::Shape::Rect(egui::epaint::RectShape {
-                    rect: cover,
-                    rounding: radius::XS.into(),
-                    fill: egui::Color32::WHITE,
-                    stroke: egui::Stroke::NONE,
-                    blur_width: 0.0,
-                    fill_texture_id: id,
-                    uv: egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                }));
-            }
-            None => {
-                painter.rect_filled(cover, radius::XS, color::SURFACE_HI);
-                crate::ui::icon::record(painter, cover.center(), color::LABEL_4, cover.width() * 0.3);
-            }
-        }
+        let tex = now
+            .as_ref()
+            .and_then(|n| self.radio_cover(n.key, n.thumb_url.as_deref()));
+        paint_cover(ui.painter(), cover, tex);
         // The controls take the right end, as much as they need; the words
         // get what's left.
         let ctl = egui::Rect::from_min_max(egui::pos2(cover.right() + PAD, bar.top()), bar.max);
@@ -642,6 +676,8 @@ impl App {
         clip.galley(egui::pos2(words.left(), y0), g1.clone(), color::LABEL);
         clip.galley(egui::pos2(words.left(), y0 + g1.size().y + 2.0), g2, color::LABEL_3);
 
+        self.draw_radio_walk(ui, bar);
+
         if stop {
             self.radio_stop("Radio off");
         }
@@ -660,6 +696,155 @@ impl App {
                     },
                 );
             }
+        }
+    }
+
+    /// A radio record's cover: the local cache for a shelf record, the
+    /// dig's cover cache for one Discogs found.
+    fn radio_cover(&mut self, key: Option<VinylCoverKey>, thumb_url: Option<&str>) -> Option<egui::TextureId> {
+        match key {
+            Some(k) => {
+                self.request_vinyl_cover(k);
+                match self.vinyl_covers.get(&k) {
+                    Some(ThumbState::Ready(Some(t))) => Some(t.id()),
+                    _ => None,
+                }
+            }
+            None => thumb_url.and_then(|u| self.dig_cover(u).map(|t| t.id())),
+        }
+    }
+
+    /// The walk so far, in a row under the bar: every record the radio has
+    /// stood on, oldest left, newest right, each numbered as it is on the
+    /// map and joined to the next by the thread that led there. A fresh
+    /// start breaks the row. Hover a stop for how it was found; click it to
+    /// lean the map in on it.
+    fn draw_radio_walk(&mut self, ui: &mut egui::Ui, bar: egui::Rect) {
+        use crate::ui::tokens::{color, font, radius};
+        let walk = self.radio.walk.clone();
+        if walk.len() < 2 {
+            return;
+        }
+        const THUMB: f32 = 30.0;
+        const LINK: f32 = 26.0;
+        const PAD: f32 = 10.0;
+        const NUM_H: f32 = 13.0;
+        let pitch = THUMB + LINK;
+        let room = bar.width() - PAD * 2.0;
+        // The last stops that fit; a count of the ones cut off leads the row.
+        let fit = (((room + LINK) / pitch).floor() as usize).max(2);
+        let (skipped, shown): (usize, &[RadioStop]) = if walk.len() > fit {
+            let k = walk.len() - (fit - 1);
+            (k, &walk[k..])
+        } else {
+            (0, &walk[..])
+        };
+        let more = (skipped > 0).then(|| format!("+{skipped}"));
+        let more_w = more.as_ref().map(|m| {
+            ui.painter()
+                .layout_no_wrap(m.clone(), font::caption(), color::LABEL_3)
+                .size()
+                .x
+                + LINK
+        });
+        let w = PAD * 2.0 + shown.len() as f32 * THUMB + (shown.len() - 1) as f32 * LINK
+            + more_w.unwrap_or(0.0);
+        let h = PAD + THUMB + 2.0 + NUM_H + PAD * 0.6;
+        let row = egui::Rect::from_min_size(
+            egui::pos2(bar.center().x - w * 0.5, bar.bottom() + 8.0),
+            egui::vec2(w, h),
+        );
+        ui.painter().rect(
+            row,
+            radius::LG,
+            color::SURFACE.gamma_multiply(0.96),
+            egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE),
+        );
+        let mut x = row.left() + PAD;
+        let cy = row.top() + PAD + THUMB * 0.5;
+        if let Some(m) = &more {
+            let p = ui.painter();
+            let galley = p.layout_no_wrap(m.clone(), font::caption(), color::LABEL_3);
+            p.galley(egui::pos2(x, cy - galley.size().y * 0.5), galley, color::LABEL_3);
+            x += more_w.unwrap_or(0.0);
+        }
+        let on_air = self.radio.now.as_ref().map(|n| n.release_id);
+        let first_num = skipped + 1;
+        let mut lean: Option<u64> = None;
+        for (k, stop) in shown.iter().enumerate() {
+            let num = first_num + k;
+            let thumb = egui::Rect::from_center_size(
+                egui::pos2(x + THUMB * 0.5, cy),
+                egui::Vec2::splat(THUMB),
+            );
+            // The link from the stop before, in the colour of the thread
+            // that led here. A fresh start gets a gap and a tick instead.
+            if k > 0 || more.is_some() {
+                let p = ui.painter();
+                let a = egui::pos2(x - LINK + 3.0, cy);
+                let b = egui::pos2(x - 3.0, cy);
+                match (&stop.via, stop.fresh) {
+                    (Some((t, _)), false) => {
+                        let tint = crate::graph::thread_tint(*t);
+                        p.line_segment([a, b], egui::Stroke::new(2.0, tint));
+                        p.add(egui::Shape::convex_polygon(
+                            vec![b, b + egui::vec2(-5.0, -3.0), b + egui::vec2(-5.0, 3.0)],
+                            tint,
+                            egui::Stroke::NONE,
+                        ));
+                    }
+                    _ => {
+                        let m = egui::pos2(x - LINK * 0.5, cy);
+                        p.line_segment(
+                            [m - egui::vec2(0.0, 6.0), m + egui::vec2(0.0, 6.0)],
+                            egui::Stroke::new(1.0, color::LABEL_4),
+                        );
+                    }
+                }
+            }
+            let tex = self.radio_cover(stop.key, stop.thumb_url.as_deref());
+            let p = ui.painter();
+            paint_cover(p, thumb, tex);
+            let live = on_air == Some(stop.release_id);
+            let resp = ui.interact(
+                thumb,
+                ui.id().with(("radio_walk", k, stop.release_id)),
+                egui::Sense::click(),
+            );
+            let p = ui.painter();
+            let (sw, sc) = if live {
+                (2.0, color::ACCENT)
+            } else if resp.hovered() {
+                (1.5, color::LABEL_2)
+            } else {
+                (1.0, color::SEPARATOR_OPAQUE)
+            };
+            p.rect_stroke(thumb, radius::XS, egui::Stroke::new(sw, sc));
+            let galley = p.layout_no_wrap(
+                num.to_string(),
+                font::strong(10.0),
+                if live { color::ACCENT_HOVER } else { color::LABEL_3 },
+            );
+            p.galley(
+                egui::pos2(thumb.center().x - galley.size().x * 0.5, thumb.bottom() + 2.0),
+                galley,
+                color::LABEL_3,
+            );
+            let mut note = format!("{num}. {} – {}", stop.artist, stop.title);
+            note.push('\n');
+            note.push_str(&match (&stop.via, stop.fresh) {
+                (Some((t, m)), false) => format!("via {} {}", t.label(), m),
+                _ if num == 1 => "where the radio started".to_string(),
+                _ => "a fresh start".to_string(),
+            });
+            if resp.on_hover_note(note).clicked() {
+                lean = Some(stop.release_id);
+            }
+            x += pitch;
+        }
+        if let Some(id) = lean {
+            self.graph.lean = Some((format!("r:{id}"), true));
+            self.graph.wake();
         }
     }
 }
