@@ -843,9 +843,16 @@ fn parse_note(s: &str) -> Result<u8> {
     Ok((base + accidental).rem_euclid(12) as u8)
 }
 
-/// `export DEST [--playlist ID]... [--replace]` — build a native rekordbox USB.
-pub fn export(db: &Path, dest: &Path, playlist_ids: &[u64], replace: bool) -> Result<()> {
-    use ordnung_rbdb::export::{export_usb, ExportMode, ExportStage};
+/// `export DEST [--playlist ID]... [--replace] [--player P]` — build a native
+/// rekordbox USB.
+pub fn export(
+    db: &Path,
+    dest: &Path,
+    playlist_ids: &[u64],
+    replace: bool,
+    player: ordnung_rbdb::export::PlayerTarget,
+) -> Result<()> {
+    use ordnung_rbdb::export::{export_usb_with, ExportMode, ExportOptions, ExportStage};
 
     let catalog = Catalog::open(db).context("opening catalog")?;
     // Strict id validation up front — export_selection ignores unknown ids.
@@ -887,7 +894,8 @@ pub fn export(db: &Path, dest: &Path, playlist_ids: &[u64], replace: bool) -> Re
     );
     let cancel = std::sync::atomic::AtomicBool::new(false);
     let mut stage = ExportStage::CopyingAudio;
-    let report = export_usb(dest, &tracks, &playlists, mode, &mut |p| {
+    let opts = ExportOptions { mode, player };
+    let report = export_usb_with(dest, &tracks, &playlists, opts, &mut |p| {
         if p.stage != stage {
             stage = p.stage;
             bar.set_position(0);
@@ -911,6 +919,12 @@ pub fn export(db: &Path, dest: &Path, playlist_ids: &[u64], replace: bool) -> Re
     );
     for (id, why) in &report.skipped {
         println!("  skipped track {id}: {why}");
+    }
+    if report.transcoded > 0 {
+        println!(
+            "  {} track(s) converted to AIFF on the stick for the chosen player.",
+            report.transcoded
+        );
     }
     println!("Eject the volume before unplugging so FAT flushes fully.");
     Ok(())

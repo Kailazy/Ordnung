@@ -180,6 +180,29 @@ pub fn convert_file(
     dest: &Path,
     in_place: bool,
 ) -> Result<ConvertOutcome> {
+    convert_file_resampled(src, spec, dest, in_place, None)
+}
+
+/// Is `ffmpeg` runnable from here? The USB export asks before it commits to
+/// a player target that needs on-the-fly conversion, so a missing tool is a
+/// clean refusal rather than a half-written stick.
+pub fn ffmpeg_available() -> bool {
+    Command::new(resolve_tool("ffmpeg"))
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// [`convert_file`] with an optional output sample rate (`-ar`), for targets
+/// such as older CDJs that stop at 48 kHz. `None` keeps the source rate.
+pub fn convert_file_resampled(
+    src: &Path,
+    spec: &ConvertSpec,
+    dest: &Path,
+    in_place: bool,
+    sample_rate_hz: Option<u32>,
+) -> Result<ConvertOutcome> {
     if spec.target == Format::Other {
         return Err(Error::Convert {
             path: src.to_path_buf(),
@@ -223,7 +246,7 @@ pub fn convert_file(
         dest.to_path_buf()
     };
 
-    run_ffmpeg(src, spec, &write_to)?;
+    run_ffmpeg(src, spec, &write_to, sample_rate_hz)?;
     verify_codec(&write_to, spec.target)?;
 
     if in_place {
@@ -273,15 +296,23 @@ fn resolve_tool(name: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn run_ffmpeg(src: &Path, spec: &ConvertSpec, dest: &Path) -> Result<()> {
+fn run_ffmpeg(
+    src: &Path,
+    spec: &ConvertSpec,
+    dest: &Path,
+    sample_rate_hz: Option<u32>,
+) -> Result<()> {
     let mut cmd = Command::new(resolve_tool("ffmpeg"));
     cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(src)
         // Audio only (drop attached cover-art video streams that break some
         // container conversions); carry text metadata across.
         .args(["-vn", "-map_metadata", "0"])
-        .args(encoder_args(spec))
-        .arg(dest);
+        .args(encoder_args(spec));
+    if let Some(rate) = sample_rate_hz {
+        cmd.args(["-ar", &rate.to_string()]);
+    }
+    cmd.arg(dest);
 
     let output = cmd.output().map_err(|e| Error::Convert {
         path: src.to_path_buf(),

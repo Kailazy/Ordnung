@@ -225,6 +225,7 @@ impl App {
         playlist_ids: Vec<Id>,
         scope: String,
         replace: bool,
+        player: ordnung_rbdb::export::PlayerTarget,
     ) {
         let (tx, rx) = mpsc::channel();
         self.job_rx = Some(rx);
@@ -236,7 +237,9 @@ impl App {
         // the device view (the stick's on-disk playlists just changed).
         self.export_running_to = Some(dest.clone());
         let db = self.db_path.clone();
-        thread::spawn(move || run_export(db, dest, playlist_ids, replace, cancel, tx, ctx));
+        thread::spawn(move || {
+            run_export(db, dest, playlist_ids, replace, player, cancel, tx, ctx)
+        });
     }
 
     /// Write an empty rekordbox export structure onto `dest` — the flow behind
@@ -993,16 +996,20 @@ fn run_usb_setup(
 /// land in both `export.pdb` and `exportLibrary.db` so every CDJ generation
 /// sees them. Library sources are read, never written.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_export(
     db: PathBuf,
     dest: PathBuf,
     playlist_ids: Vec<Id>,
     replace: bool,
+    player: ordnung_rbdb::export::PlayerTarget,
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
 ) {
-    use ordnung_rbdb::export::{export_usb, ExportError, ExportMode, ExportStage};
+    use ordnung_rbdb::export::{
+        export_usb_with, ExportError, ExportMode, ExportOptions, ExportStage,
+    };
 
     let catalog = match Catalog::open(&db) {
         Ok(c) => c,
@@ -1045,11 +1052,11 @@ pub(crate) fn run_export(
     } else {
         ExportMode::Merge
     };
-    let result = export_usb(
+    let result = export_usb_with(
         &dest,
         &tracks,
         &playlists,
-        mode,
+        ExportOptions { mode, player },
         &mut |p| {
             let stage = match p.stage {
                 ExportStage::CopyingAudio => "Copying",
@@ -1092,8 +1099,13 @@ pub(crate) fn run_export(
                     items,
                 });
             }
+            let converted = if report.transcoded > 0 {
+                format!(" {} converted to AIFF for the player.", report.transcoded)
+            } else {
+                String::new()
+            };
             let _ = tx.send(JobMsg::Done(format!(
-                "Exported {} track(s), {} playlist node(s) to {} ({:.1} MB copied). \
+                "Exported {} track(s), {} playlist node(s) to {} ({:.1} MB copied).{converted} \
 Eject before unplugging.",
                 report.tracks_exported,
                 report.playlists_exported,

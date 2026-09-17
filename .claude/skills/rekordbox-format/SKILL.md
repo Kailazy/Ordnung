@@ -95,6 +95,16 @@ internally — see `audio-analysis` for the Camelot↔OpenKey table).
    and `edit::sync_dlp_playlists` both do this; keep any new SQLite-on-stick
    path doing the same.
 
+## Player compatibility (what the export converts)
+
+| Player | FLAC | Max rate | Export policy (`PlayerTarget`) |
+|---|---|---|---|
+| CDJ-2000, 2000NXS, 900, 850, XDJ-1000 | no | 48 kHz | `Classic`: FLAC and >48 kHz → 16-bit AIFF on the stick |
+| CDJ-2000NXS2, XDJ-1000MK2, XDJ-RX2/XZ, CDJ-3000, OPUS-QUAD | yes | 96 kHz | `Modern` (default): copy as-is; >96 kHz → AIFF at 96 kHz |
+
+MP3, AAC, WAV and AIFF (16/24-bit) play on every generation. Conversions
+write only under `/Contents`; the library file is never touched.
+
 ## Validation workflow
 
 1. Export a tiny library (2–3 tracks, 1 playlist, a few cues) from Ordnung.

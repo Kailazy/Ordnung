@@ -3224,6 +3224,11 @@ impl eframe::App for App {
                     n_playlists,
                     // Sending one playlist adds it to the stick, rekordbox-style.
                     replace: false,
+                    player: if self.config.export_player == "classic" {
+                        ordnung_rbdb::export::PlayerTarget::Classic
+                    } else {
+                        ordnung_rbdb::export::PlayerTarget::Modern
+                    },
                 });
             }
             Some(SidebarAction::SavePlaylistText(id)) => {

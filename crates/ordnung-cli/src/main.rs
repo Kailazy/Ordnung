@@ -6,7 +6,7 @@
 
 mod commands;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -129,7 +129,19 @@ enum Command {
         /// (tracks already present are kept; playlists merge by name).
         #[arg(long)]
         replace: bool,
+        /// Which players the stick is for. `modern` (CDJ-2000NXS2/CDJ-3000
+        /// and newer) copies FLAC as-is; `classic` (CDJ-2000/NXS/900 and
+        /// older) converts FLAC and anything above 48 kHz to AIFF on the
+        /// stick (needs ffmpeg). Library files are never touched.
+        #[arg(long, value_enum, default_value_t = PlayerArg::Modern)]
+        player: PlayerArg,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum PlayerArg {
+    Modern,
+    Classic,
 }
 
 #[derive(Subcommand)]
@@ -201,8 +213,17 @@ fn main() {
         Command::Convert { ids, to, bitrate, out, in_place, yes } => {
             commands::convert(&db, &ids, &to, bitrate, out.as_deref(), in_place, yes)
         }
-        Command::Export { dest, playlists, replace } => {
-            commands::export(&db, &dest, &playlists, replace)
+        Command::Export {
+            dest,
+            playlists,
+            replace,
+            player,
+        } => {
+            let player = match player {
+                PlayerArg::Modern => ordnung_rbdb::export::PlayerTarget::Modern,
+                PlayerArg::Classic => ordnung_rbdb::export::PlayerTarget::Classic,
+            };
+            commands::export(&db, &dest, &playlists, replace, player)
         }
     };
 

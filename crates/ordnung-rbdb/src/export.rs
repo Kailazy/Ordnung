@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ordnung_core::convert::ConvertSpec;
 use ordnung_core::model::{Cue, Format, Id, Playlist, Track};
 
 use crate::anlz;
@@ -48,6 +49,12 @@ pub enum ExportError {
     NotEnoughSpace { need_mb: u64, free_mb: u64 },
     #[error("the export wrote a database that failed validation ({0}); the stick was not left in a half-written state")]
     Validation(String),
+    #[error(
+        "{n} track(s) need converting for this player, which needs ffmpeg (brew install ffmpeg), or choose the newer-player target"
+    )]
+    NeedsFfmpeg { n: usize },
+    #[error("converting {path} for the player failed: {msg}")]
+    Transcode { path: PathBuf, msg: String },
 }
 
 type Result<T> = std::result::Result<T, ExportError>;
@@ -129,14 +136,13 @@ pub(crate) fn sync_dir(dir: &Path) {
 /// (the `TrackRow.file_size` field is clamped to u32, so it must not be used
 /// here). `dest_contents` is the stick's `/Contents` dir, used to skip files
 /// already copied.
-fn estimated_bytes_needed(sources: &[(PathBuf, String)], dest_contents: &Path) -> u64 {
+fn estimated_bytes_needed(sources: &[(u64, String)], dest_contents: &Path) -> u64 {
     let mut audio: u64 = 0;
-    for (src, name) in sources {
-        let src_len = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+    for (src_len, name) in sources {
         let already = std::fs::metadata(dest_contents.join(name))
             .map(|m| m.len())
             .unwrap_or(0);
-        if already != src_len {
+        if already != *src_len {
             audio += src_len;
         }
     }
@@ -186,6 +192,9 @@ pub struct ExportProgress {
 pub struct ExportReport {
     pub tracks_exported: usize,
     pub playlists_exported: usize,
+    /// Tracks written to the stick as a converted AIFF because the chosen
+    /// player can't play the source format or rate (see [`PlayerTarget`]).
+    pub transcoded: usize,
     /// Tracks left off the stick, with the reason (missing source, format).
     pub skipped: Vec<(Id, String)>,
     pub bytes_copied: u64,
@@ -204,6 +213,12 @@ struct ExportTrack {
     bands: Vec<u8>,
     cues: Vec<Cue>,
     copy_needed: bool,
+    /// Conversion the player needs on the way onto the stick (AIFF spec and
+    /// output rate). `None` = the file is copied byte-for-byte.
+    transcode: Option<(ConvertSpec, Option<u32>)>,
+    /// Bytes the file will occupy on the stick — the source's length, or an
+    /// estimate for a conversion whose output doesn't exist yet.
+    expected_bytes: u64,
 }
 
 /// rekordbox file-type enum (master.db `FileType`).
@@ -313,6 +328,56 @@ pub enum ExportMode {
     /// merge by name — an incoming playlist with an existing name replaces
     /// that one's membership, a new name is added.
     Merge,
+}
+
+/// Which generation of player the stick is for. It decides only what audio
+/// has to be converted on the way onto the stick; the databases and analysis
+/// files are the same for every generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlayerTarget {
+    /// CDJ-2000NXS2, XDJ-1000MK2, CDJ-3000 and newer: FLAC plays natively,
+    /// rates up to 96 kHz. Only audio above that is converted.
+    #[default]
+    Modern,
+    /// CDJ-2000, CDJ-2000NXS, CDJ-900/850 and older: no FLAC, and 44.1/48 kHz
+    /// only. FLAC and anything above 48 kHz is converted to 16-bit AIFF.
+    Classic,
+}
+
+impl PlayerTarget {
+    /// The sample-rate ceiling this generation plays.
+    fn max_sample_rate_hz(self) -> u32 {
+        match self {
+            PlayerTarget::Modern => 96_000,
+            PlayerTarget::Classic => 48_000,
+        }
+    }
+}
+
+/// Everything that shapes one export run beyond the selection itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExportOptions {
+    pub mode: ExportMode,
+    pub player: PlayerTarget,
+}
+
+/// How a track has to be converted for `player`, if at all: the AIFF spec
+/// and the output sample rate (`None` keeps the source's).
+fn transcode_for(player: PlayerTarget, t: &Track) -> Option<(ConvertSpec, Option<u32>)> {
+    let rate = t.properties.as_ref().map(|p| p.sample_rate_hz).unwrap_or(0);
+    let too_fast = rate > player.max_sample_rate_hz();
+    let unplayable = player == PlayerTarget::Classic && t.format == Format::Flac;
+    if !too_fast && !unplayable {
+        return None;
+    }
+    let spec = ConvertSpec {
+        target: Format::Aiff,
+        bitrate_kbps: None,
+    };
+    // A too-fast file lands on the generation's ceiling; a merely unplayable
+    // one keeps its rate.
+    let out_rate = too_fast.then_some(player.max_sample_rate_hz());
+    Some((spec, out_rate))
 }
 
 /// One track already on the stick, reconstructed from the existing export so a
@@ -504,7 +569,27 @@ pub fn export_usb(
     progress: &mut dyn FnMut(ExportProgress),
     cancel: &AtomicBool,
 ) -> Result<ExportReport> {
-    export_impl(dest_root, tracks, playlists, mode, progress, cancel, false)
+    let opts = ExportOptions {
+        mode,
+        player: PlayerTarget::default(),
+    };
+    export_impl(dest_root, tracks, playlists, opts, progress, cancel, false)
+}
+
+/// [`export_usb`] with the full option set — the player generation decides
+/// which audio is converted on the way onto the stick (see [`PlayerTarget`]).
+/// Conversions write only to the stick's `/Contents`; library files are never
+/// touched. Refuses up front with [`ExportError::NeedsFfmpeg`] when a
+/// conversion is due and `ffmpeg` isn't runnable.
+pub fn export_usb_with(
+    dest_root: &Path,
+    tracks: &[Track],
+    playlists: &[Playlist],
+    opts: ExportOptions,
+    progress: &mut dyn FnMut(ExportProgress),
+    cancel: &AtomicBool,
+) -> Result<ExportReport> {
+    export_impl(dest_root, tracks, playlists, opts, progress, cancel, false)
 }
 
 /// Turn plain storage into a rekordbox device: write a valid **empty** export
@@ -519,7 +604,10 @@ pub fn setup_device(dest_root: &Path, cancel: &AtomicBool) -> Result<ExportRepor
         dest_root,
         &[],
         &[],
-        ExportMode::Merge,
+        ExportOptions {
+            mode: ExportMode::Merge,
+            player: PlayerTarget::default(),
+        },
         &mut |_| {},
         cancel,
         true,
@@ -531,11 +619,12 @@ fn export_impl(
     dest_root: &Path,
     tracks: &[Track],
     playlists: &[Playlist],
-    mode: ExportMode,
+    opts: ExportOptions,
     progress: &mut dyn FnMut(ExportProgress),
     cancel: &AtomicBool,
     allow_empty: bool,
 ) -> Result<ExportReport> {
+    let mode = opts.mode;
     if !dest_root.is_dir() {
         return Err(ExportError::BadDestination(dest_root.to_path_buf()));
     }
@@ -620,10 +709,17 @@ fn export_impl(
                 .unwrap_or_default()
                 .as_str(),
         );
-        let (stem, ext) = match base.rsplit_once('.') {
+        let (stem, mut ext) = match base.rsplit_once('.') {
             Some((s, e)) => (s.to_string(), format!(".{e}")),
             None => (base.clone(), String::new()),
         };
+        // A file the player can't play goes onto the stick as an AIFF
+        // conversion, under the AIFF name, so a later merge finds it there.
+        let transcode = transcode_for(opts.player, t);
+        if transcode.is_some() {
+            ext = ".aiff".to_string();
+        }
+        let base = format!("{stem}{ext}");
         // Does this exact `/Contents/<base>` already live on the stick?
         let reuse_id = existing_by_path
             .get(&format!("/contents/{}", base.to_lowercase()))
@@ -648,11 +744,18 @@ fn export_impl(
         placed_ids.insert(id);
         let usb_path = format!("/Contents/{name}");
 
-        let file_size = std::fs::metadata(&source)
-            .map(|m| m.len().min(u32::MAX as u64) as u32)
-            .unwrap_or(0);
         let props = t.properties.as_ref();
         let duration_ms = props.map(|p| p.duration_ms).unwrap_or(0);
+        // What the stick will hold: the source's own bytes, or the 16-bit
+        // stereo PCM a conversion produces (the row's size is corrected from
+        // the real file once it's written).
+        let out_rate = transcode
+            .map(|(_, r)| r.unwrap_or_else(|| props.map(|p| p.sample_rate_hz).unwrap_or(44_100)));
+        let expected_bytes = match out_rate {
+            Some(rate) => duration_ms * rate as u64 * 4 / 1000 + 4096,
+            None => std::fs::metadata(&source).map(|m| m.len()).unwrap_or(0),
+        };
+        let file_size = expected_bytes.min(u32::MAX as u64) as u32;
         let analysis = t.analysis.as_ref();
         let beats = analysis
             .map(|a| a.beatgrid.expand_to(duration_ms))
@@ -675,13 +778,16 @@ fn export_impl(
         let anlz_dir = format!("P{:03}/{:08X}", (id - 1) / 256, id);
         let row = TrackRow {
             id,
-            sample_rate_hz: props.map(|p| p.sample_rate_hz).unwrap_or(0),
+            sample_rate_hz: out_rate.unwrap_or_else(|| props.map(|p| p.sample_rate_hz).unwrap_or(0)),
             file_size,
             master_content_id: master_content_id(id),
             artwork_id,
             key_id,
             label_id: labels.get(t.tags.label.as_deref()),
-            bitrate_kbps: props.and_then(|p| p.bitrate_kbps).unwrap_or(0),
+            bitrate_kbps: match out_rate {
+                Some(rate) => rate * 32 / 1000, // 16-bit stereo PCM
+                None => props.and_then(|p| p.bitrate_kbps).unwrap_or(0),
+            },
             track_number: t.tags.track_number.unwrap_or(0) as u32,
             tempo_centi_bpm: analysis
                 .and_then(|a| a.bpm)
@@ -692,9 +798,13 @@ fn export_impl(
             artist_id: artists.get(t.tags.artist.as_deref()),
             disc_number: t.tags.disc_number.unwrap_or(0),
             year: t.tags.year.unwrap_or(0),
-            sample_depth: props.and_then(|p| p.bit_depth).unwrap_or(16) as u16,
+            sample_depth: if transcode.is_some() {
+                16
+            } else {
+                props.and_then(|p| p.bit_depth).unwrap_or(16) as u16
+            },
             duration_s: (duration_ms / 1000).min(u16::MAX as u64) as u16,
-            file_type: file_type(t.format),
+            file_type: file_type(if transcode.is_some() { Format::Aiff } else { t.format }),
             rating: t.tags.rating.unwrap_or(0).min(5),
             isrc: t.tags.isrc.clone().unwrap_or_default(),
             date_added: date.clone(),
@@ -713,9 +823,13 @@ fn export_impl(
             file_path: usb_path.clone(),
         };
         let dest = contents.join(&name);
-        let copy_needed = std::fs::metadata(&dest)
-            .map(|m| m.len() != file_size as u64)
-            .unwrap_or(true);
+        // A byte copy is current when the sizes agree; a conversion's size
+        // isn't known ahead, so any non-empty output on the stick stands.
+        let copy_needed = match std::fs::metadata(&dest) {
+            Ok(m) if transcode.is_some() => m.len() == 0,
+            Ok(m) => m.len() != expected_bytes,
+            Err(_) => true,
+        };
         resolved.push(ExportTrack {
             catalog_id: t.id,
             row,
@@ -727,6 +841,8 @@ fn export_impl(
             bands: analysis.map(|a| a.waveform_bands.clone()).unwrap_or_default(),
             cues: t.cues.clone(),
             copy_needed,
+            transcode,
+            expected_bytes,
         });
     }
     // ---- carry over existing tracks the selection didn't re-cover --------
@@ -767,12 +883,23 @@ fn export_impl(
         return Err(ExportError::NoTracks);
     }
 
+    // ---- conversion precheck ----------------------------------------------
+    // A player target that needs conversions needs ffmpeg; find out now,
+    // before anything is written.
+    let n_transcode = resolved
+        .iter()
+        .filter(|t| t.copy_needed && t.transcode.is_some())
+        .count();
+    if n_transcode > 0 && !ordnung_core::convert::ffmpeg_available() {
+        return Err(ExportError::NeedsFfmpeg { n: n_transcode });
+    }
+
     // ---- free-space precheck ----------------------------------------------
     // Refuse before touching the stick if the selection can't fit, rather than
-    // half-writing it. Sum true file lengths of the audio we'd actually copy.
-    let sources: Vec<(PathBuf, String)> = resolved
+    // half-writing it. Sum the bytes of the audio we'd actually write.
+    let sources: Vec<(u64, String)> = resolved
         .iter()
-        .map(|t| (t.source.clone(), t.row.filename.clone()))
+        .map(|t| (t.expected_bytes, t.row.filename.clone()))
         .collect();
     let need = estimated_bytes_needed(&sources, &contents);
     if let Some(free) = free_space(dest_root) {
@@ -786,19 +913,57 @@ fn export_impl(
 
     // ---- copy audio -------------------------------------------------------
     let total = resolved.len();
-    for (i, tr) in resolved.iter().enumerate() {
+    for (i, tr) in resolved.iter_mut().enumerate() {
         check(cancel)?;
+        let detail = match tr.transcode {
+            Some(_) => format!(
+                "{} (converting from {})",
+                tr.row.filename,
+                tr.source
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_uppercase())
+                    .unwrap_or_default()
+            ),
+            None => tr.row.filename.clone(),
+        };
         progress(ExportProgress {
             stage: ExportStage::CopyingAudio,
             done: i,
             total,
-            detail: tr.row.filename.clone(),
+            detail,
         });
-        if tr.copy_needed {
-            let dest = contents.join(&tr.row.filename);
-            let n = std::fs::copy(&tr.source, &dest).map_err(io_err(dest.clone()))?;
-            sync_existing(&dest).map_err(io_err(dest))?;
-            report.bytes_copied += n;
+        if !tr.copy_needed {
+            continue;
+        }
+        let dest = contents.join(&tr.row.filename);
+        match tr.transcode {
+            None => {
+                let n = std::fs::copy(&tr.source, &dest).map_err(io_err(dest.clone()))?;
+                sync_existing(&dest).map_err(io_err(dest))?;
+                report.bytes_copied += n;
+            }
+            Some((spec, rate)) => {
+                // Encode to a sibling temp name (real extension last so ffmpeg
+                // picks the muxer), then move into place: an interrupted
+                // conversion never leaves a half file under the track's name.
+                let stem = tr.row.filename.trim_end_matches(".aiff");
+                let tmp = contents.join(format!("{stem}.ordnung-tmp.aiff"));
+                let _ = std::fs::remove_file(&tmp);
+                if dest.exists() {
+                    std::fs::remove_file(&dest).map_err(io_err(dest.clone()))?;
+                }
+                ordnung_core::convert::convert_file_resampled(&tr.source, &spec, &tmp, false, rate)
+                    .map_err(|e| ExportError::Transcode {
+                        path: tr.source.clone(),
+                        msg: e.to_string(),
+                    })?;
+                sync_existing(&tmp).map_err(io_err(tmp.clone()))?;
+                std::fs::rename(&tmp, &dest).map_err(io_err(dest.clone()))?;
+                let n = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+                tr.row.file_size = n.min(u32::MAX as u64) as u32;
+                report.bytes_copied += n;
+                report.transcoded += 1;
+            }
         }
     }
 
@@ -1075,7 +1240,7 @@ mod tests {
         std::fs::create_dir_all(&contents).unwrap();
         let src = dir.join("a.mp3");
         std::fs::write(&src, vec![0u8; 1000]).unwrap();
-        let sources = vec![(src.clone(), "a.mp3".to_string())];
+        let sources = vec![(1000u64, "a.mp3".to_string())];
         // Nothing on the stick yet: the 1000 bytes count (plus margin).
         let need_fresh = estimated_bytes_needed(&sources, &contents);
         assert!(need_fresh >= 1000);
@@ -1087,6 +1252,46 @@ mod tests {
             "an already-copied file must not be re-counted"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn player_target_decides_what_converts() {
+        let mk = |format: Format, rate: u32| Track {
+            id: 1,
+            source_path: "/x".into(),
+            format,
+            properties: Some(ordnung_core::model::AudioProperties {
+                sample_rate_hz: rate,
+                bit_depth: Some(24),
+                channels: 2,
+                duration_ms: 1000,
+                bitrate_kbps: None,
+            }),
+            tags: Default::default(),
+            analysis: None,
+            cues: Vec::new(),
+        };
+        // Modern players take FLAC and 96 kHz as-is; only faster gets resampled.
+        assert!(transcode_for(PlayerTarget::Modern, &mk(Format::Flac, 96_000)).is_none());
+        assert_eq!(
+            transcode_for(PlayerTarget::Modern, &mk(Format::Wav, 192_000)).map(|(s, r)| (s.target, r)),
+            Some((Format::Aiff, Some(96_000)))
+        );
+        // Classic players: FLAC converts at its own rate, >48 kHz lands on 48.
+        assert_eq!(
+            transcode_for(PlayerTarget::Classic, &mk(Format::Flac, 44_100)).map(|(s, r)| (s.target, r)),
+            Some((Format::Aiff, None))
+        );
+        assert_eq!(
+            transcode_for(PlayerTarget::Classic, &mk(Format::Flac, 96_000)).map(|(_, r)| r),
+            Some(Some(48_000))
+        );
+        assert_eq!(
+            transcode_for(PlayerTarget::Classic, &mk(Format::Aiff, 88_200)).map(|(_, r)| r),
+            Some(Some(48_000))
+        );
+        assert!(transcode_for(PlayerTarget::Classic, &mk(Format::Mp3, 44_100)).is_none());
+        assert!(transcode_for(PlayerTarget::Classic, &mk(Format::Aiff, 48_000)).is_none());
     }
 
     #[test]

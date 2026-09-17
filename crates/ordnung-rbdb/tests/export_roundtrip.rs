@@ -10,7 +10,10 @@ use ordnung_core::model::{
     Analysis, AudioProperties, Beat, Beatgrid, Cue, Format, Playlist, Tags, Track,
 };
 use ordnung_core::model::key::{Key, Mode, PitchClass};
-use ordnung_rbdb::export::{export_usb, setup_device, ExportError, ExportMode};
+use ordnung_rbdb::export::{
+    export_usb, export_usb_with, setup_device, ExportError, ExportMode, ExportOptions,
+    PlayerTarget,
+};
 use ordnung_rbdb::{dlp, pdb};
 
 fn temp_root(tag: &str) -> PathBuf {
@@ -574,4 +577,114 @@ fn empty_merge_sets_up_a_valid_device() {
 
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&usb);
+}
+
+/// Render a short tone into `path` with ffmpeg; `None` when ffmpeg isn't
+/// installed here (the conversion tests then skip rather than fail).
+fn tone_file(path: &Path, rate: u32) -> Option<PathBuf> {
+    if !ordnung_core::convert::ffmpeg_available() {
+        return None;
+    }
+    let ok = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i"])
+        .arg(format!("sine=frequency=440:sample_rate={rate}:duration=0.5"))
+        .args(["-ac", "2"])
+        .arg(path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    ok.then(|| path.to_path_buf())
+}
+
+fn track_with_rate(id: u64, path: &Path, format: Format, title: &str, rate: u32) -> Track {
+    let mut t = track(id, path, format, title, "Artist");
+    if let Some(p) = t.properties.as_mut() {
+        p.sample_rate_hz = rate;
+        p.duration_ms = 500;
+    }
+    t
+}
+
+#[test]
+fn classic_player_target_converts_flac_and_high_rates_to_aiff() {
+    let src = temp_root("player-src");
+    let usb = temp_root("player-usb");
+    let Some(flac) = tone_file(&src.join("tone.flac"), 44_100) else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let hi = tone_file(&src.join("hi.wav"), 96_000).unwrap();
+    let mp3 = tone_file(&src.join("plain.mp3"), 44_100).unwrap();
+    let tracks = vec![
+        track_with_rate(1, &flac, Format::Flac, "Flac", 44_100),
+        track_with_rate(2, &hi, Format::Wav, "Hi", 96_000),
+        track_with_rate(3, &mp3, Format::Mp3, "Plain", 44_100),
+    ];
+    let cancel = AtomicBool::new(false);
+    let opts = ExportOptions {
+        mode: ExportMode::Replace,
+        player: PlayerTarget::Classic,
+    };
+    let mut details = Vec::new();
+    let report = export_usb_with(&usb, &tracks, &[], opts, &mut |p| details.push(p.detail), &cancel)
+        .expect("classic export succeeds");
+    assert_eq!(report.tracks_exported, 3);
+    assert_eq!(report.transcoded, 2);
+    assert!(details.iter().any(|d| d.contains("converting from FLAC")), "{details:?}");
+
+    // The stick holds AIFFs under the AIFF names; the MP3 is a byte copy.
+    assert!(usb.join("Contents/tone.aiff").is_file());
+    assert!(!usb.join("Contents/tone.flac").exists());
+    assert!(usb.join("Contents/hi.aiff").is_file());
+    assert!(usb.join("Contents/plain.mp3").is_file());
+    assert_eq!(
+        std::fs::read(usb.join("Contents/plain.mp3")).unwrap(),
+        std::fs::read(&mp3).unwrap()
+    );
+    let aiff = std::fs::read(usb.join("Contents/tone.aiff")).unwrap();
+    assert_eq!(&aiff[0..4], b"FORM");
+    // No temp sidecars left behind.
+    assert!(!std::fs::read_dir(usb.join("Contents"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.file_name().to_string_lossy().contains("ordnung-tmp")));
+
+    // The rows describe what's on the stick: AIFF paths, the converted rate,
+    // and real file sizes.
+    let export = pdb::read_export(&usb.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let f = export.tracks.values().find(|t| t.title == "Flac").unwrap();
+    assert_eq!(f.file_path, "/Contents/tone.aiff");
+    assert_eq!(f.sample_rate_hz, 44_100);
+    assert_eq!(f.bitrate_kbps, 1_411);
+    let h = export.tracks.values().find(|t| t.title == "Hi").unwrap();
+    assert_eq!(h.file_path, "/Contents/hi.aiff");
+    assert_eq!(h.sample_rate_hz, 48_000, "96 kHz lands on the classic ceiling");
+    let p = export.tracks.values().find(|t| t.title == "Plain").unwrap();
+    assert_eq!(p.file_path, "/Contents/plain.mp3");
+    // The ANLZ path names the AIFF too.
+    let dat = usb.join(&f.analyze_path.as_deref().unwrap()[1..]);
+    assert_eq!(
+        ordnung_rbdb::anlz::read_track_path(&dat).as_deref(),
+        Some("/Contents/tone.aiff")
+    );
+
+    // Re-running is incremental: the conversions already on the stick stand.
+    let report2 = export_usb_with(&usb, &tracks, &[], opts, &mut |_| {}, &cancel).unwrap();
+    assert_eq!(report2.transcoded, 0);
+    assert_eq!(report2.bytes_copied, 0);
+
+    // The library files were only read.
+    assert_eq!(std::fs::metadata(&flac).unwrap().len() > 0, true);
+    assert!(src.join("tone.flac").is_file() && src.join("hi.wav").is_file());
+
+    // A modern target copies the FLAC as-is.
+    let usb2 = temp_root("player-usb2");
+    let report = export_usb(&usb2, &tracks, &[], ExportMode::Replace, &mut |_| {}, &cancel).unwrap();
+    assert_eq!(report.transcoded, 0);
+    assert!(usb2.join("Contents/tone.flac").is_file());
+    assert!(usb2.join("Contents/hi.wav").is_file(), "96 kHz is fine on a modern player");
+
+    for d in [&src, &usb, &usb2] {
+        let _ = std::fs::remove_dir_all(d);
+    }
 }

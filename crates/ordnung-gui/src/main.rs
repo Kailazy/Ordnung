@@ -2133,6 +2133,9 @@ struct ExportConfirm {
     /// whatever export is already on it. Scoped playlist exports default to
     /// merge; the whole-library button defaults to replace.
     replace: bool,
+    /// Player generation the stick is for; decides what audio is converted
+    /// on the way over. Seeded from `Config::export_player`.
+    player: ordnung_rbdb::export::PlayerTarget,
 }
 
 /// A request raised by a track row's right-click context menu. Collected inside

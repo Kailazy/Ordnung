@@ -143,8 +143,17 @@ tracks show the stick's cues read-only. `anlz` now writes real `PCPT`/`PCP2`
 entries (hot list first, pads by slot, memory by time; loops carry
 loop_time and status 4; comments UTF-16BE; colour code 0 + RGB) and reads
 them back (`anlz::read_cues`, .EXT preferred, .DAT fallback); the export
-round-trip test covers it. Still open here: golden-fixture diffing, the
-compatibility matrix, and the DLP `cue` table (cue banks — left empty).
+round-trip test covers it. **Player target (same day):** `ExportOptions { mode, player: PlayerTarget }`
+via `export_usb_with` — `Modern` (NXS2/3000+, default) copies FLAC as-is and
+only resamples above 96 kHz; `Classic` (CDJ-2000/NXS/900) converts FLAC and
+anything above 48 kHz to 16-bit AIFF *on the stick only* through the Phase 4
+ffmpeg engine (`convert_file_resampled`), refusing up front with
+`NeedsFfmpeg` when ffmpeg is missing. Converted files take the `.aiff` name
+under `/Contents` (so merges find them), rows carry the real size/rate, and
+the report counts `transcoded`. CLI `--player modern|classic`; GUI: a "For:"
+toggle in the export confirm, remembered in `Config::export_player`. Still
+open here: golden-fixture diffing, the compatibility matrix, and the DLP
+`cue` table (cue banks — left empty).
 
 ## Later — GUI  `[~]`
 `ordnung-gui` wraps `ordnung-core` (library grid, harmonic mixing view).
