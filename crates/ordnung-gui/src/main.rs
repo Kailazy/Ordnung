@@ -11,6 +11,7 @@ mod app;
 mod audio;
 mod config;
 mod covers;
+mod cues;
 mod dig;
 mod graph;
 mod inspector;
@@ -50,8 +51,8 @@ use ordnung_core::discogs;
 use ordnung_core::genredb;
 use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
-    Analysis, Format, Id, Playlist, SellerListing, SellerShop, Tags, Track, TranscodeVerdict,
-    VinylList, VinylRecord,
+    Analysis, Cue, Format, Id, Playlist, SellerListing, SellerShop, Tags, Track,
+    TranscodeVerdict, VinylList, VinylRecord,
 };
 use ordnung_core::search::{ScoredHit, SearchHit};
 use ordnung_core::{
@@ -1912,6 +1913,12 @@ struct App {
     /// are moving the grid live. The catalog write is deferred until the release
     /// (one write per gesture, not one per repeat tick). See [`player`].
     grid_nudge_held: bool,
+    /// The zoom lane's CUES panel is open — pads and memory cues show above
+    /// the lane's left edge. See [`cues`].
+    cue_edit_open: bool,
+    /// A cue being renamed from its context menu: its index in the loaded
+    /// track's cue list and the text typed so far. See [`cues`].
+    cue_rename: Option<(usize, String)>,
     /// Receives the one-shot startup update check's result off the network
     /// thread. `Some(info)` → a newer release exists; `None` → up to date or the
     /// check failed (we stay silent). Consumed once in `update()`, then dropped.
@@ -1953,6 +1960,10 @@ struct NowPlaying {
     /// Detected beatgrid for the moving lane's beat lines. `None` for unanalyzed
     /// tracks or ones with no confident tempo.
     grid: Option<PlayerGrid>,
+    /// Hot and memory cues, drawn over both lanes and edited in the CUES
+    /// panel. The catalog's for a library track, the stick's for a device
+    /// track (read-only). See [`cues`].
+    cues: Vec<Cue>,
 }
 
 /// The constant-tempo beatgrid the player overlays on the zoom lane. Beats are at

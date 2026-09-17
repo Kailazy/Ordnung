@@ -217,7 +217,6 @@ pub fn analyze_file(path: impl AsRef<Path>, params: AnalysisParams) -> Result<An
         bpm,
         key: detected_key,
         beatgrid,
-        cues: Vec::new(),
         waveform_preview: lv.waveform_preview,
         waveform_bands,
         peak: Some(lv.peak),

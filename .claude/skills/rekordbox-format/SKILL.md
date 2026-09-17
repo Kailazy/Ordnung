@@ -57,6 +57,11 @@ Tagged section format ("PMAI" header, then `PXXX` tagged sections). Key sections
 
 - `PQTZ` — beat grid (beat number, tempo, time in ms per beat).
 - `PCOB`/`PCO2` — cue list (memory + hot cues); `PCO2` carries nxs2 color/label.
+  Written from `Track::cues` since 2026-09-17: hot list before memory list in
+  both files; `PCPT` 0x38 fixed (hot_cue = pad+1, type 1 point / 2 loop,
+  status 4 for loops, loop_time 0xFFFFFFFF unless loop); `PCP2` 0x58 + comment
+  bytes (UTF-16BE, no terminator), colour code 0 + RGB, 40 zero tail bytes.
+  `anlz::read_cues` reads them back for tests and the GUI's device tracks.
 - `PPTH` — file path; `PVBR` — VBR seek index for MP3.
 - `PWAV`/`PWV2` — waveform preview; `PWV3`/`PWV4`/`PWV5` — detailed/color waveforms.
 - `.DAT` = the classic set CDJs require; `.EXT` = extended (color waveforms, nxs2).

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use ordnung_core::model::{
-    Analysis, AudioProperties, Beat, Beatgrid, Format, Playlist, Tags, Track,
+    Analysis, AudioProperties, Beat, Beatgrid, Cue, Format, Playlist, Tags, Track,
 };
 use ordnung_core::model::key::{Key, Mode, PitchClass};
 use ordnung_rbdb::export::{export_usb, setup_device, ExportError, ExportMode};
@@ -63,6 +63,7 @@ fn track(id: u64, path: &Path, format: Format, title: &str, artist: &str) -> Tra
             waveform_bands: bands,
             ..Default::default()
         }),
+        cues: Vec::new(),
     }
 }
 
@@ -91,8 +92,32 @@ fn export_then_read_back_full_surface() {
     let b = audio_file(&src, "b_side.mp3", 7_000);
     let missing = src.join("gone.flac");
 
+    let mut alpha_track = track(101, &a, Format::Aiff, "Alpha", "Artist One");
+    alpha_track.cues = vec![
+        Cue {
+            hot_slot: None,
+            position_ms: 30_000,
+            loop_end_ms: None,
+            label: Some("break".into()),
+            color: None,
+        },
+        Cue {
+            hot_slot: Some(2),
+            position_ms: 60_250,
+            loop_end_ms: Some(62_125),
+            label: None,
+            color: Some([40, 226, 20]),
+        },
+        Cue {
+            hot_slot: Some(0),
+            position_ms: 250,
+            loop_end_ms: None,
+            label: Some("intro ü".into()),
+            color: None,
+        },
+    ];
     let tracks = vec![
-        track(101, &a, Format::Aiff, "Alpha", "Artist One"),
+        alpha_track,
         track(102, &b, Format::Mp3, "Beta", "Artist Two"),
         track(103, &missing, Format::Flac, "Ghost", "Nobody"),
     ];
@@ -217,6 +242,31 @@ fn export_then_read_back_full_surface() {
         tags,
         ["PPTH", "PWV3", "PCOB", "PCOB", "PCO2", "PCO2", "PQT2", "PWV5", "PWV4"]
     );
+
+    // Cues round-trip through both the classic (.DAT) and nxs2 (.EXT) lists:
+    // pads first by slot, then memory cues; loops, comments and colours kept.
+    let cues = ordnung_rbdb::anlz::read_cues(&usb.join(&anlz_path[1..]));
+    assert_eq!(cues.len(), 3, "{cues:?}");
+    assert_eq!((cues[0].hot_slot, cues[0].position_ms), (Some(0), 250));
+    assert_eq!(cues[0].label.as_deref(), Some("intro ü"));
+    assert_eq!(cues[0].color, Some([255, 0, 23]), "default pad colour written");
+    assert_eq!((cues[1].hot_slot, cues[1].loop_end_ms), (Some(2), Some(62_125)));
+    assert_eq!(cues[1].color, Some([40, 226, 20]));
+    assert_eq!((cues[2].hot_slot, cues[2].position_ms), (None, 30_000));
+    assert_eq!(cues[2].label.as_deref(), Some("break"));
+    // The .DAT alone (what an older CDJ reads) carries the same positions.
+    let dat_only = temp_root("dat-only");
+    std::fs::copy(usb.join(&anlz_path[1..]), dat_only.join("ANLZ0000.DAT")).unwrap();
+    let classic = ordnung_rbdb::anlz::read_cues(&dat_only.join("ANLZ0000.DAT"));
+    assert_eq!(
+        classic.iter().map(|c| (c.hot_slot, c.position_ms, c.loop_end_ms)).collect::<Vec<_>>(),
+        cues.iter().map(|c| (c.hot_slot, c.position_ms, c.loop_end_ms)).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&dat_only);
+    // Beta has no cues: its lists are the empty forms rekordbox writes.
+    let beta = export.tracks.values().find(|t| t.title == "Beta").unwrap();
+    let beta_dat = usb.join(&beta.analyze_path.as_deref().unwrap()[1..]);
+    assert!(ordnung_rbdb::anlz::read_cues(&beta_dat).is_empty());
 
     // --- re-export is incremental ------------------------------------------
     let report2 = export_usb(&usb, &tracks, &playlists, ExportMode::Replace, &mut |_| {}, &cancel).unwrap();

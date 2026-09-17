@@ -185,20 +185,42 @@ impl Beatgrid {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CueKind {
-    Hot,
-    Memory,
-    Loop,
+/// A cue point: a hot cue (pad A–H) or a memory cue, either a point or a
+/// loop. Positions are milliseconds from the start of the file; the export
+/// derives samples where the format needs them. User data, not analysis
+/// output — it lives in its own catalog table and survives re-analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cue {
+    /// Hot cue pad `0..8` (A–H), or `None` for a memory cue.
+    pub hot_slot: Option<u8>,
+    pub position_ms: u64,
+    /// Loop end, when this cue is a loop rather than a point. Always past
+    /// `position_ms`.
+    pub loop_end_ms: Option<u64>,
+    /// The cue's comment, shown on the player next to the pad.
+    pub label: Option<String>,
+    /// Pad colour, `[r, g, b]`. `None` = the player's default.
+    pub color: Option<[u8; 3]>,
 }
 
-/// A cue point. Positions carry both ms and sample where the export needs them.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Cue {
-    pub kind: CueKind,
-    pub position_ms: u64,
-    pub label: Option<String>,
-    pub color: Option<[u8; 3]>,
+impl Cue {
+    /// Number of hot cue pads a rekordbox track carries (A–H).
+    pub const HOT_SLOTS: u8 = 8;
+
+    pub fn is_hot(&self) -> bool {
+        self.hot_slot.is_some()
+    }
+
+    pub fn is_loop(&self) -> bool {
+        self.loop_end_ms.is_some()
+    }
+
+    /// The pad letter for a hot cue (`A`..`H`); memory cues have none.
+    pub fn slot_letter(&self) -> Option<char> {
+        self.hot_slot
+            .filter(|s| *s < Self::HOT_SLOTS)
+            .map(|s| (b'A' + s) as char)
+    }
 }
 
 /// The result of analyzing a track. Cache key = (`content_hash`, `analyzer_version`).
@@ -207,7 +229,6 @@ pub struct Analysis {
     pub bpm: Option<f32>,
     pub key: Option<Key>,
     pub beatgrid: Beatgrid,
-    pub cues: Vec<Cue>,
     /// Low-resolution waveform preview bins (CDJ overview).
     pub waveform_preview: Vec<u8>,
     /// Per-bin colored-waveform data: `[low, mid, high, loudness]` quads
@@ -306,6 +327,9 @@ pub struct Track {
     pub properties: Option<AudioProperties>,
     pub tags: Tags,
     pub analysis: Option<Analysis>,
+    /// Hot and memory cues, as set on the player. Empty from the plain track
+    /// listers; [`Catalog::attach_cues`] (and `export_selection`) fill it.
+    pub cues: Vec<Cue>,
 }
 
 /// An ordered playlist; playlists nest under playlist folders (`parent`).

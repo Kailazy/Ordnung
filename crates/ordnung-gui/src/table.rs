@@ -21,6 +21,7 @@ impl App {
                         properties: Some(t.properties.clone()),
                         tags: t.tags.clone(),
                         analysis: None,
+                        cues: Vec::new(),
                     }),
                 false,
             ),

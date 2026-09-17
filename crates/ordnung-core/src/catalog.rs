@@ -7,8 +7,8 @@
 use crate::error::{Error, Result};
 use crate::model::key::{Key, Mode, PitchClass};
 use crate::model::{
-    Analysis, AudioProperties, Beat, Beatgrid, DugRelease, Format, Id, Playlist, SellerListing,
-    SellerShop, Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
+    Analysis, AudioProperties, Beat, Beatgrid, Cue, DugRelease, Format, Id, Playlist,
+    SellerListing, SellerShop, Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashMap;
@@ -105,7 +105,6 @@ fn analysis_from_row(r: &rusqlite::Row, base: usize) -> rusqlite::Result<Analysi
             },
             _ => Beatgrid::default(),
         },
-        cues: Vec::new(),
         peak: r.get::<_, Option<f64>>(c(4))?.map(|v| v as f32),
         integrated_loudness_lufs: r.get::<_, Option<f64>>(c(5))?.map(|v| v as f32),
         waveform_preview: r.get::<_, Option<Vec<u8>>>(c(6))?.unwrap_or_default(),
@@ -299,7 +298,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 /// How long a master's cached pressing list is served before it's re-listed.
 /// New pressings appear rarely, and the list only feeds "other pressings" and
@@ -507,6 +506,21 @@ impl Catalog {
                 PRIMARY KEY (playlist_id, track_id)
             );
             CREATE INDEX IF NOT EXISTS idx_pltracks_pl ON playlist_tracks(playlist_id);
+
+            -- Hot and memory cues set on the player (schema v16). User data,
+            -- kept apart from `analysis` so re-analysis never touches them.
+            -- hot_slot 0..7 = pad A..H, NULL = memory cue; loop_end_ms set
+            -- for loops. See `Cue`.
+            CREATE TABLE IF NOT EXISTS cues (
+                id           INTEGER PRIMARY KEY,
+                track_id     INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+                hot_slot     INTEGER,
+                position_ms  INTEGER NOT NULL,
+                loop_end_ms  INTEGER,
+                label        TEXT,
+                color        INTEGER                    -- 0xRRGGBB, NULL = default
+            );
+            CREATE INDEX IF NOT EXISTS idx_cues_track ON cues(track_id);
 
             -- Cover art fetched from external sources (Discogs today; MusicBrainz/
             -- Beatport later). Kept separate from tracks.cover_thumb so the
@@ -2768,6 +2782,7 @@ impl Catalog {
             (tracks, playlists)
         };
         self.attach_analyses(&mut tracks)?;
+        self.attach_cues(&mut tracks)?;
         Ok((tracks, playlists))
     }
 
@@ -2796,6 +2811,98 @@ impl Catalog {
         for t in tracks {
             t.analysis = by_id.remove(&t.id);
         }
+        Ok(())
+    }
+
+    /// Fill `Track::cues` for every track from the `cues` table in one query.
+    pub fn attach_cues(&self, tracks: &mut [Track]) -> Result<()> {
+        let mut by_id = self.cues_by_track()?;
+        for t in tracks {
+            t.cues = by_id.remove(&t.id).unwrap_or_default();
+        }
+        Ok(())
+    }
+
+    /// Every track's cues, keyed by track id. Hot cues first by pad, then
+    /// memory cues by position — the order the player and the export want.
+    pub fn cues_by_track(&self) -> Result<HashMap<Id, Vec<Cue>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT track_id, hot_slot, position_ms, loop_end_ms, label, color
+               FROM cues
+              ORDER BY track_id, hot_slot IS NULL, hot_slot, position_ms",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)? as Id, cue_from_row(r, 1)?))
+        })?;
+        let mut out: HashMap<Id, Vec<Cue>> = HashMap::new();
+        for row in rows {
+            let (id, cue) = row?;
+            out.entry(id).or_default().push(cue);
+        }
+        Ok(out)
+    }
+
+    /// A track's cues: hot cues first by pad, then memory cues by position.
+    pub fn cues_for(&self, id: Id) -> Result<Vec<Cue>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT hot_slot, position_ms, loop_end_ms, label, color
+               FROM cues
+              WHERE track_id = ?1
+              ORDER BY hot_slot IS NULL, hot_slot, position_ms",
+        )?;
+        let rows = stmt.query_map(params![id as i64], |r| cue_from_row(r, 0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Replace a track's cue set. Rejects a pad outside A–H, two cues on one
+    /// pad, and a loop that doesn't end after it starts; a cue's label is
+    /// trimmed and an empty one dropped. Writes the whole set in one
+    /// transaction so a failed validation leaves the old cues in place.
+    pub fn set_cues(&self, id: Id, cues: &[Cue]) -> Result<()> {
+        let mut pads = std::collections::HashSet::new();
+        for c in cues {
+            if let Some(slot) = c.hot_slot {
+                if slot >= Cue::HOT_SLOTS {
+                    return Err(Error::Invalid(format!("hot cue pad {slot} is out of range")));
+                }
+                if !pads.insert(slot) {
+                    return Err(Error::Invalid(format!(
+                        "two cues on hot cue pad {}",
+                        (b'A' + slot) as char
+                    )));
+                }
+            }
+            if c.loop_end_ms.is_some_and(|end| end <= c.position_ms) {
+                return Err(Error::Invalid("a loop must end after it starts".into()));
+            }
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM cues WHERE track_id = ?1", params![id as i64])?;
+        {
+            let mut ins = tx.prepare(
+                "INSERT INTO cues (track_id, hot_slot, position_ms, loop_end_ms, label, color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for c in cues {
+                let label = c
+                    .label
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let color = c
+                    .color
+                    .map(|[r, g, b]| ((r as i64) << 16) | ((g as i64) << 8) | b as i64);
+                ins.execute(params![
+                    id as i64,
+                    c.hot_slot.map(|s| s as i64),
+                    c.position_ms as i64,
+                    c.loop_end_ms.map(|v| v as i64),
+                    label,
+                    color,
+                ])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -4212,6 +4319,20 @@ fn search_filter(query: Option<&str>, prefix: &str) -> (String, Vec<String>) {
     (sql, params)
 }
 
+/// One `cues` row starting at column `base`:
+/// `hot_slot, position_ms, loop_end_ms, label, color`.
+fn cue_from_row(r: &Row, base: usize) -> rusqlite::Result<Cue> {
+    Ok(Cue {
+        hot_slot: r.get::<_, Option<i64>>(base)?.map(|v| v as u8),
+        position_ms: r.get::<_, i64>(base + 1)?.max(0) as u64,
+        loop_end_ms: r.get::<_, Option<i64>>(base + 2)?.map(|v| v.max(0) as u64),
+        label: r.get(base + 3)?,
+        color: r.get::<_, Option<i64>>(base + 4)?.map(|c| {
+            [((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8]
+        }),
+    })
+}
+
 fn row_to_track(r: &Row) -> rusqlite::Result<Track> {
     let format: String = r.get("format")?;
     Ok(Track {
@@ -4294,6 +4415,7 @@ fn row_to_track(r: &Row) -> rusqlite::Result<Track> {
             has_cover: r.get::<_, Option<i64>>("has_cover")?.unwrap_or(0) != 0,
         },
         analysis: None,
+        cues: Vec::new(),
     })
 }
 
@@ -4400,6 +4522,7 @@ mod tests {
             }),
             tags: Tags::default(),
             analysis,
+            cues: Vec::new(),
         }
     }
 
@@ -6291,6 +6414,86 @@ mod tests {
             .unwrap();
         assert_eq!(again.title, "Force + Form");
         assert_eq!(calls.get(), 1, "cache hit must not re-fetch");
+    }
+
+    #[test]
+    fn cues_round_trip_and_validate() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let (id, _) = cat
+            .upsert_scanned(&scanned("/cue.mp3", "A", "Techno", 200_000))
+            .unwrap();
+        assert!(cat.cues_for(id).unwrap().is_empty());
+
+        let cues = vec![
+            Cue {
+                hot_slot: Some(1),
+                position_ms: 32_000,
+                loop_end_ms: None,
+                label: Some("  drop ".into()),
+                color: Some([255, 0, 23]),
+            },
+            Cue {
+                hot_slot: Some(0),
+                position_ms: 1_000,
+                loop_end_ms: Some(2_875),
+                label: Some(String::new()),
+                color: None,
+            },
+            Cue {
+                hot_slot: None,
+                position_ms: 64_000,
+                loop_end_ms: None,
+                label: None,
+                color: None,
+            },
+            Cue {
+                hot_slot: None,
+                position_ms: 16_000,
+                loop_end_ms: None,
+                label: Some("break".into()),
+                color: Some([40, 226, 20]),
+            },
+        ];
+        cat.set_cues(id, &cues).unwrap();
+        let got = cat.cues_for(id).unwrap();
+        // Pads first in pad order, then memory cues by time; labels trimmed,
+        // empty ones dropped; colours survive the packed column.
+        assert_eq!(got.len(), 4);
+        assert_eq!((got[0].hot_slot, got[0].loop_end_ms), (Some(0), Some(2_875)));
+        assert_eq!(got[0].label, None);
+        assert_eq!(got[1].hot_slot, Some(1));
+        assert_eq!(got[1].label.as_deref(), Some("drop"));
+        assert_eq!(got[1].color, Some([255, 0, 23]));
+        assert_eq!((got[2].hot_slot, got[2].position_ms), (None, 16_000));
+        assert_eq!(got[2].color, Some([40, 226, 20]));
+        assert_eq!((got[3].hot_slot, got[3].position_ms), (None, 64_000));
+
+        // export_selection carries them on the track.
+        let (tracks, _) = cat.export_selection(&[]).unwrap();
+        assert_eq!(tracks[0].cues.len(), 4);
+
+        // Replacing writes the new set, not a union.
+        cat.set_cues(id, &cues[..1]).unwrap();
+        assert_eq!(cat.cues_for(id).unwrap().len(), 1);
+
+        // Invalid sets are rejected and leave the old set intact.
+        let bad_pad = vec![Cue {
+            hot_slot: Some(8),
+            ..cues[0].clone()
+        }];
+        assert!(cat.set_cues(id, &bad_pad).is_err());
+        let dup_pad = vec![cues[0].clone(), cues[0].clone()];
+        assert!(cat.set_cues(id, &dup_pad).is_err());
+        let bad_loop = vec![Cue {
+            loop_end_ms: Some(10),
+            ..cues[0].clone()
+        }];
+        assert!(cat.set_cues(id, &bad_loop).is_err());
+        assert_eq!(cat.cues_for(id).unwrap().len(), 1);
+
+        // Cues go with their track.
+        cat.delete_tracks(&[id]).unwrap();
+        assert!(cat.cues_for(id).unwrap().is_empty());
     }
 
     #[test]

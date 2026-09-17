@@ -125,10 +125,25 @@ Verified: 13 unit + 3 round-trip tests (export → `pdb::read_export`/
 the golden-reference tooling (page accounting matches rekordbox exactly), and
 a real 80-track / 2 GB CLI export.
 
-## Phase 6 — Validation & cues  `[ ]`
+## Phase 6 — Validation & cues  `[~]`
 Golden-fixture diffing vs rekordbox exports; hot/memory cue editing; compatibility
 matrix across CDJ/XDJ models.
 **DoD:** round-trip diffs are explained; cue edits export correctly.
+**Cues landed (2026-09-17):** `Cue` moved off `Analysis` onto `Track` (user
+data, not analyzer output) with `hot_slot` (pad A–H or memory), `loop_end_ms`,
+label and RGB colour; its own `cues` catalog table (schema v16) behind
+`Catalog::cues_for / set_cues / attach_cues` (validated: pad range, one cue per
+pad, loop ends after start). The player's zoom lane grew a **CUES** tab beside
+GRID: eight pads (empty pad sets at the playhead, set pad jumps; keys 1–8 do
+the same), memory cue / memory loop buttons, and a context menu per cue
+(rename, move to playhead, loop 4 beats / to playhead / remove, 8-colour
+palette, delete); markers draw on both lanes with loops as a wash. Device
+tracks show the stick's cues read-only. `anlz` now writes real `PCPT`/`PCP2`
+entries (hot list first, pads by slot, memory by time; loops carry
+loop_time and status 4; comments UTF-16BE; colour code 0 + RGB) and reads
+them back (`anlz::read_cues`, .EXT preferred, .DAT fallback); the export
+round-trip test covers it. Still open here: golden-fixture diffing, the
+compatibility matrix, and the DLP `cue` table (cue banks — left empty).
 
 ## Later — GUI  `[~]`
 `ordnung-gui` wraps `ordnung-core` (library grid, harmonic mixing view).

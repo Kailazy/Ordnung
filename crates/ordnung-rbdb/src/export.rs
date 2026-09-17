@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ordnung_core::model::{Format, Id, Playlist, Track};
+use ordnung_core::model::{Cue, Format, Id, Playlist, Track};
 
 use crate::anlz;
 use crate::pdbw::{self, PdbTables, PlaylistRow, TrackRow};
@@ -202,6 +202,7 @@ struct ExportTrack {
     beats: Vec<ordnung_core::model::Beat>,
     preview: Vec<u8>,
     bands: Vec<u8>,
+    cues: Vec<Cue>,
     copy_needed: bool,
 }
 
@@ -698,6 +699,7 @@ fn export_impl(
             beats,
             preview: analysis.map(|a| a.waveform_preview.clone()).unwrap_or_default(),
             bands: analysis.map(|a| a.waveform_bands.clone()).unwrap_or_default(),
+            cues: t.cues.clone(),
             copy_needed,
         });
     }
@@ -801,6 +803,7 @@ fn export_impl(
             preview: &tr.preview,
             bands: &tr.bands,
             scroll: &scroll,
+            cues: &tr.cues,
         };
         let dat = dir.join("ANLZ0000.DAT");
         write_synced(&dat, &anlz::build_dat(&inp)).map_err(io_err(dat))?;

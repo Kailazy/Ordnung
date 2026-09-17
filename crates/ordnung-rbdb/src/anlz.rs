@@ -10,7 +10,7 @@
 //! All integers big-endian. Empty cue lists and the header-only `PQT2` are
 //! forms rekordbox itself writes, so they are safe minimal outputs.
 
-use ordnung_core::model::Beat;
+use ordnung_core::model::{Beat, Cue};
 
 /// Everything the ANLZ files for one track are derived from.
 pub(crate) struct AnlzInput<'a> {
@@ -29,6 +29,9 @@ pub(crate) struct AnlzInput<'a> {
     /// what the detailed waveforms should carry. Empty when the audio wasn't
     /// decodable at export time; the coarse cached data above fills in.
     pub scroll: &'a [u8],
+    /// Hot and memory cues. Any order; the writer sorts pads by slot and
+    /// memory cues by time, the way rekordbox lists them.
+    pub cues: &'a [Cue],
 }
 
 const BANDS_PER_SEC: f64 = 20.0;
@@ -119,6 +122,133 @@ pub fn read_track_path(dat_path: &std::path::Path) -> Option<String> {
         .take_while(|&u| u != 0)
         .collect();
     String::from_utf16(&units).ok()
+}
+
+/// Read a track's cues back from its ANLZ pair: the `.EXT`'s nxs2 `PCO2`
+/// lists (which carry comments and colours) when present, else the `.DAT`'s
+/// classic `PCOB` lists. Hot cues come first by pad, then memory cues by
+/// time. Empty when the files are missing or carry no cues.
+pub fn read_cues(dat_path: &std::path::Path) -> Vec<Cue> {
+    let mut out = std::fs::read(dat_path.with_extension("EXT"))
+        .ok()
+        .map(|ext| parse_pco2_lists(&ext))
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::fs::read(dat_path).ok().map(|dat| parse_pcob_lists(&dat)))
+        .unwrap_or_default();
+    out.sort_by_key(|c| (c.hot_slot.is_none(), c.hot_slot.unwrap_or(0), c.position_ms));
+    out
+}
+
+/// Every section with `tag`, in file order (a file carries two cue lists:
+/// hot cues, then memory cues).
+fn find_sections<'a>(data: &'a [u8], want: &[u8; 4]) -> Vec<&'a [u8]> {
+    let mut out = Vec::new();
+    if data.len() < 0x1C || &data[0..4] != b"PMAI" {
+        return out;
+    }
+    let mut off = 0x1C;
+    while off + 12 <= data.len() {
+        let Some(len_tag) = data
+            .get(off + 8..off + 12)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_be_bytes)
+            .map(|v| v as usize)
+        else {
+            break;
+        };
+        if len_tag < 12 || off + len_tag > data.len() {
+            break;
+        }
+        if &data[off..off + 4] == want {
+            out.push(&data[off + 12..off + len_tag]);
+        }
+        off += len_tag;
+    }
+    out
+}
+
+fn u32_at(b: &[u8], i: usize) -> Option<u32> {
+    b.get(i..i + 4).and_then(|x| x.try_into().ok()).map(u32::from_be_bytes)
+}
+fn u16_at(b: &[u8], i: usize) -> Option<u16> {
+    b.get(i..i + 2).and_then(|x| x.try_into().ok()).map(u16::from_be_bytes)
+}
+
+/// Walk the fixed-size `PCPT` entries of every classic cue list.
+fn parse_pcob_lists(data: &[u8]) -> Vec<Cue> {
+    let mut out = Vec::new();
+    for body in find_sections(data, b"PCOB") {
+        // Body: u32 type, u16 0, u16 count, u32 memory_count; then entries,
+        // each a `PCPT` section of its own (len_tag at +8).
+        let Some(count) = u16_at(body, 6) else { continue };
+        let mut off = 12;
+        for _ in 0..count {
+            let Some(len) = u32_at(body, off + 8).map(|v| v as usize) else { break };
+            if len < 0x38 || off + len > body.len() || &body[off..off + 4] != b"PCPT" {
+                break;
+            }
+            let e = &body[off + 12..off + len];
+            let hot = u32_at(e, 0).unwrap_or(0);
+            let kind = e.get(16).copied().unwrap_or(1);
+            let time = u32_at(e, 20).unwrap_or(0) as u64;
+            let loop_time = u32_at(e, 24).unwrap_or(u32::MAX);
+            out.push(Cue {
+                hot_slot: (hot > 0).then(|| (hot - 1) as u8),
+                position_ms: time,
+                loop_end_ms: (kind == 2 && loop_time != u32::MAX).then_some(loop_time as u64),
+                label: None,
+                color: None,
+            });
+            off += len;
+        }
+    }
+    out
+}
+
+/// Walk the variable-size `PCP2` entries of every nxs2 cue list.
+fn parse_pco2_lists(data: &[u8]) -> Vec<Cue> {
+    let mut out = Vec::new();
+    for body in find_sections(data, b"PCO2") {
+        // Body: u32 type, u16 count, u16 0; then `PCP2` entries.
+        let Some(count) = u16_at(body, 4) else { continue };
+        let mut off = 8;
+        for _ in 0..count {
+            let Some(len) = u32_at(body, off + 8).map(|v| v as usize) else { break };
+            if len < 0x30 || off + len > body.len() || &body[off..off + 4] != b"PCP2" {
+                break;
+            }
+            let e = &body[off + 12..off + len];
+            let hot = u32_at(e, 0).unwrap_or(0);
+            let kind = e.get(4).copied().unwrap_or(1);
+            let time = u32_at(e, 8).unwrap_or(0) as u64;
+            let loop_time = u32_at(e, 12).unwrap_or(u32::MAX);
+            let len_comment = u32_at(e, 28).unwrap_or(0) as usize;
+            let label = e
+                .get(32..32 + len_comment)
+                .map(|raw| {
+                    let units: Vec<u16> = raw
+                        .chunks_exact(2)
+                        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                        .take_while(|&u| u != 0)
+                        .collect();
+                    String::from_utf16_lossy(&units)
+                })
+                .filter(|s| !s.is_empty());
+            let rgb = e.get(32 + len_comment + 1..32 + len_comment + 4);
+            let color = rgb
+                .map(|c| [c[0], c[1], c[2]])
+                .filter(|c| *c != [0, 0, 0]);
+            out.push(Cue {
+                hot_slot: (hot > 0).then(|| (hot - 1) as u8),
+                position_ms: time,
+                loop_end_ms: (kind == 2 && loop_time != u32::MAX).then_some(loop_time as u64),
+                label,
+                color,
+            });
+            off += len;
+        }
+    }
+    out
 }
 
 /// Read a track's waveforms from its `ANLZ0000.DAT` (the `.EXT` sibling is
@@ -242,22 +372,92 @@ fn pqt2() -> Vec<u8> {
     section(b"PQT2", 0x38, &body)
 }
 
-/// Empty classic cue list (`type`: 1 = hot cues, 0 = memory cues).
-fn pcob(list_type: u32) -> Vec<u8> {
-    let mut body = Vec::with_capacity(12);
+/// The cues one list carries: hot cues (`list_type` 1) by pad, or memory
+/// cues (0) by time. Both files list hot cues first.
+fn cues_for_list(cues: &[Cue], list_type: u32) -> Vec<&Cue> {
+    let mut v: Vec<&Cue> = cues
+        .iter()
+        .filter(|c| c.is_hot() == (list_type == 1))
+        .filter(|c| c.hot_slot.map_or(true, |s| s < Cue::HOT_SLOTS))
+        .collect();
+    v.sort_by_key(|c| (c.hot_slot.unwrap_or(0), c.position_ms));
+    v
+}
+
+/// rekordbox 7's hot cue colour when none was chosen (code 0, red).
+const DEFAULT_HOT_RGB: [u8; 3] = [255, 0, 23];
+
+/// Classic cue list (`type`: 1 = hot cues, 0 = memory cues) with its
+/// fixed-size `PCPT` entries — what every CDJ generation reads.
+fn pcob(list_type: u32, cues: &[Cue]) -> Vec<u8> {
+    let list = cues_for_list(cues, list_type);
+    let mut body = Vec::with_capacity(12 + list.len() * 0x38);
     body.extend_from_slice(&be32(list_type));
     body.extend_from_slice(&be16(0));
-    body.extend_from_slice(&be16(0));
+    body.extend_from_slice(&be16(list.len() as u16));
     body.extend_from_slice(&[0xFF; 4]);
+    for c in list {
+        let mut e = Vec::with_capacity(0x38 - 12);
+        e.extend_from_slice(&be32(c.hot_slot.map_or(0, |s| s as u32 + 1)));
+        // status: 0 for a point (as rekordbox 7 writes), 4 for a loop (DS).
+        e.extend_from_slice(&be32(if c.is_loop() { 4 } else { 0 }));
+        e.extend_from_slice(&be32(0x0001_0000));
+        e.extend_from_slice(&be16(0xFFFF)); // order_first
+        e.extend_from_slice(&be16(0xFFFF)); // order_last
+        e.push(if c.is_loop() { 2 } else { 1 });
+        e.push(0);
+        e.extend_from_slice(&be16(1000));
+        e.extend_from_slice(&be32(c.position_ms.min(u32::MAX as u64) as u32));
+        e.extend_from_slice(&be32(
+            c.loop_end_ms
+                .map_or(0xFFFF_FFFF, |v| v.min(u32::MAX as u64) as u32),
+        ));
+        e.extend_from_slice(&[0u8; 16]);
+        body.extend_from_slice(&section(b"PCPT", 0x1C, &e));
+    }
     section(b"PCOB", 0x18, &body)
 }
 
-/// Empty nxs2 cue list.
-fn pco2(list_type: u32) -> Vec<u8> {
-    let mut body = Vec::with_capacity(8);
+/// nxs2 cue list with its `PCP2` entries: the classic fields plus a UTF-16BE
+/// comment and an RGB pad colour. Entry size is rekordbox 7's 0x58 for an
+/// empty comment, growing by the comment's bytes.
+fn pco2(list_type: u32, cues: &[Cue]) -> Vec<u8> {
+    let list = cues_for_list(cues, list_type);
+    let mut body = Vec::with_capacity(8 + list.len() * 0x58);
     body.extend_from_slice(&be32(list_type));
+    body.extend_from_slice(&be16(list.len() as u16));
     body.extend_from_slice(&be16(0));
-    body.extend_from_slice(&be16(0));
+    for c in list {
+        let comment: Vec<u8> = c
+            .label
+            .as_deref()
+            .unwrap_or("")
+            .encode_utf16()
+            .flat_map(|u| u.to_be_bytes())
+            .collect();
+        let mut e = Vec::with_capacity(0x58 - 12 + comment.len());
+        e.extend_from_slice(&be32(c.hot_slot.map_or(0, |s| s as u32 + 1)));
+        e.push(if c.is_loop() { 2 } else { 1 });
+        e.push(0);
+        e.extend_from_slice(&be16(1000));
+        e.extend_from_slice(&be32(c.position_ms.min(u32::MAX as u64) as u32));
+        e.extend_from_slice(&be32(
+            c.loop_end_ms
+                .map_or(0xFFFF_FFFF, |v| v.min(u32::MAX as u64) as u32),
+        ));
+        e.push(0); // memory cue colour id (palette index; 0 = none)
+        e.push(1);
+        e.extend_from_slice(&[0u8; 6]);
+        e.extend_from_slice(&be16(0)); // loop numerator
+        e.extend_from_slice(&be16(0)); // loop denominator
+        e.extend_from_slice(&be32(comment.len() as u32));
+        e.extend_from_slice(&comment);
+        let rgb = c.color.unwrap_or(if c.is_hot() { DEFAULT_HOT_RGB } else { [0, 0, 0] });
+        e.push(0); // colour code (0 = custom RGB)
+        e.extend_from_slice(&rgb);
+        e.extend_from_slice(&[0u8; 40]);
+        body.extend_from_slice(&section(b"PCP2", 0x10, &e));
+    }
     section(b"PCO2", 0x14, &body)
 }
 
@@ -508,8 +708,8 @@ pub(crate) fn build_dat(inp: &AnlzInput) -> Vec<u8> {
         pqtz(inp.beats),
         pwav(inp),
         pwv2(inp),
-        pcob(1),
-        pcob(0),
+        pcob(1, inp.cues),
+        pcob(0, inp.cues),
     ])
 }
 
@@ -519,10 +719,10 @@ pub(crate) fn build_ext(inp: &AnlzInput) -> Vec<u8> {
     pmai(vec![
         ppth(inp.usb_path),
         pwv3(inp),
-        pcob(1),
-        pcob(0),
-        pco2(1),
-        pco2(0),
+        pcob(1, inp.cues),
+        pcob(0, inp.cues),
+        pco2(1, inp.cues),
+        pco2(0, inp.cues),
         pqt2(),
         pwv5(inp),
         pwv4(inp),
@@ -579,6 +779,7 @@ mod tests {
             preview: &[128; 400],
             bands: &vec![64; 4 * 82],
             scroll: &[],
+            cues: &[],
         };
         let dat = build_dat(&inp);
         // PMAI header words as every golden file has them; 1 in the third
@@ -614,6 +815,52 @@ mod tests {
     }
 
     #[test]
+    fn cue_lists_carry_rekordbox_sized_entries() {
+        let cues = vec![
+            Cue {
+                hot_slot: Some(1),
+                position_ms: 5_000,
+                loop_end_ms: None,
+                label: None,
+                color: None,
+            },
+            Cue {
+                hot_slot: None,
+                position_ms: 1_000,
+                loop_end_ms: Some(3_000),
+                label: Some("ab".into()),
+                color: Some([1, 2, 3]),
+            },
+        ];
+        // Classic: header 0x18 + one 0x38 entry per cue in that list.
+        let hot = pcob(1, &cues);
+        assert_eq!(hot.len(), 0x18 + 0x38);
+        let mem = pcob(0, &cues);
+        assert_eq!(mem.len(), 0x18 + 0x38);
+        assert_eq!(u16::from_be_bytes([mem[0x12], mem[0x13]]), 1, "count");
+        // nxs2: header 0x14; an uncommented entry is 0x58, a commented one
+        // grows by the comment's UTF-16 bytes.
+        let hot2 = pco2(1, &cues);
+        assert_eq!(hot2.len(), 0x14 + 0x58);
+        let mem2 = pco2(0, &cues);
+        assert_eq!(mem2.len(), 0x14 + 0x58 + 4);
+        // And they read back.
+        let mut file = pmai(vec![ppth("/Contents/x.mp3"), hot2, mem2]);
+        let got = parse_pco2_lists(&file);
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].hot_slot, got[0].position_ms), (Some(1), 5_000));
+        assert_eq!(got[0].color, Some(DEFAULT_HOT_RGB));
+        assert_eq!((got[1].hot_slot, got[1].loop_end_ms), (None, Some(3_000)));
+        assert_eq!(got[1].label.as_deref(), Some("ab"));
+        assert_eq!(got[1].color, Some([1, 2, 3]));
+        file.clear();
+        let dat = pmai(vec![ppth("/Contents/x.mp3"), hot, mem]);
+        let got = parse_pcob_lists(&dat);
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[1].hot_slot, got[1].position_ms, got[1].loop_end_ms), (None, 1_000, Some(3_000)));
+    }
+
+    #[test]
     fn waveforms_round_trip_through_anlz_files() {
         let b = beats();
         let preview: Vec<u8> = (0..400).map(|i| (i % 256) as u8).collect();
@@ -625,6 +872,7 @@ mod tests {
             preview: &preview,
             bands: &bands,
             scroll: &[],
+            cues: &[],
         };
         let dir = std::env::temp_dir().join(format!("ordnung-anlzr-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -675,6 +923,7 @@ mod tests {
             preview: &[200; 400],
             bands: &vec![100; 4 * 1200],
             scroll: &[],
+            cues: &[],
         };
         let ext = build_ext(&inp);
         let secs = walk(&ext);
@@ -700,6 +949,7 @@ mod tests {
             preview: &[200; 400],
             bands: &vec![100; 4 * 1200],
             scroll: &[],
+            cues: &[],
         };
         let ex2 = build_2ex(&inp);
         let secs = walk(&ex2);
@@ -733,6 +983,7 @@ mod tests {
             preview: &[],
             bands: &[],
             scroll: &[],
+            cues: &[],
         };
         walk(&build_dat(&inp));
         walk(&build_ext(&inp));

@@ -98,6 +98,8 @@ impl App {
                 .as_ref()
                 .and_then(player_grid)
                 .or_else(|| self.usb_anlz_grid(id));
+            let cues = self.load_cues(id);
+            self.cue_rename = None;
             self.now_playing = Some(NowPlaying {
                 id,
                 artist,
@@ -109,6 +111,7 @@ impl App {
                 hires_bands: None,
                 hires_requested: false,
                 grid,
+                cues,
             });
             self.scrub = None;
         }
@@ -237,6 +240,7 @@ impl App {
         // the PCM has been analyzed (or for tracks the engine never decoded).
         let hires = np.hires_bands.clone().unwrap_or_default();
         let grid = np.grid;
+        let cues = np.cues.clone();
         let wave_style = WaveformStyle::from_config(&self.config);
 
         const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
@@ -586,6 +590,7 @@ impl App {
                             Some(shown_frac),
                             (0.0, 1.0),
                         );
+                        crate::cues::draw_cue_markers(painter, rect, &cues, dur, (0.0, 1.0), true);
                     }
                     let knob_r = if resp.hovered() || self.scrub.is_some() {
                         6.5
@@ -680,6 +685,26 @@ impl App {
             self.select_anchor = Some(np_id);
             self.scroll_to_track = Some(np_id);
             self.refresh_selected();
+        }
+
+        // Keys 1–8 press hot cue pads A–H (set when empty, jump when set),
+        // like a controller's pad row. Skipped while a text field has focus.
+        if !ctx.wants_keyboard_input() {
+            const PAD_KEYS: [egui::Key; 8] = [
+                egui::Key::Num1,
+                egui::Key::Num2,
+                egui::Key::Num3,
+                egui::Key::Num4,
+                egui::Key::Num5,
+                egui::Key::Num6,
+                egui::Key::Num7,
+                egui::Key::Num8,
+            ];
+            for (slot, key) in PAD_KEYS.iter().enumerate() {
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, *key)) {
+                    self.trigger_hot_cue(slot as u8);
+                }
+            }
         }
 
         // Drive the playhead: while audio is rolling, keep repainting so the zoom
@@ -1039,6 +1064,10 @@ impl App {
                     draw_beatgrid(painter, draw_rect, g, dur, (w0, w1));
                 }
             }
+            // Cue markers: lettered pads and memory ticks, loops as a wash.
+            if let Some(cues) = self.now_playing.as_ref().map(|n| n.cues.clone()) {
+                crate::cues::draw_cue_markers(painter, draw_rect, &cues, dur, (w0, w1), false);
+            }
 
             // Fixed playhead line at the window's mapping of the live position.
             let play_x = rect.left() + ((shown_frac - w0) / span.max(f32::EPSILON)) * rect.width();
@@ -1104,6 +1133,8 @@ impl App {
             } else {
                 false
             };
+            // Cue editor: its own tab beside GRID, panel above the lane's left.
+            self.draw_cue_editor(ui, rect);
 
             // Click/drag to seek — map pointer x back through the window.
             let frac_at = |p: egui::Pos2| {
