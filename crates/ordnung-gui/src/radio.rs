@@ -630,6 +630,10 @@ impl App {
             egui::pos2(canvas.center().x - w * 0.5, canvas.top() + 12.0),
             egui::vec2(w, H),
         );
+        // The bar shadows the map: a pointer on it is on the bar, not on the
+        // record under it, so nothing behind lights, drags or opens. The
+        // controls and scrubber register after this and so sit on top of it.
+        ui.interact(bar, ui.id().with("radio_bar_shade"), egui::Sense::click_and_drag());
         ui.painter().rect(
             bar,
             radius::LG,
@@ -889,6 +893,8 @@ impl App {
             egui::pos2(bar.center().x - w * 0.5, bar.bottom() + 8.0),
             egui::vec2(w, h),
         );
+        // Shadows the map the same way the bar does.
+        ui.interact(row, ui.id().with("radio_walk_shade"), egui::Sense::click_and_drag());
         ui.painter().rect(
             row,
             radius::LG,
