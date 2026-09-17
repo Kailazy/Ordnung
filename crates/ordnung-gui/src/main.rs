@@ -75,12 +75,10 @@ use ui::hover::HoverNoteExt;
 use util::*;
 use vinyl_sheet::{SheetFetched, VinylSheet};
 
-/// Compile-time switch for the native rekordbox USB export. The format is
-/// still being reverse engineered, so release DMGs build without the
-/// `usb-export` feature and hide the whole device surface; local dev builds
-/// (`make run` / `make app`) turn it on. Users get music to the players the
-/// classic way meanwhile: drop tagged files into rekordbox (see the tour's
-/// rekordbox step).
+/// Compile-time switch for the native rekordbox USB export. On in every
+/// default build since 0.109.0; a `--no-default-features` build hides the
+/// whole device surface (Devices section, device view, export menus) and
+/// leaves rekordbox drag-and-drop as the way to the players.
 pub(crate) const USB_EXPORT: bool = cfg!(feature = "usb-export");
 
 /// [`ordnung_core::usb::detect_volumes`], but always empty when the USB

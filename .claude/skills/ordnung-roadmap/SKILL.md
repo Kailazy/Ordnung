@@ -127,6 +127,9 @@ the golden-reference tooling (page accounting matches rekordbox exactly), and
 a real 80-track / 2 GB CLI export.
 
 ## Phase 6 — Validation & cues  `[~]`
+**Shipped (0.109.0, 2026-09-17):** the `usb-export` feature is default-on,
+so release DMGs carry the device surface; the tour's rekordbox step now
+names the USB export first and rekordbox drag second.
 Golden-fixture diffing vs rekordbox exports; hot/memory cue editing; compatibility
 matrix across CDJ/XDJ models.
 **DoD:** round-trip diffs are explained; cue edits export correctly.

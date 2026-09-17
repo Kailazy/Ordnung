@@ -8,7 +8,7 @@
 #   tools/build-app.sh --universal    # build a fat arm64+x86_64 binary (runs on any Mac)
 #   tools/build-app.sh --dmg          # also package Ordnung.dmg (drag-to-Applications)
 #   tools/build-app.sh --version=X.Y.Z  # stamp this version into Info.plist / DMG name
-#   tools/build-app.sh --dist         # distribution build: leave dev-only features out
+#   tools/build-app.sh --dist         # distribution build (same features; kept for CI)
 #   # The release CI uses: --no-install --no-launch --universal --dmg --dist --version=<tag>
 #
 # What it does:
@@ -41,11 +41,11 @@ for arg in "$@"; do
   esac
 done
 
-# Local builds carry the dev-only features (the in-progress rekordbox USB
-# export); --dist (used by release CI) leaves them out so the shipped DMG
-# hides that surface until the format work is done. A plain string (expanded
+# Extra cargo features for the build. The rekordbox USB export is a default
+# feature since 0.109.0, so local and --dist builds are the same; this stays
+# as the hook for a future dev-only feature. A plain string (expanded
 # unquoted below) because macOS bash 3.2 chokes on empty arrays under `set -u`.
-features="--features usb-export"
+features=""
 if [[ "$dist" -eq 1 ]]; then
   features=""
 fi

@@ -14,9 +14,10 @@ name = "Ordnung"
 path = "src/main.rs"
 
 [features]
-# The native rekordbox USB export, still being reverse engineered. Off by
-# default so the release DMG ships without the device surface; local dev
-# builds (`make run` / `make app`) enable it. See `crate::USB_EXPORT`.
+default = ["usb-export"]
+# The native rekordbox USB export and the whole device surface. On by
+# default since 0.109.0 (hardware-validated, cues, merge, golden-diffed);
+# `--no-default-features` builds a catalog-only app. See `crate::USB_EXPORT`.
 usb-export = []
 
 [dependencies]

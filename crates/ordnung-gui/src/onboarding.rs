@@ -28,8 +28,8 @@ use super::*;
 ///
 /// v3 added the digital/vinyl question and the inline Discogs token field.
 ///
-/// v4 added the rekordbox hand-off step: with the direct USB export not yet
-/// in shipped builds, the tour has to say how finished tracks reach the decks.
+/// v4 added the rekordbox hand-off step: how finished tracks reach the decks
+/// (reworded, same version, once the direct USB export shipped in 0.109.0).
 ///
 /// v5 added the automatic Discogs match choice: whether new imports get their
 /// release found and applied automatically, and which candidate wins.
@@ -696,40 +696,33 @@ impl App {
                                 );
                             }
                             TourStep::Rekordbox => {
-                                // The direct USB export is still being built,
-                                // so this step keeps the promise honest: the
-                                // hand-off to the decks is rekordbox itself,
-                                // and it works because the metadata lives in
+                                // Two doors to the decks, both honest: the
+                                // native USB export, and rekordbox itself,
+                                // which works because the metadata lives in
                                 // the files. Sequenced right before the
                                 // writeback fork — this is why that choice
                                 // matters.
                                 step_heading(
                                     ui,
                                     "Off to the decks",
-                                    "Ordnung gets your tracks ready. Rekordbox stays how \
-                                     they reach the players.",
-                                );
-                                feature_row(
-                                    ui,
-                                    crate::ui::icon::tag,
-                                    "Metadata lives in your files",
-                                    "BPM, key, artwork and release data end up in the \
-                                     files' own tags.",
+                                    "Ordnung gets your tracks ready, then writes a \
+                                     stick the players read directly.",
                                 );
                                 feature_row(
                                     ui,
                                     crate::ui::icon::deck,
-                                    "Drop into rekordbox",
-                                    "Once tracks are filled in, add them to rekordbox as \
-                                     you always have. Everything travels with the files.",
+                                    "Export to a USB stick",
+                                    "Right-click a playlist and choose Export to device: \
+                                     tracks, playlists, beatgrids, keys, cues and waveforms \
+                                     land on the stick in rekordbox's own format.",
                                 );
-                                ui.label(
-                                    egui::RichText::new(
-                                        "A direct USB export straight from Ordnung is in \
-                                         the works.",
-                                    )
-                                    .font(crate::ui::tokens::font::body())
-                                    .color(crate::ui::tokens::color::LABEL_3),
+                                feature_row(
+                                    ui,
+                                    crate::ui::icon::tag,
+                                    "Or drop into rekordbox",
+                                    "BPM, key, artwork and release data end up in the \
+                                     files' own tags, so adding them to rekordbox as you \
+                                     always have works too.",
                                 );
                             }
                             TourStep::Writeback => {

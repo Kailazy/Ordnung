@@ -14,8 +14,8 @@ app: ## Build, sign, install to /Applications, pin to Dock, relaunch
 app-only: ## Build + sign the local Ordnung.app, don't touch /Applications
 	@bash tools/build-app.sh --no-install
 
-run: ## Run the GUI from source (debug, no bundle, dev features)
-	@cargo run -p ordnung-gui --features usb-export
+run: ## Run the GUI from source (debug, no bundle)
+	@cargo run -p ordnung-gui
 
 genredb-publish: ## Rebuild the prebuilt genre DB from the Discogs dump (~10 GB stream) and publish it to the rolling `genredb` release. Needs a residential connection; Cloudflare blocks datacenter IPs (see .github/workflows/genredb.yml).
 	@cargo run --release -p ordnung-core --example build_genredb -- /tmp/discogs-genres.db
