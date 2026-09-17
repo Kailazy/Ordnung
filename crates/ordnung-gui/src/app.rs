@@ -263,6 +263,7 @@ impl App {
             failure_report_title: String::new(),
             failure_report: Vec::new(),
             show_failure_report: false,
+            hidden_format_notice: None,
             audio: AudioEngine::new(egui_ctx),
             media_cover_tx,
             media_cover_rx,
@@ -3769,6 +3770,7 @@ impl eframe::App for App {
         self.draw_wantlist_watch(ctx);
         self.draw_browse_page(ctx);
         self.draw_failure_report(ctx);
+        self.draw_hidden_format_notice(ctx);
         self.draw_export_confirm(ctx);
         self.draw_usb_setup_confirm(ctx);
         // Drawn last so the welcome tour sits above every other window on a

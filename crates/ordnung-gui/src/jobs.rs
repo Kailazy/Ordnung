@@ -49,6 +49,11 @@ impl App {
                     // Don't save yet — queue the candidates for the user to pick.
                     self.artwork_queue.push_back(c);
                 }
+                Ok(JobMsg::HiddenFormats(n)) => {
+                    // Not a failure: open the notice that names the setting
+                    // and offers to search those tracks again unfiltered.
+                    self.hidden_format_notice = (!n.items.is_empty()).then_some(n);
+                }
                 Ok(JobMsg::CoversChanged(ids)) => {
                     // The auto-match replaced these tracks' covers; drop the
                     // cached textures so each re-decodes on next render.
@@ -771,6 +776,19 @@ impl App {
     /// chosen release supplies the cover *and* fills empty tag fields, since a
     /// cover-only mode meant a second trip through the same picker.
     pub(crate) fn spawn_fetch_tracks(&mut self, ctx: egui::Context, ids: Vec<Id>) {
+        self.spawn_fetch_tracks_with(ctx, ids, false);
+    }
+
+    /// [`Self::spawn_fetch_tracks`] with a switch to ignore the medium filter
+    /// for this one run: the hidden-format notice's "show them anyway", which
+    /// searches the same tracks again with every format visible. The setting
+    /// itself is left untouched.
+    pub(crate) fn spawn_fetch_tracks_with(
+        &mut self,
+        ctx: egui::Context,
+        ids: Vec<Id>,
+        all_formats: bool,
+    ) {
         if ids.is_empty() {
             return;
         }
@@ -791,7 +809,11 @@ impl App {
         let db = self.db_path.clone();
         // Snapshot the medium filter for the worker: the user's picker
         // preferences can't be read off `self` from another thread.
-        let hidden_mediums = self.config.hidden_release_mediums.clone();
+        let hidden_mediums = if all_formats {
+            Vec::new()
+        } else {
+            self.config.hidden_release_mediums.clone()
+        };
         thread::spawn(move || {
             run_fetch_tracks(db, token, ids, cancel, tx, ctx, true, hidden_mediums)
         });
@@ -1631,6 +1653,11 @@ fn auto_match_tracks(
     let mut fails: Vec<(String, String)> = Vec::new();
     // Tracks whose cover art changed, so the UI can drop their stale textures.
     let mut covers: Vec<Id> = Vec::new();
+    // Tracks Discogs knew but the medium filter emptied, and the mediums that
+    // hid them: a notice with a fix, not a failure.
+    let mut hidden: Vec<(Id, String)> = Vec::new();
+    let mut hidden_mediums_seen: std::collections::BTreeSet<&'static str> =
+        std::collections::BTreeSet::new();
     for (i, track_id) in ids.into_iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             break;
@@ -1682,10 +1709,15 @@ fn auto_match_tracks(
         match client.find_artwork_candidates(&artist, title.as_deref(), album.as_deref()) {
             Ok(found) => {
                 let hit_any = !found.is_empty();
-                let kept: Vec<_> = found
+                let (kept, dropped): (Vec<_>, Vec<_>) = found
                     .into_iter()
-                    .filter(|c| medium_filter.shows_release_format(&c.format))
-                    .collect();
+                    .partition(|c| medium_filter.shows_release_format(&c.format));
+                if kept.is_empty() {
+                    for c in &dropped {
+                        hidden_mediums_seen
+                            .insert(config::ReleaseMedium::classify(&c.format).label());
+                    }
+                }
                 match best_candidate(&kept, spec.criterion) {
                     Some(c) => {
                         apply_release(catalog, &client, track_id, c);
@@ -1701,12 +1733,7 @@ fn auto_match_tracks(
                         if !hit_any {
                             let _ = catalog.mark_metadata_fetched(track_id);
                         } else {
-                            fails.push((
-                                label,
-                                "every release Discogs found is on a format hidden \
-                                 in Settings › Discogs"
-                                    .into(),
-                            ));
+                            hidden.push((track_id, label));
                         }
                     }
                 }
@@ -1720,6 +1747,13 @@ fn auto_match_tracks(
     let _ = tx.send(JobMsg::Progress { done: total, total });
     if !covers.is_empty() {
         let _ = tx.send(JobMsg::CoversChanged(covers));
+    }
+    if !hidden.is_empty() {
+        let _ = tx.send(JobMsg::HiddenFormats(crate::HiddenFormatNotice {
+            title: "Discogs match".into(),
+            items: hidden,
+            mediums: hidden_mediums_seen.into_iter().map(str::to_string).collect(),
+        }));
     }
     if !fails.is_empty() {
         let _ = tx.send(JobMsg::Failures {
@@ -3385,6 +3419,11 @@ pub(crate) fn run_fetch_tracks(
     // apart from a true no-match, since the fix is a setting, not more tagging.
     let mut filtered = 0u64;
     let mut fails: Vec<(String, String)> = Vec::new();
+    // The hidden-format tracks and the mediums that hid them, reported as a
+    // notice with a fix rather than as failures.
+    let mut hidden: Vec<(Id, String)> = Vec::new();
+    let mut hidden_mediums_seen: std::collections::BTreeSet<&'static str> =
+        std::collections::BTreeSet::new();
     for (i, track_id) in ids.into_iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             break;
@@ -3452,10 +3491,15 @@ pub(crate) fn run_fetch_tracks(
                 // remembers that Discogs *did* know this track, so a list
                 // emptied purely by the filter isn't mistaken for a no-match.
                 let hit_any = !found.is_empty();
-                let kept: Vec<_> = found
+                let (kept, dropped): (Vec<_>, Vec<_>) = found
                     .into_iter()
-                    .filter(|c| medium_filter.shows_release_format(&c.format))
-                    .collect();
+                    .partition(|c| medium_filter.shows_release_format(&c.format));
+                if kept.is_empty() {
+                    for c in &dropped {
+                        hidden_mediums_seen
+                            .insert(config::ReleaseMedium::classify(&c.format).label());
+                    }
+                }
                 (kept, hit_any)
             }) {
             Ok((found, _)) if !found.is_empty() => {
@@ -3490,12 +3534,7 @@ pub(crate) fn run_fetch_tracks(
                     // Deliberately *not* marked fetched — nothing was reviewed,
                     // and widening the filter should bring this track back.
                     filtered += 1;
-                    fails.push((
-                        label,
-                        "every release Discogs found is on a format hidden in \
-                         Settings › Discogs"
-                            .into(),
-                    ));
+                    hidden.push((track_id, label));
                 } else {
                     none += 1;
                     // A real no-match: Discogs has nothing for this track. Mark
@@ -3515,6 +3554,13 @@ pub(crate) fn run_fetch_tracks(
         ctx.request_repaint();
     }
     let _ = tx.send(JobMsg::Progress { done: total, total });
+    if !hidden.is_empty() {
+        let _ = tx.send(JobMsg::HiddenFormats(crate::HiddenFormatNotice {
+            title: "Discogs fetch".into(),
+            items: hidden,
+            mediums: hidden_mediums_seen.into_iter().map(str::to_string).collect(),
+        }));
+    }
     if !fails.is_empty() {
         let _ = tx.send(JobMsg::Failures {
             title: "Discogs fetch".into(),
@@ -3527,7 +3573,7 @@ pub(crate) fn run_fetch_tracks(
         if queued == 1 {
             "Pick a release.".to_string()
         } else if filtered == 1 {
-            "Only hidden formats found. Check Settings › Discogs.".to_string()
+            "Only hidden formats found.".to_string()
         } else if none == 1 {
             "No Discogs release found.".to_string()
         } else if skipped == 1 {

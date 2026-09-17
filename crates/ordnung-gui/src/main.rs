@@ -828,6 +828,12 @@ enum JobMsg {
     },
     /// Candidate releases fetched for one track, for the user to pick from.
     ArtworkChoices(ArtworkChoices),
+    /// Tracks Discogs *did* know, but whose every release sits on a medium the
+    /// user hides in Settings › Discogs. Not a failure: nothing broke, a
+    /// setting narrowed the list to zero. Sent apart from `Failures` so the
+    /// UI can offer the fix (open the setting, or search again unfiltered)
+    /// instead of a red report.
+    HiddenFormats(HiddenFormatNotice),
     /// Tracks whose cover art a background job replaced (the automatic Discogs
     /// match), so the UI drops their cached textures and the new art re-decodes.
     CoversChanged(Vec<Id>),
@@ -838,6 +844,18 @@ enum JobMsg {
     /// changed and the rows should reload when the job finishes — sent even
     /// when the job then reports `Failed`, which on its own asks for no reload.
     VinylChanged,
+}
+
+/// A Discogs run's "only hidden formats" outcome: the tracks it applied to,
+/// which hidden mediums the found releases were on (display labels, deduped),
+/// and which job produced it, for the notice's title.
+#[derive(Debug, Clone, Default)]
+struct HiddenFormatNotice {
+    title: String,
+    /// `(track id, "Artist — Title")` per affected track.
+    items: Vec<(Id, String)>,
+    /// Labels of the hidden mediums the releases were on, e.g. "CD / DVD".
+    mediums: Vec<String>,
 }
 
 /// Result of a background full-resolution cover load. The decode (potentially a
@@ -1664,6 +1682,9 @@ struct App {
     failure_report: Vec<(String, String)>,
     /// Whether the failure-report popup is open.
     show_failure_report: bool,
+    /// The last Discogs run's hidden-format outcome, while its notice is open.
+    /// Offers the setting that caused it and an unfiltered re-search.
+    hidden_format_notice: Option<HiddenFormatNotice>,
     /// Audio output for the cover snippet-preview button. `None` if the machine
     /// has no usable output device (the button is then hidden).
     audio: Option<AudioEngine>,

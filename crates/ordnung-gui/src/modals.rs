@@ -2186,6 +2186,84 @@ files elsewhere on the device stay plain storage.",
         }
     }
 
+    /// The "only hidden formats" outcome of a Discogs run. Nothing failed:
+    /// Discogs had releases for these tracks, every one on a medium the user
+    /// hides in Settings › Discogs. So this reads as a notice with the fix at
+    /// hand, not a failure report: jump to the setting, or search the same
+    /// tracks again with every format shown (the setting stays as it is).
+    pub(crate) fn draw_hidden_format_notice(&mut self, ctx: &egui::Context) {
+        let Some(notice) = self.hidden_format_notice.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut close = false;
+        let screen = ctx.screen_rect().size();
+        let win_w = (screen.x * 0.6).clamp(280.0, 560.0);
+        let list_h = (screen.y * 0.4).clamp(80.0, 320.0);
+        // One line, no lecture: the buttons say what to do about it.
+        let line = if notice.mediums.is_empty() {
+            "Releases found, all on hidden formats.".to_string()
+        } else {
+            format!(
+                "Releases found only on hidden formats: {}.",
+                notice.mediums.join(", ")
+            )
+        };
+        egui::Window::new(format!("{}: hidden formats only", notice.title))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .max_width(win_w)
+            .default_width(win_w)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.set_max_width(win_w);
+                ui.add(egui::Label::new(egui::RichText::new(line).strong()).wrap());
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical()
+                    .max_height(list_h)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.set_max_width(ui.available_width());
+                        for (_, name) in &notice.items {
+                            ui.add(egui::Label::new(name.as_str()).wrap());
+                        }
+                    });
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    let busy = self.is_busy();
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Show anyway"))
+                        .on_hover_note("Search again with every format shown")
+                        .clicked()
+                    {
+                        let ids: Vec<Id> = notice.items.iter().map(|(id, _)| *id).collect();
+                        close = true;
+                        self.spawn_fetch_tracks_with(ctx.clone(), ids, true);
+                    }
+                    if ui
+                        .button("Discogs settings")
+                        .on_hover_note("Choose which formats to show")
+                        .clicked()
+                    {
+                        self.token_input = self.config.discogs_token.clone();
+                        self.settings_tab = SettingsTab::Discogs;
+                        self.settings_open = true;
+                        close = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if !open || close {
+            self.hidden_format_notice = None;
+        }
+    }
+
     /// "Write all edited tracks to their source files?" confirmation. Source
     /// files are mutated and the analysis cache for those tracks is invalidated
     /// (their mtimes change), so this is an explicit, gated action. Confirming
