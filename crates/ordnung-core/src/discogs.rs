@@ -1276,7 +1276,8 @@ impl Client {
     /// pressings of one song apart); hits without a thumbnail are kept (a
     /// record without a cover is still a record); and an artist-less line
     /// (`ID - Rain`, or a title-only paste) still searches by track title
-    /// alone. One to three requests per call, paced by the shared throttle.
+    /// alone; the last rung is the free-text query the search box sends.
+    /// One to six requests per call, paced by the shared throttle.
     pub fn find_track_releases(
         &self,
         artist: &str,
@@ -1314,6 +1315,14 @@ impl Client {
                 ladder.push(vec![("track", bare.as_str())]);
             }
         }
+        // Last, what the search box sends: the words as free text with no
+        // track filter. Discogs's `track` filter wants the title as the
+        // record lists it; a long or bracketed title fails there and still
+        // turns up as plain words, and the local ranking sorts the hits.
+        let free = format!("{artist} {}", if bare.is_empty() { title } else { bare.as_str() })
+            .trim()
+            .to_string();
+        ladder.push(vec![("q", free.as_str())]);
         for mut params in ladder {
             params.push(("type", "release"));
             params.push(("per_page", "12"));
