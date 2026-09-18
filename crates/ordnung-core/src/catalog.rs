@@ -354,7 +354,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 
 /// How long a master's cached pressing list is served before it's re-listed.
 /// New pressings appear rarely, and the list only feeds "other pressings" and
@@ -775,6 +775,7 @@ impl Catalog {
                 rel_catno      TEXT,
                 rel_format     TEXT,
                 rel_thumb      TEXT,
+                rel_track      TEXT,
                 candidates_json TEXT NOT NULL DEFAULT '[]',
                 PRIMARY KEY (tracklist_id, position)
             );",
@@ -975,6 +976,8 @@ impl Catalog {
         // absence means "not published", never "free".
         self.add_column_if_missing("seller_listings", "shipping_price", "REAL")?;
         self.add_column_if_missing("seller_listings", "shipping_currency", "TEXT")?;
+        // v18: the song's title as the matched record spells it.
+        self.add_column_if_missing("tracklist_lines", "rel_track", "TEXT")?;
 
         // The local cart (schema v6) was retired in v11: the Discogs API has
         // no cart endpoint, so a local stand-in could never mirror the real
@@ -3939,12 +3942,34 @@ impl Catalog {
     }
 
     /// The song lines of one tracklist, in pasted order.
+    /// The song's title as the matched record spells it, when the record's
+    /// tracklist settled the match under a looser reading than the paste
+    /// (`Lil' Drummer Boi` for `Lil Drummer Boy`). `None` clears it; a new
+    /// match through [`Self::set_tracklist_match`] clears it too.
+    pub fn set_tracklist_rel_track(
+        &self,
+        tracklist_id: Id,
+        position: u32,
+        rel_track: Option<&str>,
+    ) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE tracklist_lines SET rel_track = ?3 WHERE tracklist_id = ?1 AND position = ?2",
+            params![tracklist_id as i64, position as i64, rel_track],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!(
+                "tracklist {tracklist_id} has no line {position}"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn tracklist_entries(&self, tracklist_id: Id) -> Result<Vec<TracklistEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT tracklist_id, position, raw, timestamp_s, artist, title,
                     label_hint, catno_hint, kind, release_id, confidence, chosen_by,
                     local_track_id, rel_artist, rel_title, rel_year, rel_label,
-                    rel_catno, rel_format, rel_thumb, candidates_json
+                    rel_catno, rel_format, rel_thumb, candidates_json, rel_track
              FROM tracklist_lines
              WHERE tracklist_id = ?1
              ORDER BY position",
@@ -3976,6 +4001,7 @@ impl Catalog {
                     rel_catno: r.get(17)?,
                     rel_format: r.get(18)?,
                     rel_thumb: r.get(19)?,
+                    rel_track: r.get(21)?,
                     candidates: serde_json::from_str(&json).unwrap_or_default(),
                 })
             })?
@@ -4015,7 +4041,7 @@ impl Catalog {
                 release_id = ?3, confidence = ?4, chosen_by = ?5,
                 rel_artist = ?6, rel_title = ?7, rel_year = ?8, rel_label = ?9,
                 rel_catno = ?10, rel_format = ?11, rel_thumb = ?12,
-                candidates_json = ?13
+                candidates_json = ?13, rel_track = NULL
              WHERE tracklist_id = ?1 AND position = ?2",
             params![
                 tracklist_id as i64,
@@ -5705,6 +5731,13 @@ mod tests {
         let e = &cat.tracklist_entries(id).unwrap()[0];
         assert_eq!(e.release_id, Some(42));
         assert_eq!(e.rel_title.as_deref(), Some("Miura"));
+        assert_eq!(e.rel_track, None);
+        cat.set_tracklist_rel_track(id, 1, Some("Miura (Original)")).unwrap();
+        assert_eq!(cat.tracklist_entries(id).unwrap()[0].rel_track.as_deref(), Some("Miura (Original)"));
+        assert!(cat.set_tracklist_rel_track(id, 9, None).is_err());
+        // A fresh match forgets the spelling of the old one.
+        cat.set_tracklist_match(id, 1, Some(&cand), Confidence::Sure, ChosenBy::Auto, &[cand.clone()]).unwrap();
+        assert_eq!(cat.tracklist_entries(id).unwrap()[0].rel_track, None);
         assert_eq!(e.rel_year, Some(2001));
         assert_eq!(e.rel_catno.as_deref(), Some("ENV 006"));
         assert_eq!(e.local_track_id, Some(7));

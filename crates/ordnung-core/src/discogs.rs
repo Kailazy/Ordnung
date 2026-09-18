@@ -503,6 +503,12 @@ impl ReleaseDetail {
     /// plain word-prefix is not enough (`Blue` is not `Blue Monday`). Any
     /// position counts, not only the first track.
     pub fn carries_title(&self, title: &str) -> bool {
+        self.matching_track_title(title).is_some()
+    }
+
+    /// The track on this release that [`Self::carries_title`] accepts for
+    /// `title`, as the release spells it.
+    pub fn matching_track_title(&self, title: &str) -> Option<&str> {
         let forms = |t: &str| {
             let mut v = title_forms(t);
             let bare = norm_loose(&without_brackets(t));
@@ -513,15 +519,18 @@ impl ReleaseDetail {
         };
         let wants = forms(title);
         if wants.is_empty() {
-            return false;
+            return None;
         }
-        self.tracklist.iter().any(|t| {
-            forms(&t.title).iter().any(|have| {
-                wants
-                    .iter()
-                    .any(|want| have == want || levenshtein(have, want) <= typo_budget(want))
+        self.tracklist
+            .iter()
+            .find(|t| {
+                forms(&t.title).iter().any(|have| {
+                    wants
+                        .iter()
+                        .any(|want| have == want || levenshtein(have, want) <= typo_budget(want))
+                })
             })
-        })
+            .map(|t| t.title.as_str())
     }
 
     /// Which video plays each track: one entry per `tracklist` position, holding
@@ -3554,6 +3563,7 @@ mod tests {
         assert!(!d.carries_title("Blue"));
         d.tracklist.push(track("E", "Lil' Drummer Boi"));
         assert!(d.carries_title("Lil Drummer Boy"));
+        assert_eq!(d.matching_track_title("Lil Drummer Boy"), Some("Lil' Drummer Boi"));
         assert!(!d.carries_title("Big Drummer Boy"));
         assert_eq!(without_brackets("The Word Is Love (Say The Word) (Steve 'Silk' Hurley's Anthem of Life)"), "The Word Is Love");
         assert_eq!(without_brackets("Rubbernotes [5th Gear Edit]"), "Rubbernotes");

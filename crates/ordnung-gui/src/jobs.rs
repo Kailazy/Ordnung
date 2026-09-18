@@ -4290,6 +4290,7 @@ pub(crate) fn run_match_tracklist(
             .cloned()
             .unwrap_or_else(|| ordered[0].clone());
         let mut confidence = tracklist::confidence_for(best_score);
+        let mut rel_track: Option<String> = None;
 
         // Verify anything short of Sure against the record's own tracklist:
         // the chosen one first, then the next in rank. A hit is Sure; a record
@@ -4299,7 +4300,7 @@ pub(crate) fn run_match_tracklist(
             if let Some(t) = entry.title.as_deref() {
                 let mut tried = 0usize;
                 let mut read = 0usize;
-                let mut verified: Option<discogs::ReleaseCandidate> = None;
+                let mut verified: Option<(discogs::ReleaseCandidate, String)> = None;
                 // Two records when the score already says Likely; four when
                 // only the artist agreed and the tracklists must decide.
                 let limit = if best_score >= 80 { 2 } else { 4 };
@@ -4312,16 +4313,21 @@ pub(crate) fn run_match_tracklist(
                     let id = cand.release_id.clone();
                     if let Ok(detail) = catalog.release_cached_or(&id, || client.fetch_release(&id)) {
                         read += 1;
-                        if detail.carries_title(t) {
-                            verified = Some(cand);
+                        if let Some(as_listed) = detail.matching_track_title(t) {
+                            verified = Some((cand, as_listed.to_string()));
                             break;
                         }
                     }
                 }
                 match verified {
-                    Some(c) => {
+                    Some((c, as_listed)) => {
                         chosen = c;
                         confidence = Confidence::Sure;
+                        // The record's own spelling, when it differs from
+                        // the paste, is what the row will show.
+                        if as_listed != t {
+                            rel_track = Some(as_listed);
+                        }
                     }
                     None if read > 0 => confidence = confidence.min(Confidence::Unsure),
                     None => {}
@@ -4341,6 +4347,9 @@ pub(crate) fn run_match_tracklist(
             ChosenBy::Auto,
             &ordered,
         );
+        if let Some(as_listed) = rel_track.as_deref() {
+            let _ = catalog.set_tracklist_rel_track(tracklist_id, entry.position, Some(as_listed));
+        }
         // A matched record joins the record map like a dug one.
         if confidence >= Confidence::Likely {
             let sub = match (chosen.year.trim(), chosen.format.trim()) {

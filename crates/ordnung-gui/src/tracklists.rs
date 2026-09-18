@@ -133,10 +133,11 @@ fn entry_matches(e: &TracklistEntry, query: &str) -> bool {
         return true;
     }
     let hay = format!(
-        "{} {} {} {} {} {}",
+        "{} {} {} {} {} {} {}",
         e.raw,
         e.artist.as_deref().unwrap_or(""),
         e.title.as_deref().unwrap_or(""),
+        e.rel_track.as_deref().unwrap_or(""),
         e.rel_artist.as_deref().unwrap_or(""),
         e.rel_title.as_deref().unwrap_or(""),
         e.rel_label.as_deref().unwrap_or(""),
@@ -532,7 +533,9 @@ impl App {
                     row.col(|ui| {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
-                            let label = match (e.kind, e.title.as_deref()) {
+                            // The record's spelling wins over the paste's
+                            // once the record's tracklist settled the line.
+                            let label = match (e.kind, e.rel_track.as_deref().or(e.title.as_deref())) {
                                 (LineKind::Id, _) => "ID".to_string(),
                                 (_, Some(t)) => t.to_string(),
                                 _ => e.song_label(),
@@ -548,7 +551,10 @@ impl App {
                                 sub.push(c.to_string());
                             }
                             center_lines(ui, !sub.is_empty());
-                            ui.add(egui::Label::new(egui::RichText::new(label).color(color::LABEL)).truncate());
+                            let name = ui.add(egui::Label::new(egui::RichText::new(label).color(color::LABEL)).truncate());
+                            if let (Some(_), Some(pasted)) = (e.rel_track.as_deref(), e.title.as_deref()) {
+                                name.on_hover_note(format!("Pasted as {pasted}"));
+                            }
                             if !sub.is_empty() {
                                 ui.add(egui::Label::new(egui::RichText::new(sub.join(" · ")).font(font::caption()).color(color::LABEL_3)).truncate());
                             }

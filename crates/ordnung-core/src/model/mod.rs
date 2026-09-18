@@ -586,6 +586,9 @@ pub struct TracklistEntry {
     pub rel_catno: Option<String>,
     pub rel_format: Option<String>,
     pub rel_thumb: Option<String>,
+    /// The song's title as the record spells it, when the record's tracklist
+    /// settled the match under a looser reading than the paste.
+    pub rel_track: Option<String>,
     /// Every candidate the last search turned up, best first, so the user
     /// can pick another offline.
     pub candidates: Vec<crate::discogs::ReleaseCandidate>,
