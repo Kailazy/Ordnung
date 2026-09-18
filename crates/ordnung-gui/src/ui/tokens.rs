@@ -30,6 +30,13 @@ pub fn inner(outer: f32, pad: f32) -> f32 {
 
 /// 8-pt spacing grid. Reach for these instead of ad-hoc pixel gaps; consistent
 /// rhythm is most of what makes a layout read as "designed".
+/// Stroke widths.
+pub mod stroke {
+    /// The edge of a control at rest: a touch over a hairline, so at Retina it
+    /// comes out as a clean solid line rather than a feathered one.
+    pub const OUTLINE: f32 = 1.5;
+}
+
 pub mod space {
     pub const S1: f32 = 2.0;
     pub const S2: f32 = 4.0;
@@ -89,12 +96,13 @@ pub mod color {
     pub const SEPARATOR: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
     /// Opaque separator for use over a known dark surface.
     pub const SEPARATOR_OPAQUE: Color32 = Color32::from_rgb(56, 56, 60);
-    /// The outline on a control at rest: a faint light edge (white α36,
-    /// premultiplied) that lifts a button off the surface without hardening
-    /// into a border. The way a macOS toolbar button sits on its bar.
-    pub const OUTLINE: Color32 = Color32::from_rgba_premultiplied(36, 36, 36, 36);
-    /// The same outline while the pointer is on the control (white α52).
-    pub const OUTLINE_HOVER: Color32 = Color32::from_rgba_premultiplied(52, 52, 52, 52);
+    /// The outline on a control at rest: a solid grey edge that lifts a
+    /// button off the surface without hardening into a border. Opaque, not
+    /// translucent, so it reads as one flat line rather than a tint of what
+    /// sits behind it. The way a macOS toolbar button sits on its bar.
+    pub const OUTLINE: Color32 = Color32::from_rgb(78, 78, 82);
+    /// The same outline while the pointer is on the control.
+    pub const OUTLINE_HOVER: Color32 = Color32::from_rgb(98, 98, 102);
 
     // --- Labels, primary → faint ---
     pub const LABEL: Color32 = Color32::from_rgb(235, 235, 240);

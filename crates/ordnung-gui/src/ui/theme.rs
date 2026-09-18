@@ -9,7 +9,7 @@
 
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily, Margin, Rounding, Stroke};
 
-use super::tokens::{color, font, radius, space};
+use super::tokens::{color, font, radius, space, stroke};
 
 /// Install fonts and the global style. Call once, before any frame is laid out.
 pub fn install(ctx: &egui::Context) {
@@ -222,7 +222,7 @@ fn apply_style(ctx: &egui::Context) {
     // consistent small rounding, and no size "expansion" bulge on hover.
     let w = &mut v.widgets;
     let hairline = Stroke::new(1.0, color::SEPARATOR);
-    let outline = Stroke::new(1.0, color::OUTLINE);
+    let outline = Stroke::new(stroke::OUTLINE, color::OUTLINE);
 
     // Non-interactive: labels, frame backgrounds, separators.
     w.noninteractive.bg_fill = color::SURFACE;
@@ -243,7 +243,7 @@ fn apply_style(ctx: &egui::Context) {
     // Hovered.
     w.hovered.bg_fill = color::SURFACE_HOVER;
     w.hovered.weak_bg_fill = color::SURFACE_HOVER;
-    w.hovered.bg_stroke = Stroke::new(1.0, color::OUTLINE_HOVER);
+    w.hovered.bg_stroke = Stroke::new(stroke::OUTLINE, color::OUTLINE_HOVER);
     w.hovered.fg_stroke = Stroke::new(1.0, color::LABEL);
     w.hovered.rounding = Rounding::same(radius::SM);
     w.hovered.expansion = 0.0;
