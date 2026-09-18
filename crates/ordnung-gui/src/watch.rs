@@ -113,14 +113,11 @@ impl App {
 
         let mut act: Option<Act> = None;
         let mut open = true;
-        egui::Window::new("Wantlist watch")
+        crate::ui::window::Window::new("Wantlist watch")
             .id(egui::Id::new("wantlist-watch"))
             .open(&mut open)
-            .collapsible(false)
-            .resizable([false, true])
+            .resizable_height()
             .default_width(PANEL_W)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_min_width(PANEL_W);
                 ui.set_max_width(PANEL_W);

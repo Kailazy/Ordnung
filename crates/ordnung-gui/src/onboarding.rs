@@ -312,12 +312,8 @@ impl App {
         let mut auto_fetch = tour.auto_fetch;
         let mut auto_match = tour.auto_match;
 
-        egui::Window::new("Welcome to Ordnung")
+        crate::ui::window::Window::new("Welcome to Ordnung")
             .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 // Every page is laid out inside one fixed box, so the window
                 // never resizes between steps and Next stays exactly where the

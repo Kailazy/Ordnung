@@ -2,11 +2,15 @@
 //!
 //! [`tokens`] holds the design tokens (colours, radii, spacing, type ramp) and
 //! [`theme`] pushes them into egui's global style. The components sit beside
-//! them: [`button`] is the one push button, [`menu`] the dropdown it anchors,
-//! [`control_row`] the rule that a row of controls shares one height.
+//! them: [`button`] is the one push button, [`chip`] the avatar pill, [`menu`]
+//! the dropdown a button anchors,
+//! [`window`] the one floating window, [`glass`] the surface they all sit
+//! on, [`control_row`] the rule that a row of controls shares one height.
 
 pub mod button;
+pub mod chip;
 pub mod frost;
+pub mod glass;
 pub mod hover;
 pub mod icon;
 pub mod knob;
@@ -19,6 +23,7 @@ pub mod theme;
 // literals. Allow the interim dead-code until that pass lands.
 #[allow(dead_code)]
 pub mod tokens;
+pub mod window;
 
 use eframe::egui;
 

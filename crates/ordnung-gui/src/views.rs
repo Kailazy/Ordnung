@@ -253,14 +253,12 @@ fn confirm_window(
     ctx: &egui::Context,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
-    let win = egui::Window::new(title).collapsible(false).resizable(false);
+    let win = crate::ui::window::Window::new(title);
     let win = match pos {
         // Nudge up-left so the cursor sits inside the dialog body, a short hop
         // from the confirm button row.
-        Some(p) => win.default_pos(p - egui::vec2(28.0, 16.0)),
-        None => win
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center()),
+        Some(p) => win.at(egui::Align2::LEFT_TOP, p - egui::vec2(28.0, 16.0)),
+        None => win,
     };
     win.show(ctx, add_contents);
 }
@@ -2829,11 +2827,7 @@ impl App {
         if let Some(ids) = self.missing_pending_remove.clone() {
             let n = ids.len();
             let mut close = false;
-            egui::Window::new("Remove missing tracks")
-                .collapsible(false)
-                .resizable(false)
-                .pivot(egui::Align2::CENTER_CENTER)
-                .default_pos(ui.ctx().screen_rect().center())
+            crate::ui::window::Window::new("Remove missing tracks")
                 .show(ui.ctx(), |ui| {
                     ui.label(format!(
                         "Remove {n} missing track{} from the catalog? Their source file{} \

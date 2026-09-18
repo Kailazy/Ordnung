@@ -38,6 +38,8 @@ impl App {
         // matches the Ordnung visual language (see `ui::theme`). DejaVu Sans stays
         // in the fallback chain for the wide-Unicode glyphs Inter lacks.
         crate::ui::theme::install(&egui_ctx);
+        let tex_graveyard = TexGraveyard::default();
+        crate::ui::glass::install(&egui_ctx, tex_graveyard.clone());
         // Dig cover downloads: many small CDN fetches, each answering on this
         // one channel (the dig is a single path, so there's no per-request
         // routing to do).
@@ -205,8 +207,6 @@ impl App {
             confirm_vinyl_edit: None,
             collect_wanted: None,
             vinyl_sheet: None,
-            sheet_frost: crate::ui::frost::Frost::new(),
-            sheet_was_open: false,
             sheet_follows_dig: false,
             sheet_rx: None,
             sheet_price_rx: None,
@@ -262,7 +262,7 @@ impl App {
             column_menu: None,
             col_filters: HashMap::new(),
             col_filter_open: None,
-            tex_graveyard: TexGraveyard::default(),
+            tex_graveyard,
             inspector_open: false,
             menu_installed: false,
             tour: None,
@@ -1812,6 +1812,8 @@ impl eframe::App for App {
         // before anything paints or uploads — guarantees the frame that painted
         // them has already been submitted to the GPU (see `tex_graveyard`).
         self.tex_graveyard.clear();
+        // Closed windows and menus forget their backdrops; primed ones land.
+        crate::ui::glass::sweep(ctx);
         // Both lanes drain every frame; either can change the rows.
         let worker_changed = self.poll_worker();
         let vinyl_changed = self.poll_vinyl_edits();
@@ -3693,12 +3695,8 @@ impl eframe::App for App {
         let mut close_modal = false;
         let mut start_convert: Option<()> = None;
         if let Some(modal) = self.convert_modal.as_mut() {
-            egui::Window::new("Convert track")
+            crate::ui::window::Window::new("Convert track")
                 .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .pivot(egui::Align2::CENTER_CENTER)
-                .default_pos(ctx.screen_rect().center())
                 .show(ctx, |ui| {
                     // Fixed, narrow width: without a cap the long source path
                     // used to dictate how wide the dialog opened.

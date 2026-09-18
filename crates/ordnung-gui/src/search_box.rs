@@ -325,7 +325,19 @@ impl App {
         // reversing on close. Both are driven by the one `open_t` so the two
         // halves of the motion can never drift apart.
         let rise = POPUP_RISE * (1.0 - open_t);
-        egui::Area::new(egui::Id::new("search_suggestions"))
+        // The popup's backdrop is snapshotted on the press into the field,
+        // ahead of the typing that opens it; failing that, on open, under
+        // the fade-in.
+        let glass_id = egui::Id::new("search_suggestions");
+        if field.is_pointer_button_down_on() {
+            crate::ui::glass::prime(&ctx, glass_id);
+        }
+        if !crate::ui::glass::ready(&ctx, glass_id) {
+            ctx.request_repaint();
+            return;
+        }
+        let mut slot = None;
+        let popup = egui::Area::new(glass_id)
             .order(egui::Order::Foreground)
             // Non-interactive while it is still materialising or on its way out,
             // so a click during the fade lands on whatever the user aimed at
@@ -334,9 +346,12 @@ impl App {
             .fixed_pos(field.rect.left_bottom() + egui::vec2(0.0, 4.0 - rise))
             .show(&ctx, |ui| {
                 ui.multiply_opacity(open_t);
+                // The glass every floating surface sits on, painted under
+                // the rows once the popup's rect is known (see `glass`).
+                slot = Some(crate::ui::glass::begin(ui));
                 egui::Frame::popup(ui.style())
-                    // The record sheet's glass, shared by every dropdown.
-                    .fill(color::SURFACE_GLASS)
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::NONE)
                     .inner_margin(egui::Margin::symmetric(space::S1, space::S2))
                     .rounding(egui::Rounding::same(radius::MD))
                     .show(ui, |ui| {
@@ -424,6 +439,16 @@ impl App {
                         filter_clicked = show_all_row(ui, &query);
                     });
             });
+        if let Some(slot) = slot {
+            crate::ui::glass::end(
+                &ctx,
+                slot,
+                glass_id,
+                popup.response.rect,
+                egui::Rounding::same(radius::MD),
+                crate::ui::window::edge(),
+            );
+        }
 
         for hit in load_covers {
             match hit {

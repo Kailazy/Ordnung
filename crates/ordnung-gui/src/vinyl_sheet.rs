@@ -41,6 +41,12 @@ pub(crate) enum SheetSource {
     None,
 }
 
+/// The sheet's backdrop key in `glass`: shared by every record, so the
+/// press that opens a sheet can prime it before the record is known.
+fn sheet_glass() -> egui::Id {
+    egui::Id::new("vinyl-sheet-glass")
+}
+
 /// One line of the sheet: a Discogs tracklist position, or a leftover video
 /// (album rip, live set) shown under its own heading.
 pub(crate) struct SheetRow {
@@ -958,13 +964,7 @@ impl App {
     /// before it returns, so the caller just calls it once per frame.
     pub(crate) fn draw_vinyl_sheet(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         if self.vinyl_sheet.is_none() {
-            // Whichever way the sheet went, its next open is over a different
-            // screen and wants a fresh frost.
-            if self.sheet_was_open {
-                self.sheet_frost.clear();
-            }
-            self.sheet_was_open = false;
-            // The frost is a snapshot of the app under the sheet, and taking
+            // The frost under the sheet is a snapshot of the app, and taking
             // it stalls the frame; taken on the click that opens the sheet,
             // that stall is the hitch the user sees. So it's taken on the
             // press before the click, wherever a click can open a sheet
@@ -972,17 +972,8 @@ impl App {
             // nothing that would show in the backdrop, like a menu, is up.
             let press = ctx.input(|i| i.pointer.primary_pressed());
             if press && self.sheet_can_open_from_press(ctx) {
-                self.sheet_frost.prime(ctx);
+                crate::ui::glass::prime(ctx, sheet_glass());
             }
-            self.sheet_frost.poll(ctx, &self.tex_graveyard);
-            self.sheet_frost.expire();
-            return;
-        }
-        self.sheet_was_open = true;
-        // The frost under the sheet is a snapshot of the app taken before the
-        // sheet is first drawn; if the press didn't leave one, the sheet
-        // waits the one frame that takes.
-        if !self.sheet_frost.ready(ctx, &self.tex_graveyard) {
             return;
         }
         // A sheet is where videos get played from, so have the player built
@@ -1269,25 +1260,17 @@ impl App {
         let mut video_act: Option<VideoAct> = None;
         let mut open = true;
 
-        let shown = egui::Window::new(format!("{artist} — {title}"))
+        crate::ui::window::Window::new(format!("{artist} — {title}"))
             .id(egui::Id::new(("vinyl-sheet", release_id)))
+            // One backdrop for every record: the press that opens a sheet
+            // primes it before the record is known.
+            .glass_id(sheet_glass())
             .open(&mut open)
-            .collapsible(false)
             // Fixed width: the sheet's content is a fixed-width layout (see the
             // `set_max_width` note below), so a horizontal drag would only pad
             // it. Height still follows the tracklist.
-            .resizable([false, true])
+            .resizable_height()
             .default_width(SHEET_W)
-            // A frosted surface: the app under the sheet shows through as a
-            // blur (painted beneath the window, see `sheet_frost`), and this
-            // tint over it keeps the sheet dark enough to read. The radio
-            // bar's plain see-through surface is its small cousin.
-            .frame(
-                egui::Frame::window(&ctx.style())
-                    .fill(crate::ui::tokens::color::SURFACE_GLASS),
-            )
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 // Pin the content width rather than only flooring it. The sheet
                 // auto-sizes, so any child that fills the width it is offered
@@ -1868,15 +1851,6 @@ impl App {
                     }
                 });
             });
-        if let Some(shown) = shown {
-            self.sheet_frost.paint(
-                ctx,
-                egui::Id::new("vinyl-sheet-frost"),
-                shown.response.rect,
-                ctx.style().visuals.window_rounding,
-            );
-        }
-
         // The transport talks straight to the panel — nothing here touches the
         // sheet's own state except the stop, which also clears the row marker.
         match video_act {

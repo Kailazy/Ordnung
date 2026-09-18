@@ -321,16 +321,11 @@ impl App {
         let mut changed = false;
         let mut reset = false;
 
-        let win_frame = egui::Frame::window(&ctx.style())
-            .rounding(egui::Rounding::same(10.0))
-            .inner_margin(egui::Margin::symmetric(12.0, 10.0));
-        egui::Window::new("Columns")
+        crate::ui::window::Window::new("Columns")
             .id(egui::Id::new("column_reorder_popup"))
             .title_bar(false)
-            .frame(win_frame)
-            .collapsible(false)
-            .resizable(false)
-            .default_pos(pos)
+            .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+            .at(egui::Align2::LEFT_TOP, pos)
             .auto_sized()
             .show(ctx, |ui| {
                 // Fixed content width: the list is short labels, and the header /
@@ -579,12 +574,10 @@ impl App {
         // Remember the bar's rect so a click anywhere else this frame closes it.
         let mut bar_rect = egui::Rect::NOTHING;
 
-        egui::Window::new(format!("Filter · {}", col.label()))
+        crate::ui::window::Window::new(format!("Filter · {}", col.label()))
             .id(egui::Id::new("col_filter_popup"))
             .title_bar(false)
-            .collapsible(false)
-            .resizable(false)
-            .default_pos(pos)
+            .at(egui::Align2::LEFT_TOP, pos)
             .show(ctx, |ui| {
                 // The Quality column filters by verdict, so offer one-click presets
                 // (and the legend) instead of making the user remember the chip

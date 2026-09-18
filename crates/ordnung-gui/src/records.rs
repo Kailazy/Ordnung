@@ -62,12 +62,9 @@ const ARTIST_PER_PAGE: u32 = 8;
 /// still fit the width when names run long; the rest are simply not drawn.
 const ARTIST_HITS_SHOWN: usize = 4;
 
-/// The artist band: its height, the chips' height and padding, the round
-/// portrait's side, and how wide a name may run before it's truncated.
-const BAND_H: f32 = 44.0;
-const CHIP_H: f32 = 32.0;
-const CHIP_PAD: f32 = 4.0;
-const AVATAR_PX: f32 = 24.0;
+/// The artist band's height (the chips sit centred in it) and how wide a
+/// name may run before it's truncated.
+const BAND_H: f32 = crate::ui::chip::H + 2.0 * space::S2 + 4.0;
 const CHIP_NAME_MAX_W: f32 = 150.0;
 
 /// Cap on the memoised query cache. Small: entries are only worth keeping for
@@ -655,88 +652,25 @@ fn artist_band(
     let mut clicked = None;
     for (i, a) in artists.iter().enumerate() {
         let name = crate::dig::strip_disambiguator(&a.name).to_string();
-        let galley = ui.fonts(|f| {
-            let mut job = egui::text::LayoutJob::simple_singleline(
-                name,
-                egui::TextStyle::Body.resolve(ui.style()),
-                color::LABEL,
-            );
-            job.wrap.max_width = CHIP_NAME_MAX_W;
-            job.wrap.max_rows = 1;
-            job.wrap.break_anywhere = false;
-            f.layout_job(job)
-        });
-        let w = CHIP_PAD + AVATAR_PX + space::S2 + galley.size().x + CHIP_PAD;
-        if x + w > right {
+        let chip = crate::ui::chip::measure(ui, &name, CHIP_NAME_MAX_W);
+        if x + chip.width > right {
             break;
         }
-        let chip = egui::Rect::from_min_size(
-            egui::pos2(x, band.center().y - CHIP_H / 2.0),
-            egui::vec2(w, CHIP_H),
-        );
-        let resp = ui.interact(
-            chip,
+        let resp = crate::ui::chip::show(
+            ui,
+            &chip,
+            egui::pos2(x, band.center().y - crate::ui::chip::H / 2.0),
             ui.id().with(("artist-chip", a.artist_id)),
-            egui::Sense::click(),
-        );
-        let hot = ui.ctx().animate_bool_with_time(
-            resp.id.with("hot"),
-            selected == Some(i) || resp.hovered(),
-            ROW_HIGHLIGHT_ANIM,
-        );
-        let rounding = egui::Rounding::same(CHIP_H / 2.0);
-        ui.painter().rect_filled(chip, rounding, color::SURFACE_HI);
-        if hot > 0.0 {
-            ui.painter().rect_filled(
-                chip,
-                rounding,
-                ui.visuals()
-                    .widgets
-                    .hovered
-                    .weak_bg_fill
-                    .gamma_multiply(hot),
-            );
-        }
-        // The portrait, round: a face in a circle reads as a person where the
-        // square covers above read as records.
-        let face = egui::Rect::from_center_size(
-            egui::pos2(chip.left() + CHIP_PAD + AVATAR_PX / 2.0, chip.center().y),
-            egui::vec2(AVATAR_PX, AVATAR_PX),
-        );
-        let face_round = egui::Rounding::same(AVATAR_PX / 2.0);
-        match portraits.get(i).cloned().flatten() {
-            Some(tex) => {
-                egui::Image::new(&tex)
-                    .rounding(face_round)
-                    .paint_at(ui, face);
-            }
-            None => {
-                ui.painter().rect_filled(face, face_round, color::FIELD);
-                ui.painter().text(
-                    face.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "♪",
-                    small.clone(),
-                    color::LABEL_3,
-                );
-            }
-        }
-        ui.painter().galley(
-            egui::pos2(
-                face.right() + space::S2,
-                chip.center().y - galley.size().y / 2.0,
-            ),
-            galley,
-            color::LABEL,
+            portraits.get(i).and_then(|p| p.as_ref()),
+            selected == Some(i),
         );
         if resp
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(format!("Every release by {}", a.name))
             .clicked()
         {
             clicked = Some(i);
         }
-        x += w + space::S2;
+        x += chip.width + space::S2;
     }
     clicked
 }

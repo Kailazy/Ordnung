@@ -368,13 +368,10 @@ impl App {
         let mut rename_buf = self.cue_rename.clone();
         let playhead = self.playhead_ms();
 
-        egui::Window::new("Cues")
+        crate::ui::window::Window::new("Cues")
             .id(egui::Id::new("cue_edit_panel"))
             .title_bar(false)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::LEFT_BOTTOM)
-            .fixed_pos(egui::pos2(lane.left(), lane.top() - 6.0))
+            .fixed_at(egui::Align2::LEFT_BOTTOM, egui::pos2(lane.left(), lane.top() - 6.0))
             .show(ui.ctx(), |ui| {
                 const W: f32 = 296.0;
                 const GAP: f32 = crate::ui::tokens::space::S2;

@@ -781,13 +781,10 @@ impl App {
         let mut edited: Option<PlayerGrid> = None;
         let mut held = false;
         let mut reset = false;
-        egui::Window::new("Beatgrid")
+        crate::ui::window::Window::new("Beatgrid")
             .id(egui::Id::new("grid_edit_panel"))
             .title_bar(false)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::RIGHT_BOTTOM)
-            .fixed_pos(egui::pos2(lane.right(), lane.top() - 6.0))
+            .fixed_at(egui::Align2::RIGHT_BOTTOM, egui::pos2(lane.right(), lane.top() - 6.0))
             .show(ui.ctx(), |ui| {
                 const W: f32 = 200.0;
                 ui.set_width(W);

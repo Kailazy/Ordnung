@@ -455,14 +455,11 @@ impl App {
             BrowseThread::Label => "⌂",
             BrowseThread::Artist => "♪",
         };
-        egui::Window::new(format!("{glyph} {name}"))
+        crate::ui::window::Window::new(format!("{glyph} {name}"))
             .id(egui::Id::new("browse-page"))
             .open(&mut open)
-            .collapsible(false)
-            .resizable([false, true])
+            .resizable_height()
             .default_width(PANEL_W)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_min_width(PANEL_W);
                 ui.set_max_width(PANEL_W);

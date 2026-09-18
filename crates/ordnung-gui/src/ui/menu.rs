@@ -61,6 +61,11 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
     let id = anchor.id.with("ord_dropdown");
     let mut open: bool = ctx.data(|d| d.get_temp(id).unwrap_or(false));
     let now = ctx.input(|i| i.time);
+    // The press on the anchor is the moment to snapshot the backdrop: the
+    // click that opens the menu follows it, and finds the frost in hand.
+    if !open && anchor.is_pointer_button_down_on() {
+        super::glass::prime(&ctx, id);
+    }
     if anchor.clicked() {
         open = !open;
         if open {
@@ -82,6 +87,13 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
         return;
     }
 
+    // The panel holds until its backdrop is snapshotted; the fade-in it's
+    // running hides the frame that takes.
+    if !super::glass::ready(&ctx, id) {
+        ctx.request_repaint();
+        ctx.data_mut(|d| d.insert_temp(id, open));
+        return;
+    }
     let opened_at: f64 = ctx.data(|d| d.get_temp(id.with("at")).unwrap_or(now));
     let since_open = (now - opened_at) as f32;
     // Dismissal context, sampled before the content draws so this frame's own
@@ -97,6 +109,7 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
 
     let mut rows = 0usize;
     let mut want_close = false;
+    let mut slot = None;
     let area = egui::Area::new(id.with("area"))
         .order(egui::Order::Foreground)
         // Non-interactive until fully materialised, so a click during the fade
@@ -106,11 +119,11 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
         .constrain(true)
         .show(&ctx, |ui| {
             ui.multiply_opacity(open_t);
+            // The glass is the fill, painted under the rows once the panel's
+            // rect is known (see `glass`); the frame keeps the shadow.
+            slot = Some(super::glass::begin(ui));
             egui::Frame::none()
-                // The same glass as the record sheet, so a menu opened over
-                // the sheet is one surface with it rather than a darker slab.
-                .fill(color::SURFACE_GLASS)
-                .stroke(egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE))
+                .fill(egui::Color32::TRANSPARENT)
                 .rounding(egui::Rounding::same(radius::MD))
                 .inner_margin(egui::Margin::symmetric(space::S2, space::S2))
                 .shadow(egui::epaint::Shadow {
@@ -137,6 +150,16 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
                     want_close = m.close;
                 });
         });
+    if let Some(slot) = slot {
+        super::glass::end(
+            &ctx,
+            slot,
+            id,
+            area.response.rect,
+            egui::Rounding::same(radius::MD),
+            super::window::edge(),
+        );
+    }
 
     if want_close {
         open = false;

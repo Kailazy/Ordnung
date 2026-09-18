@@ -64,7 +64,7 @@ enum State {
 
 /// A window's frosted backdrop. Keep one per window across its open spell and
 /// [`Frost::clear`] it when the window closes, so the next open takes a fresh
-/// snapshot.
+/// snapshot. `glass` keeps one per window and does this bookkeeping.
 pub struct Frost {
     state: State,
     /// The screen the snapshot covers, in points, to map a window rect onto it.
@@ -167,30 +167,30 @@ impl Frost {
         ctx.request_repaint();
     }
 
-    /// Paint the frost under a window occupying `rect`. It goes on the
-    /// background order, above every panel and below every window, so it
-    /// needn't be painted before the window itself.
-    pub fn paint(&self, ctx: &egui::Context, id: egui::Id, rect: egui::Rect, rounding: egui::Rounding) {
+    /// The frost under a window occupying `rect`, as a shape for the caller
+    /// to place: under the window's tint, in the window's own layer (see
+    /// `glass`), so a window over another window blurs that one too. `None`
+    /// until a snapshot is in hand, or when none came.
+    pub fn shape(&self, rect: egui::Rect, rounding: egui::Rounding) -> Option<egui::Shape> {
         let State::Have(tex, _) = &self.state else {
-            return;
+            return None;
         };
         let s = self.screen;
         if s.width() <= 0.0 || s.height() <= 0.0 {
-            return;
+            return None;
         }
         let uv = |p: egui::Pos2| {
             egui::pos2((p.x - s.min.x) / s.width(), (p.y - s.min.y) / s.height())
         };
-        ctx.layer_painter(egui::LayerId::new(egui::Order::Background, id))
-            .add(egui::epaint::RectShape {
-                rect,
-                rounding,
-                fill: egui::Color32::WHITE,
-                stroke: egui::Stroke::NONE,
-                blur_width: 0.0,
-                fill_texture_id: tex.id(),
-                uv: egui::Rect::from_min_max(uv(rect.min), uv(rect.max)),
-            });
+        Some(egui::Shape::Rect(egui::epaint::RectShape {
+            rect,
+            rounding,
+            fill: egui::Color32::WHITE,
+            stroke: egui::Stroke::NONE,
+            blur_width: 0.0,
+            fill_texture_id: tex.id(),
+            uv: egui::Rect::from_min_max(uv(rect.min), uv(rect.max)),
+        }))
     }
 
     /// Forget the snapshot: the window closed, and its next open is over a

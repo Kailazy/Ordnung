@@ -14,12 +14,8 @@ impl App {
         let mut apply = false;
         let mut cancel = false;
         if let Some(d) = self.cover_drop.as_mut() {
-            egui::Window::new("Set album art")
+            crate::ui::window::Window::new("Set album art")
                 .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .pivot(egui::Align2::CENTER_CENTER)
-                .default_pos(ctx.screen_rect().center())
                 .show(ctx, |ui| {
                     ui.set_min_width(420.0);
                     // Image preview, centred.
@@ -144,12 +140,8 @@ impl App {
         let mut start = false;
         let mut close = false;
         if let Some(m) = self.batch_convert.as_mut() {
-            egui::Window::new("Convert selected tracks")
+            crate::ui::window::Window::new("Convert selected tracks")
                 .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .pivot(egui::Align2::CENTER_CENTER)
-                .default_pos(ctx.screen_rect().center())
                 .show(ctx, |ui| {
                     ui.set_min_width(460.0);
                     ui.label(
@@ -636,15 +628,12 @@ impl App {
         // is deliberately shorter than the old fixed 620px viewport; anyone who
         // wants more can drag it, and egui persists the size across sessions.
         let default_h = (ctx.screen_rect().height() - 260.0).clamp(320.0, 460.0);
-        egui::Window::new("Settings")
+        crate::ui::window::Window::new("Settings")
             .open(&mut window_open)
-            .collapsible(false)
             .resizable(true)
             .default_size([620.0, default_h])
             .min_width(520.0)
             .min_height(300.0)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 let row = ui.horizontal_top(|ui| {
                     // Left rail: selectable category tabs (Ableton-style).
@@ -1876,12 +1865,8 @@ impl App {
         }
         let mut open = true;
         let mut confirm = false;
-        egui::Window::new("Clear catalog?")
+        crate::ui::window::Window::new("Clear catalog?")
             .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_min_width(380.0);
                 let n = self.rows.len();
@@ -1962,12 +1947,8 @@ impl App {
             .join("export.pdb")
             .is_file();
         let mut open = true;
-        egui::Window::new(format!("Export to {name}?"))
+        crate::ui::window::Window::new(format!("Export to {name}?"))
             .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_max_width(440.0);
                 ui.label(format!(
@@ -2101,12 +2082,8 @@ Converted copies go on the stick; your library files stay as they are. Needs ffm
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| dest.display().to_string());
         let mut open = true;
-        egui::Window::new(format!("Set up {name} for rekordbox?"))
+        crate::ui::window::Window::new(format!("Set up {name} for rekordbox?"))
             .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_max_width(440.0);
                 ui.label(format!(
@@ -2160,14 +2137,11 @@ files elsewhere on the device stay plain storage.",
         let screen = ctx.screen_rect().size();
         let win_w = (screen.x * 0.6).clamp(280.0, 560.0);
         let list_h = (screen.y * 0.5).clamp(120.0, 420.0);
-        egui::Window::new(format!("{title}: {n} item(s) failed"))
+        crate::ui::window::Window::new(format!("{title}: {n} item(s) failed"))
             .open(&mut open)
-            .collapsible(false)
             .resizable(true)
             .max_width(win_w)
             .default_width(win_w)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_max_width(win_w);
                 ui.label(
@@ -2239,14 +2213,11 @@ files elsewhere on the device stay plain storage.",
                 notice.mediums.join(", ")
             )
         };
-        egui::Window::new(format!("{}: hidden formats only", notice.title))
+        crate::ui::window::Window::new(format!("{}: hidden formats only", notice.title))
             .open(&mut open)
-            .collapsible(false)
             .resizable(true)
             .max_width(win_w)
             .default_width(win_w)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_max_width(win_w);
                 ui.add(egui::Label::new(egui::RichText::new(line).strong()).wrap());
@@ -2305,12 +2276,8 @@ files elsewhere on the device stay plain storage.",
         let mut open = true;
         let mut confirm = false;
         let n = self.edited_count;
-        egui::Window::new("Write edits to source files?")
+        crate::ui::window::Window::new("Write edits to source files?")
             .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_min_width(400.0);
                 ui.label(
@@ -2368,12 +2335,8 @@ files elsewhere on the device stay plain storage.",
         let n = ids.len();
         let mut open = true;
         let mut confirm = false;
-        egui::Window::new("Delete from catalog?")
+        crate::ui::window::Window::new("Delete from catalog?")
             .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_min_width(400.0);
                 ui.label(
@@ -2464,12 +2427,8 @@ files elsewhere on the device stay plain storage.",
         };
         let mut open = true;
         let mut confirm = false;
-        egui::Window::new(title)
+        crate::ui::window::Window::new(title)
             .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_min_width(400.0);
                 ui.label(
@@ -2540,12 +2499,8 @@ files elsewhere on the device stay plain storage.",
         };
         let mut open = true;
         let mut choice: Option<VinylEdit> = None;
-        egui::Window::new("Also remove from your wantlist?")
+        crate::ui::window::Window::new("Also remove from your wantlist?")
             .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_min_width(400.0);
                 ui.label(egui::RichText::new(&pending.label).strong());
@@ -2732,14 +2687,11 @@ files elsewhere on the device stay plain storage.",
         // buttons) so they stay visible; the list scrolls within the remainder.
         let reserve = if enrich { 320.0 } else { 200.0 };
         let list_h = (max_h - reserve).clamp(100.0, 360.0);
-        egui::Window::new(picker_title)
-            .collapsible(false)
+        crate::ui::window::Window::new(picker_title)
             .resizable(true)
             .default_width(460.0)
             .max_width(max_w)
             .max_height(max_h)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 // Hard-cap the content width so a long, non-wrapping field value
                 // (e.g. a release with dozens of styles) can't stretch the window
@@ -3502,12 +3454,8 @@ impl App {
         } else {
             "Playlist icon and color"
         };
-        egui::Window::new(title)
+        crate::ui::window::Window::new(title)
             .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.set_width(384.0);
                 let current_glyph = p

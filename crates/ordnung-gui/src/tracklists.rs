@@ -163,10 +163,9 @@ impl App {
             return;
         }
         let mut open = true;
-        egui::Window::new("Tracklists")
+        crate::ui::window::Window::new("Tracklists")
             .id(egui::Id::new("tracklists_window"))
             .open(&mut open)
-            .collapsible(false)
             .resizable(true)
             .default_size(egui::vec2(1000.0, 640.0))
             .min_size(egui::vec2(640.0, 360.0))
@@ -856,12 +855,10 @@ impl App {
         }
         let mut open = true;
         let mut choice: Option<Option<discogs::ReleaseCandidate>> = None;
-        egui::Window::new(format!("Which record is {}?", e.song_label()))
+        crate::ui::window::Window::new(format!("Which record is {}?", e.song_label()))
             .id(egui::Id::new(("tracklist_pick", tl, pos)))
-            .collapsible(false)
-            .resizable(false)
             .open(&mut open)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .anchored(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.set_min_width(560.0);
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
