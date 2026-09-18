@@ -405,3 +405,118 @@ mod tests {
         assert!(text.ends_with("warmup — 2 track(s)\n"));
     }
 }
+
+/// Share of a coarse wheel step that lands on the very next frame instead of
+/// easing in. egui spreads any wheel event of 8 pt or more over ~0.1 s, which
+/// reads as a soft ramp-up on every flick; front-loading this much of it keeps
+/// the tail smooth but makes the scroll answer the hand right away.
+const WHEEL_INSTANT_FRACTION: f32 = 0.35;
+
+/// Longest event egui still delivers unsmoothed (its threshold is `< 8.0`).
+const WHEEL_INSTANT_CHUNK: f32 = 7.5;
+
+/// Snappier wheel scrolling. Rewrites the frame's `MouseWheel` events so a
+/// slice of each coarse step (see [`WHEEL_INSTANT_FRACTION`]) is delivered
+/// as sub-threshold point events, which egui applies immediately, while the
+/// rest stays one coarse event that egui eases in as before. Fine trackpad
+/// deltas are already immediate and pass through untouched. `line_speed` is
+/// egui's points-per-line so line-unit mouse wheels get the same treatment;
+/// page-unit events are left alone.
+pub(crate) fn snap_wheel_events(events: &mut Vec<egui::Event>, line_speed: f32) {
+    use egui::{Event, MouseWheelUnit};
+    let mut out = Vec::with_capacity(events.len());
+    for ev in events.drain(..) {
+        let Event::MouseWheel { unit, delta, modifiers } = ev else {
+            out.push(ev);
+            continue;
+        };
+        let points = match unit {
+            MouseWheelUnit::Point => delta,
+            MouseWheelUnit::Line => delta * line_speed,
+            MouseWheelUnit::Page => {
+                out.push(Event::MouseWheel { unit, delta, modifiers });
+                continue;
+            }
+        };
+        let len = points.length();
+        if len < 8.0 {
+            out.push(Event::MouseWheel { unit: MouseWheelUnit::Point, delta: points, modifiers });
+            continue;
+        }
+        let instant = points * WHEEL_INSTANT_FRACTION;
+        let pieces = (instant.length() / WHEEL_INSTANT_CHUNK).ceil().max(1.0);
+        let piece = instant / pieces;
+        for _ in 0..pieces as usize {
+            out.push(Event::MouseWheel { unit: MouseWheelUnit::Point, delta: piece, modifiers });
+        }
+        out.push(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: points - instant,
+            modifiers,
+        });
+    }
+    *events = out;
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+    use egui::{Event, Modifiers, MouseWheelUnit};
+
+    fn wheel(unit: MouseWheelUnit, delta: egui::Vec2) -> Event {
+        Event::MouseWheel { unit, delta, modifiers: Modifiers::NONE }
+    }
+
+    fn deltas(events: &[Event]) -> Vec<egui::Vec2> {
+        events
+            .iter()
+            .map(|e| match e {
+                Event::MouseWheel { delta, unit: MouseWheelUnit::Point, .. } => *delta,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fine_trackpad_delta_passes_through() {
+        let mut ev = vec![wheel(MouseWheelUnit::Point, egui::vec2(0.0, -3.0))];
+        snap_wheel_events(&mut ev, 40.0);
+        assert_eq!(deltas(&ev), vec![egui::vec2(0.0, -3.0)]);
+    }
+
+    #[test]
+    fn coarse_step_is_front_loaded_and_sums_to_the_original() {
+        let mut ev = vec![wheel(MouseWheelUnit::Point, egui::vec2(0.0, -40.0))];
+        snap_wheel_events(&mut ev, 40.0);
+        let d = deltas(&ev);
+        let (head, tail) = d.split_at(d.len() - 1);
+        // Every immediate piece stays under egui's smoothing threshold.
+        assert!(head.iter().all(|p| p.length() < 8.0), "{head:?}");
+        let instant: f32 = head.iter().map(|p| p.y).sum();
+        assert!((instant - -40.0 * WHEEL_INSTANT_FRACTION).abs() < 1e-3, "{instant}");
+        // The remainder is one coarse event egui still eases in.
+        assert!(tail[0].length() >= 8.0);
+        let total: f32 = d.iter().map(|p| p.y).sum();
+        assert!((total - -40.0).abs() < 1e-3, "{total}");
+    }
+
+    #[test]
+    fn line_units_are_scaled_by_line_speed() {
+        let mut ev = vec![wheel(MouseWheelUnit::Line, egui::vec2(0.0, 1.0))];
+        snap_wheel_events(&mut ev, 40.0);
+        let total: f32 = deltas(&ev).iter().map(|p| p.y).sum();
+        assert!((total - 40.0).abs() < 1e-3, "{total}");
+    }
+
+    #[test]
+    fn other_events_keep_their_order() {
+        let mut ev = vec![
+            Event::Copy,
+            wheel(MouseWheelUnit::Point, egui::vec2(0.0, -20.0)),
+            Event::Cut,
+        ];
+        snap_wheel_events(&mut ev, 40.0);
+        assert!(matches!(ev.first(), Some(Event::Copy)));
+        assert!(matches!(ev.last(), Some(Event::Cut)));
+    }
+}
