@@ -251,10 +251,17 @@ impl<'o> Window<'o> {
         let mut closed = false;
         let shown = w.show(ctx, |ui| {
             slot = Some(glass::begin(ui));
+            let r = contents(ui);
+            // After the content, not before: the chrome is placed from
+            // what the content took (`min_rect`), which is what the frame
+            // wraps. The rect egui offers before layout (`max_rect`) is its
+            // remembered desired width, which never shrinks, so it can run
+            // past the frame and put the button on the edge. Last also
+            // puts it above anything the content drew in the corner.
             if corner_close {
                 closed = close_button(ui, id);
             }
-            contents(ui)
+            r
         });
         if let (Some(shown), Some(slot)) = (&shown, slot) {
             glass::end(ctx, slot, glass_id, shown.response.rect, rounding, stroke);
@@ -273,10 +280,11 @@ impl<'o> Window<'o> {
 /// title bar; content on that row stops short of it.
 pub const CLOSE_W: f32 = 28.0;
 
-/// The close button of a window without a title bar: egui's own cross, in
-/// the top-right corner of the content, taking no space from the layout.
+/// The close button of a window without a title bar: a cross in the
+/// top-right corner of the content, taking no space from the layout. Call
+/// after the content: it sits on the content's own extent.
 fn close_button(ui: &mut egui::Ui, id: egui::Id) -> bool {
-    let r = ui.max_rect();
+    let r = ui.min_rect();
     let side = ui.spacing().interact_size.y;
     let rect = egui::Rect::from_min_size(
         egui::pos2(r.right() - side, r.top() - 2.0),
