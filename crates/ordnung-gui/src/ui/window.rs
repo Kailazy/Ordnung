@@ -413,20 +413,25 @@ impl<'o> Window<'o> {
                 block_grips(ui, id, rect, resizable, grips);
             }
             let bar = with_title_bar.then(|| title_row(ui, &title, close, title_gap));
+            let from = first_shape(ui);
             let r = contents(ui);
-            // A window the user sizes is as large as they made it, whatever
-            // the content claimed. egui's frame wraps the content's
-            // `min_rect`, and a panel or table laid out in the offered rect
-            // draws there without claiming it, so the frame, and the glass
-            // under it, would stop where the last claiming widget did and
-            // the rest would draw on bare screen (the Tracklists window,
-            // once its paste box left the top: only its left bar was
-            // framed, the rows and the title's strip sat on the app).
-            // Claiming the offered rect is egui's own idiom for a resizable
-            // window, and it also holds the window at the size it was
-            // given rather than letting it shrink to a shorter content. A
-            // window resizable in height alone follows its content by
-            // contract (`resizable_height`) and is left to it.
+            // The frame covers everything the content painted. egui wraps
+            // the frame around the content's `min_rect`, which only what
+            // the content *claimed* widens; a panel or a table laid out in
+            // the offered rect paints there without claiming it, and the
+            // frame, with the glass under it, would then stop where the
+            // last claiming widget did, the rest on bare screen (the
+            // Tracklists window, once its paste box left the top: only its
+            // left bar was framed, the rows and the title's strip sat on
+            // the app). So the content's painting is measured, not trusted:
+            // whatever it put in the window's layer, the frame takes in.
+            ui.expand_to_include_rect(painted_since(ui, from));
+            // And a window the user sizes is as large as they made it,
+            // painted or not: egui's own idiom for a resizable window,
+            // which also holds it at the size it was given rather than
+            // letting it shrink to a shorter content. One resizable in
+            // height alone follows its content by contract
+            // (`resizable_height`) and is left to it.
             if resizable == [true, true] {
                 ui.expand_to_include_rect(ui.max_rect());
             }
@@ -478,6 +483,37 @@ impl<'o> Window<'o> {
         }
         shown
     }
+}
+
+/// Where the window's layer's paint list stands now: the index the next
+/// shape will take. With [`painted_since`], brackets what a stretch of
+/// content painted.
+fn first_shape(ui: &egui::Ui) -> usize {
+    let layer = ui.layer_id();
+    ui.ctx()
+        .graphics(|g| g.get(layer).map_or(0, |l| l.next_idx().0))
+}
+
+/// The rect the shapes painted into the window's layer since `from` show
+/// in, within what the window offered its content (`max_rect`). Each
+/// shape counts for its visible part only, what its clip lets through;
+/// what lies past the offered rect is clipped by egui anyway, and taking
+/// it in would widen the window by that sliver every pass. `Rect::NOTHING`
+/// when nothing was painted, which expands a rect by nothing.
+fn painted_since(ui: &egui::Ui, from: usize) -> egui::Rect {
+    let layer = ui.layer_id();
+    let offered = ui.max_rect();
+    ui.ctx().graphics(|g| {
+        let Some(list) = g.get(layer) else {
+            return egui::Rect::NOTHING;
+        };
+        list.all_entries()
+            .skip(from)
+            .map(|s| s.shape.visual_bounding_rect().intersect(s.clip_rect))
+            .filter(|r| r.is_positive())
+            .fold(egui::Rect::NOTHING, |acc, r| acc.union(r))
+            .intersect(offered)
+    })
 }
 
 /// The close button's square: the standard interact height, so its target
@@ -735,4 +771,104 @@ fn block_grips(
 /// and wants the same hairline.
 pub fn edge() -> egui::Stroke {
     egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rect every shape in `layer` shows in, clipped, on the pass that
+    /// just ran.
+    fn painted(ctx: &egui::Context, layer: egui::LayerId) -> egui::Rect {
+        ctx.graphics(|g| {
+            g.get(layer).map_or(egui::Rect::NOTHING, |l| {
+                l.all_entries()
+                    .map(|s| s.shape.visual_bounding_rect().intersect(s.clip_rect))
+                    .filter(|r| r.is_positive())
+                    .fold(egui::Rect::NOTHING, |acc, r| acc.union(r))
+            })
+        })
+    }
+
+    /// The frame's edge is a hairline centred on it, so the layer paints
+    /// half a pixel past the frame by design; the glitch under test is
+    /// whole panels past it.
+    fn covers(frame: egui::Rect, paint: egui::Rect) -> bool {
+        frame.expand(1.0).contains_rect(paint)
+    }
+
+    /// Run `content` in a window for a few passes and hand back the frame
+    /// the window ended up with and the rect its layer painted.
+    fn frame_and_paint(
+        resizable: bool,
+        content: impl Fn(&mut egui::Ui) + Copy,
+    ) -> (egui::Rect, egui::Rect) {
+        let ctx = egui::Context::default();
+        // The shadow is the one shape meant to lie outside the frame.
+        ctx.style_mut(|s| s.visuals.window_shadow = egui::epaint::Shadow::NONE);
+        let id = egui::Id::new("under-test");
+        let mut out = None;
+        for _ in 0..4 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+                ..Default::default()
+            };
+            ctx.run(input, |ctx| {
+                let mut open = true;
+                let shown = Window::new("Under test")
+                    .id(id)
+                    .open(&mut open)
+                    .resizable(resizable)
+                    .default_size(egui::vec2(600.0, 400.0))
+                    .show(ctx, content)
+                    .expect("drawn");
+                let layer = egui::LayerId::new(egui::Order::Middle, id);
+                out = Some((shown.response.rect, painted(ctx, layer)));
+            });
+        }
+        out.unwrap()
+    }
+
+    /// Panels lay out in the offered rect without claiming it; the frame
+    /// must still take in what they painted.
+    #[test]
+    fn frame_covers_panels_that_claim_nothing() {
+        for resizable in [true, false] {
+            let (frame, paint) = frame_and_paint(resizable, |ui| {
+                egui::SidePanel::left("side")
+                    .default_width(150.0)
+                    .show_inside(ui, |ui| {
+                        ui.label("side");
+                    });
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    let r = ui.max_rect();
+                    ui.painter().rect_filled(r, 0.0, egui::Color32::RED);
+                });
+            });
+            assert!(
+                covers(frame, paint),
+                "resizable={resizable}: painted {paint:?} outside frame {frame:?}"
+            );
+            assert!(frame.width() >= 590.0, "resizable={resizable}: frame {frame:?} narrower than the panels");
+        }
+    }
+
+    /// A user-sized window is the size it was given, whatever the content.
+    #[test]
+    fn resizable_window_holds_its_size() {
+        let (frame, _) = frame_and_paint(true, |ui| {
+            ui.label("tiny");
+        });
+        assert!(frame.width() >= 600.0 && frame.height() >= 400.0, "frame {frame:?}");
+    }
+
+    /// A fixed window still wraps its content rather than the offered rect.
+    #[test]
+    fn fixed_window_wraps_its_content() {
+        let (frame, paint) = frame_and_paint(false, |ui| {
+            ui.label("tiny");
+        });
+        assert!(covers(frame, paint), "painted {paint:?} outside frame {frame:?}");
+        assert!(frame.width() < 400.0, "frame {frame:?} took the offered width");
+    }
 }
