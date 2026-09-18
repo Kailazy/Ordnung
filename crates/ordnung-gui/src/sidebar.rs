@@ -159,6 +159,7 @@ pub(crate) fn nav_button_sized(
     let prev_widgets = ui.visuals().widgets.clone();
     {
         let w = &mut ui.visuals_mut().widgets;
+        w.inactive.bg_stroke = egui::Stroke::NONE;
         w.hovered.bg_stroke = egui::Stroke::NONE;
         w.hovered.weak_bg_fill = egui::Color32::from_gray(64);
         w.active.bg_stroke = egui::Stroke::NONE;

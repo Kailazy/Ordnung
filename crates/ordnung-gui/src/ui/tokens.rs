@@ -89,6 +89,12 @@ pub mod color {
     pub const SEPARATOR: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
     /// Opaque separator for use over a known dark surface.
     pub const SEPARATOR_OPAQUE: Color32 = Color32::from_rgb(56, 56, 60);
+    /// The outline on a control at rest: a faint light edge (white α36,
+    /// premultiplied) that lifts a button off the surface without hardening
+    /// into a border. The way a macOS toolbar button sits on its bar.
+    pub const OUTLINE: Color32 = Color32::from_rgba_premultiplied(36, 36, 36, 36);
+    /// The same outline while the pointer is on the control (white α52).
+    pub const OUTLINE_HOVER: Color32 = Color32::from_rgba_premultiplied(52, 52, 52, 52);
 
     // --- Labels, primary → faint ---
     pub const LABEL: Color32 = Color32::from_rgb(235, 235, 240);

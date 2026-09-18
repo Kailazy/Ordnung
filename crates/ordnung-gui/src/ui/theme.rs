@@ -218,10 +218,11 @@ fn apply_style(ctx: &egui::Context) {
     v.selection.stroke = Stroke::new(1.0, color::ACCENT);
     v.hyperlink_color = color::ACCENT;
 
-    // Widget states. Apple-ish: soft fills instead of hard outlines, consistent
-    // small rounding, and no size "expansion" bulge on hover.
+    // Widget states. Apple-ish: soft fills with a faint light outline at rest,
+    // consistent small rounding, and no size "expansion" bulge on hover.
     let w = &mut v.widgets;
     let hairline = Stroke::new(1.0, color::SEPARATOR);
+    let outline = Stroke::new(1.0, color::OUTLINE);
 
     // Non-interactive: labels, frame backgrounds, separators.
     w.noninteractive.bg_fill = color::SURFACE;
@@ -234,7 +235,7 @@ fn apply_style(ctx: &egui::Context) {
     // Inactive: a button/input at rest.
     w.inactive.bg_fill = color::SURFACE_HI;
     w.inactive.weak_bg_fill = color::SURFACE_HI;
-    w.inactive.bg_stroke = Stroke::NONE;
+    w.inactive.bg_stroke = outline;
     w.inactive.fg_stroke = Stroke::new(1.0, color::LABEL);
     w.inactive.rounding = Rounding::same(radius::SM);
     w.inactive.expansion = 0.0;
@@ -242,7 +243,7 @@ fn apply_style(ctx: &egui::Context) {
     // Hovered.
     w.hovered.bg_fill = color::SURFACE_HOVER;
     w.hovered.weak_bg_fill = color::SURFACE_HOVER;
-    w.hovered.bg_stroke = Stroke::NONE;
+    w.hovered.bg_stroke = Stroke::new(1.0, color::OUTLINE_HOVER);
     w.hovered.fg_stroke = Stroke::new(1.0, color::LABEL);
     w.hovered.rounding = Rounding::same(radius::SM);
     w.hovered.expansion = 0.0;
@@ -258,7 +259,7 @@ fn apply_style(ctx: &egui::Context) {
     // Open (e.g. an expanded combo box).
     w.open.bg_fill = color::SURFACE_HI;
     w.open.weak_bg_fill = color::SURFACE_HI;
-    w.open.bg_stroke = hairline;
+    w.open.bg_stroke = outline;
     w.open.fg_stroke = Stroke::new(1.0, color::LABEL);
     w.open.rounding = Rounding::same(radius::SM);
     w.open.expansion = 0.0;
