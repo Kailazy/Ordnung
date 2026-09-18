@@ -3915,6 +3915,100 @@ impl Catalog {
         Ok(id)
     }
 
+    /// Rewrite a saved tracklist from an edited paste: the text, its name and
+    /// one row per song line again, renumbered in the new order. A line whose
+    /// text is unchanged keeps everything the matcher or the user settled for
+    /// it (release, confidence, who chose, candidates, local track), so adding
+    /// lines to a matched mix leaves the matched ones alone, however they are
+    /// renumbered; a line that was edited or is new starts unmatched, and a
+    /// line that is gone is gone.
+    pub fn update_tracklist(
+        &self,
+        tracklist_id: Id,
+        name: &str,
+        pasted_text: &str,
+        lines: &[crate::tracklist::TracklistLine],
+    ) -> Result<()> {
+        use crate::tracklist::LineKind;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Invalid("a tracklist needs a name".into()));
+        }
+        let mut old = self.tracklist_entries(tracklist_id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "UPDATE tracklists SET name = ?2, pasted_text = ?3 WHERE id = ?1",
+            params![tracklist_id as i64, name, pasted_text],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("tracklist {tracklist_id}")));
+        }
+        tx.execute(
+            "DELETE FROM tracklist_lines WHERE tracklist_id = ?1",
+            params![tracklist_id as i64],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO tracklist_lines
+                    (tracklist_id, position, raw, timestamp_s, artist, title,
+                     label_hint, catno_hint, kind, release_id, confidence, chosen_by,
+                     local_track_id, rel_artist, rel_title, rel_year, rel_label,
+                     rel_catno, rel_format, rel_thumb, rel_track, candidates_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                         ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+            )?;
+            for l in lines.iter().filter(|l| l.kind != LineKind::Noise) {
+                // The first old line that reads the same (its ordinal and
+                // raw spelling aside, since adding a line renumbers those
+                // after it) carries its state over; a duplicated line takes
+                // the next one, then none.
+                let kept = old
+                    .iter()
+                    .position(|e| {
+                        e.kind == l.kind
+                            && e.timestamp_s == l.timestamp
+                            && e.artist == l.artist
+                            && e.title == l.title
+                            && e.label_hint == l.label_hint
+                            && e.catno_hint == l.catno_hint
+                    })
+                    .map(|i| old.remove(i));
+                let json = match &kept {
+                    Some(e) => serde_json::to_string(&e.candidates)
+                        .map_err(|e| Error::Invalid(format!("serializing candidates: {e}")))?,
+                    None => "[]".to_string(),
+                };
+                let e = kept.as_ref();
+                stmt.execute(params![
+                    tracklist_id as i64,
+                    l.position as i64,
+                    l.raw,
+                    l.timestamp.map(|t| t as i64),
+                    l.artist,
+                    l.title,
+                    l.label_hint,
+                    l.catno_hint,
+                    l.kind.key(),
+                    e.and_then(|e| e.release_id).map(|r| r as i64),
+                    e.map_or(crate::tracklist::Confidence::None, |e| e.confidence).key(),
+                    e.map_or(ChosenBy::Nobody, |e| e.chosen_by).key(),
+                    e.and_then(|e| e.local_track_id).map(|t| t as i64),
+                    e.and_then(|e| e.rel_artist.clone()),
+                    e.and_then(|e| e.rel_title.clone()),
+                    e.and_then(|e| e.rel_year).map(|y| y as i64),
+                    e.and_then(|e| e.rel_label.clone()),
+                    e.and_then(|e| e.rel_catno.clone()),
+                    e.and_then(|e| e.rel_format.clone()),
+                    e.and_then(|e| e.rel_thumb.clone()),
+                    e.and_then(|e| e.rel_track.clone()),
+                    json,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Every saved tracklist, newest first, with its line and match counts.
     pub fn list_tracklists(&self) -> Result<Vec<Tracklist>> {
         let mut stmt = self.conn.prepare(
@@ -5748,7 +5842,7 @@ mod tests {
         assert!(t.matched_at.is_some());
 
         // "Not this" clears the release but records the user's say.
-        cat.set_tracklist_match(id, 1, None, Confidence::None, ChosenBy::User, &[cand])
+        cat.set_tracklist_match(id, 1, None, Confidence::None, ChosenBy::User, &[cand.clone()])
             .unwrap();
         let e = &cat.tracklist_entries(id).unwrap()[0];
         assert_eq!(e.release_id, None);
@@ -5757,6 +5851,32 @@ mod tests {
 
         // A position that doesn't exist is an error, not a silent no-op.
         assert!(cat.set_tracklist_match(id, 9, None, Confidence::None, ChosenBy::User, &[]).is_err());
+
+        // Editing the paste keeps what unchanged lines settled, renumbers
+        // around a removed line, and starts new and edited lines fresh.
+        cat.set_tracklist_match(id, 3, Some(&cand), Confidence::Likely, ChosenBy::Auto, &[cand.clone()])
+            .unwrap();
+        let text2 = "Tracklist:\n01. Metro Area - Miura\n02. Theo Parrish - Solitary Flight [Sound Signature]\n03. Pépé Bradock - Deep Burnt\n";
+        let lines2 = parse_tracklist(text2);
+        cat.update_tracklist(id, "Deep Space II", text2, &lines2).unwrap();
+        let t = &cat.list_tracklists().unwrap()[0];
+        assert_eq!(t.name, "Deep Space II");
+        assert_eq!(t.pasted_text, text2);
+        assert_eq!((t.lines, t.matched), (3, 1));
+        let entries = cat.tracklist_entries(id).unwrap();
+        assert_eq!(entries.iter().map(|e| e.position).collect::<Vec<_>>(), vec![1, 2, 3]);
+        // Line 1 kept the user's "not this" and its candidates.
+        assert_eq!(entries[0].chosen_by, ChosenBy::User);
+        assert_eq!(entries[0].candidates.len(), 1);
+        // The Parrish line moved from 3 to 2 with its match intact.
+        assert_eq!(entries[1].release_id, Some(42));
+        assert_eq!(entries[1].confidence, Confidence::Likely);
+        // The new line starts blank.
+        assert_eq!(entries[2].artist.as_deref(), Some("Pépé Bradock"));
+        assert_eq!(entries[2].chosen_by, ChosenBy::Nobody);
+        assert!(entries[2].candidates.is_empty());
+        assert!(cat.update_tracklist(id, "  ", text2, &lines2).is_err());
+        assert!(cat.update_tracklist(999, "x", text2, &lines2).is_err());
 
         cat.rename_tracklist(id, "Deep Space 2019").unwrap();
         assert_eq!(cat.list_tracklists().unwrap()[0].name, "Deep Space 2019");

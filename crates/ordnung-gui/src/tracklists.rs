@@ -6,7 +6,10 @@
 //! the pasted text does (⌘V with the window open and nothing focused lands
 //! in it too). Match saves the paste as a tracklist and
 //! runs the background job in `jobs::run_match_tracklist`, whose rows fill
-//! in one at a time. Each row shows the song as pasted, the record it
+//! in one at a time. A saved tracklist can be reopened in the box (Edit the
+//! paste, in the ⋯ menu) to add or fix lines; Save writes it back through
+//! `Catalog::update_tracklist`, which keeps the matches of lines that
+//! didn't change, and only the new lines get looked up. Each row shows the song as pasted, the record it
 //! matched (cover, title, year, label and catalog number, format), a
 //! confidence pip and OWNED / WANT / IN LIBRARY badges; a click opens the
 //! ordinary record sheet, and the context menu wants, digs, re-picks or
@@ -37,6 +40,7 @@ enum LineAct {
 enum ListAct {
     Match,
     Rematch,
+    Edit,
     WantAll,
     ShowOnMap,
     CopyText,
@@ -202,7 +206,16 @@ impl App {
         });
         if let Some(t) = pasted {
             if ctx.memory(|m| m.focused().is_none()) {
-                self.tracklist_paste = t;
+                // While a saved tracklist is open for editing, the paste
+                // adds to it rather than replacing what is being edited.
+                if self.tracklist_editing.is_some() && !self.tracklist_paste.trim().is_empty() {
+                    if !self.tracklist_paste.ends_with('\n') {
+                        self.tracklist_paste.push('\n');
+                    }
+                    self.tracklist_paste.push_str(&t);
+                } else {
+                    self.tracklist_paste = t;
+                }
             }
         }
         if self.tracklist_current.is_none() {
@@ -243,6 +256,8 @@ impl App {
     /// more, capped at a third of the view and scrolling inside past that.
     /// Once it holds text, the name field, Match and the parse preview sit
     /// beneath it. The window's search field shares its row on the right.
+    /// Editing a saved tracklist uses the same box: its text is loaded, the
+    /// name field holds its name, and Match reads Save.
     fn draw_tracklist_paste(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let box_id = egui::Id::new("tracklist_paste_box");
         let was_focused = ctx.memory(|m| m.has_focus(box_id));
@@ -284,8 +299,15 @@ impl App {
         let tracks = lines.iter().filter(|l| l.kind == LineKind::Track).count();
         let ids = lines.iter().filter(|l| l.kind == LineKind::Id).count();
         let skipped = lines.iter().filter(|l| l.kind == LineKind::Noise).count();
-        let suggested = tracklist::suggested_name(&self.tracklist_paste)
-            .unwrap_or_else(|| format!("Pasted {}", fmt_day(now_unix())));
+        let editing = self
+            .tracklist_editing
+            .and_then(|id| self.tracklists.iter().find(|t| t.id == id))
+            .cloned();
+        let suggested = match &editing {
+            Some(t) => t.name.clone(),
+            None => tracklist::suggested_name(&self.tracklist_paste)
+                .unwrap_or_else(|| format!("Pasted {}", fmt_day(now_unix()))),
+        };
 
         ui.add_space(space::S2);
         let mut save = false;
@@ -298,18 +320,23 @@ impl App {
                     .show(ui)
                     .on_hover_note("A name for this tracklist");
                 let can = tracks + ids > 0 && !self.is_busy();
-                if crate::ui::button::button_enabled(ui, can, "Match")
-                    .on_hover_note(if self.is_busy() {
-                        "Wait for the current job to finish"
-                    } else {
-                        "Save the tracklist and look every line up on Discogs"
-                    })
-                    .clicked()
-                {
+                let (verb, note) = match (&editing, self.is_busy()) {
+                    (_, true) => ("Match", "Wait for the current job to finish"),
+                    (Some(_), false) => ("Save", "Save the edit. Lines that didn't change keep their records; new ones get looked up"),
+                    (None, false) => ("Match", "Save the tracklist and look every line up on Discogs"),
+                };
+                if crate::ui::button::button_enabled(ui, can, verb).on_hover_note(note).clicked() {
                     save = true;
                 }
-                if crate::ui::button::button(ui, "Cancel").on_hover_note("Clear the paste box").clicked() {
+                if crate::ui::button::button(ui, "Cancel")
+                    .on_hover_note(if editing.is_some() { "Drop the edit and keep the tracklist as it was" } else { "Clear the paste box" })
+                    .clicked()
+                {
                     cancel = true;
+                }
+                if let Some(t) = &editing {
+                    ui.label(egui::RichText::new(format!("Editing {}", t.name)).color(color::LABEL_2))
+                        .on_hover_note("Add, fix or remove lines, then Save");
                 }
                 let mut parts = vec![format!("{tracks} track{}", if tracks == 1 { "" } else { "s" })];
                 if ids > 0 {
@@ -340,12 +367,30 @@ impl App {
                 self.tracklist_name.trim().to_string()
             };
             let text = self.tracklist_paste.clone();
-            match Catalog::open(&self.db_path).and_then(|c| c.create_tracklist(&name, &text, &lines)) {
+            let saved = match editing {
+                Some(t) => Catalog::open(&self.db_path)
+                    .and_then(|c| c.update_tracklist(t.id, &name, &text, &lines))
+                    .map(|()| t.id),
+                None => Catalog::open(&self.db_path).and_then(|c| c.create_tracklist(&name, &text, &lines)),
+            };
+            match saved {
                 Ok(id) => {
                     self.reload_tracklists();
                     self.tracklist_current = Some(id);
                     self.clear_tracklist_paste(ctx, box_id);
-                    self.spawn_match_tracklist(ctx.clone(), id, true);
+                    // Only what isn't settled gets looked up, so an edit that
+                    // adds three lines costs three lines' requests.
+                    self.ensure_tracklist_entries();
+                    let unsettled = self.tracklist_entries.iter().any(|e| {
+                        e.kind == LineKind::Track
+                            && e.chosen_by != ChosenBy::User
+                            && (e.release_id.is_none() || e.confidence < Confidence::Likely)
+                    });
+                    if unsettled {
+                        self.spawn_match_tracklist(ctx.clone(), id, true);
+                    } else {
+                        self.status = format!("Saved the tracklist {name}.");
+                    }
                 }
                 Err(e) => self.fail(format!("Couldn't save the tracklist: {e}")),
             }
@@ -355,7 +400,20 @@ impl App {
     fn clear_tracklist_paste(&mut self, ctx: &egui::Context, box_id: egui::Id) {
         self.tracklist_paste.clear();
         self.tracklist_name.clear();
+        self.tracklist_editing = None;
         ctx.memory_mut(|m| m.surrender_focus(box_id));
+    }
+
+    /// Open a saved tracklist's text in the paste box to add or fix lines.
+    fn edit_tracklist(&mut self, id: Id) {
+        let Some(t) = self.tracklists.iter().find(|t| t.id == id) else { return };
+        self.tracklist_paste = t.pasted_text.clone();
+        if !self.tracklist_paste.ends_with('\n') {
+            self.tracklist_paste.push('\n');
+        }
+        self.tracklist_name = t.name.clone();
+        self.tracklist_editing = Some(id);
+        self.tracklist_focus_paste = true;
     }
 
     /// The saved tracklists, newest first.
@@ -420,6 +478,10 @@ impl App {
                     ui.menu_button("⋯", |ui| {
                         if ui.button("Re-match every line").on_hover_note("Search again for every line you haven't chosen by hand").clicked() {
                             act = Some(ListAct::Rematch);
+                            ui.close_menu();
+                        }
+                        if ui.button("Edit the paste").on_hover_note("Open the text in the paste box to add, fix or remove lines").clicked() {
+                            act = Some(ListAct::Edit);
                             ui.close_menu();
                         }
                         if ui.button("Copy as text").on_hover_note("Copy the lines with their matched records").clicked() {
@@ -682,6 +744,7 @@ impl App {
         match act {
             Some(ListAct::Match) => self.spawn_match_tracklist(ctx.clone(), id, true),
             Some(ListAct::Rematch) => self.spawn_match_tracklist(ctx.clone(), id, false),
+            Some(ListAct::Edit) => self.edit_tracklist(id),
             Some(ListAct::WantAll) => {
                 let ids: Vec<u64> = self
                     .tracklist_entries

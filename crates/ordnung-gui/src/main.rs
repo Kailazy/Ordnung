@@ -1298,6 +1298,9 @@ struct App {
     tracklist_focus_paste: bool,
     tracklist_paste: String,
     tracklist_name: String,
+    /// The saved tracklist the paste box is editing, when it holds one's
+    /// text rather than a new paste; Match then saves back into it.
+    tracklist_editing: Option<Id>,
     /// A "pick another" popup open on one line: (tracklist, position).
     tracklist_pick: Option<(Id, u32)>,
     /// Pre-folded search haystack per listing (same indices as

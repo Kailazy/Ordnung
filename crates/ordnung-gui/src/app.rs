@@ -161,6 +161,7 @@ impl App {
             tracklist_focus_paste: false,
             tracklist_paste: String::new(),
             tracklist_name: String::new(),
+            tracklist_editing: None,
             tracklist_pick: None,
             seller_genres: HashMap::new(),
             seller_hay: Vec::new(),

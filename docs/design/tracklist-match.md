@@ -73,6 +73,11 @@ review surface instead of a silent commit.
 6. The tracklist is saved. It stays in the Tracklists tab with its match state,
    and every matched record joins the record map as a dug record, so the mix
    becomes a cluster on the map you can keep digging from.
+7. A saved tracklist can be reopened in the paste box (**Edit the paste** in
+   the ⋯ menu) to add, fix or remove lines. **Save** writes the text back
+   through `Catalog::update_tracklist`: a line that still reads the same
+   (ordinal aside) keeps its match, candidates and the user's say, an edited
+   or new line starts unmatched, and only the unsettled lines are looked up.
 
 Not in scope: fetching a tracklist from a URL. 1001tracklists and the other
 sites sit behind Cloudflare exactly like `discogs.com/sell` did in the sellers
