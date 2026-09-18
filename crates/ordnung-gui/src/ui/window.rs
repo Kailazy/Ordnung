@@ -158,7 +158,10 @@ impl<'o> Window<'o> {
     }
 
     /// The user may drag it to size, both ways, by the bottom-right corner
-    /// (or the [`Self::grips`] given).
+    /// (or the [`Self::grips`] given). Such a window is always the size it
+    /// was given, whatever its content claims: the frame covers the whole
+    /// of it, so content laid out in the offered rect (panels, a table)
+    /// never draws past the glass.
     pub fn resizable(mut self, resizable: bool) -> Self {
         self.resizable = [resizable, resizable];
         self
@@ -411,6 +414,22 @@ impl<'o> Window<'o> {
             }
             let bar = with_title_bar.then(|| title_row(ui, &title, close, title_gap));
             let r = contents(ui);
+            // A window the user sizes is as large as they made it, whatever
+            // the content claimed. egui's frame wraps the content's
+            // `min_rect`, and a panel or table laid out in the offered rect
+            // draws there without claiming it, so the frame, and the glass
+            // under it, would stop where the last claiming widget did and
+            // the rest would draw on bare screen (the Tracklists window,
+            // once its paste box left the top: only its left bar was
+            // framed, the rows and the title's strip sat on the app).
+            // Claiming the offered rect is egui's own idiom for a resizable
+            // window, and it also holds the window at the size it was
+            // given rather than letting it shrink to a shorter content. A
+            // window resizable in height alone follows its content by
+            // contract (`resizable_height`) and is left to it.
+            if resizable == [true, true] {
+                ui.expand_to_include_rect(ui.max_rect());
+            }
             // After the content, not before: the chrome is placed from
             // what the content took (`min_rect`), which is what the frame
             // wraps. The rect egui offers before layout (`max_rect`) is its
