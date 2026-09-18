@@ -761,6 +761,7 @@ impl App {
 
     pub(crate) fn draw_table(&mut self, ui: &mut egui::Ui) -> Option<Vec<PathBuf>> {
         let mut open_convert_for: Option<Id> = None;
+        let mut open_inspector = false;
         // A pending jump-to-row (e.g. from the vinyl grid's "in catalog" badge):
         // taken once so the table scrolls to it this frame and not forever after.
         // The table body is virtualized (only visible rows are built), so an
@@ -1744,21 +1745,25 @@ impl App {
                                             }
                                             return;
                                         }
-                                        if ui.button("Convert…").clicked() {
-                                            menu_action = Some(TrackMenuAction::Convert(r.id));
-                                            ui.close_menu();
-                                        }
-                                        if drag_ids.len() > 1
-                                            && ui
-                                                .button(format!(
-                                                    "Convert {} selected…",
-                                                    drag_ids.len()
+                                        // One Convert item: with several rows
+                                        // selected it converts them all and says
+                                        // how many, the way Analyze does below.
+                                        // Offering the single track beside the
+                                        // batch was two ways to say the same
+                                        // thing.
+                                        let convert_label = if drag_ids.len() > 1 {
+                                            format!("Convert {} selected…", drag_ids.len())
+                                        } else {
+                                            "Convert…".to_string()
+                                        };
+                                        if ui.button(convert_label).clicked() {
+                                            menu_action = if drag_ids.len() > 1 {
+                                                Some(TrackMenuAction::ConvertSelected(
+                                                    drag_ids.clone(),
                                                 ))
-                                                .clicked()
-                                        {
-                                            menu_action = Some(TrackMenuAction::ConvertSelected(
-                                                drag_ids.clone(),
-                                            ));
+                                            } else {
+                                                Some(TrackMenuAction::Convert(r.id))
+                                            };
                                             ui.close_menu();
                                         }
                                         let analyze_label = if drag_ids.len() > 1 {
@@ -2132,7 +2137,11 @@ impl App {
                                     // Device rows: double-click previews the file.
                                     preview_request = Some((r.id, r.source_path.clone()));
                                 } else {
-                                    open_convert_for = Some(r.id);
+                                    // A double-click opens the track's details
+                                    // in the inspector, the way a double-click
+                                    // in Finder opens the thing. Converting is a
+                                    // menu action, not what most opens mean.
+                                    open_inspector = true;
                                 }
                             }
                         });
@@ -2478,6 +2487,13 @@ impl App {
         if let Some(id) = clicked_id {
             let mods = ctx_clone.input(|i| i.modifiers);
             self.apply_click_selection(id, mods);
+        }
+        if open_inspector && !self.inspector_open {
+            self.inspector_open = true;
+            // The drawer's state is a preference (see the pull tab), so an
+            // open from here is remembered the same way.
+            self.config.inspector_open = true;
+            let _ = self.config.save();
         }
         if let Some(id) = open_convert_for {
             if let Some(r) = self.rows.iter().find(|r| r.id == id) {

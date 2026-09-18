@@ -147,7 +147,15 @@ pub fn scan_file(path: impl AsRef<Path>) -> Result<ScannedTrack> {
         tags.album = tag.album().map(|c| nfc(c.as_ref()));
         tags.genre = tag.genre().map(|c| nfc(c.as_ref()));
         tags.comment = tag.comment().map(|c| nfc(c.as_ref()));
-        tags.label = str_of(tag, ItemKey::Label);
+        // ID3 has one frame (TPUB) for both the label and the publisher, and
+        // lofty reads it back as the publisher: a label written into an MP3
+        // or AIFF came back under the other name, and the catalog lost it
+        // on every re-scan. On that container the publisher is the label.
+        tags.label = str_of(tag, ItemKey::Label).or_else(|| {
+            (tag.tag_type() == lofty::tag::TagType::Id3v2)
+                .then(|| str_of(tag, ItemKey::Publisher))
+                .flatten()
+        });
         tags.year = tag
             .get_string(ItemKey::RecordingDate)
             .or_else(|| tag.get_string(ItemKey::Year))

@@ -198,10 +198,12 @@ impl App {
                     ne: 0.0,
                     se: 0.0,
                 };
+                // The drawer's own surface, so the handle reads as the edge
+                // of the panel rather than a shape stuck to it.
                 let bg = if hovered {
                     crate::ui::tokens::color::DRAWER_HOVER
                 } else {
-                    crate::ui::tokens::color::DRAWER
+                    crate::ui::sidebar::fill()
                 };
                 ui.painter().rect_filled(rect, rounding, bg);
 
@@ -294,48 +296,32 @@ impl App {
     ) -> Option<InspectorAction> {
         use crate::ui::tokens::{color, space};
 
-        // Small all-caps caption rather than a big heading: the track's own
-        // name below is what should read as the panel's title. The letter
-        // spacing is real spaces because egui has no tracking control; keeping
-        // it here rather than in the string means the eyebrow reads as a label
-        // and not as a word someone mistyped.
-        ui.add_space(space::S4);
-        // The eyebrow shares its line with "View release": the button belongs to
-        // the track's identity block, and this is the one line up here with room
-        // to spare — the title and artist beneath it are truncating labels that a
-        // trailing button would eat into. Right-aligned so it reads as an action
-        // on the header rather than another piece of the label.
+        // The panel's caption is a small one, set the way its sections'
+        // are: the track's own name below is what reads as the title.
+        // "View release" shares the caption's line: the button belongs to
+        // the track's identity block, and this is the one line up here with
+        // room to spare; the title and artist beneath it are truncating
+        // labels a trailing button would eat into. Only shown when the
+        // track has a matched release, the same signal the cover dot in
+        // the table reads: nothing to open otherwise, and a permanently
+        // disabled button would be noise.
+        let has_release = self
+            .selected_track
+            .as_ref()
+            .is_some_and(|t| self.track_releases.contains_key(&t.id));
         let mut view_release = false;
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new("T R A C K")
-                        .font(crate::ui::tokens::font::caption())
-                        .color(color::LABEL_3),
-                )
-                .truncate(),
-            );
-            // Only shown when this track actually has a matched release — the
-            // same signal the cover dot in the table reads. Nothing to open
-            // otherwise, and a permanently-disabled button would just be noise.
-            if self
-                .selected_track
-                .as_ref()
-                .is_some_and(|t| self.track_releases.contains_key(&t.id))
-            {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    view_release = ui
-                        .add(egui::Button::new(
-                            egui::RichText::new("View release")
-                                .font(crate::ui::tokens::font::caption())
-                                .color(color::LABEL_2),
-                        ))
-                        .on_hover_note("Show this record's tracklist")
-                        .clicked();
-                });
+        crate::ui::sidebar::header(ui, "Track", |ui| {
+            if has_release {
+                view_release = ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("View release")
+                            .font(crate::ui::tokens::font::caption())
+                            .color(color::LABEL_2),
+                    ))
+                    .on_hover_note("Show this record's tracklist")
+                    .clicked();
             }
         });
-        ui.add_space(space::S3);
 
         // Copied out before borrowing `selected_track` so the button below can
         // act on them without holding an immutable borrow of `self`.
@@ -469,12 +455,7 @@ impl App {
         // deliberately sits on the scrolling side: at full panel width it would
         // otherwise consume most of a short window.
         ui.add_space(space::S4);
-        let hdr = ui.available_rect_before_wrap();
-        ui.painter().hline(
-            (hdr.left() - space::S5)..=(hdr.right() + space::S4),
-            hdr.top(),
-            egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE),
-        );
+        crate::ui::sidebar::rule_full(ui);
 
         // --- Editable Core tags ------------------------------------------
         // The fields a user most often fixes or fills (e.g. from Discogs), plus
@@ -557,15 +538,21 @@ impl App {
             // `self.tag_edit` mutably.
             let editing = self.tags_editing;
             let mut toggle_editing = false;
-            inspector_section_with_action(
+            crate::ui::sidebar::section_with_action(
                 ui,
                 "Tags",
                 |ui| {
                     // Leaving edit mode with unsaved changes would silently drop
                     // them, so the toggle says so rather than looking like a
                     // plain view switch.
+                    // Set like the header's "View release": one size and
+                    // weight for every action on a caption row.
                     let label = if editing { "Done" } else { "✏ Edit" };
-                    let btn = ui.small_button(label);
+                    let btn = ui.add(egui::Button::new(
+                        egui::RichText::new(label)
+                            .font(crate::ui::tokens::font::caption())
+                            .color(color::LABEL_2),
+                    ));
                     let btn = if editing && dirty {
                         btn.on_hover_note("Unsaved edits stay in the form until you save")
                     } else {
@@ -662,7 +649,7 @@ impl App {
             }
 
             // --- Audio (technical) ---------------------------------------
-            inspector_section(ui, "Audio", |ui| {
+            crate::ui::sidebar::section(ui, "Audio", |ui| {
                 if let Some(p) = &t.properties {
                     inspector_row(ui, "Format", format_label(t.format));
                     inspector_row(ui, "Sample rate", &format!("{} Hz", p.sample_rate_hz));
@@ -684,7 +671,7 @@ impl App {
             // track has been analyzed by v6+ (older cached analyses have no cutoff).
             if let Some(a) = &t.analysis {
                 if a.analyzer_version >= 6 {
-                    inspector_section(ui, "Spectral quality", |ui| {
+                    crate::ui::sidebar::section(ui, "Spectral quality", |ui| {
                         let verdict = a.transcode_verdict();
                         let (label, color) = match verdict {
                             // Clean and Inconclusive both mean "no transcode
@@ -743,7 +730,7 @@ impl App {
             // tags" section above; the rest of the descriptive core stays here
             // read-only.
             let g = &t.tags;
-            inspector_section(ui, "Dates & numbering", |ui| {
+            crate::ui::sidebar::section(ui, "Dates & numbering", |ui| {
                 opt_row(ui, "Recording date", &g.recording_date);
                 opt_row(ui, "Release date", &g.release_date);
                 opt_row(ui, "Original release", &g.original_release_date);
@@ -767,7 +754,7 @@ impl App {
 
             // --- Credits -------------------------------------------------
             if has_any_credit(g) {
-                inspector_section(ui, "Credits", |ui| {
+                crate::ui::sidebar::section(ui, "Credits", |ui| {
                     opt_row(ui, "Composer", &g.composer);
                     opt_row(ui, "Remixer", &g.remixer);
                     opt_row(ui, "Producer", &g.producer);
@@ -782,7 +769,7 @@ impl App {
 
             // --- DJ / mixing --------------------------------------------
             if has_any_dj(g) {
-                inspector_section(ui, "DJ / mixing", |ui| {
+                crate::ui::sidebar::section(ui, "DJ / mixing", |ui| {
                     if let Some(b) = g.bpm_tag {
                         inspector_row(ui, "BPM (file tag)", &format!("{b:.1}"));
                     }
@@ -794,7 +781,7 @@ impl App {
 
             // --- Release identifiers ------------------------------------
             if has_any_release(g) {
-                inspector_section(ui, "Release identifiers", |ui| {
+                crate::ui::sidebar::section(ui, "Release identifiers", |ui| {
                     opt_row(ui, "ISRC", &g.isrc);
                     opt_row(ui, "Catalog #", &g.catalog_number);
                     opt_row(ui, "Barcode", &g.barcode);
@@ -806,7 +793,7 @@ impl App {
 
             // --- MusicBrainz / AcoustID ---------------------------------
             if has_any_mb(g) {
-                inspector_section(ui, "MusicBrainz / AcoustID", |ui| {
+                crate::ui::sidebar::section(ui, "MusicBrainz / AcoustID", |ui| {
                     opt_row(ui, "Recording ID", &g.musicbrainz_recording_id);
                     opt_row(ui, "Track ID", &g.musicbrainz_track_id);
                     opt_row(ui, "Release ID", &g.musicbrainz_release_id);
@@ -825,7 +812,7 @@ impl App {
                 || g.replay_gain_track_peak.is_some()
                 || g.replay_gain_album_peak.is_some()
             {
-                inspector_section(ui, "ReplayGain", |ui| {
+                crate::ui::sidebar::section(ui, "ReplayGain", |ui| {
                     if let Some(v) = g.replay_gain_track_gain {
                         inspector_row(ui, "Track gain", &format!("{v:+.2} dB"));
                     }
@@ -843,7 +830,7 @@ impl App {
 
             // --- Encoder / origin ---------------------------------------
             if has_any_encoder(g) {
-                inspector_section(ui, "Encoder / origin", |ui| {
+                crate::ui::sidebar::section(ui, "Encoder / origin", |ui| {
                     opt_row(ui, "Encoded by", &g.encoded_by);
                     opt_row(ui, "Encoder software", &g.encoder_software);
                     opt_row(ui, "Encoder settings", &g.encoder_settings);
@@ -854,7 +841,7 @@ impl App {
 
             // --- Content / descriptive ---------------------------------
             if has_any_content(g) {
-                inspector_section(ui, "Content", |ui| {
+                crate::ui::sidebar::section(ui, "Content", |ui| {
                     opt_row(ui, "Subtitle", &g.subtitle);
                     opt_row(ui, "Description", &g.description);
                     opt_row(ui, "Language", &g.language);
@@ -1059,68 +1046,6 @@ pub(crate) fn has_any_content(g: &ordnung_core::Tags) -> bool {
 
 pub(crate) fn has_value(v: &Option<String>) -> bool {
     v.as_deref().is_some_and(|s| !s.trim().is_empty())
-}
-
-/// One titled block in the inspector: a dimmed caption with a hairline rule
-/// under it, then the body. The rule is what makes the sections read as
-/// distinct groups instead of one long list of label/value pairs.
-pub(crate) fn inspector_section(
-    ui: &mut egui::Ui,
-    title: &str,
-    add_body: impl FnOnce(&mut egui::Ui),
-) {
-    section_head(ui, title);
-    add_body(ui);
-}
-
-/// The caption + rule that opens a section. Space *above* is much larger than
-/// the space below: a heading belongs to what follows it, and equal gaps on
-/// both sides are what makes a long settings-style column read as undifferentiated.
-fn section_head(ui: &mut egui::Ui, title: &str) {
-    use crate::ui::tokens::{color, font, space};
-    ui.add_space(space::S6);
-    ui.label(
-        egui::RichText::new(title.to_uppercase())
-            .font(font::caption())
-            .color(color::LABEL_3)
-            .strong(),
-    );
-    ui.add_space(space::S2);
-    section_rule(ui);
-    ui.add_space(space::S3);
-}
-
-/// Like [`inspector_section`] but with a trailing control on the caption row
-/// (e.g. the tag block's Edit toggle), right-aligned against the rule below.
-pub(crate) fn inspector_section_with_action(
-    ui: &mut egui::Ui,
-    title: &str,
-    add_action: impl FnOnce(&mut egui::Ui),
-    add_body: impl FnOnce(&mut egui::Ui),
-) {
-    use crate::ui::tokens::{color, font, space};
-    ui.add_space(space::S6);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(title.to_uppercase())
-                .font(font::caption())
-                .color(color::LABEL_3)
-                .strong(),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add_action);
-    });
-    ui.add_space(space::S2);
-    section_rule(ui);
-    ui.add_space(space::S3);
-    add_body(ui);
-}
-
-/// The hairline under a section caption.
-fn section_rule(ui: &mut egui::Ui) {
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), egui::Sense::hover());
-    ui.painter()
-        .rect_filled(rect, 0.0, crate::ui::tokens::color::SEPARATOR_OPAQUE);
 }
 
 /// A tag field shown read-only (edit mode off). Unlike [`opt_row`] an empty

@@ -1441,7 +1441,6 @@ impl App {
                                                 m.close();
                                             }
                                         }
-                                        m.note("Click a copy to open its listing");
                                     });
                                 }
                             });

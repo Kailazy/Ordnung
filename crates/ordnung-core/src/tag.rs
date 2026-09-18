@@ -566,6 +566,18 @@ pub fn write_to_file(path: impl AsRef<Path>, tags: &Tags, artwork: Option<&[u8]>
     set_or_clear(tag, ItemKey::Genre, tags.genre.as_deref());
     set_or_clear(tag, ItemKey::Label, tags.label.as_deref());
     set_or_clear(tag, ItemKey::Comment, tags.comment.as_deref());
+    // The year goes out as the recording date, the way `embed_full` writes
+    // it: lofty drops a bare `Year` from an ID3v2 tag (MP3, AIFF, WAV) on
+    // save, so a year written that way alone vanished from the file, and the
+    // re-scan after an automatic write then cleared it from the catalog too.
+    // The recording date round-trips on every container and `scan` derives
+    // the year back out of it. A full date the track already carries is
+    // kept; the bare year only stands in when there is none.
+    let recording_date = tags
+        .recording_date
+        .clone()
+        .or_else(|| tags.year.map(|y| y.to_string()));
+    set_or_clear(tag, ItemKey::RecordingDate, recording_date.as_deref());
     match tags.year {
         Some(y) => {
             tag.insert_text(ItemKey::Year, y.to_string());
@@ -660,6 +672,34 @@ mod tests {
             "../../testdata/seeker-sample/function - berghain 07 cd1 - 01. tadeo - requiem.mp3",
         );
         p.exists().then_some(p)
+    }
+
+    /// The fields a Discogs match fills (label, year) must survive the plain
+    /// writeback and a re-scan of an ID3 file: the automatic write after an
+    /// import embeds the cover, re-scans, and replaces the catalog's tags
+    /// with what the file reads back.
+    #[test]
+    fn write_to_file_round_trips_label_and_year_on_id3() {
+        let Some(src) = fixture() else {
+            eprintln!("skipping: testdata fixture missing");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("ordnung-write-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dst = dir.join("fixture.mp3");
+        std::fs::copy(&src, &dst).unwrap();
+
+        let mut tags = crate::scan::scan_file(&dst).unwrap().tags;
+        tags.label = Some("Éveil Records".into());
+        tags.year = Some(2016);
+        tags.recording_date = None;
+        write_to_file(&dst, &tags, None).unwrap();
+
+        let got = crate::scan::scan_file(&dst).unwrap().tags;
+        assert_eq!(got.label.as_deref(), Some("Éveil Records"));
+        assert_eq!(got.year, Some(2016));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Build a minimal valid PNG (1x1) so the test doesn't depend on `image`.

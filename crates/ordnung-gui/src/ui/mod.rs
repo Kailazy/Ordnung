@@ -4,8 +4,9 @@
 //! [`theme`] pushes them into egui's global style. The components sit beside
 //! them: [`button`] is the one push button, [`field`] the one text box,
 //! [`chip`] the avatar pill, [`menu`] the dropdown a button anchors,
-//! [`window`] the one floating window, [`glass`] the surface they all sit
-//! on, [`control_row`] the rule that a row of controls shares one height.
+//! [`window`] the one floating window, [`sidebar`] the window docked to an
+//! edge, [`glass`] the surface they all sit on, [`control_row`] the rule
+//! that a row of controls shares one height.
 
 pub mod button;
 pub mod chip;
@@ -18,6 +19,7 @@ pub mod knob;
 pub mod menu;
 pub mod phosphor_icons;
 pub mod sheet;
+pub mod sidebar;
 pub mod theme;
 // Tokens are an intentionally ahead-of-use palette: Pass 1 wires only a subset
 // into the global style; the rest are consumed as call sites migrate off inline

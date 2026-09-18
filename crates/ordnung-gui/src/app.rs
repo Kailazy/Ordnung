@@ -2770,53 +2770,14 @@ impl eframe::App for App {
             0.12,
         );
         let width = INSPECTOR_W * t;
-        if width > 0.5 {
-            egui::SidePanel::right("inspector")
-                .resizable(false)
-                .exact_width(width)
-                // Same fill as the pull tab (see `color::DRAWER`), so the
-                // handle reads as the edge of this panel rather than a lighter
-                // shape stuck to a darker one.
-                // egui's own divider is off (`show_separator_line`); the edge is
-                // instead a hairline drawn as the frame's left stroke, which is
-                // what keeps the drawer from bleeding into the table now that
-                // both are dark. A stroke on `Frame` insets the content by its
-                // width on every side, so it is applied as a painted line below
-                // rather than here.
-                .show_separator_line(false)
-                .frame(
-                    egui::Frame::side_top_panel(&ctx.style())
-                        .fill(crate::ui::tokens::color::DRAWER)
-                        .stroke(egui::Stroke::NONE)
-                        // Content inset. The panel had none, so captions and
-                        // values ran flush into the panel edge; a utility panel
-                        // needs a consistent gutter on both sides for its
-                        // label/value columns to read as a column at all.
-                        .inner_margin(egui::Margin {
-                            left: crate::ui::tokens::space::S5,
-                            right: crate::ui::tokens::space::S4,
-                            top: 0.0,
-                            bottom: 0.0,
-                        }),
-                )
-                .show(ctx, |ui| {
-                    // The hairline between drawer and table, painted at the
-                    // panel's own left edge so the inner margin doesn't push it
-                    // inward the way a `Frame` stroke would.
-                    let edge = ui.max_rect().left() - crate::ui::tokens::space::S5;
-                    ui.painter().vline(
-                        edge,
-                        ctx.screen_rect().y_range(),
-                        egui::Stroke::new(1.0, crate::ui::tokens::color::SEPARATOR_OPAQUE),
-                    );
-                    // The inspector's text is laid out at its natural width, and
-                    // a label wider than the panel would otherwise push the
-                    // panel's width back out and paint over the table. Clip to
-                    // the frame so the panel's width is the panel's alone.
-                    ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
-                    ui.set_max_width(ui.available_width());
-                    inspector_action = self.draw_inspector(ui, ctx);
-                });
+        // The drawer is a sidebar (see `ui::sidebar`): the window's surface,
+        // edge and margins, docked to the right.
+        if let Some(shown) =
+            crate::ui::sidebar::Sidebar::right("inspector")
+                .width(width)
+                .show(ctx, |ui| self.draw_inspector(ui, ctx))
+        {
+            inspector_action = shown.inner;
         }
         // Pull tab: a slim half-rounded handle pinned to the inner edge of the
         // drawer, vertically centred over whatever is beside it. It rides along
