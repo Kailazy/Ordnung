@@ -27,10 +27,12 @@ use eframe::egui;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// One surface's frost, and the last pass it was drawn in.
+/// One surface's frost, the last pass it was open in, and the last pass
+/// it actually drew (an open surface holds for its backdrop first).
 struct Entry {
     frost: Frost,
     shown: u64,
+    drawn: u64,
 }
 
 /// Every surface's frost, and the graveyard their textures retire to. Lives
@@ -96,6 +98,7 @@ pub fn prime(ctx: &egui::Context, id: egui::Id) {
     let e = entries.entry(id).or_insert_with(|| Entry {
         frost: Frost::new(),
         shown: 0,
+        drawn: 0,
     });
     if e.shown + 1 < pass {
         e.frost.prime(ctx);
@@ -114,9 +117,34 @@ pub fn ready(ctx: &egui::Context, id: egui::Id) -> bool {
     let e = entries.entry(id).or_insert_with(|| Entry {
         frost: Frost::new(),
         shown: 0,
+        drawn: 0,
     });
     e.shown = pass;
     e.frost.ready(ctx, &reg.graveyard)
+}
+
+/// Whether this pass is the surface's first drawn since it opened: what it
+/// does once per open spell (take its place on screen) it does now. Ask
+/// after [`ready`] says draw, before [`drawn`] records it.
+pub fn opening(ctx: &egui::Context, id: egui::Id) -> bool {
+    let Some(reg) = registry(ctx) else {
+        return false;
+    };
+    let pass = ctx.cumulative_pass_nr();
+    let entries = reg.entries.lock().unwrap();
+    entries.get(&id).map_or(true, |e| e.drawn + 1 < pass)
+}
+
+/// Record that the surface drew this pass.
+pub fn drawn(ctx: &egui::Context, id: egui::Id) {
+    let Some(reg) = registry(ctx) else {
+        return;
+    };
+    let pass = ctx.cumulative_pass_nr();
+    let mut entries = reg.entries.lock().unwrap();
+    if let Some(e) = entries.get_mut(&id) {
+        e.drawn = pass;
+    }
 }
 
 /// The slots the glass will be painted into, reserved under the content.

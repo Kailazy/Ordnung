@@ -2,11 +2,15 @@
 //! that opens over the library. One component, so they share one surface
 //! (`glass`), one chrome, and one set of ways to be sized and placed.
 //!
-//! Sizing and placement are the configuration. The default is what most
-//! dialogs want: sized to their content, not resizable, centred on the
-//! screen. A panel that grows with its list is `resizable_height`; one the
-//! user may drag to size is `resizable`; a popover opens `at` a point, or
-//! `anchored` to a screen edge. None collapse.
+//! Sizing, placement and chrome are the configuration. The default is what
+//! most dialogs want: sized to their content, not resizable, opening in
+//! the centre of the screen every time (a window dragged aside comes back
+//! to the centre on its next open), with a title bar and a close button. A
+//! panel that grows with its list is `resizable_height`; one the user may
+//! drag to size is `resizable`; a popover opens `at` a point, or `anchored`
+//! to a screen edge. A window whose content carries its own heading turns
+//! the `title_bar` off and keeps the close button, in the corner. None
+//! collapse.
 
 use super::glass;
 use super::tokens::color;
@@ -14,7 +18,7 @@ use eframe::egui;
 
 /// How the window is placed when it first opens (the user may drag it after).
 enum Place {
-    /// Centred on the screen.
+    /// Centred on the screen, on every open.
     Center,
     /// Its `pivot` corner at this point.
     At(egui::Align2, egui::Pos2),
@@ -78,7 +82,10 @@ impl<'o> Window<'o> {
         self
     }
 
-    /// No title bar: a popover, not a dialog.
+    /// No title bar. A popover, or a window whose content leads with its
+    /// own heading; with [`Self::open`] set it still gets a close button,
+    /// in the top-right corner of the content, which the content should
+    /// leave clear ([`CLOSE_W`] wide).
     pub fn title_bar(mut self, title_bar: bool) -> Self {
         self.title_bar = title_bar;
         self
@@ -183,6 +190,7 @@ impl<'o> Window<'o> {
             ctx.request_repaint();
             return None;
         }
+        let opening = glass::opening(ctx, glass_id);
         let style = ctx.style();
         let rounding = style.visuals.window_rounding;
         let stroke = style.visuals.window_stroke;
@@ -200,7 +208,9 @@ impl<'o> Window<'o> {
             .title_bar(self.title_bar)
             .frame(frame)
             .resizable(self.resizable);
-        if let Some(open) = self.open {
+        let mut open = self.open;
+        let corner_close = !self.title_bar && open.is_some();
+        if let Some(open) = open.as_deref_mut() {
             w = w.open(open);
         }
         match (self.default_size[0], self.default_size[1]) {
@@ -225,6 +235,11 @@ impl<'o> Window<'o> {
             w = w.auto_sized();
         }
         w = match self.place {
+            // Centred on the pass it opens (`current_pos` overrides the
+            // place egui remembers for it), free to drag after.
+            Place::Center if opening => w
+                .pivot(egui::Align2::CENTER_CENTER)
+                .current_pos(ctx.screen_rect().center()),
             Place::Center => w
                 .pivot(egui::Align2::CENTER_CENTER)
                 .default_pos(ctx.screen_rect().center()),
@@ -233,15 +248,49 @@ impl<'o> Window<'o> {
             Place::Anchor(align, offset) => w.anchor(align, offset),
         };
         let mut slot = None;
+        let mut closed = false;
         let shown = w.show(ctx, |ui| {
             slot = Some(glass::begin(ui));
+            if corner_close {
+                closed = close_button(ui, id);
+            }
             contents(ui)
         });
         if let (Some(shown), Some(slot)) = (&shown, slot) {
             glass::end(ctx, slot, glass_id, shown.response.rect, rounding, stroke);
+            glass::drawn(ctx, glass_id);
+        }
+        if closed {
+            if let Some(open) = open {
+                *open = false;
+            }
         }
         shown
     }
+}
+
+/// Width the close button takes at the top-right of a window without a
+/// title bar; content on that row stops short of it.
+pub const CLOSE_W: f32 = 28.0;
+
+/// The close button of a window without a title bar: egui's own cross, in
+/// the top-right corner of the content, taking no space from the layout.
+fn close_button(ui: &mut egui::Ui, id: egui::Id) -> bool {
+    let r = ui.max_rect();
+    let side = ui.spacing().interact_size.y;
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(r.right() - side, r.top() - 2.0),
+        egui::vec2(side, side),
+    );
+    let resp = ui.interact(rect, id.with("corner-close"), egui::Sense::click());
+    let visuals = ui.style().interact(&resp);
+    let cross = rect.shrink(rect.width() * 0.32);
+    let stroke = visuals.fg_stroke;
+    ui.painter()
+        .line_segment([cross.left_top(), cross.right_bottom()], stroke);
+    ui.painter()
+        .line_segment([cross.right_top(), cross.left_bottom()], stroke);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
 /// The glass's edge, for a surface that isn't a window (a menu, a popup)

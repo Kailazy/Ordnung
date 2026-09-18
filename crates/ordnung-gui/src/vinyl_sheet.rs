@@ -1266,6 +1266,9 @@ impl App {
             // primes it before the record is known.
             .glass_id(sheet_glass())
             .open(&mut open)
+            // The header under the cover names the record; a title bar
+            // would say it twice.
+            .title_bar(false)
             // Fixed width: the sheet's content is a fixed-width layout (see the
             // `set_max_width` note below), so a horizontal drag would only pad
             // it. Height still follows the tracklist.
@@ -1287,9 +1290,11 @@ impl App {
                 // out of the row of things to do with the record.
                 {
                     let r = ui.max_rect();
+                    // Short of the window's close button in the corner.
+                    let right = r.right() - crate::ui::window::CLOSE_W;
                     let slot = egui::Rect::from_min_max(
-                        egui::pos2(r.right() - 160.0, r.top()),
-                        egui::pos2(r.right(), r.top() + crate::ui::control_h(ui) + 8.0),
+                        egui::pos2(right - 160.0, r.top()),
+                        egui::pos2(right, r.top() + crate::ui::control_h(ui) + 8.0),
                     );
                     let mut tui = ui.new_child(
                         egui::UiBuilder::new()
