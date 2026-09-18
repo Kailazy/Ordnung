@@ -1,9 +1,11 @@
 //! Ordnung's visual component library.
 //!
 //! [`tokens`] holds the design tokens (colours, radii, spacing, type ramp) and
-//! [`theme`] pushes them into egui's global style. Bespoke component helpers will
-//! live alongside these in a later pass.
+//! [`theme`] pushes them into egui's global style. The components sit beside
+//! them: [`button`] is the one push button, [`menu`] the dropdown it anchors,
+//! [`control_row`] the rule that a row of controls shares one height.
 
+pub mod button;
 pub mod frost;
 pub mod hover;
 pub mod icon;

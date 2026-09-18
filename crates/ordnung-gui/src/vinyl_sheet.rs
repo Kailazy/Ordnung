@@ -1306,15 +1306,14 @@ impl App {
                     let r = ui.max_rect();
                     let slot = egui::Rect::from_min_max(
                         egui::pos2(r.right() - 160.0, r.top()),
-                        egui::pos2(r.right(), r.top() + 24.0),
+                        egui::pos2(r.right(), r.top() + crate::ui::control_h(ui) + 8.0),
                     );
                     let mut tui = ui.new_child(
                         egui::UiBuilder::new()
                             .max_rect(slot)
                             .layout(egui::Layout::right_to_left(egui::Align::Min)),
                     );
-                    if tui
-                        .small_button("Pressings")
+                    if crate::ui::button::button(&mut tui, "Pressings")
                         .on_hover_note("Other pressings of this record, to swap one in")
                         .clicked()
                     {
@@ -1384,13 +1383,14 @@ impl App {
                                         .collect::<std::collections::BTreeSet<_>>()
                                         .len();
                                     let label = if offer.is_some() {
-                                        format!("More from your sellers ({shops}) ▾")
+                                        format!("More from your sellers ({shops})")
                                     } else {
-                                        format!("From your sellers ({shops}) ▾")
+                                        format!("From your sellers ({shops})")
                                     };
-                                    let btn = ui.small_button(label).on_hover_note(
-                                        "Copies in the shops you follow, cheapest first",
-                                    );
+                                    let btn = crate::ui::button::menu_button(ui, label)
+                                        .on_hover_note(
+                                            "Copies in the shops you follow, cheapest first",
+                                        );
                                     crate::ui::menu::dropdown(&btn, 420.0, |m| {
                                         for r in &stocked {
                                             if m.item_detail(&r.label, &r.detail) {
@@ -1419,8 +1419,7 @@ impl App {
                                         .small()
                                         .color(egui::Color32::from_rgb(120, 200, 140)),
                                 );
-                                if ui
-                                    .small_button("Buy ↗")
+                                if crate::ui::button::button(ui, "Buy ↗")
                                     .on_hover_note("Open this listing on discogs.com")
                                     .clicked()
                                 {
@@ -1456,8 +1455,7 @@ impl App {
                                         .small()
                                         .color(egui::Color32::from_rgb(120, 200, 140)),
                                 );
-                                if ui
-                                    .small_button("View")
+                                if crate::ui::button::button(ui, "View")
                                     .on_hover_note("Show that pressing in this window")
                                     .clicked()
                                 {
@@ -1471,12 +1469,12 @@ impl App {
                                 } else {
                                     "Add that pressing to your Discogs wantlist"
                                 };
-                                if ui
-                                    .add_enabled(
-                                        !already && !editing,
-                                        egui::Button::new("＋ Wantlist").small(),
-                                    )
-                                    .on_hover_note(want_tip)
+                                if crate::ui::button::button_enabled(
+                                    ui,
+                                    !already && !editing,
+                                    "＋ Wantlist",
+                                )
+                                .on_hover_note(want_tip)
                                     .on_disabled_hover_text(crate::ui::hover::note(want_tip))
                                     .clicked()
                                 {
@@ -1538,8 +1536,7 @@ impl App {
                             if resp.clicked() {
                                 act = Some(Act::TogglePlay);
                             }
-                            if ui
-                                .button("↗  Discogs")
+                            if crate::ui::button::button(ui, "↗  Discogs")
                                 .on_hover_note("Open this release on discogs.com")
                                 .clicked()
                             {
@@ -1551,9 +1548,12 @@ impl App {
                                 Some(l) => format!("Every release on {l}"),
                                 None => "Looking up this record's label…".to_string(),
                             };
-                            if ui
-                                .add_enabled(sheet_label.is_some(), egui::Button::new("⌂ Label"))
-                                .on_hover_note(label_page_tip.clone())
+                            if crate::ui::button::button_enabled(
+                                ui,
+                                sheet_label.is_some(),
+                                "⌂ Label",
+                            )
+                            .on_hover_note(label_page_tip.clone())
                                 .on_disabled_hover_text(crate::ui::hover::note(label_page_tip))
                                 .clicked()
                             {
@@ -1611,8 +1611,7 @@ impl App {
                             // Dig from here: search Discogs outward from this
                             // record for pressings you don't already have.
                             if can_dig
-                                && ui
-                                    .button("🔍  Dig")
+                                && crate::ui::button::button(ui, "🔍  Dig")
                                     .on_hover_note(
                                         "Find records like this one on Discogs that aren't \
                                          in your collection",
@@ -1859,8 +1858,7 @@ impl App {
                     ui.label(egui::RichText::new(note).small().weak());
                     if owned > 0 {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .button("Show in library")
+                            if crate::ui::button::button(ui, "Show in library")
                                 .on_hover_note("Filter the library to this record")
                                 .clicked()
                             {
