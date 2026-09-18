@@ -4,21 +4,39 @@
 //! can only tint what's under it: at any alpha that lets the app show, it shows
 //! in outline. What a frosted surface wants is the app *blurred*, and there is
 //! no backdrop blur to ask the GPU for. So the frost is made the long way round:
-//! when the window opens, the frame is snapshotted before the window is drawn,
-//! shrunk and box-blurred on the CPU, and painted under the window from then on,
-//! mapped so the window sees the part of the snapshot it sits over. The window
-//! is held back for the one frame the snapshot takes.
+//! the frame is snapshotted before the window is drawn, shrunk and box-blurred,
+//! and painted under the window from then on, mapped so the window sees the
+//! part of the snapshot it sits over.
 //!
-//! The snapshot is taken once, at open. Whatever moves under the window after
-//! that is stale in it, but at this blur nothing under the window has a shape
-//! to be stale in, and taking it again would only capture the window itself.
+//! The snapshot is the expensive part, and it can't be made cheap: reading the
+//! frame back stalls the main thread on the GPU and a full-resolution pixel
+//! copy (about 40 ms on a Retina display in a release build, ten times that in
+//! debug). Taken when the window opens, that stall lands on the click and the
+//! whole app hitches. So it is taken on the mouse *press* instead, while the
+//! window is still closed ([`Frost::prime`]): a press is a moment when nothing
+//! on screen is moving, the click that opens the window comes a frame or more
+//! later, and by then the snapshot is in hand. The blur runs on a worker
+//! thread so it never costs the frame anything. A window opened without a
+//! press (keyboard, a menu item) falls back to snapshotting on open, holding
+//! the window back for the one frame that takes.
+//!
+//! Whatever moves under the window after the snapshot is stale in it, but at
+//! this blur nothing under the window has a shape to be stale in, and taking
+//! it again would only capture the window itself.
 
+use crate::tex::{Tex, TexGraveyard};
 use eframe::egui;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 /// How long to hold the window back for a snapshot that isn't coming (a
 /// backend without screenshots) before drawing it plain.
 const GIVE_UP: Duration = Duration::from_millis(300);
+
+/// How long a primed snapshot stays good for while the window is closed. The
+/// click a press is for follows it within this; a window opened later isn't
+/// the one the press was for, and what's on screen may have changed since.
+const PRIME_TTL: Duration = Duration::from_secs(1);
 
 /// Long side of the blurred snapshot, in texels. Small enough that the blur
 /// is free; magnifying it back up with bilinear filtering is itself most of
@@ -33,10 +51,13 @@ const PASSES: usize = 3;
 enum State {
     /// Nothing asked for yet.
     Fresh,
-    /// The snapshot is in flight since then.
+    /// The snapshot is in flight since then. The window must not draw: it
+    /// would end up in its own backdrop.
     Asked(Instant),
-    /// The blurred snapshot, ready to paint.
-    Have(egui::TextureHandle),
+    /// The snapshot, taken then, is being blurred on a worker thread.
+    Blurring(Receiver<egui::ColorImage>, Instant),
+    /// The blurred snapshot, taken then, ready to paint.
+    Have(Tex, Instant),
     /// No snapshot came; the window goes on plain.
     Bare,
 }
@@ -58,19 +79,35 @@ impl Frost {
         }
     }
 
-    /// Call once a frame before drawing the window. `false` means the window
-    /// must sit this frame out: the screen under it is being snapshotted, and
-    /// drawing it now would put it in its own backdrop.
-    pub fn ready(&mut self, ctx: &egui::Context) -> bool {
-        match &self.state {
-            State::Have(_) | State::Bare => true,
-            State::Fresh => {
-                self.screen = ctx.screen_rect();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
-                self.state = State::Asked(Instant::now());
-                ctx.request_repaint();
-                false
+    /// Take the snapshot now, ahead of the window opening. Call on a mouse
+    /// press while the window is closed (and nothing that shouldn't be in the
+    /// backdrop, like a menu, is up): the stall lands under the press, and
+    /// the click that follows finds the snapshot ready. A newer press
+    /// replaces an older snapshot; one already in flight is left to land.
+    pub fn prime(&mut self, ctx: &egui::Context) {
+        if matches!(self.state, State::Asked(_) | State::Blurring(..)) {
+            return;
+        }
+        self.ask(ctx);
+    }
+
+    /// Drop a primed snapshot nobody opened a window on within
+    /// [`PRIME_TTL`]. Call once a frame while the window is closed, never
+    /// while it's open: the snapshot under an open window stays as long as
+    /// the window does.
+    pub fn expire(&mut self) {
+        if let State::Have(_, taken) = &self.state {
+            if taken.elapsed() > PRIME_TTL {
+                self.state = State::Fresh;
             }
+        }
+    }
+
+    /// Move a snapshot along: pick up the frame when it lands, the blur when
+    /// it's done. Call once a frame whether or not the window is open; the
+    /// frame arrives as an input event that is only there for one frame.
+    pub fn poll(&mut self, ctx: &egui::Context, graveyard: &TexGraveyard) {
+        match &self.state {
             State::Asked(since) => {
                 let shot = ctx.input(|i| {
                     i.events.iter().find_map(|e| match e {
@@ -79,26 +116,62 @@ impl Frost {
                     })
                 });
                 if let Some(image) = shot {
-                    let tex =
-                        ctx.load_texture("frost", blur(&image), egui::TextureOptions::LINEAR);
-                    self.state = State::Have(tex);
-                    return true;
-                }
-                if since.elapsed() > GIVE_UP {
+                    let (tx, rx) = mpsc::channel();
+                    let ctx = ctx.clone();
+                    std::thread::spawn(move || {
+                        if tx.send(blur(&image)).is_ok() {
+                            ctx.request_repaint();
+                        }
+                    });
+                    self.state = State::Blurring(rx, *since);
+                } else if since.elapsed() > GIVE_UP {
                     self.state = State::Bare;
-                    return true;
+                } else {
+                    ctx.request_repaint();
                 }
+            }
+            State::Blurring(rx, taken) => {
+                if let Ok(blurred) = rx.try_recv() {
+                    let tex = ctx.load_texture("frost", blurred, egui::TextureOptions::LINEAR);
+                    self.state = State::Have(graveyard.wrap(tex), *taken);
+                }
+            }
+            State::Fresh | State::Have(..) | State::Bare => {}
+        }
+    }
+
+    /// Call once a frame before drawing the window. `false` means the window
+    /// must sit this frame out: the screen under it is being snapshotted, and
+    /// drawing it now would put it in its own backdrop (or the blur is a
+    /// frame from done, and the window shouldn't flash plain first).
+    pub fn ready(&mut self, ctx: &egui::Context, graveyard: &TexGraveyard) -> bool {
+        if matches!(self.state, State::Fresh) {
+            self.ask(ctx);
+            return false;
+        }
+        self.poll(ctx, graveyard);
+        match self.state {
+            State::Have(..) | State::Bare => true,
+            State::Blurring(..) => {
                 ctx.request_repaint();
                 false
             }
+            State::Asked(_) | State::Fresh => false,
         }
+    }
+
+    fn ask(&mut self, ctx: &egui::Context) {
+        self.screen = ctx.screen_rect();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+        self.state = State::Asked(Instant::now());
+        ctx.request_repaint();
     }
 
     /// Paint the frost under a window occupying `rect`. It goes on the
     /// background order, above every panel and below every window, so it
     /// needn't be painted before the window itself.
     pub fn paint(&self, ctx: &egui::Context, id: egui::Id, rect: egui::Rect, rounding: egui::Rounding) {
-        let State::Have(tex) = &self.state else {
+        let State::Have(tex, _) = &self.state else {
             return;
         };
         let s = self.screen;
