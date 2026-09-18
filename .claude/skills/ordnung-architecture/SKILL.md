@@ -34,13 +34,13 @@ If a requested change would break one of these, stop and flag it rather than cod
   `dlp` (exportLibrary.db read/write), `export` (USB export orchestration).
   Depends on `ordnung-core` model, not the reverse. Format details belong in
   the `rekordbox-format` skill and `docs/rekordbox-export-structure.md`.
-- `ordnung-cli` — the ONLY place that decides policy, prints, prompts, and maps
-  user intent to core calls. Owns `clap` definitions and progress UI.
-- `ordnung-gui` — the egui/eframe desktop app, the primary front-end. Wraps
-  `ordnung-core` exactly like the CLI does — so keep all reusable logic in core,
-  never in the CLI or GUI.
+- `ordnung-gui` — the egui/eframe desktop app, the only front-end and the ONLY
+  place that decides policy, prompts, and maps user intent to core calls. Keep
+  all reusable logic in core, never in the GUI. (A `clap` CLI crate existed
+  through v0.116; it was retired in v0.117 — do not reintroduce a second
+  front-end without a reason.)
 
-Dependency direction: `cli` → `rbdb` → `core`, and `gui` → `rbdb` → `core`
+Dependency direction: `gui` → `rbdb` → `core`
 (the GUI reads mounted sticks and drives the USB export through `rbdb`).
 Never let `core` depend upward.
 
@@ -49,18 +49,18 @@ Never let `core` depend upward.
 `Track`, `Analysis`, `Key`, `Cue`, `Beatgrid`, `Playlist`, `ExportProfile` — defined
 in `ordnung-core/model`. `Catalog` (the SQLite-backed store + CRUD) lives in
 `ordnung-core/catalog.rs`, not `model`. Extend these in place; do not invent parallel
-structs in `cli`, `gui`, or `rbdb`. `Analysis` carries a `content_hash` and `analyzer_version`
+structs in `gui` or `rbdb`. `Analysis` carries a `content_hash` and `analyzer_version`
 so the cache can invalidate correctly.
 
 ## Conventions
 
-- Errors: `thiserror` enums in `core`/`rbdb`; `anyhow` only at the `cli` boundary.
+- Errors: `thiserror` enums in `core`/`rbdb`; the GUI maps them to user-facing text.
 - Concurrency: `rayon` for batch analysis; keep engines `Send + Sync` and stateless
   where possible (state lives in the catalog).
 - DSP and format parsing are pure Rust (`rustfft`, `rekordcrate`). `ffmpeg` is the
   only subprocess, invoked solely by the `convert`/`export` paths.
 - Every new engine function takes inputs + config and returns data; it does not read
-  CLI flags, prompt, or print.
+  UI state, prompt, or print.
 - Tests live next to code; the Camelot/key mapping and any format writer get unit
   tests with known-good fixtures.
 - GUI controls that share a row share a height. Size a row of buttons, pickers
@@ -74,7 +74,7 @@ so the cache can invalidate correctly.
 
 - New metadata field → `model` + `catalog` schema + `tag` read/write.
 - New analysis output → `analysis` + `Analysis` struct + cache + (if exported) `rbdb/anlz`.
-- New user command → `cli` only, delegating to existing core engines.
+- New user action → `gui` only, delegating to existing core engines.
 - New target format → `convert` presets + `rekordbox-format` compatibility matrix.
 
 When in doubt, consult `ordnung-roadmap` for sequencing and `PLAN.md` for intent.

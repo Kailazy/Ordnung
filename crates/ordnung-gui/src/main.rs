@@ -1,6 +1,6 @@
 //! Ordnung GUI — desktop wrapper around `ordnung-core`.
 //!
-//! Mirrors the CLI's role per `ordnung-architecture`: all policy/UI lives here,
+//! The only front-end, per `ordnung-architecture`: all policy/UI lives here,
 //! engines stay in core. Browses the catalog; double-click a track to convert it.
 //! Conversion (and any other I/O) runs in a background thread; the engine itself
 //! is the existing `ordnung-core::convert` Phase-4 implementation.

@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/ordnung-core",
     "crates/ordnung-rbdb",
-    "crates/ordnung-cli",
     "crates/ordnung-gui",
 ]
 

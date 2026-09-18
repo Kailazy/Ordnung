@@ -9,8 +9,8 @@ tracks, and (in progress) exports a native rekordbox USB the CDJs can read — a
 without rekordbox itself. It is **not** a rekordbox plugin: it generates every
 piece of metadata and analysis on its own.
 
-The primary front-end is a native desktop app (`Ordnung`, built on egui). A CLI
-(`ordnung`) exposes the same engine for scripting.
+The front-end is a native desktop app (`Ordnung`, built on egui). The engine
+underneath is a plain library crate, so it stays scriptable and testable on its own.
 
 ## Product rules
 
@@ -28,14 +28,13 @@ These are enforced design constraints, not preferences:
 
 ## Workspace layout
 
-A Cargo workspace with four crates:
+A Cargo workspace with three crates:
 
 | Crate          | Kind   | Responsibility |
 |----------------|--------|----------------|
 | `ordnung-core` | lib    | Domain model, catalog (SQLite), scan, tag (lofty), analysis (BPM / key / beatgrid / waveform / loudness), conversion (ffmpeg), Discogs enrichment |
 | `ordnung-rbdb` | lib    | rekordbox/CDJ export — `export.pdb` (DeviceSQL) + ANLZ writers (in progress) |
-| `ordnung-cli`  | bin    | `ordnung` — command-line front-end (the only print/policy layer) |
-| `ordnung-gui`  | bin    | `Ordnung` — native desktop app wrapping the core engine |
+| `ordnung-gui`  | bin    | `Ordnung` — the desktop app; the only policy/UI layer over the engine |
 
 See [PLAN.md](PLAN.md) and [HANDOFF.md](HANDOFF.md) for the full architecture and
 phased roadmap.
@@ -71,9 +70,8 @@ attach the DMG.
 # Run the GUI from source (debug)
 make run                 # == cargo run -p ordnung-gui
 
-# Build release binaries
+# Build the release binary
 cargo build --release -p ordnung-gui    # -> target/release/Ordnung
-cargo build --release -p ordnung-cli    # -> target/release/ordnung
 ```
 
 ### macOS app bundle
@@ -90,23 +88,10 @@ takes `--universal` (fat arm64+x86_64 binary), `--dmg` (package a
 drag-to-Applications `Ordnung.dmg`), and `--version=X.Y.Z`. The release CI runs
 `build-app.sh --no-install --no-launch --universal --dmg --version=<tag>`.
 
-## CLI usage
-
-```bash
-ordnung scan <dir>      # index files into the catalog
-ordnung ls              # list catalog entries
-ordnung analyze         # BPM, beatgrid, key, waveform, loudness
-ordnung key             # show detected keys (Camelot)
-ordnung tag             # read/write tags (opt-in writes)
-ordnung missing         # tracks with missing files
-ordnung dupes           # find duplicates
-ordnung repoint         # fix moved-file paths
-```
-
 ## Configuration
 
-Ordnung reads an optional `.env` from the repo root on startup (for dev launches
-and the CLI). The only variable today is a Discogs token used for metadata
+Ordnung reads an optional `.env` from the repo root on startup (for dev
+launches). The only variable today is a Discogs token used for metadata
 enrichment:
 
 ```bash
