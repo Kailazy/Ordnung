@@ -2051,6 +2051,29 @@ impl App {
                 self.request_vinyl_cover(c.key);
             }
         }
+        // A cold shelf's covers come back from the decoder pool a few per
+        // frame. Painted as they land, the wall fills in from the top left
+        // over a dozen frames, a ripple rather than a page. So while any of
+        // this shelf's covers are still in flight the wall is laid out but
+        // painted invisibly, and shown in one go once they have all landed.
+        // The hold is capped so a slow disk degrades to the old trickle
+        // rather than a blank page; a warm cache (the usual case after the
+        // first visit, since leaving the view keeps the textures) never holds.
+        const REVEAL_HOLD: Duration = Duration::from_millis(400);
+        let pending = cells.iter().any(|c| {
+            c.has_cover && matches!(self.vinyl_covers.get(&c.key), Some(ThumbState::Loading))
+        });
+        let hold = if pending {
+            let since = *self.vinyl_reveal_hold.get_or_insert_with(Instant::now);
+            let holding = since.elapsed() < REVEAL_HOLD;
+            if holding {
+                ctx.request_repaint();
+            }
+            holding
+        } else {
+            self.vinyl_reveal_hold = None;
+            false
+        };
 
         ui.add_space(4.0);
         // What the user asked of a cell (jump to the catalog, or a list edit).
@@ -2107,6 +2130,9 @@ impl App {
                 } else {
                     // The same cells drawn either way; the toggle in the toolbar
                     // is a layout choice, not a different view.
+                    if hold {
+                        ui.set_invisible();
+                    }
                     let acted = if self.config.vinyl_view == "list" {
                         self.vinyl_rows(ui, &cells)
                     } else {

@@ -1105,9 +1105,9 @@ impl App {
         // The fallback covers a keyed record too, not just a dug one: a key is
         // live only while the record is in a list, and the sheet outlives that.
         // Removing the record evicts its texture (and deletes the row its PNG
-        // sits on); leaving the Vinyl view clears the cache outright. Both used
-        // to blank an open sheet. `dig_cover` refetches on a miss, so the worst
-        // case is the cover returning a moment later rather than vanishing.
+        // sits on), which used to blank an open sheet. `dig_cover` refetches
+        // on a miss, so the worst case is the cover returning a moment later
+        // rather than vanishing.
         let cached = key.and_then(|k| match self.vinyl_covers.get(&k) {
             Some(ThumbState::Ready(Some(t))) => Some(t.clone()),
             _ => None,

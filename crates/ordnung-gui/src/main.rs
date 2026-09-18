@@ -1152,12 +1152,11 @@ struct App {
     /// Cover textures for the search popup's vinyl rows, keyed like
     /// `vinyl_covers`.
     ///
-    /// Deliberately a *separate* cache: `vinyl_covers` is scoped to the Vinyl
-    /// view and cleared by `reload` whenever another view is active (see
-    /// `App::reload`), but the popup shows records from the Library view, where
-    /// that cache is always empty. Sharing it would re-request every cover only
-    /// to have the next reload drop it again. Bounded by the popup's 5 rows plus
-    /// whatever earlier queries left behind, so it stays tiny.
+    /// Deliberately a *separate* cache: `vinyl_covers` is pruned by `reload`
+    /// to the records on the two shelves and fed by the wall's decoder pool,
+    /// while the popup shows five rows at a time from any view. Bounded by
+    /// the popup's 5 rows plus whatever earlier queries left behind, so it
+    /// stays tiny.
     search_vinyl_covers: HashMap<VinylCoverKey, ThumbState>,
     search_cover_req_tx: Sender<VinylCoverKey>,
     search_cover_rx: Receiver<VinylCoverLoaded>,
@@ -1399,6 +1398,11 @@ struct App {
     /// mirroring `cover_cache` for table rows. The list is part of the key because
     /// collection instance ids and wantlist release ids are separate id spaces.
     vinyl_covers: HashMap<VinylCoverKey, ThumbState>,
+    /// When the shelf on screen first had covers still in flight, if it still
+    /// does. `draw_vinyl` paints the wall invisibly until they've all landed
+    /// (or a short hold is up), so a cold wall appears at once rather than
+    /// filling in from the top left.
+    vinyl_reveal_hold: Option<Instant>,
     /// Asks the vinyl-cover worker to load + decode one record's cached cover.
     vinyl_cover_req_tx: Sender<VinylCoverKey>,
     /// Finished vinyl-cover decodes. Drained each frame, uploaded to a texture,

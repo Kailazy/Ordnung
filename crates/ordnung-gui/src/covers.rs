@@ -1,5 +1,6 @@
 //! Split out of `main.rs`; part of the GUI `App`.
 use super::*;
+use std::sync::Mutex;
 
 impl App {
     /// Ask the worker to load `id`'s thumbnail unless it's already cached or in
@@ -564,38 +565,61 @@ pub(crate) fn decode_thumb_image(bytes: &[u8]) -> Option<egui::ColorImage> {
     ))
 }
 
-/// Persistent loader for vinyl cover art: one long-lived catalog connection
-/// decodes each record's cached cover PNG off the UI thread. Serves both the
-/// collection and the wantlist — the request key says which cache to read.
+/// Persistent loader for vinyl cover art: `workers` threads, each with its own
+/// long-lived catalog connection, decode records' cached cover PNGs off the UI
+/// thread. Serves both the collection and the wantlist — the request key says
+/// which cache to read.
+///
+/// More than one worker matters for the cover wall: a cold shelf asks for
+/// every cover at once, and a single decoder hands them back one every few
+/// milliseconds, which on screen is a ripple filling in from the top left.
+/// A pool gets the whole wall in within a reveal hold (see `draw_vinyl`), so
+/// it appears as a page. The search popup, which wants five covers at a time,
+/// runs one worker.
 pub(crate) fn spawn_vinyl_cover_loader(
     db: PathBuf,
     ctx: egui::Context,
     req_rx: Receiver<VinylCoverKey>,
     tx: Sender<VinylCoverLoaded>,
+    workers: usize,
 ) {
-    thread::spawn(move || {
-        let catalog = match Catalog::open(&db) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        while let Ok(key) = req_rx.recv() {
-            let (list, id) = key;
-            let image = catalog
-                .vinyl_cover(list, id)
-                .ok()
-                .flatten()
-                .and_then(|bytes| image::load_from_memory(&bytes).ok())
-                .map(|img| {
-                    let rgba = img.to_rgba8();
-                    let size = [rgba.width() as usize, rgba.height() as usize];
-                    egui::ColorImage::from_rgba_unmultiplied(size, &rgba.into_raw())
-                });
-            if tx.send(VinylCoverLoaded { key, image }).is_err() {
-                break;
+    let req_rx = Arc::new(Mutex::new(req_rx));
+    for _ in 0..workers.max(1) {
+        let db = db.clone();
+        let ctx = ctx.clone();
+        let req_rx = Arc::clone(&req_rx);
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let catalog = match Catalog::open(&db) {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            loop {
+                // Hold the lock only to take a request, never across the
+                // decode, so the other workers keep draining the queue.
+                let key = match req_rx.lock() {
+                    Ok(rx) => rx.recv(),
+                    Err(_) => return,
+                };
+                let Ok(key) = key else { return };
+                let (list, id) = key;
+                let image = catalog
+                    .vinyl_cover(list, id)
+                    .ok()
+                    .flatten()
+                    .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                    .map(|img| {
+                        let rgba = img.to_rgba8();
+                        let size = [rgba.width() as usize, rgba.height() as usize];
+                        egui::ColorImage::from_rgba_unmultiplied(size, &rgba.into_raw())
+                    });
+                if tx.send(VinylCoverLoaded { key, image }).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
             }
-            ctx.request_repaint();
-        }
-    });
+        });
+    }
 }
 
 /// Read and decode a track's small table thumbnail using an already-open catalog

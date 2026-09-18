@@ -8,6 +8,8 @@ use ordnung_rbdb::edit;
 /// under the ~200 ms gap that reads as a pause — while collapsing the keystrokes
 /// within a typed word into a single reload.
 pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+/// Decoder threads behind the vinyl cover wall; see `spawn_vinyl_cover_loader`.
+const VINYL_COVER_WORKERS: usize = 4;
 /// Narrowest the toolbar search field shrinks to before the counts label
 /// starts giving up its parts. Still wide enough to read a short query.
 const SEARCH_FIELD_MIN_W: f32 = 72.0;
@@ -69,7 +71,8 @@ impl App {
         let (usb_thumb_req_tx, usb_thumb_req_rx) = mpsc::channel::<UsbThumbReq>();
         spawn_usb_thumb_loader(egui_ctx.clone(), usb_thumb_req_rx, thumb_tx_usb);
         // A second long-lived loader for vinyl cover art (collection + wantlist),
-        // keyed by list and that list's row id.
+        // keyed by list and that list's row id. A small pool, so a cold cover
+        // wall is decoded inside its reveal hold rather than trickling in.
         let (vinyl_cover_req_tx, vinyl_cover_req_rx) = mpsc::channel::<VinylCoverKey>();
         let (vinyl_cover_tx, vinyl_cover_rx) = mpsc::channel();
         spawn_vinyl_cover_loader(
@@ -77,10 +80,11 @@ impl App {
             egui_ctx.clone(),
             vinyl_cover_req_rx,
             vinyl_cover_tx,
+            VINYL_COVER_WORKERS,
         );
         // A third loader serving the search popup's vinyl rows. Its own channel
         // (and cache) because the popup shows records from outside the Vinyl
-        // view, where `vinyl_covers` is cleared on every reload.
+        // view, whose cache is pruned to that view's lists on every reload.
         let (search_cover_req_tx, search_cover_req_rx) = mpsc::channel::<VinylCoverKey>();
         let (search_cover_tx, search_cover_rx) = mpsc::channel();
         let (record_tx, record_rx) = mpsc::channel();
@@ -89,6 +93,7 @@ impl App {
             egui_ctx.clone(),
             search_cover_req_rx,
             search_cover_tx,
+            1,
         );
         // Resolves the now-playing cover to a temp file off-thread (see
         // `now_playing_cover_url`) so the OS Now Playing panel can show artwork
@@ -193,6 +198,7 @@ impl App {
             vinyl_genre_fallback_for: Vec::new(),
             genredb_info: None,
             vinyl_covers: HashMap::new(),
+            vinyl_reveal_hold: None,
             vinyl_cover_req_tx,
             vinyl_cover_rx,
             vinyl_links: HashMap::new(),
@@ -980,21 +986,16 @@ impl App {
                     m
                 })
                 .unwrap_or_default();
-        } else if self.view != LibraryView::Vinyl
-            && (!self.seller_listings.is_empty() || !self.vinyl_covers.is_empty())
-        {
-            // Leaving the section keeps the (small) record lists, so coming
-            // back is instant, but drops the two heavy caches: the seller
-            // listings (the Sellers tab re-reads them on the next visit) and
-            // the cover textures. The latter runs mid-frame when the grid's
-            // "in catalog" badge jumps to the Library after painting these
-            // covers; safe because `Tex` defers the frees to the next frame
-            // (see `tex.rs`).
+        } else if self.view != LibraryView::Vinyl && !self.seller_listings.is_empty() {
+            // Leaving the section keeps the record lists and the cover
+            // textures, so coming back is instant: the wall is painted from
+            // cache on the first frame rather than re-decoded cover by cover.
+            // The seller listings are dropped (the Sellers tab re-reads them
+            // on the next visit).
             self.seller_listings = Vec::new();
             self.seller_hay = Vec::new();
             self.seller_genres = HashMap::new();
             self.seller_listings_for = None;
-            self.vinyl_covers.clear();
         }
     }
 
@@ -1804,8 +1805,12 @@ const MIN_UI_ZOOM: f32 = 0.8;
 const MAX_UI_ZOOM: f32 = 1.5;
 
 impl eframe::App for App {
-    // TEMP DEBUG: inject a synthetic hover at ORDNUNG_CURSOR_PROBE="x,y".
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // Snappier wheel scrolling: front-load part of each coarse wheel step
+        // so the view answers a flick right away instead of easing in.
+        let line_speed = ctx.options(|o| o.line_scroll_speed);
+        crate::util::snap_wheel_events(&mut raw_input.events, line_speed);
+        // TEMP DEBUG: inject a synthetic hover at ORDNUNG_CURSOR_PROBE="x,y".
         if let Some(path) = std::env::var_os("ORDNUNG_CURSOR_PROBE") {
             let v = std::fs::read_to_string(path).unwrap_or_default();
             if let Some((x, y)) = v.trim().split_once(',') {
