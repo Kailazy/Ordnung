@@ -914,6 +914,7 @@ impl App {
         {
             return;
         }
+        self.follow_video_queue();
         // The record is over when its last video is: the page is youtube.com
         // itself, and left alone it would roll on into whatever YouTube
         // recommends next. With the radio on the player is the radio's, and
@@ -931,6 +932,33 @@ impl App {
         if let Some(uri) = uri {
             open_url(&uri);
         }
+    }
+
+    /// Keep the marked row on the video actually sounding. A row's play hands
+    /// the player that video and every one after it, and the player moves
+    /// down that queue on its own when a video ends, so the row that started
+    /// the record is soon not the one playing. The page on air is matched by
+    /// youtube id back to the record's videos and the mark moves with it.
+    fn follow_video_queue(&mut self) {
+        let Some(on_air) = webview::on_air() else {
+            return;
+        };
+        let Some(sheet) = self.vinyl_sheet.as_mut() else {
+            return;
+        };
+        let (Some(cur), Some(detail)) = (sheet.playing_video, sheet.detail.as_ref()) else {
+            return;
+        };
+        let id_of = |v: usize| detail.videos.get(v).and_then(|v| v.youtube_id());
+        if id_of(cur) == Some(on_air.as_str()) {
+            return;
+        }
+        let Some(next) = (0..detail.videos.len()).find(|&v| id_of(v) == Some(on_air.as_str()))
+        else {
+            return;
+        };
+        sheet.video_uri = detail.videos.get(next).map(|v| v.uri.clone());
+        sheet.playing_video = Some(next);
     }
 
     /// Close the mini-player and forget which row it was on. With the radio
@@ -1111,6 +1139,9 @@ impl App {
                     self.cover_full_texture(ctx, id, &path)
                 }),
         };
+        // Whether the marked video row's bars should move: the transport is
+        // running, not merely open on a paused video.
+        let video_running = video_open && webview::transport().playing;
         let now_playing_id = self.audio.as_ref().and_then(|a| a.current());
         // The track that is actually *sounding*, as against the one merely
         // loaded in the player. `current()` survives a pause and a stop, so a
@@ -1812,7 +1843,14 @@ impl App {
                                 SheetSource::Video(v) => playing_video == Some(v),
                                 SheetSource::None => false,
                             };
-                            if sheet_row_ui(ui, sheet, row, i, playing, marked == Some(i)) {
+                            let running = match row.source {
+                                // `sounding_id` already means the audio engine is running.
+                                SheetSource::Local(_) => true,
+                                SheetSource::Video(_) => video_running,
+                                SheetSource::None => false,
+                            };
+                            if sheet_row_ui(ui, sheet, row, i, playing, running, marked == Some(i))
+                            {
                                 act = Some(Act::Play(i));
                             }
                         }
@@ -1829,7 +1867,7 @@ impl App {
                                     continue;
                                 };
                                 let playing = playing_video == Some(*v);
-                                if extra_video_ui(ui, video, n, playing) {
+                                if extra_video_ui(ui, video, n, playing, video_running) {
                                     act = Some(Act::PlayExtra(*v));
                                 }
                             }
@@ -2319,6 +2357,7 @@ fn sheet_row_ui(
     row: &SheetRow,
     index: usize,
     playing: bool,
+    running: bool,
     marked: bool,
 ) -> bool {
     const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
@@ -2332,17 +2371,10 @@ fn sheet_row_ui(
         .scope(|ui| {
             ui.horizontal(|ui| {
                 ui.set_min_height(24.0);
-                // Play marker.
-                let glyph = if playing {
-                    "❚❚"
-                } else if playable {
-                    "▶"
-                } else {
-                    " "
-                };
-                let colour = if playing {
-                    ACCENT
-                } else if playable {
+                // Play marker: bars in motion on the row that is sounding, a
+                // play triangle on the rest.
+                let glyph = if playable && !playing { "▶" } else { " " };
+                let colour = if playable {
                     egui::Color32::from_gray(190)
                 } else {
                     egui::Color32::from_gray(90)
@@ -2366,12 +2398,16 @@ fn sheet_row_ui(
                             .selectable(false)
                             .halign(egui::Align::LEFT),
                     );
+                    rect
                 };
-                cell(
+                let marker = cell(
                     ui,
                     MARKER_W,
                     egui::RichText::new(glyph).size(11.0).color(colour),
                 );
+                if playing {
+                    playing_mark(ui, marker, ACCENT, running);
+                }
                 // Position.
                 cell(
                     ui,
@@ -2498,12 +2534,24 @@ fn sheet_row_ui(
     clicked
 }
 
+/// The sounding row's mark, drawn over the glyph column where "▶" sits on the
+/// other rows and left-aligned with it. Keeps the frame clock ticking while
+/// the bars move; a paused track shows them at rest and asks for nothing.
+fn playing_mark(ui: &mut egui::Ui, cell: egui::Rect, col: egui::Color32, running: bool) {
+    let t = ui.input(|i| i.time);
+    let c = egui::pos2(cell.left() + 7.0, cell.center().y);
+    if crate::ui::icon::playing_bars(ui.painter(), c, col, t, running) {
+        ui.ctx().request_repaint();
+    }
+}
+
 /// One "other video" row (album rip, live set). Returns true when clicked.
 fn extra_video_ui(
     ui: &mut egui::Ui,
     video: &discogs::ReleaseVideo,
     index: usize,
     playing: bool,
+    running: bool,
 ) -> bool {
     const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
     let bg = ui.painter().add(egui::Shape::Noop);
@@ -2511,17 +2559,22 @@ fn extra_video_ui(
         .scope(|ui| {
             ui.horizontal(|ui| {
                 ui.set_min_height(22.0);
-                ui.allocate_ui(egui::vec2(22.0, 20.0), |ui| {
-                    ui.label(
-                        egui::RichText::new(if playing { "❚❚" } else { "▶" })
-                            .size(11.0)
-                            .color(if playing {
-                                ACCENT
-                            } else {
-                                egui::Color32::from_gray(190)
-                            }),
+                let (marker, _) =
+                    ui.allocate_exact_size(egui::vec2(MARKER_W, 20.0), egui::Sense::hover());
+                if playing {
+                    playing_mark(ui, marker, ACCENT, running);
+                } else {
+                    ui.put(
+                        marker,
+                        egui::Label::new(
+                            egui::RichText::new("▶")
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(190)),
+                        )
+                        .selectable(false)
+                        .halign(egui::Align::LEFT),
                     );
-                });
+                }
                 ui.label(egui::RichText::new(&video.title).color(egui::Color32::from_gray(215)));
                 if let Some(d) = video.duration_secs {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

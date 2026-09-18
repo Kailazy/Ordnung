@@ -84,6 +84,47 @@ pub fn play_pause(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, playing:
     }
 }
 
+/// The "now playing" mark: four bars bouncing off a shared baseline, the way
+/// Spotify lights the row that is sounding. A pause glyph on the row said
+/// "press to pause" as much as "this one is playing"; bars in motion only
+/// ever mean the latter. `running` false holds them at a resting pose, so a
+/// paused track keeps its mark without pretending to move. Returns whether
+/// another frame is wanted, for the caller to request a repaint.
+pub fn playing_bars(
+    p: &egui::Painter,
+    c: egui::Pos2,
+    col: egui::Color32,
+    t: f64,
+    running: bool,
+) -> bool {
+    const N: usize = 4;
+    const BAR_W: f32 = 2.0;
+    const GAP: f32 = 1.5;
+    const H: f32 = 12.0;
+    // Each bar on its own rate and phase, so the four never fall into step.
+    const RATE: [f64; N] = [5.3, 6.7, 4.6, 6.1];
+    const PHASE: [f64; N] = [0.0, 1.9, 3.7, 5.2];
+    const REST: [f32; N] = [0.35, 0.6, 0.45, 0.3];
+    let total = N as f32 * BAR_W + (N - 1) as f32 * GAP;
+    let x0 = c.x - total / 2.0;
+    let base = c.y + H / 2.0;
+    for i in 0..N {
+        let frac = if running {
+            let s = (t * RATE[i] + PHASE[i]).sin() as f32 * 0.5 + 0.5;
+            0.2 + 0.8 * s
+        } else {
+            REST[i]
+        };
+        let x = x0 + i as f32 * (BAR_W + GAP);
+        p.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(x, base - H * frac), egui::pos2(x + BAR_W, base)),
+            0.5,
+            col,
+        );
+    }
+    running
+}
+
 /// A stop square centred on `c`, `r` to each edge.
 pub fn stop(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
     p.rect_filled(egui::Rect::from_center_size(c, egui::Vec2::splat(r * 2.0)), 1.5, col);

@@ -231,6 +231,20 @@ pub fn ended() -> bool {
     false
 }
 
+/// The YouTube id of the video on air, or `None` when nothing is loaded. The
+/// panel advances its own queue when a video ends, so the id it started on is
+/// not for long the one sounding; a sheet marking the playing row asks this
+/// to follow the music down the tracklist.
+#[cfg(target_os = "macos")]
+pub fn on_air() -> Option<String> {
+    imp::on_air()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn on_air() -> Option<String> {
+    None
+}
+
 /// Ask the mini-player what became of the video it was given.
 #[cfg(target_os = "macos")]
 pub fn status() -> PlayerStatus {
@@ -561,6 +575,15 @@ mod imp {
             slot.borrow().as_ref().is_some_and(|mini| {
                 mini.live && mini.page.state == "ended" && mini.queue.is_empty()
             })
+        })
+    }
+
+    pub fn on_air() -> Option<String> {
+        MainThreadMarker::new()?;
+        PANEL.with(|slot| {
+            let slot = slot.borrow();
+            let mini = slot.as_ref().filter(|m| m.live)?;
+            (!mini.page.id.is_empty()).then(|| mini.page.id.clone())
         })
     }
 
