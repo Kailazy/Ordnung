@@ -2,12 +2,18 @@
 //!
 //! One box for every place the user types: the toolbar search, a filter, a
 //! name, a token, a paste. It is egui's `TextEdit` under one set of
-//! defaults, so every field reads as the same control. The text sits 8 pt
-//! in from the sides rather than egui's 4, which left the caret and hint
-//! pressed against the frame; the vertical inset stays at egui's 2, which is
-//! the height `super::control_row` measures a row against. A focused field
-//! shows the accent outline; a field that is the whole surface it sits on (a
-//! paste box, an inline rename) can turn that `outline` off.
+//! defaults, so every field reads as the same control. The text sits 12 pt
+//! in from the sides and 8 pt from the top and bottom rather than egui's
+//! 4 × 2, which made a field a squat 20 pt bar with the caret and hint
+//! pressed against the frame, so that the toolbar search, the table filter
+//! and the sidebar rename each padded it back out by hand. At the body
+//! size the box comes out 32 pt tall, twice its text: the proportion of a
+//! standard desktop input, and the one height every row of controls is
+//! measured against ([`super::control_h`]). A push button on its own is
+//! shorter; on a row with a field it goes through [`super::control_row`],
+//! which brings it up to the field. A focused field shows the accent
+//! outline; a field that is the whole surface it sits on (a paste box, an
+//! inline rename) can turn that `outline` off.
 //!
 //! The builder forwards the `TextEdit` settings a call site needs; anything
 //! rarer goes through [`Field::edit`].
@@ -15,8 +21,8 @@
 use super::tokens::space;
 use eframe::egui::{self, Margin, Stroke, TextBuffer, Widget};
 
-/// The standard inset of the text from the frame.
-pub const MARGIN: Margin = Margin::symmetric(space::S3, space::S1);
+/// The standard inset of the text from the frame: 12 × 8.
+pub const MARGIN: Margin = Margin::symmetric(space::S4, space::S3);
 
 // The builder is complete ahead of use: a setting no call site needs yet
 // stays, so a new field never reaches past the component.
@@ -127,5 +133,57 @@ impl Widget for Field<'_> {
             })
             .inner
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lay `add` out in a row on a themed context and hand back the height
+    /// the row took, which is the height the control was allocated (a
+    /// `TextEdit`'s own response rect is the text, not the frame).
+    fn row_height(add: impl FnOnce(&mut egui::Ui)) -> f32 {
+        let ctx = egui::Context::default();
+        super::super::theme::install(&ctx);
+        let mut h = 0.0;
+        let mut add = Some(add);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                h = ui.horizontal(|ui| add.take().unwrap()(ui)).response.rect.height();
+            });
+        });
+        h
+    }
+
+    /// The field is the row height: 32 pt at the body size.
+    #[test]
+    fn field_is_the_control_height() {
+        let mut text = String::new();
+        let field = row_height(|ui| {
+            ui.add(Field::singleline(&mut text).hint("Search"));
+        });
+        let mut row = 0.0;
+        row_height(|ui| row = super::super::control_h(ui));
+        assert_eq!(field, row, "field {field} vs control_h {row}");
+        assert_eq!(field, 32.0);
+    }
+
+    /// A button beside a field, laid out through the row rule, comes out
+    /// exactly the field's height rather than its own shorter one.
+    #[test]
+    fn control_row_brings_the_button_to_the_field() {
+        let mut text = String::new();
+        let mut field = 0.0;
+        let mut button = 0.0;
+        row_height(|ui| {
+            super::super::control_row(ui, |ui| {
+                field = ui.add(Field::singleline(&mut text)).rect.height() + MARGIN.sum().y;
+                button = super::super::button::button(ui, "Add").rect.height();
+            });
+        });
+        assert_eq!(field, button, "field {field} vs button {button}");
+        assert_eq!(button, 32.0);
     }
 }

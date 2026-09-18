@@ -29,22 +29,27 @@ pub mod window;
 use eframe::egui;
 
 /// The one height every control on a row shares: a single-line text field at
-/// the body size, egui's default 2 pt vertical text margin included. The field
-/// is the reference because it is the control whose height is least free to
-/// move (its text must not clip); buttons and pickers beside it are brought to
-/// this through [`control_row`].
+/// the body size, [`field::MARGIN`] included, which is 32 pt. The field is
+/// the reference because it is the control whose height is least free to
+/// move (its text must not clip); the buttons and pickers beside it are
+/// brought to this through [`control_row`]. The text height is rounded the
+/// way egui rounds a laid-out line, so the number is a whole point.
 pub fn control_h(ui: &egui::Ui) -> f32 {
-    ui.text_style_height(&egui::TextStyle::Body) + 2.0 * 2.0
+    ui.text_style_height(&egui::TextStyle::Body).round() + field::MARGIN.sum().y
 }
 
-/// Lay out a row of controls at one height. Every `Button`, `ComboBox` and
-/// single-line `TextEdit` added inside comes out [`control_h`] tall, so a row
-/// never shows three neighbouring controls at three heights. Use the plain
-/// `ui.button` inside, not `small_button`: the small variant sets its own
-/// text size and would break the line it sits on.
+/// Lay out a row of controls at one height. Every `Button`, `ComboBox`,
+/// glyph and single-line `TextEdit` added inside comes out [`control_h`]
+/// tall, so a row never shows three neighbouring controls at three heights.
+/// A push button on its own is shorter than a field; here its padding grows
+/// so it meets the field. Use the plain `ui.button` inside, not
+/// `small_button`: the small variant sets its own text size and would
+/// break the line it sits on.
 pub fn control_row<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let h = control_h(ui);
-    let text_h = ui.text_style_height(&egui::TextStyle::Button);
+    // Rounded like the line egui lays out, or the padding would carry the
+    // fraction and the button land a hair past `h`.
+    let text_h = ui.text_style_height(&egui::TextStyle::Button).round();
     ui.scope(|ui| {
         let s = ui.spacing_mut();
         s.interact_size.y = h;

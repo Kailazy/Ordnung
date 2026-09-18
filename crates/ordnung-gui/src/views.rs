@@ -1628,7 +1628,9 @@ impl App {
         // borrows.
         let mut import_genredb = false;
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        // A row of controls around the search field: every button on it
+        // takes the field's height (see `ui::control_row`).
+        ui.horizontal(|ui| crate::ui::control_row(ui, |ui| {
             // Collection and wantlist are two shelves of the same kind, so they're
             // tabs: with a big collection the wantlist used to sit a full scroll
             // below, and neither shelf could be reached quickly from the other.
@@ -1906,7 +1908,7 @@ impl App {
                     }
                 }
             });
-        });
+        }));
         // The tab strip sits directly on the separator below, so the active tab's
         // underline and that hairline read as one baseline.
         ui.add_space(-2.0);

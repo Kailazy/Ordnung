@@ -2135,7 +2135,9 @@ impl eframe::App for App {
                     .inner_margin(egui::Margin::symmetric(space::S3, space::S3)),
             )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                // A row of controls around the search field: every button on
+                // it takes the field's height (see `ui::control_row`).
+                ui.horizontal(|ui| crate::ui::control_row(ui, |ui| {
                     // The window's horizontal center, captured before any group
                     // lays out: the search field anchors to it further down, so
                     // it sits in the same spot whichever view is showing.
@@ -2572,8 +2574,6 @@ impl eframe::App for App {
                                 (avail.right() - group_w - clear_w).max(avail.left()),
                             );
                             ui.add_space((left - avail.left()).max(0.0));
-                            // Taller than the standard field: it's the most-used
-                            // control in the toolbar, so it earns the space.
                             // Read before the field borrows `search_query`
                             // mutably, so the hint can depend on the scope.
                             let hint = if self.searching_discogs() {
@@ -2584,8 +2584,6 @@ impl eframe::App for App {
                             let resp = ui.add(
                                 crate::ui::field::Field::singleline(&mut self.search_query)
                                     .width(w)
-                                    .margin(egui::Margin::symmetric(space::S3, space::S2 + 1.0))
-                                    .min_size(egui::vec2(0.0, 26.0))
                                     .hint(hint),
                             );
                             // ⌘F (or Edit ▸ Find) asked for this field. Focus
@@ -2659,7 +2657,7 @@ impl eframe::App for App {
                             }
                         });
                     });
-                });
+                }));
             });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {

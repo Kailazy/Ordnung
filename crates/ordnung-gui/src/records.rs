@@ -699,7 +699,8 @@ impl App {
     /// half slides rather than blinking across, which is what makes it read as
     /// one switch with a position instead of two buttons that light up.
     pub(crate) fn draw_scope_toggle(&mut self, ui: &mut egui::Ui) {
-        let h = 26.0;
+        // The row's height: it sits beside the search field.
+        let h = crate::ui::control_h(ui);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(SCOPE_TOGGLE_W, h), egui::Sense::hover());
         let painter = ui.painter();
         painter.rect_filled(rect, egui::Rounding::same(radius::SM), color::FIELD);

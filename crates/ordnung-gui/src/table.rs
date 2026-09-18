@@ -694,10 +694,6 @@ impl App {
             let field = ui.add(
                 crate::ui::field::Field::singleline(&mut self.filter)
                     .width(220.0)
-                    .margin(egui::Margin::symmetric(
-                        crate::ui::tokens::space::S3,
-                        crate::ui::tokens::space::S2,
-                    ))
                     .hint("Filter these tracks"),
             );
             field.clone().on_hover_note(
