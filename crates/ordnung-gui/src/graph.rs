@@ -2153,7 +2153,7 @@ impl App {
                     let (word, c) = match rel.status {
                         Status::Owned => ("In your collection", color::LABEL_2),
                         Status::Wanted => ("On your wantlist", color::ACCENT),
-                        Status::Dug => ("Dug to, not on a list yet", color::ORANGE),
+                        Status::Dug => ("Discovered", color::ORANGE),
                     };
                     ui.label(egui::RichText::new(word).color(c).small());
                     if small {
