@@ -43,7 +43,10 @@ pub enum SearchHit {
         release_id: u64,
         title: String,
         artist: String,
-        /// Year/format/label line, pre-joined for display.
+        /// Label/year/format line, pre-joined for display. The label leads:
+        /// the GUI ellipsizes this line from the right when the popup is
+        /// narrow, so whatever comes last is what disappears, and the label
+        /// is the part of a pressing worth keeping over its carrier.
         sub: String,
         matched_track: Option<String>,
         /// Whether a cover image is cached locally for this record.
@@ -182,15 +185,13 @@ pub fn search_library(cat: &Catalog, query: &str, limit: usize) -> Result<Vec<Sc
                 }
             }
             if score > 0 {
-                let sub = [
-                    rec.year.map(|y| y.to_string()),
-                    rec.format.as_deref().map(short_format),
-                    rec.label.clone(),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(" · ");
+                // The row already names the artist ahead of this line, so a
+                // self-released record doesn't get "Studio 1 · Studio 1".
+                let label = rec
+                    .label
+                    .as_deref()
+                    .filter(|l| !l.trim().eq_ignore_ascii_case(rec.artist.trim()));
+                let sub = vinyl_sub_line(label, rec.year, rec.format.as_deref());
                 out.push(ScoredHit {
                     hit: SearchHit::Vinyl {
                         list,
@@ -217,6 +218,24 @@ pub fn search_library(cat: &Catalog, query: &str, limit: usize) -> Result<Vec<Sc
     });
     out.truncate(limit);
     Ok(out)
+}
+
+/// The one-line pressing summary under a vinyl hit: `label · year · format`.
+///
+/// Label first on purpose. The row truncates this line from the right, so the
+/// order is the priority order: a record's label answers "what is this?" far
+/// more often than `Vinyl, 12"` does, and it used to be the first thing cut.
+fn vinyl_sub_line(label: Option<&str>, year: Option<u16>, format: Option<&str>) -> String {
+    [
+        label.map(str::to_string),
+        year.map(|y| y.to_string()),
+        format.map(short_format),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|s| !s.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 
 /// Reduce a Discogs format string to the carrier and its size — `Vinyl, 12"` out
@@ -313,6 +332,17 @@ mod tests {
                 SearchHit::Vinyl { title, .. } => format!("vinyl:{title}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn the_sub_line_leads_with_the_label() {
+        assert_eq!(
+            vinyl_sub_line(Some("Logistic Records"), Some(2026), Some("Vinyl, 12\", 33 ⅓ RPM")),
+            "Logistic Records · 2026 · Vinyl, 12\""
+        );
+        assert_eq!(vinyl_sub_line(None, Some(1996), Some("Vinyl, LP")), "1996 · Vinyl, LP");
+        assert_eq!(vinyl_sub_line(Some("Trelik"), None, None), "Trelik");
+        assert_eq!(vinyl_sub_line(Some(""), None, Some("")), "");
     }
 
     #[test]

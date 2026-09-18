@@ -847,8 +847,10 @@ fn search_hit_row(
     }
     let text_x = art.right() + space::S4 - 2.0;
     // Both lines are truncated to the space actually left in the row.
-    // `painter.text` neither wraps nor clips, so a long "artist · year · format
-    // · label" ran straight out of the popup and over the table behind it.
+    // `painter.text` neither wraps nor clips, so a long "artist · label · year
+    // · format" ran straight out of the popup and over the table behind it.
+    // The ellipsis eats from the right, which is why the label sits ahead of
+    // the year and format in that line (see `search::vinyl_sub_line`).
     let avail = (rect.right() - pad - text_x).max(0.0);
     // Two lines stacked around the row's centre. A single-line hit (no artist
     // or album to show) centres on its own instead of floating high with an
