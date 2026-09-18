@@ -498,8 +498,9 @@ impl ReleaseDetail {
     /// tracklist line, which may drop the mix name Discogs lists (`Dark &
     /// Long` for `Dark & Long (Dark Train Mix)`) or carry one Discogs
     /// doesn't: the two are equal under the loose title key with an
-    /// `(Original Mix)` marker or any bracketed tail dropped on either side.
-    /// A plain word-prefix is not enough (`Blue` is not `Blue Monday`). Any
+    /// `(Original Mix)` marker or any bracketed tail dropped on either side,
+    /// give or take a typo (`Lil Drummer Boy` finds `Lil' Drummer Boi`). A
+    /// plain word-prefix is not enough (`Blue` is not `Blue Monday`). Any
     /// position counts, not only the first track.
     pub fn carries_title(&self, title: &str) -> bool {
         let forms = |t: &str| {
@@ -514,9 +515,13 @@ impl ReleaseDetail {
         if wants.is_empty() {
             return false;
         }
-        self.tracklist
-            .iter()
-            .any(|t| forms(&t.title).iter().any(|have| wants.contains(have)))
+        self.tracklist.iter().any(|t| {
+            forms(&t.title).iter().any(|have| {
+                wants
+                    .iter()
+                    .any(|want| have == want || levenshtein(have, want) <= typo_budget(want))
+            })
+        })
     }
 
     /// Which video plays each track: one entry per `tracklist` position, holding
@@ -1323,9 +1328,23 @@ impl Client {
             .trim()
             .to_string();
         ladder.push(vec![("q", free.as_str())]);
+        // Last of all, the artist without the title, a bigger page: the
+        // paste may spell the song as nobody else does (`Lil Drummer Boy`
+        // for `Lil' Drummer Boi`), and the caller then reads the records'
+        // own tracklists. A joint credit goes as its names in free text,
+        // since Discogs writes the pair in its own order.
+        let names = crate::tracklist::credit_names(artist);
+        let joint = names.join(" ");
+        if names.len() > 1 {
+            ladder.push(vec![("q", joint.as_str()), ("per_page", "25")]);
+        } else if !artist.is_empty() && !title.is_empty() {
+            ladder.push(vec![("artist", artist), ("per_page", "25")]);
+        }
         for mut params in ladder {
             params.push(("type", "release"));
-            params.push(("per_page", "12"));
+            if !params.iter().any(|(k, _)| *k == "per_page") {
+                params.push(("per_page", "12"));
+            }
             let hits = self.search_release(&params)?;
             if !hits.is_empty() {
                 return Ok(hits.into_iter().map(candidate_from_hit).collect());
@@ -3533,6 +3552,9 @@ mod tests {
         assert!(d.carries_title("So Many Things"));
         assert!(!d.carries_title("Dreams"));
         assert!(!d.carries_title("Blue"));
+        d.tracklist.push(track("E", "Lil' Drummer Boi"));
+        assert!(d.carries_title("Lil Drummer Boy"));
+        assert!(!d.carries_title("Big Drummer Boy"));
         assert_eq!(without_brackets("The Word Is Love (Say The Word) (Steve 'Silk' Hurley's Anthem of Life)"), "The Word Is Love");
         assert_eq!(without_brackets("Rubbernotes [5th Gear Edit]"), "Rubbernotes");
     }

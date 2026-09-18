@@ -4292,7 +4292,7 @@ pub(crate) fn run_match_tracklist(
         let mut confidence = tracklist::confidence_for(best_score);
 
         // Verify anything short of Sure against the record's own tracklist:
-        // the chosen one first, then the runner-up. A hit is Sure; a record
+        // the chosen one first, then the next in rank. A hit is Sure; a record
         // read that doesn't carry the song leaves the first choice as
         // Unsure; a record that couldn't be read leaves the local score.
         if confidence < Confidence::Sure {
@@ -4300,9 +4300,12 @@ pub(crate) fn run_match_tracklist(
                 let mut tried = 0usize;
                 let mut read = 0usize;
                 let mut verified: Option<discogs::ReleaseCandidate> = None;
-                let runner_up = ordered.iter().find(|c| c.release_id != chosen.release_id).cloned();
-                for cand in std::iter::once(chosen.clone()).chain(runner_up) {
-                    if tried >= 2 || cancel.load(Ordering::Relaxed) {
+                // Two records when the score already says Likely; four when
+                // only the artist agreed and the tracklists must decide.
+                let limit = if best_score >= 80 { 2 } else { 4 };
+                let others = ordered.iter().filter(|c| c.release_id != chosen.release_id).cloned();
+                for cand in std::iter::once(chosen.clone()).chain(others) {
+                    if tried >= limit || cancel.load(Ordering::Relaxed) {
                         break;
                     }
                     tried += 1;

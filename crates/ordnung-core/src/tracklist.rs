@@ -712,29 +712,55 @@ fn artist_agrees(line_artist: &str, hit_artist: &str) -> bool {
         return true;
     }
     // The line credits several too (`Cajmere ft Dajae`): the lead name
-    // agreeing is enough, however the hit writes the rest.
+    // agreeing is enough, however the hit writes the rest; and a joint
+    // credit agrees in any order (`D. Tiffany & Roza Terenzi` is `Roza
+    // Terenzi & D. Tiffany`).
     let want_parts = credit_parts(line_artist);
     want_parts.len() > 1
         && !want_parts[0].is_empty()
-        && have_parts.first().is_some_and(|h| *h == want_parts[0])
+        && (have_parts.first().is_some_and(|h| *h == want_parts[0])
+            || want_parts.iter().all(|w| have_parts.contains(w)))
 }
 
-/// The names in a credit, folded: `Kerri Chandler & Jerome Sydenham`,
+/// The names in a credit, as written: `Kerri Chandler & Jerome Sydenham`,
 /// `Dennis Ferrer Feat. Kerri Chandler`, `Cajmere ft Dajae`. Split on the
-/// raw punctuation first (folding erases it), then on the joining words.
-fn credit_parts(credit: &str) -> Vec<String> {
+/// joining punctuation and words.
+pub fn credit_names(credit: &str) -> Vec<String> {
+    const JOINERS: [&str; 10] = [
+        " feat. ", " feat ", " featuring ", " ft. ", " ft ", " and ", " vs. ", " vs ", " x ", " with ",
+    ];
     credit
         .split([',', '&', '/', '+'])
         .flat_map(|part| {
-            let folded = fold_name(part);
-            [" feat ", " featuring ", " ft ", " and ", " vs ", " x "]
-                .iter()
-                .fold(vec![folded], |acc, sep| {
-                    acc.into_iter()
-                        .flat_map(|p| p.split(sep).map(|q| q.trim().to_string()).collect::<Vec<_>>())
-                        .collect()
-                })
+            let mut pieces = vec![part.to_string()];
+            for sep in JOINERS {
+                pieces = pieces
+                    .into_iter()
+                    .flat_map(|p| {
+                        let lower = p.to_lowercase();
+                        let mut out = Vec::new();
+                        let mut start = 0;
+                        for (i, _) in lower.match_indices(sep) {
+                            out.push(p[start..i].to_string());
+                            start = i + sep.len();
+                        }
+                        out.push(p[start..].to_string());
+                        out
+                    })
+                    .collect();
+            }
+            pieces
         })
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// [`credit_names`], folded for comparison.
+fn credit_parts(credit: &str) -> Vec<String> {
+    credit_names(credit)
+        .iter()
+        .map(|n| fold_name(n))
         .filter(|p| !p.is_empty())
         .collect()
 }
@@ -1162,6 +1188,13 @@ mod tests {
         assert!(artist_agrees("Cajmere ft Dajae", "Cajmere Featuring Dajae"));
         assert!(artist_agrees("Cajmere ft Dajae", "Cajmere"));
         assert!(!artist_agrees("Cajmere ft Dajae", "Dajae"));
+        assert!(artist_agrees("D. Tiffany & Roza Terenzi", "Roza Terenzi & D. Tiffany"));
+        assert!(artist_agrees("D. Tiffany & Roza Terenzi", "Roza Terenzi, D. Tiffany"));
+        assert_eq!(
+            credit_names("Dennis Ferrer Feat. Kerri Chandler & Jerome Sydenham"),
+            vec!["Dennis Ferrer", "Kerri Chandler", "Jerome Sydenham"]
+        );
+        assert_eq!(credit_names("Sandwell District"), vec!["Sandwell District"]);
     }
 
     #[test]
