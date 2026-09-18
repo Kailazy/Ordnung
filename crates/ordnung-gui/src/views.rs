@@ -2543,6 +2543,11 @@ impl App {
                         // than a bare "Move".
                         resp.context_menu(|ui| vinyl_cell_menu(ui, c, &release_url, &mut action));
                         ui.set_max_width(cover_side);
+                        // The caption hugs the cover: the wrap layout's cell
+                        // gap must not open up between the cover and its own
+                        // lines, so the cell tightens its vertical spacing here
+                        // and the two lines sit close.
+                        ui.spacing_mut().item_spacing.y = 2.0;
                         ui.add_space(4.0);
                         // Title doubles as the textual link to the release page.
                         // The price, what the sort orders by, sits right after
