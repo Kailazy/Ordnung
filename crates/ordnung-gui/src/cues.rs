@@ -969,6 +969,9 @@ impl App {
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing.x = GAP;
+                            // Off the clip's edge, so the first chip's outline
+                            // and corner aren't shaved by it.
+                            ui.add_space(2.0);
                             for (idx, c) in &memory {
                                 let (idx, c) = (*idx, *c);
                                 let glyph = if c.is_loop() { "⟲" } else { "▸" };

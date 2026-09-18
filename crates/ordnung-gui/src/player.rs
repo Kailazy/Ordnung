@@ -308,7 +308,7 @@ impl App {
             .show_separator_line(false)
             .show(ctx, |ui| {
                 let slot = crate::ui::glass::begin(ui);
-                ui.add_space(8.0);
+                ui.add_space(PANEL_TOP_GAP);
 
                 // Zoomed detail lane — a window of `wave_zoom_secs` centered on the
                 // playhead, scrolling under it during playback. Wheel to zoom,
@@ -350,7 +350,7 @@ impl App {
                         grid,
                         &mut seek_to,
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(LANE_ROW_GAP);
                 }
 
                 ui.horizontal(|ui| {
@@ -2561,11 +2561,16 @@ pub(crate) const DEFAULT_LANE_H: f32 = 46.0;
 const MIN_LANE_H: f32 = 46.0;
 /// Tallest the lane can be dragged (keeps the lane from swallowing the screen).
 const MAX_LANE_H: f32 = 460.0;
-/// Base height of the player panel excluding the resizable lane (artwork/controls
-/// row plus the spacing around the lane). The grip floats over the lane and the
-/// smoothing slider moved to Settings, so neither reserves a row here any more.
-/// Panel height = this + the lane height.
-const PANEL_BASE_H: f32 = 100.0;
+/// Base height of the player panel excluding the resizable lane: the frame's
+/// margins, [`PANEL_TOP_GAP`], the lane's item spacing, [`LANE_ROW_GAP`], the
+/// 56 pt artwork row and a matching gap under it. The grip floats over the
+/// lane and the smoothing slider moved to Settings, so neither reserves a
+/// row here any more. Panel height = this + the lane height.
+const PANEL_BASE_H: f32 = 2.0 + PANEL_TOP_GAP + 4.0 + LANE_ROW_GAP + 4.0 + 56.0 + LANE_ROW_GAP + 2.0;
+/// Clearance above the lane (or the cue bar), under the panel's top edge.
+const PANEL_TOP_GAP: f32 = 6.0;
+/// Gap between the lane and the artwork row, and under the row.
+const LANE_ROW_GAP: f32 = 4.0;
 
 /// Buckets per second for the high-res zoom envelope. ~100× the stored preview's
 /// ~20/sec — well past rekordbox's detailed waveform, so even the tightest
