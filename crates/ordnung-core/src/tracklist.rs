@@ -114,6 +114,7 @@ pub struct RankedCandidate {
 pub fn parse_tracklist(text: &str) -> Vec<TracklistLine> {
     let mut out = Vec::new();
     let mut position = 0usize;
+    let text = unfold(text);
     for raw in text.lines() {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -147,6 +148,141 @@ pub fn parse_tracklist(text: &str) -> Vec<TracklistLine> {
         }
     }
     out
+}
+
+/// A paste whose line breaks were lost (a SoundCloud comment, a description
+/// copied as one paragraph) runs its songs together on one line, each
+/// introduced by a marker: `[04] Konduku - YTK [07] Dorisburg - …`, `12:30
+/// Artist - Title 16:45 Next - …`, or `1. A - B 2. C - D`. Put the breaks
+/// back: a line carrying two or more markers that follow song text is split
+/// before each of them, when what stands before it is a whole `Artist -
+/// Title`. A line with one marker (the usual one song per line) is left
+/// alone, so a clock inside a title never splits it. Bare
+/// bracketed minutes (`[04]`) on a split line become `[04:00]`, so the
+/// clock pass reads them; elsewhere `[3]` stays an ordinal.
+fn unfold(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    for (n, line) in text.lines().enumerate() {
+        if n > 0 {
+            out.push('\n');
+        }
+        out.push_str(&unfold_line(line));
+    }
+    out
+}
+
+/// A marker found on a line: where it starts and ends, and the bare minute
+/// count when it's a `[mm]` that wants a `:00` appended.
+struct Marker {
+    start: usize,
+    end: usize,
+    bare_minutes: bool,
+}
+
+fn unfold_line(line: &str) -> String {
+    let b = line.as_bytes();
+    let mut markers: Vec<Marker> = Vec::new();
+    let mut last_ordinal: Option<u32> = None;
+    let mut i = 0;
+    while i < b.len() {
+        let at_word_start = i == 0 || b[i - 1].is_ascii_whitespace();
+        let c = b[i];
+        if c == b'[' || c == b'(' {
+            let close = if c == b'[' { b']' } else { b')' };
+            if let Some(len) = b[i + 1..].iter().position(|&x| x == close) {
+                let inner = &line[i + 1..i + 1 + len];
+                let bare = !inner.is_empty()
+                    && inner.len() <= 3
+                    && inner.bytes().all(|x| x.is_ascii_digit());
+                if bare || parse_clock(inner).is_some() {
+                    markers.push(Marker { start: i, end: i + 2 + len, bare_minutes: bare });
+                    i += 2 + len;
+                    continue;
+                }
+            }
+        } else if c.is_ascii_digit() && at_word_start {
+            let len = b[i..]
+                .iter()
+                .position(|&x| !(x.is_ascii_digit() || x == b':'))
+                .unwrap_or(b.len() - i);
+            let tok = &line[i..i + len];
+            let end = i + len;
+            let followed = end == b.len() || b[end].is_ascii_whitespace();
+            if parse_clock(tok).is_some() && followed {
+                markers.push(Marker { start: i, end, bare_minutes: false });
+                i = end;
+                continue;
+            }
+            // `1. ` / `1) ` ordinals, accepted only in sequence: the first
+            // one seen, then each number one above the last accepted.
+            let digits = tok.bytes().take_while(|x| x.is_ascii_digit()).count();
+            if digits == len && digits <= 3 && end + 1 < b.len() && matches!(b[end], b'.' | b')') && b[end + 1].is_ascii_whitespace() {
+                if let Ok(n) = tok.parse::<u32>() {
+                    let in_sequence = match last_ordinal {
+                        None => true,
+                        Some(last) => n == last + 1,
+                    };
+                    if in_sequence {
+                        last_ordinal = Some(n);
+                        markers.push(Marker { start: i, end: end + 1, bare_minutes: false });
+                    }
+                }
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    // A marker breaks the line when a whole song sits before it: an
+    // `Artist - Title` with words on both sides. Text that is only half a
+    // song (`A - 4:20 Anthem`) keeps its clock. Once the line has broken,
+    // any words since the last break count (`[30] (not in history) [35]`),
+    // unless a bracket is still open, which puts the marker inside a title
+    // (`C - D (Extended 4:20 Mix)`).
+    let mut breaks = Vec::new();
+    let mut seg_start = 0;
+    for m in &markers {
+        let seg = &line[seg_start..m.start];
+        let words = seg.chars().any(|c| c.is_alphabetic());
+        let open = seg.matches(['(', '[']).count() > seg.matches([')', ']']).count();
+        if !open && (looks_like_song(seg) || (!breaks.is_empty() && words)) {
+            breaks.push(m.start);
+            seg_start = m.start;
+        }
+    }
+    if breaks.len() < 2 {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len() + breaks.len() + markers.len() * 3);
+    let mut pos = 0;
+    for m in &markers {
+        out.push_str(&line[pos..m.start]);
+        if breaks.contains(&m.start) {
+            out.push('\n');
+        }
+        if m.bare_minutes {
+            // `[04]` → `[04:00]`
+            out.push_str(&line[m.start..m.end - 1]);
+            out.push_str(":00");
+            out.push_str(&line[m.end - 1..m.end]);
+        } else {
+            out.push_str(&line[m.start..m.end]);
+        }
+        pos = m.end;
+    }
+    out.push_str(&line[pos..]);
+    out
+}
+
+/// `Artist - Title` with letters on both sides of the dash.
+fn looks_like_song(seg: &str) -> bool {
+    let seg = normalise(seg);
+    match seg.split_once(" - ") {
+        Some((a, t)) => {
+            a.chars().any(|c| c.is_alphabetic()) && t.chars().any(|c| c.is_alphabetic())
+        }
+        None => false,
+    }
 }
 
 /// Parse one trimmed, non-empty line.
@@ -793,6 +929,47 @@ mod tests {
             vec![(1, LineKind::Track), (2, LineKind::Id), (3, LineKind::Track)]
         );
         assert_eq!(lines.len(), 5);
+    }
+
+    #[test]
+    fn one_line_paste_with_minute_stamps_is_unfolded() {
+        let text = "[00] Mathew Jonson - Freedom Engine [04] Konduku - YTK [07] Dorisburg - Internet Tension [10] Prime Minister of Doom - Grand Finale [14] Dawn Razor - Locked [17] Atomic Moog - Static Flow [19] Azu Tiwaline - Nyctophilia [21] Wata Igarashi - Mood of the Machines, Pt. 1 [27] Atomic Moog - Planet [30] (not in history) [35] DJ Mastra - Nachtbullet [38] Planet Love - Scander [42] Corrie - Stars [45] Steve Barnes - Cosmic Sandwich [50] Neel - Deep Quarantine [54] D. Tiffany & Roza Terenzi - Lil Drummer Boy [57]";
+        let lines = parse_tracklist(text);
+        let tracks: Vec<&TracklistLine> = lines.iter().filter(|l| l.kind == LineKind::Track).collect();
+        assert_eq!(tracks.len(), 15, "{lines:#?}");
+        assert_eq!(tracks[0].artist.as_deref(), Some("Mathew Jonson"));
+        assert_eq!(tracks[0].timestamp, Some(0));
+        assert_eq!(tracks[1].artist.as_deref(), Some("Konduku"));
+        assert_eq!(tracks[1].timestamp, Some(240));
+        assert_eq!(tracks[7].title.as_deref(), Some("Mood of the Machines, Pt. 1"));
+        assert_eq!(tracks[14].artist.as_deref(), Some("D. Tiffany & Roza Terenzi"));
+        assert_eq!(tracks[14].timestamp, Some(54 * 60));
+        // "(not in history)" and the closing "[57]" are skipped, not songs.
+        assert_eq!(lines.iter().filter(|l| l.kind == LineKind::Noise).count(), 2);
+    }
+
+    #[test]
+    fn one_line_paste_with_clocks_or_ordinals_is_unfolded() {
+        let lines = parse_tracklist("0:00 A - B 12:30 C - D (Extended 4:20 Mix) 1:02:03 E - F");
+        let artists: Vec<&str> = lines.iter().filter_map(|l| l.artist.as_deref()).collect();
+        assert_eq!(artists, vec!["A", "C", "E"]);
+        assert_eq!(lines[1].title.as_deref(), Some("D (Extended 4:20 Mix)"));
+        assert_eq!(lines[2].timestamp, Some(3723));
+        let lines = parse_tracklist("1. A - B 2. C - D 3. E - F (Vol. 2 Mix)");
+        let titles: Vec<&str> = lines.iter().filter_map(|l| l.title.as_deref()).collect();
+        assert_eq!(titles, vec!["B", "D", "F (Vol. 2 Mix)"]);
+    }
+
+    #[test]
+    fn one_marker_per_line_never_splits() {
+        // A clock inside a title, a duration at the end, a bracketed ordinal.
+        let text = "01. A - 4:20 Anthem 5:32\n[3] C - D\n12:34 E - F [Label]\n";
+        let lines = parse_tracklist(text);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].title.as_deref(), Some("4:20 Anthem 5:32"));
+        assert_eq!(lines[1].artist.as_deref(), Some("C"));
+        assert_eq!(lines[1].timestamp, None);
+        assert_eq!(lines[2].timestamp, Some(754));
     }
 
     #[test]
