@@ -150,7 +150,7 @@ impl App {
         self.tracklist_entries_for = Some(id);
     }
 
-    fn reload_tracklists(&mut self) {
+    pub(crate) fn reload_tracklists(&mut self) {
         self.tracklists = Catalog::open(&self.db_path)
             .and_then(|c| c.list_tracklists())
             .unwrap_or_default();

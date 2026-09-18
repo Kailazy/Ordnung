@@ -19,6 +19,7 @@ impl App {
         let Some(rx) = &self.job_rx else { return false };
         let mut reload = false;
         let mut finished = false;
+        let mut tracklists_changed = false;
         loop {
             match rx.try_recv() {
                 Ok(JobMsg::Status(s)) => self.status = s,
@@ -65,11 +66,8 @@ impl App {
                     }
                 }
                 Ok(JobMsg::VinylChanged) => reload = true,
-                Ok(JobMsg::TracklistChanged(id)) => {
-                    if self.tracklist_entries_for == Some(id) {
-                        self.tracklist_entries_for = None;
-                    }
-                }
+                // The rows and the list's counts both move as lines settle.
+                Ok(JobMsg::TracklistChanged(_)) => tracklists_changed = true,
                 Ok(JobMsg::VinylUsername(u)) => {
                     // Persist the resolved username so the collection link works
                     // across launches. Only write when it actually changed.
@@ -84,6 +82,9 @@ impl App {
                     break;
                 }
             }
+        }
+        if tracklists_changed {
+            self.reload_tracklists();
         }
         if finished {
             self.job_rx = None;
@@ -4291,12 +4292,13 @@ pub(crate) fn run_match_tracklist(
         let mut confidence = tracklist::confidence_for(best_score);
 
         // Verify anything short of Sure against the record's own tracklist:
-        // the chosen one first, then the runner-up. A hit is Sure; two
-        // misses leave the first choice standing as Unsure.
+        // the chosen one first, then the runner-up. A hit is Sure; a record
+        // read that doesn't carry the song leaves the first choice as
+        // Unsure; a record that couldn't be read leaves the local score.
         if confidence < Confidence::Sure {
             if let Some(t) = entry.title.as_deref() {
-                let want = vec![t.to_string()];
                 let mut tried = 0usize;
+                let mut read = 0usize;
                 let mut verified: Option<discogs::ReleaseCandidate> = None;
                 let runner_up = ordered.iter().find(|c| c.release_id != chosen.release_id).cloned();
                 for cand in std::iter::once(chosen.clone()).chain(runner_up) {
@@ -4305,9 +4307,9 @@ pub(crate) fn run_match_tracklist(
                     }
                     tried += 1;
                     let id = cand.release_id.clone();
-                    let detail = catalog.release_cached_or(&id, || client.fetch_release(&id));
-                    if let Ok(detail) = detail {
-                        if detail.file_matches(&want).first().copied().flatten().is_some() {
+                    if let Ok(detail) = catalog.release_cached_or(&id, || client.fetch_release(&id)) {
+                        read += 1;
+                        if detail.carries_title(t) {
                             verified = Some(cand);
                             break;
                         }
@@ -4318,7 +4320,8 @@ pub(crate) fn run_match_tracklist(
                         chosen = c;
                         confidence = Confidence::Sure;
                     }
-                    None => confidence = confidence.min(Confidence::Unsure),
+                    None if read > 0 => confidence = confidence.min(Confidence::Unsure),
+                    None => {}
                 }
             }
         }

@@ -352,7 +352,8 @@ fn normalise(s: &str) -> String {
         out.push(match c {
             '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
             | '\u{2212}' => '-',
-            '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' => '\'',
+            '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' | '\u{00b4}' | '\u{02bc}'
+            | '\u{2032}' | '`' => '\'',
             '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{201f}' => '"',
             '\u{00a0}' | '\u{2007}' | '\u{202f}' | '\t' => ' ',
             c => c,
@@ -505,12 +506,25 @@ fn split_hints(s: &str) -> (String, Option<String>, Option<String>) {
         if body[..start].trim().is_empty() {
             break;
         }
-        if looks_like_catno(&inner) {
+        // `[Label - CAT 01]` carries both; `[CAT 01 - A1]` a number and the
+        // position on it, which the search doesn't need.
+        let (first, second) = match inner.split_once(" - ") {
+            Some((a, b)) => (a.trim().to_string(), Some(b.trim().to_string())),
+            None => (inner, None),
+        };
+        if looks_like_catno(&first) {
             if catno.is_none() {
-                catno = Some(inner);
+                catno = Some(first);
             }
-        } else if label.is_none() {
-            label = Some(inner);
+        } else {
+            if label.is_none() {
+                label = Some(first);
+            }
+            if let Some(s) = second.filter(|s| looks_like_catno(s)) {
+                if catno.is_none() {
+                    catno = Some(s);
+                }
+            }
         }
         body = body[..start].trim_end().to_string();
     }
@@ -576,6 +590,11 @@ fn split_artist_title(body: &str) -> (Option<String>, Option<String>, Option<Str
         };
         return (non_empty(artist), non_empty(&title), label.filter(|l| !l.is_empty()));
     }
+    // A dash glued to one side (`Leafar Legov- When The Morning Comes`,
+    // `Artist -Title`) is still the separator when it's the only one.
+    if let Some((a, tt)) = split_glued_dash(body) {
+        return (non_empty(a), non_empty(tt), None);
+    }
     // Artist "Title"
     if let Some(open) = body.find('"') {
         if let Some(close) = body[open + 1..].find('"') {
@@ -596,6 +615,29 @@ fn split_artist_title(body: &str) -> (Option<String>, Option<String>, Option<Str
         }
     }
     (None, None, None)
+}
+
+/// The one `-` with a space on exactly one side and a word on the other;
+/// `None` when there is none or more than one. A hyphen inside a word
+/// (`Pin-1`, `e-mail`) has words on both sides and never counts.
+fn split_glued_dash(body: &str) -> Option<(&str, &str)> {
+    let chars: Vec<(usize, char)> = body.char_indices().collect();
+    let mut found: Option<usize> = None;
+    for k in 1..chars.len().saturating_sub(1) {
+        if chars[k].1 != '-' {
+            continue;
+        }
+        let (prev, next) = (chars[k - 1].1, chars[k + 1].1);
+        let glued = (prev.is_alphanumeric() && next == ' ') || (prev == ' ' && next.is_alphanumeric());
+        if glued {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(chars[k].0);
+        }
+    }
+    let at = found?;
+    Some((&body[..at], &body[at + 1..]))
 }
 
 fn non_empty(s: &str) -> Option<String> {
@@ -660,13 +702,27 @@ fn artist_agrees(line_artist: &str, hit_artist: &str) -> bool {
     if have == want {
         return true;
     }
-    // Credits join several names with punctuation or a word; split on the
-    // raw punctuation first (folding erases it), then on the joining words.
-    hit_artist
+    let have_parts = credit_parts(hit_artist);
+    if have_parts.iter().any(|p| *p == want) {
+        return true;
+    }
+    // The line credits several too (`Cajmere ft Dajae`): the lead name
+    // agreeing is enough, however the hit writes the rest.
+    let want_parts = credit_parts(line_artist);
+    want_parts.len() > 1
+        && !want_parts[0].is_empty()
+        && have_parts.first().is_some_and(|h| *h == want_parts[0])
+}
+
+/// The names in a credit, folded: `Kerri Chandler & Jerome Sydenham`,
+/// `Dennis Ferrer Feat. Kerri Chandler`, `Cajmere ft Dajae`. Split on the
+/// raw punctuation first (folding erases it), then on the joining words.
+fn credit_parts(credit: &str) -> Vec<String> {
+    credit
         .split([',', '&', '/', '+'])
         .flat_map(|part| {
             let folded = fold_name(part);
-            [" feat ", " featuring ", " and ", " vs ", " x "]
+            [" feat ", " featuring ", " ft ", " and ", " vs ", " x "]
                 .iter()
                 .fold(vec![folded], |acc, sep| {
                     acc.into_iter()
@@ -674,7 +730,8 @@ fn artist_agrees(line_artist: &str, hit_artist: &str) -> bool {
                         .collect()
                 })
         })
-        .any(|part| !part.is_empty() && part == want)
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 /// Score every candidate for a line, best first. Uses only what the search
@@ -1090,5 +1147,28 @@ mod tests {
         assert!(artist_agrees("Kerri Chandler", "Kerri Chandler & Jerome Sydenham"));
         assert!(artist_agrees("Kerri Chandler", "Dennis Ferrer Feat. Kerri Chandler"));
         assert!(!artist_agrees("Kerri Chandler", "Kerri"));
+        assert!(artist_agrees("Cajmere ft Dajae", "Cajmere Featuring Dajae"));
+        assert!(artist_agrees("Cajmere ft Dajae", "Cajmere"));
+        assert!(!artist_agrees("Cajmere ft Dajae", "Dajae"));
+    }
+
+    #[test]
+    fn glued_dash_accent_and_bracketed_position() {
+        let l = line("38:48 Leafar Legov- When The Morning Comes");
+        assert_eq!(l.artist.as_deref(), Some("Leafar Legov"));
+        assert_eq!(l.title.as_deref(), Some("When The Morning Comes"));
+        let l = line("Artist -Title");
+        assert_eq!(l.artist.as_deref(), Some("Artist"));
+        // Two glued dashes are ambiguous; a hyphenated word is not a dash.
+        assert_eq!(line("A- B- C").kind, LineKind::Noise);
+        assert_eq!(at("Pin-1 - Untitled").0.as_deref(), Some("Pin-1"));
+        let l = line("54:40 Moodymann - It´s 2 Late 4 U And Me (youANDme EDIT)");
+        assert_eq!(l.title.as_deref(), Some("It's 2 Late 4 U And Me (youANDme EDIT)"));
+        let l = line("25:20 SnPLO - Unknown [Pin-1 - A1]");
+        assert_eq!(l.catno_hint.as_deref(), Some("Pin-1"));
+        assert_eq!(l.kind, LineKind::Track);
+        let l = line("A - B [Sound Signature - SS 011]");
+        assert_eq!(l.label_hint.as_deref(), Some("Sound Signature"));
+        assert_eq!(l.catno_hint.as_deref(), Some("SS 011"));
     }
 }

@@ -494,6 +494,31 @@ enum Rule {
 }
 
 impl ReleaseDetail {
+    /// Does this release carry a track called `title`? For a pasted
+    /// tracklist line, which may drop the mix name Discogs lists (`Dark &
+    /// Long` for `Dark & Long (Dark Train Mix)`) or carry one Discogs
+    /// doesn't: the two are equal under the loose title key with an
+    /// `(Original Mix)` marker or any bracketed tail dropped on either side.
+    /// A plain word-prefix is not enough (`Blue` is not `Blue Monday`). Any
+    /// position counts, not only the first track.
+    pub fn carries_title(&self, title: &str) -> bool {
+        let forms = |t: &str| {
+            let mut v = title_forms(t);
+            let bare = norm_loose(&without_brackets(t));
+            if !bare.is_empty() && !v.contains(&bare) {
+                v.push(bare);
+            }
+            v.into_iter().map(|f| title_key(&f)).collect::<Vec<_>>()
+        };
+        let wants = forms(title);
+        if wants.is_empty() {
+            return false;
+        }
+        self.tracklist
+            .iter()
+            .any(|t| forms(&t.title).iter().any(|have| wants.contains(have)))
+    }
+
     /// Which video plays each track: one entry per `tracklist` position, holding
     /// an index into `videos` (or `None` when nothing on the release matches).
     /// [`match_videos`](Self::match_videos) without a release artist — see
@@ -1276,6 +1301,18 @@ impl Client {
             ladder.push(vec![("track", title)]);
         } else {
             ladder.push(vec![("artist", artist)]);
+        }
+        // A title with a bracketed tail (`Rubbernotes (5th Gear Edit)`, `The
+        // Word Is Love (Say The Word) (…)`) often fails as typed and finds the
+        // record without it: the bare title is the last rung.
+        let bare = without_brackets(title);
+        if bare != title && !bare.is_empty() {
+            if !artist.is_empty() {
+                ladder.push(vec![("artist", artist), ("track", bare.as_str())]);
+                ladder.push(vec![("q", artist), ("track", bare.as_str())]);
+            } else {
+                ladder.push(vec![("track", bare.as_str())]);
+            }
         }
         for mut params in ladder {
             params.push(("type", "release"));
@@ -2850,6 +2887,22 @@ pub fn strip_original_mix(title: &str) -> &str {
     }
 }
 
+/// A title without its `(…)` / `[…]` parts: `The Word Is Love (Say The
+/// Word) (Steve's Anthem)` → `The Word Is Love`.
+fn without_brackets(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut depth = 0i32;
+    for c in title.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            c if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Drop a trailing Discogs disambiguation number, e.g. `Surgeon (2)` → `Surgeon`.
 fn strip_discogs_number(name: &str) -> String {
     let trimmed = name.trim();
@@ -3452,6 +3505,27 @@ mod tests {
         let (a, t) = split_artist_title("Untitled");
         assert_eq!(a, "");
         assert_eq!(t, "Untitled");
+    }
+
+    #[test]
+    fn carries_title_at_any_position_and_without_the_mix_name() {
+        let mut d = detail();
+        d.tracklist = vec![
+            track("A", "Blue Monday"),
+            track("B", "The Beach"),
+            track("C1", "Dark & Long (Dark Train Mix)"),
+            track("C2", "Instant Bliss (Iron Curtis Drama Mix)"),
+            track("D", "So Many Things (Original Mix)"),
+        ];
+        assert!(d.carries_title("The Beach"));
+        assert!(d.carries_title("Beach"));
+        assert!(d.carries_title("Dark & Long"));
+        assert!(d.carries_title("Instant Bliss (Iron Curtis Drama Mix)"));
+        assert!(d.carries_title("So Many Things"));
+        assert!(!d.carries_title("Dreams"));
+        assert!(!d.carries_title("Blue"));
+        assert_eq!(without_brackets("The Word Is Love (Say The Word) (Steve 'Silk' Hurley's Anthem of Life)"), "The Word Is Love");
+        assert_eq!(without_brackets("Rubbernotes [5th Gear Edit]"), "Rubbernotes");
     }
 
     fn detail() -> ReleaseDetail {
