@@ -344,7 +344,7 @@ impl App {
             wave_lane_h: crate::player::DEFAULT_LANE_H,
             grid_edit_open: false,
             grid_nudge_held: false,
-            cue_edit_open: false,
+            loop_beats: crate::cues::DEFAULT_LOOP_BEATS,
             cue_rename: None,
             update_rx: None,
             update_available: None,

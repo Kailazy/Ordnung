@@ -270,11 +270,16 @@ impl App {
         // The panel grows with the (resizable) lane; the controls row below is a
         // fixed base. Only reserve the lane's extra height when there's a waveform
         // to show — unanalyzed tracks have no lane.
+        // The cue bar stacks above the lane when it's open (see `cues`).
+        let cue_bar = !waveform.is_empty() && self.config.cue_bar_open;
         let panel_h = if waveform.is_empty() {
             150.0
+        } else if cue_bar {
+            PANEL_BASE_H + lane_h + crate::cues::CUE_BAR_H + 8.0
         } else {
             PANEL_BASE_H + lane_h
         };
+        let active_loop = self.active_loop_ms();
         egui::TopBottomPanel::bottom("player")
             .exact_height(panel_h)
             .show(ctx, |ui| {
@@ -284,6 +289,10 @@ impl App {
                 // playhead, scrolling under it during playback. Wheel to zoom,
                 // click/drag to seek. Skipped for unanalyzed tracks (no waveform).
                 if !waveform.is_empty() {
+                    if cue_bar {
+                        self.draw_cue_bar(ui);
+                        ui.add_space(8.0);
+                    }
                     // Prefer the high-res envelope; fall back to the coarse preview
                     // bands while the PCM is still decoding.
                     let (detail, detail_lane) = if hires.is_empty() {
@@ -590,7 +599,15 @@ impl App {
                             Some(shown_frac),
                             (0.0, 1.0),
                         );
-                        crate::cues::draw_cue_markers(painter, rect, &cues, dur, (0.0, 1.0), true);
+                        crate::cues::draw_cue_markers(
+                            painter,
+                            rect,
+                            &cues,
+                            active_loop,
+                            dur,
+                            (0.0, 1.0),
+                            true,
+                        );
                     }
                     let knob_r = if resp.hovered() || self.scrub.is_some() {
                         6.5
@@ -1063,7 +1080,8 @@ impl App {
             }
             // Cue markers: lettered pads and memory ticks, loops as a wash.
             if let Some(cues) = self.now_playing.as_ref().map(|n| n.cues.clone()) {
-                crate::cues::draw_cue_markers(painter, draw_rect, &cues, dur, (w0, w1), false);
+                let active = self.active_loop_ms();
+                crate::cues::draw_cue_markers(painter, draw_rect, &cues, active, dur, (w0, w1), false);
             }
 
             // Fixed playhead line at the window's mapping of the live position.
@@ -1130,8 +1148,8 @@ impl App {
             } else {
                 false
             };
-            // Cue editor: its own tab beside GRID, panel above the lane's left.
-            self.draw_cue_editor(ui, rect);
+            // Cues: the CUES tab beside GRID toggles the cue bar above the lane.
+            self.draw_cue_tab(ui, rect);
 
             // Click/drag to seek — map pointer x back through the window.
             let frac_at = |p: egui::Pos2| {

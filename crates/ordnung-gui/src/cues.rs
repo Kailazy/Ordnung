@@ -1,12 +1,18 @@
-//! Hot and memory cues on the now-playing bar: markers over both waveform
-//! lanes, and the CUES panel that sets, jumps to, loops, names, colours and
-//! deletes them. Every edit is written straight to the catalog
+//! Hot cues, memory cues and the loop on the now-playing bar: markers over
+//! both waveform lanes, and the cue bar, a strip across the top of the zoom
+//! lane laid out the way a player's pad section is. Eight pads (A–H, each
+//! its own colour), the beat loop with its length, Loop/Exit and quantize,
+//! and the memory cue list. Every edit is written straight to the catalog
 //! (`Catalog::set_cues`), so it survives a reload and rides the next USB
-//! export as PCOB/PCO2 entries. Part of the GUI `App`; split out of `player`.
+//! export as PCOB/PCO2 entries. The active loop itself lives in the audio
+//! engine (`AudioEngine::set_loop`) so it really loops, sample-exact. Part
+//! of the GUI `App`; split out of `player`.
 use super::*;
 use ordnung_core::model::Cue;
 
-/// The eight pad colours offered in the panel — rekordbox's hot cue palette.
+/// The eight pad colours, rekordbox's hot cue palette, one per slot A–H:
+/// a pad with no colour of its own takes its slot's, so the eight always
+/// read apart on the pads and on the lanes.
 pub(crate) const CUE_PALETTE: [([u8; 3], &str); 8] = [
     ([255, 0, 23], "Red"),
     ([255, 140, 0], "Orange"),
@@ -18,30 +24,52 @@ pub(crate) const CUE_PALETTE: [([u8; 3], &str); 8] = [
     ([255, 55, 95], "Pink"),
 ];
 
-/// Pad colour for a cue: its own, else the default green.
+/// The colour a slot's pad takes when its cue has none of its own.
+fn slot_rgb(slot: u8) -> [u8; 3] {
+    CUE_PALETTE[(slot as usize) % CUE_PALETTE.len()].0
+}
+
+/// Pad colour for a cue: its own, else its slot's.
 fn cue_rgb(c: &Cue) -> egui::Color32 {
-    let [r, g, b] = c.color.unwrap_or(CUE_PALETTE[3].0);
+    let [r, g, b] = c.color.unwrap_or_else(|| slot_rgb(c.hot_slot.unwrap_or(3)));
     egui::Color32::from_rgb(r, g, b)
 }
 
 /// Memory cues draw in rekordbox's orange.
 const MEMORY_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 159, 10);
 
-/// Default loop length when the track has no beatgrid to count bars on.
-const FALLBACK_LOOP_MS: u64 = 2_000;
+/// The active loop draws in white over the lanes and on the pad that holds it.
+const ACTIVE_LOOP_COLOR: egui::Color32 = egui::Color32::from_rgb(245, 245, 250);
+
+/// rekordbox keeps at most ten memory cues on a track; the export follows.
+pub(crate) const MAX_MEMORY_CUES: usize = 10;
+
+/// Loop lengths the beat loop steps through, in beats.
+pub(crate) const LOOP_BEATS: [u32; 6] = [1, 2, 4, 8, 16, 32];
+/// Index into [`LOOP_BEATS`] a fresh session starts on: four beats, one bar.
+pub(crate) const DEFAULT_LOOP_BEATS: usize = 2;
+
+/// Length of one beat when the track has no beatgrid to count on.
+const FALLBACK_BEAT_MS: f64 = 500.0;
+
+/// Height of the cue bar, headers included.
+pub(crate) const CUE_BAR_H: f32 = 58.0;
 
 /// Paint cue markers over a waveform lane. `window` is the visible span in
 /// track fractions (the zoom lane scrolls; the overview strip is `(0, 1)`).
-/// `compact` draws the overview strip's small ticks instead of lettered flags.
+/// `compact` draws the overview strip's small ticks instead of lettered
+/// flags. `active` is the loop playback is circling right now, drawn in
+/// white over whichever cue (if any) it came from.
 pub(crate) fn draw_cue_markers(
     painter: &egui::Painter,
     rect: egui::Rect,
     cues: &[Cue],
+    active: Option<(u64, u64)>,
     dur_secs: f32,
     window: (f32, f32),
     compact: bool,
 ) {
-    if dur_secs <= 0.0 || cues.is_empty() {
+    if dur_secs <= 0.0 || (cues.is_empty() && active.is_none()) {
         return;
     }
     let (w0, w1) = window;
@@ -50,29 +78,32 @@ pub(crate) fn draw_cue_markers(
         let frac = ms as f32 / 1000.0 / dur_secs;
         rect.left() + ((frac - w0) / span) * rect.width()
     };
+    let wash = |painter: &egui::Painter, start: u64, end: u64, color: egui::Color32, alpha: u8| {
+        let (x0, x1) = (x_of(start), x_of(end));
+        let body = egui::Rect::from_min_max(
+            egui::pos2(x0.max(rect.left()), rect.top()),
+            egui::pos2(x1.min(rect.right()), rect.bottom()),
+        );
+        if body.width() > 0.0 {
+            painter.rect_filled(
+                body,
+                egui::Rounding::ZERO,
+                egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha),
+            );
+        }
+        if x1 >= rect.left() && x1 <= rect.right() {
+            painter.line_segment(
+                [egui::pos2(x1, rect.top()), egui::pos2(x1, rect.bottom())],
+                egui::Stroke::new(1.0, color),
+            );
+        }
+    };
     for c in cues {
         let color = if c.is_hot() { cue_rgb(c) } else { MEMORY_COLOR };
         let x = x_of(c.position_ms);
         // Loop body first, so the markers sit on top of the wash.
         if let Some(end) = c.loop_end_ms {
-            let x1 = x_of(end);
-            let body = egui::Rect::from_min_max(
-                egui::pos2(x.max(rect.left()), rect.top()),
-                egui::pos2(x1.min(rect.right()), rect.bottom()),
-            );
-            if body.width() > 0.0 {
-                painter.rect_filled(
-                    body,
-                    egui::Rounding::ZERO,
-                    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 38),
-                );
-            }
-            if x1 >= rect.left() && x1 <= rect.right() {
-                painter.line_segment(
-                    [egui::pos2(x1, rect.top()), egui::pos2(x1, rect.bottom())],
-                    egui::Stroke::new(1.0, color),
-                );
-            }
+            wash(painter, c.position_ms, end, color, 38);
         }
         if x < rect.left() || x > rect.right() {
             continue;
@@ -143,6 +174,31 @@ pub(crate) fn draw_cue_markers(
             );
         }
     }
+    // The live loop on top of everything: a white wash with both edges
+    // drawn, so it reads as the thing playing rather than another cue.
+    if let Some((start, end)) = active.filter(|(a, b)| b > a) {
+        wash(painter, start, end, ACTIVE_LOOP_COLOR, if compact { 40 } else { 28 });
+        let x0 = x_of(start);
+        if x0 >= rect.left() && x0 <= rect.right() {
+            painter.line_segment(
+                [egui::pos2(x0, rect.top()), egui::pos2(x0, rect.bottom())],
+                egui::Stroke::new(1.0, ACTIVE_LOOP_COLOR),
+            );
+        }
+    }
+}
+
+/// What the loop section of the bar asked for this frame.
+#[derive(Clone, Copy)]
+enum LoopCmd {
+    /// Start a beat loop of the set length at the playhead.
+    BeatLoop,
+    /// Stop looping; playback runs on from where it is.
+    Exit,
+    /// Change the beat length (and resize the live loop with it).
+    Beats(usize),
+    /// Flip quantize.
+    ToggleQuantize,
 }
 
 impl App {
@@ -163,15 +219,21 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Write the loaded track's cue set to the catalog. Device tracks are
-    /// read-only here (their cues live on the stick), so this is a no-op for
-    /// them.
+    /// Write the loaded track's cue set to the catalog. Hot cues that never
+    /// got a colour are given their slot's on the way, so the export shows
+    /// the same eight colours the pads do. Device tracks are read-only here
+    /// (their cues live on the stick), so this is a no-op for them.
     fn commit_cues(&mut self) {
-        let Some(np) = self.now_playing.as_ref() else {
+        let Some(np) = self.now_playing.as_mut() else {
             return;
         };
         if np.id >= USB_ID_BASE {
             return;
+        }
+        for c in np.cues.iter_mut() {
+            if let (Some(slot), None) = (c.hot_slot, c.color) {
+                c.color = Some(slot_rgb(slot));
+            }
         }
         let (id, cues) = (np.id, np.cues.clone());
         match Catalog::open(&self.db_path).and_then(|c| c.set_cues(id, &cues)) {
@@ -180,8 +242,8 @@ impl App {
         }
     }
 
-    /// Where the playhead is right now, in ms — the position every new cue
-    /// lands on.
+    /// Where the playhead is right now, in ms, the position every new cue
+    /// lands on (before quantize).
     fn playhead_ms(&self) -> u64 {
         let Some(a) = self.audio.as_ref() else {
             return 0;
@@ -191,51 +253,140 @@ impl App {
         ((frac * dur).max(0.0) * 1000.0).round() as u64
     }
 
-    /// The length a fresh loop gets: four beats of the lane's grid, or two
-    /// seconds when the track has no tempo.
-    fn default_loop_ms(&self) -> u64 {
+    /// The lane's beat length in ms, when the track has a tempo.
+    fn beat_ms(&self) -> Option<f64> {
         self.now_playing
             .as_ref()
             .and_then(|n| n.grid)
             .filter(|g| g.bpm > 0.0)
-            .map(|g| (4.0 * 60_000.0 / g.bpm as f64).round() as u64)
-            .unwrap_or(FALLBACK_LOOP_MS)
+            .map(|g| 60_000.0 / g.bpm as f64)
     }
 
-    /// Press a hot cue pad: jump to it when set, plant it at the playhead when
-    /// empty. Also the keyboard's 1–8. Device tracks only jump.
+    /// `ms` snapped to the nearest beat of the grid when quantize is on;
+    /// untouched when it's off or the track has no grid.
+    fn snap_ms(&self, ms: u64) -> u64 {
+        if !self.config.cue_quantize {
+            return ms;
+        }
+        let Some(g) = self.now_playing.as_ref().and_then(|n| n.grid) else {
+            return ms;
+        };
+        let period = 60_000.0 / g.bpm.max(1.0) as f64;
+        let i = ((ms as f64 - g.first_beat_ms) / period).round();
+        (g.first_beat_ms + i * period).max(0.0).round() as u64
+    }
+
+    /// The length the beat loop control is set to, in ms: that many beats
+    /// of the grid, or of a 120 bpm stand-in when the track has none.
+    fn loop_len_ms(&self) -> u64 {
+        let beats = LOOP_BEATS[self.loop_beats.min(LOOP_BEATS.len() - 1)] as f64;
+        (beats * self.beat_ms().unwrap_or(FALLBACK_BEAT_MS)).round() as u64
+    }
+
+    /// The loop playback is circling, in ms.
+    pub(crate) fn active_loop_ms(&self) -> Option<(u64, u64)> {
+        self.audio
+            .as_ref()
+            .and_then(|a| a.active_loop())
+            .map(|(a, b)| ((a * 1000.0).round() as u64, (b * 1000.0).round() as u64))
+    }
+
+    fn seek_ms(&mut self, ms: u64) {
+        if let Some(a) = self.audio.as_mut() {
+            a.seek(ms as f32 / 1000.0);
+        }
+        self.scrub = None;
+    }
+
+    /// Jump to `start` and loop up to `end`, the way a loop pad plays.
+    fn engage_loop(&mut self, start: u64, end: u64) {
+        self.seek_ms(start);
+        if let Some(a) = self.audio.as_mut() {
+            a.set_loop(Some((start as f32 / 1000.0, end as f32 / 1000.0)));
+        }
+    }
+
+    fn exit_loop(&mut self) {
+        if let Some(a) = self.audio.as_mut() {
+            a.set_loop(None);
+        }
+    }
+
+    /// The beat loop button: loop the set length from the playhead (snapped
+    /// to the beat with quantize on), without a jump.
+    fn beat_loop_here(&mut self) {
+        let start = self.snap_ms(self.playhead_ms());
+        let end = start + self.loop_len_ms();
+        if let Some(a) = self.audio.as_mut() {
+            a.set_loop(Some((start as f32 / 1000.0, end as f32 / 1000.0)));
+        }
+    }
+
+    /// Step the beat length; a live loop keeps its start and takes the new
+    /// length, like halving and doubling on a player.
+    fn set_loop_beats(&mut self, idx: usize) {
+        self.loop_beats = idx.min(LOOP_BEATS.len() - 1);
+        if let Some((start, _)) = self.active_loop_ms() {
+            let end = start + self.loop_len_ms();
+            if let Some(a) = self.audio.as_mut() {
+                a.set_loop(Some((start as f32 / 1000.0, end as f32 / 1000.0)));
+            }
+        }
+    }
+
+    /// Press a hot cue pad: jump to it when set (a loop pad starts its
+    /// loop), plant it at the playhead when empty. With a loop running, an
+    /// empty pad stores that loop instead, as a player does. Also the
+    /// keyboard's 1–8. Device tracks only jump.
     pub(crate) fn trigger_hot_cue(&mut self, slot: u8) {
         let Some(np) = self.now_playing.as_ref() else {
             return;
         };
-        if let Some(c) = np.cues.iter().find(|c| c.hot_slot == Some(slot)) {
-            let secs = c.position_ms as f32 / 1000.0;
-            if let Some(a) = self.audio.as_mut() {
-                a.seek(secs);
+        let editable = np.id < USB_ID_BASE;
+        let found = np
+            .cues
+            .iter()
+            .find(|c| c.hot_slot == Some(slot))
+            .map(|c| (c.position_ms, c.loop_end_ms));
+        if let Some((start, end)) = found {
+            match end {
+                Some(end) => self.engage_loop(start, end),
+                None => {
+                    self.exit_loop();
+                    self.seek_ms(start);
+                }
             }
-            self.scrub = None;
             return;
         }
-        if np.id >= USB_ID_BASE {
+        if !editable {
             return;
         }
-        let position_ms = self.playhead_ms();
+        let (position_ms, loop_end_ms) = match self.active_loop_ms() {
+            Some((a, b)) => (a, Some(b)),
+            None => (self.snap_ms(self.playhead_ms()), None),
+        };
         if let Some(np) = self.now_playing.as_mut() {
             np.cues.push(Cue {
                 hot_slot: Some(slot),
                 position_ms,
-                loop_end_ms: None,
+                loop_end_ms,
                 label: None,
-                color: None,
+                color: Some(slot_rgb(slot)),
             });
         }
         self.commit_cues();
     }
 
-    /// Add a memory cue (or a memory loop) at the playhead.
+    /// Add a memory cue (or a memory loop) at the playhead. A running loop
+    /// is what "+ Loop" stores; otherwise the loop takes the set beat length.
     fn add_memory_cue(&mut self, as_loop: bool) {
-        let position_ms = self.playhead_ms();
-        let loop_end_ms = as_loop.then(|| position_ms + self.default_loop_ms());
+        let (position_ms, loop_end_ms) = match (as_loop, self.active_loop_ms()) {
+            (true, Some((a, b))) => (a, Some(b)),
+            _ => {
+                let p = self.snap_ms(self.playhead_ms());
+                (p, as_loop.then(|| p + self.loop_len_ms()))
+            }
+        };
         if let Some(np) = self.now_playing.as_mut() {
             if np.id >= USB_ID_BASE {
                 return;
@@ -246,6 +397,10 @@ impl App {
                 .iter()
                 .any(|c| !c.is_hot() && c.position_ms == position_ms)
             {
+                return;
+            }
+            if np.cues.iter().filter(|c| !c.is_hot()).count() >= MAX_MEMORY_CUES {
+                self.status = format!("rekordbox keeps at most {MAX_MEMORY_CUES} memory cues on a track");
                 return;
             }
             np.cues.push(Cue {
@@ -260,10 +415,10 @@ impl App {
         self.commit_cues();
     }
 
-    /// Apply one context-menu action to the cue at `idx` and persist.
+    /// Apply one action to the cue at `idx` and persist.
     fn edit_cue(&mut self, idx: usize, action: CueAction) {
-        let playhead = self.playhead_ms();
-        let loop_len = self.default_loop_ms();
+        let playhead = self.snap_ms(self.playhead_ms());
+        let loop_len = self.loop_len_ms();
         let mut jump = None;
         let mut rename = None;
         if let Some(np) = self.now_playing.as_mut() {
@@ -271,7 +426,7 @@ impl App {
                 return;
             }
             match action {
-                CueAction::Jump => jump = Some(np.cues[idx].position_ms),
+                CueAction::Jump => jump = Some((np.cues[idx].position_ms, np.cues[idx].loop_end_ms)),
                 CueAction::Rename => {
                     rename = Some((idx, np.cues[idx].label.clone().unwrap_or_default()))
                 }
@@ -291,11 +446,14 @@ impl App {
                 }
             }
         }
-        if let Some(ms) = jump {
-            if let Some(a) = self.audio.as_mut() {
-                a.seek(ms as f32 / 1000.0);
+        if let Some((ms, end)) = jump {
+            match end {
+                Some(end) => self.engage_loop(ms, end),
+                None => {
+                    self.exit_loop();
+                    self.seek_ms(ms);
+                }
             }
-            self.scrub = None;
             return;
         }
         if let Some(r) = rename {
@@ -305,33 +463,27 @@ impl App {
         self.commit_cues();
     }
 
-    /// The CUES tab on the zoom lane and, while open, the panel of pads and
-    /// memory cues floating above the lane's left edge (the beatgrid editor
-    /// takes the right). Returns nothing; seeks go straight to the engine.
-    pub(crate) fn draw_cue_editor(&mut self, ui: &mut egui::Ui, lane: egui::Rect) {
-        let Some((editable, cues)) = self
-            .now_playing
-            .as_ref()
-            .map(|n| (n.id < USB_ID_BASE, n.cues.clone()))
-        else {
+    /// The CUES tab on the zoom lane: shows and hides the cue bar above it.
+    pub(crate) fn draw_cue_tab(&mut self, ui: &mut egui::Ui, lane: egui::Rect) {
+        if self.now_playing.is_none() {
             return;
-        };
-
-        // The tab: a pill beside the GRID tab, lit while the panel is open.
+        }
+        // The tab: a pill beside the GRID tab, lit while the bar is showing.
         let tab_rect = egui::Rect::from_min_size(
             egui::pos2(lane.right() - 94.0, lane.top() + 3.0),
             egui::vec2(42.0, 15.0),
         );
         let tab = ui
             .interact(tab_rect, ui.id().with("cue_edit_tab"), egui::Sense::click())
-            .on_hover_note("Hot cues and memory cues");
+            .on_hover_note("Hot cues, loop and memory cues");
         if tab.clicked() {
-            self.cue_edit_open = !self.cue_edit_open;
+            self.config.cue_bar_open = !self.config.cue_bar_open;
+            let _ = self.config.save();
         }
         if tab.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        let (fill, text) = match (self.cue_edit_open, tab.hovered()) {
+        let (fill, text) = match (self.config.cue_bar_open, tab.hovered()) {
             (true, _) => (
                 crate::ui::tokens::color::ACCENT,
                 crate::ui::tokens::color::LABEL,
@@ -357,257 +509,561 @@ impl App {
             crate::ui::tokens::font::caption(),
             text,
         );
-        if !self.cue_edit_open {
+    }
+
+    /// The cue bar: a strip the lane's width, above the zoom lane. Left to
+    /// right: the eight hot cue pads, the loop section, the memory cues.
+    /// Seeks and loops go straight to the engine; edits to the catalog.
+    pub(crate) fn draw_cue_bar(&mut self, ui: &mut egui::Ui) {
+        use crate::ui::tokens::{color, font, radius, space};
+        let Some((editable, cues)) = self
+            .now_playing
+            .as_ref()
+            .map(|n| (n.id < USB_ID_BASE, n.cues.clone()))
+        else {
             return;
-        }
+        };
+        const MARGIN: f32 = 10.0;
+        const GAP: f32 = space::S2;
+        const SECT_GAP: f32 = space::S5;
+        const HEADER_H: f32 = 14.0;
+        const PAD_H: f32 = 40.0;
+        const LOOP_W: f32 = 206.0;
+        const MEM_MIN_W: f32 = 170.0;
+        const ADD_W: f32 = 124.0;
+        /// The add buttons as bare glyphs, for a bar too narrow for words.
+        const ADD_W_COMPACT: f32 = 72.0;
+        const CHIP_H: f32 = 28.0;
+
+        let playhead = self.playhead_ms();
+        let active = self.active_loop_ms();
+        let quantize = self.config.cue_quantize;
+        let beat = self.beat_ms();
+        let beats = LOOP_BEATS[self.loop_beats.min(LOOP_BEATS.len() - 1)];
+        let same_loop = |c: &Cue| -> bool {
+            matches!((active, c.loop_end_ms), (Some((a, b)), Some(end))
+                if a.abs_diff(c.position_ms) <= 2 && b.abs_diff(end) <= 2)
+        };
+        let loop_beats_of = |start: u64, end: u64| -> Option<String> {
+            beat.map(|p| {
+                let n = (end - start) as f64 / p;
+                if (n - n.round()).abs() < 0.05 {
+                    format!("{}", n.round() as u32)
+                } else {
+                    format!("{n:.1}")
+                }
+            })
+        };
 
         let mut pad_hit: Option<u8> = None;
         let mut action: Option<(usize, CueAction)> = None;
         let mut add_memory: Option<bool> = None;
+        let mut loop_cmd: Option<LoopCmd> = None;
         let mut rename_done: Option<Option<String>> = None; // Some(None) = cancel
         let mut rename_buf = self.cue_rename.clone();
-        let playhead = self.playhead_ms();
 
-        crate::ui::window::Window::new("Cues")
-            .id(egui::Id::new("cue_edit_panel"))
-            .title_bar(false)
-            .fixed_at(egui::Align2::LEFT_BOTTOM, egui::pos2(lane.left(), lane.top() - 6.0))
-            .show(ui.ctx(), |ui| {
-                const W: f32 = 296.0;
-                const GAP: f32 = crate::ui::tokens::space::S2;
-                ui.set_width(W);
-                ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+        let width = (ui.available_width() - 2.0 * MARGIN).max(300.0);
+        ui.horizontal(|ui| {
+            ui.add_space(MARGIN);
+            let (bar, _) = ui.allocate_exact_size(egui::vec2(width, CUE_BAR_H), egui::Sense::hover());
+            let painter = ui.painter().clone();
 
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("HOT CUES")
-                            .font(crate::ui::tokens::font::caption())
-                            .color(crate::ui::tokens::color::LABEL_3),
+            let pad_w = ((bar.width() - LOOP_W - MEM_MIN_W - 2.0 * SECT_GAP - 7.0 * GAP) / 8.0)
+                .clamp(40.0, 96.0);
+            let pads_w = 8.0 * pad_w + 7.0 * GAP;
+            let row_top = bar.top() + HEADER_H;
+            let row_h = bar.height() - HEADER_H;
+            let pads_rect = egui::Rect::from_min_size(bar.left_top(), egui::vec2(pads_w, bar.height()));
+            let loop_rect = egui::Rect::from_min_size(
+                egui::pos2(pads_rect.right() + SECT_GAP, bar.top()),
+                egui::vec2(LOOP_W, bar.height()),
+            );
+            let mem_rect = egui::Rect::from_min_max(
+                egui::pos2(loop_rect.right() + SECT_GAP, bar.top()),
+                bar.right_bottom(),
+            );
+            for x in [pads_rect.right() + SECT_GAP / 2.0, loop_rect.right() + SECT_GAP / 2.0] {
+                painter.line_segment(
+                    [egui::pos2(x, row_top + 4.0), egui::pos2(x, bar.bottom() - 4.0)],
+                    egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE),
+                );
+            }
+
+            // Section headers, with a quiet note at each one's right edge.
+            let header = |painter: &egui::Painter, r: egui::Rect, title: &str, note: &str, note_col: egui::Color32| {
+                painter.text(
+                    egui::pos2(r.left() + 1.0, r.top()),
+                    egui::Align2::LEFT_TOP,
+                    title,
+                    font::caption(),
+                    color::LABEL_3,
+                );
+                if !note.is_empty() {
+                    painter.text(
+                        egui::pos2(r.right() - 1.0, r.top()),
+                        egui::Align2::RIGHT_TOP,
+                        note,
+                        font::caption(),
+                        note_col,
                     );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(if editable {
-                                "Empty pad sets, set pad jumps. Keys 1–8."
-                            } else {
-                                "From the stick. Pads jump."
-                            })
-                            .font(crate::ui::tokens::font::caption())
-                            .color(crate::ui::tokens::color::LABEL_3),
-                        );
-                    });
-                });
-
-                // Two rows of four pads.
-                let pad_w = (W - 3.0 * GAP) / 4.0;
-                let pad_h = 36.0;
-                for row in 0..2u8 {
-                    ui.horizontal(|ui| {
-                        for col in 0..4u8 {
-                            let slot = row * 4 + col;
-                            let (rect, resp) = ui.allocate_exact_size(
-                                egui::vec2(pad_w, pad_h),
-                                egui::Sense::click(),
-                            );
-                            let found = cues
-                                .iter()
-                                .enumerate()
-                                .find(|(_, c)| c.hot_slot == Some(slot));
-                            let letter = (b'A' + slot) as char;
-                            let r = crate::ui::tokens::radius::SM;
-                            match found {
-                                Some((_, c)) => {
-                                    let col = cue_rgb(c);
-                                    let fill = if resp.hovered() {
-                                        col
-                                    } else {
-                                        egui::Color32::from_rgba_unmultiplied(
-                                            col.r(),
-                                            col.g(),
-                                            col.b(),
-                                            200,
-                                        )
-                                    };
-                                    ui.painter().rect_filled(rect, egui::Rounding::same(r), fill);
-                                    let ink = egui::Color32::from_gray(18);
-                                    ui.painter().text(
-                                        rect.left_top() + egui::vec2(6.0, 4.0),
-                                        egui::Align2::LEFT_TOP,
-                                        letter,
-                                        crate::ui::tokens::font::strong(13.0),
-                                        ink,
-                                    );
-                                    if c.is_loop() {
-                                        ui.painter().text(
-                                            rect.right_top() + egui::vec2(-6.0, 4.0),
-                                            egui::Align2::RIGHT_TOP,
-                                            "⟲",
-                                            crate::ui::tokens::font::caption(),
-                                            ink,
-                                        );
-                                    }
-                                    let sub = match c.label.as_deref().filter(|l| !l.is_empty()) {
-                                        Some(l) => l.to_string(),
-                                        None => fmt_time(c.position_ms as f32 / 1000.0),
-                                    };
-                                    ui.painter().text(
-                                        rect.left_bottom() + egui::vec2(6.0, -4.0),
-                                        egui::Align2::LEFT_BOTTOM,
-                                        sub,
-                                        crate::ui::tokens::font::caption(),
-                                        ink,
-                                    );
-                                }
-                                None => {
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        egui::Rounding::same(r),
-                                        if resp.hovered() && editable {
-                                            crate::ui::tokens::color::SURFACE_HOVER
-                                        } else {
-                                            crate::ui::tokens::color::SURFACE_HI
-                                        },
-                                    );
-                                    ui.painter().text(
-                                        rect.left_top() + egui::vec2(6.0, 4.0),
-                                        egui::Align2::LEFT_TOP,
-                                        letter,
-                                        crate::ui::tokens::font::strong(13.0),
-                                        crate::ui::tokens::color::LABEL_4,
-                                    );
-                                    if resp.hovered() && editable {
-                                        ui.painter().text(
-                                            rect.left_bottom() + egui::vec2(6.0, -4.0),
-                                            egui::Align2::LEFT_BOTTOM,
-                                            fmt_time(playhead as f32 / 1000.0),
-                                            crate::ui::tokens::font::caption(),
-                                            crate::ui::tokens::color::LABEL_2,
-                                        );
-                                    }
-                                }
-                            }
-                            if resp.hovered() && (found.is_some() || editable) {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                            }
-                            if resp.clicked() {
-                                pad_hit = Some(slot);
-                            }
-                            if let Some((idx, c)) = found {
-                                let note = format!(
-                                    "Hot cue {letter} at {}",
-                                    fmt_time(c.position_ms as f32 / 1000.0)
-                                );
-                                resp.clone().on_hover_note(note);
-                                let is_loop = c.is_loop();
-                                resp.context_menu(|ui| {
-                                    cue_context_menu(ui, idx, is_loop, editable, playhead > c.position_ms, &mut action);
-                                });
-                            }
-                        }
-                    });
                 }
+            };
+            header(
+                &painter,
+                pads_rect,
+                "HOT CUES",
+                if editable { "Keys 1–8" } else { "From the stick" },
+                color::LABEL_4,
+            );
+            let loop_note = match active {
+                Some((a, b)) => match loop_beats_of(a, b) {
+                    Some(n) => format!("{n} beats"),
+                    None => format!("{:.1} s", (b - a) as f64 / 1000.0),
+                },
+                None => String::new(),
+            };
+            header(&painter, loop_rect, "LOOP", &loop_note, ACTIVE_LOOP_COLOR);
+            let memory: Vec<(usize, &Cue)> = cues
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| !c.is_hot())
+                .collect();
+            header(
+                &painter,
+                mem_rect,
+                "MEMORY CUES",
+                &if editable { format!("{}/{MAX_MEMORY_CUES}", memory.len()) } else { String::new() },
+                color::LABEL_4,
+            );
 
-                ui.add_space(crate::ui::tokens::space::S1);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("MEMORY CUES")
-                            .font(crate::ui::tokens::font::caption())
-                            .color(crate::ui::tokens::color::LABEL_3),
-                    );
-                    if editable {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            crate::ui::control_row(ui, |ui| {
-                                if ui
-                                    .button("⟲ Loop")
-                                    .on_hover_note("Memory loop at the playhead")
-                                    .clicked()
-                                {
-                                    add_memory = Some(true);
-                                }
-                                if ui
-                                    .button("+ Cue")
-                                    .on_hover_note("Memory cue at the playhead")
-                                    .clicked()
-                                {
-                                    add_memory = Some(false);
-                                }
-                            });
-                        });
-                    }
-                });
-
-                let memory: Vec<(usize, &Cue)> = cues
+            // --- Pads ---------------------------------------------------
+            let pad_top = row_top + (row_h - PAD_H) / 2.0;
+            for slot in 0..8u8 {
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(pads_rect.left() + slot as f32 * (pad_w + GAP), pad_top),
+                    egui::vec2(pad_w, PAD_H),
+                );
+                let id = ui.id().with(("cue_pad", slot));
+                let resp = ui.interact(rect, id, egui::Sense::click());
+                let found = cues
                     .iter()
                     .enumerate()
-                    .filter(|(_, c)| !c.is_hot())
-                    .collect();
-                if memory.is_empty() {
-                    ui.label(
-                        egui::RichText::new("None yet")
-                            .font(crate::ui::tokens::font::footnote())
-                            .color(crate::ui::tokens::color::LABEL_4),
-                    );
-                } else {
-                    ui.horizontal_wrapped(|ui| {
-                        for (idx, c) in memory {
-                            let mut text = fmt_time(c.position_ms as f32 / 1000.0);
-                            if c.is_loop() {
-                                text.push_str(" ⟲");
+                    .find(|(_, c)| c.hot_slot == Some(slot));
+                let letter = (b'A' + slot) as char;
+                let r = radius::SM;
+                match found {
+                    Some((idx, c)) => {
+                        let col = cue_rgb(c);
+                        let lit = same_loop(c);
+                        // A rubber pad: the colour, with a darker lip at the
+                        // bottom so it stands off the bar; full brightness
+                        // under the pointer.
+                        let body_col = if resp.hovered() || lit {
+                            col
+                        } else {
+                            egui::Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 205)
+                        };
+                        painter.rect_filled(rect, egui::Rounding::same(r), col.gamma_multiply(0.45));
+                        let body = egui::Rect::from_min_max(rect.min, rect.max - egui::vec2(0.0, 3.0));
+                        painter.rect_filled(body, egui::Rounding::same(r), body_col);
+                        if lit {
+                            painter.rect_stroke(
+                                rect,
+                                egui::Rounding::same(r),
+                                egui::Stroke::new(2.0, ACTIVE_LOOP_COLOR),
+                            );
+                        }
+                        let ink = egui::Color32::from_gray(16);
+                        painter.text(
+                            rect.left_top() + egui::vec2(6.0, 3.0),
+                            egui::Align2::LEFT_TOP,
+                            letter,
+                            font::strong(14.0),
+                            ink,
+                        );
+                        let sub = match c.label.as_deref().filter(|l| !l.is_empty()) {
+                            Some(l) => l.to_string(),
+                            None => fmt_time(c.position_ms as f32 / 1000.0),
+                        };
+                        painter.text(
+                            rect.left_bottom() + egui::vec2(6.0, -5.0),
+                            egui::Align2::LEFT_BOTTOM,
+                            sub,
+                            font::mono_small(),
+                            ink,
+                        );
+                        // Top right: the loop badge, or the ✕ while hovered.
+                        let x_rect = egui::Rect::from_min_size(
+                            rect.right_top() + egui::vec2(-18.0, 2.0),
+                            egui::vec2(16.0, 16.0),
+                        );
+                        let x_resp = if editable && resp.hovered() {
+                            let x_resp = ui.interact(x_rect, id.with("x"), egui::Sense::click());
+                            crate::ui::icon::close(
+                                &painter,
+                                x_rect.center(),
+                                if x_resp.hovered() { egui::Color32::WHITE } else { ink },
+                                3.5,
+                            );
+                            Some(x_resp.on_hover_note(format!("Remove hot cue {letter}")))
+                        } else {
+                            None
+                        };
+                        if x_resp.is_none() {
+                            if let Some(end) = c.loop_end_ms {
+                                let badge = match loop_beats_of(c.position_ms, end) {
+                                    Some(n) if pad_w >= 60.0 => format!("⟲{n}"),
+                                    _ => "⟲".to_string(),
+                                };
+                                painter.text(
+                                    rect.right_top() + egui::vec2(-6.0, 3.0),
+                                    egui::Align2::RIGHT_TOP,
+                                    badge,
+                                    font::strong(11.0),
+                                    ink,
+                                );
                             }
-                            if let Some(l) = c.label.as_deref().filter(|l| !l.is_empty()) {
-                                text.push_str("  ");
-                                text.push_str(l);
-                            }
-                            let chip = egui::Button::new(
-                                egui::RichText::new(text)
-                                    .font(crate::ui::tokens::font::footnote())
-                                    .color(MEMORY_COLOR),
-                            )
-                            .fill(crate::ui::tokens::color::SURFACE_HI)
-                            .rounding(crate::ui::tokens::radius::XS);
-                            let resp = ui.add(chip).on_hover_note("Jump to this cue");
-                            if resp.clicked() {
-                                action = Some((idx, CueAction::Jump));
-                            }
-                            let is_loop = c.is_loop();
-                            let after = playhead > c.position_ms;
-                            resp.context_menu(|ui| {
-                                cue_context_menu(ui, idx, is_loop, editable, after, &mut action);
+                        }
+                        let note = format!(
+                            "Hot cue {letter} at {}{}",
+                            fmt_time(c.position_ms as f32 / 1000.0),
+                            if c.is_loop() { ", a loop" } else { "" }
+                        );
+                        if x_resp.as_ref().map_or(false, |x| x.clicked()) {
+                            action = Some((idx, CueAction::Delete));
+                        } else if resp.clicked() {
+                            pad_hit = Some(slot);
+                        }
+                        if resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        let is_loop = c.is_loop();
+                        resp.clone().on_hover_note(note).context_menu(|ui| {
+                            cue_context_menu(ui, idx, is_loop, editable, playhead > c.position_ms, &mut action);
+                        });
+                    }
+                    None => {
+                        let hot = resp.hovered() && editable;
+                        painter.rect_filled(
+                            rect,
+                            egui::Rounding::same(r),
+                            if hot { color::SURFACE_HOVER } else { color::FIELD },
+                        );
+                        painter.rect_stroke(
+                            rect,
+                            egui::Rounding::same(r),
+                            egui::Stroke::new(1.0, if hot { color::OUTLINE_HOVER } else { color::SURFACE_HI }),
+                        );
+                        painter.text(
+                            rect.left_top() + egui::vec2(6.0, 3.0),
+                            egui::Align2::LEFT_TOP,
+                            letter,
+                            font::strong(14.0),
+                            if hot { color::LABEL_2 } else { color::LABEL_4 },
+                        );
+                        if hot {
+                            let sub = match active {
+                                Some(_) => "store loop".to_string(),
+                                None => fmt_time(self.snap_ms(playhead) as f32 / 1000.0),
+                            };
+                            painter.text(
+                                rect.left_bottom() + egui::vec2(6.0, -5.0),
+                                egui::Align2::LEFT_BOTTOM,
+                                sub,
+                                font::mono_small(),
+                                color::LABEL_2,
+                            );
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if resp.clicked() && editable {
+                            pad_hit = Some(slot);
+                        }
+                        if editable {
+                            resp.on_hover_note(if active.is_some() {
+                                "Store the running loop on this pad"
+                            } else {
+                                "Set a hot cue at the playhead"
                             });
                         }
-                    });
+                    }
                 }
+            }
 
-                // Inline rename for the cue picked from a context menu.
-                if let Some((idx, buf)) = rename_buf.as_mut() {
-                    ui.add_space(crate::ui::tokens::space::S1);
+            // --- Loop -----------------------------------------------------
+            let loop_row = egui::Rect::from_min_max(
+                egui::pos2(loop_rect.left(), row_top),
+                loop_rect.right_bottom(),
+            );
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(loop_row), |ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = GAP;
                     crate::ui::control_row(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        let idx = self.loop_beats.min(LOOP_BEATS.len() - 1);
+                        if crate::ui::button::glyph(ui, "‹", idx > 0)
+                            .on_hover_note("Halve the loop")
+                            .clicked()
+                        {
+                            loop_cmd = Some(LoopCmd::Beats(idx - 1));
+                        }
+                        let (lr, _) = ui.allocate_exact_size(
+                            egui::vec2(30.0, crate::ui::control_h(ui)),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(lr, egui::Rounding::same(radius::SM), color::FIELD);
+                        ui.painter().text(
+                            lr.center(),
+                            egui::Align2::CENTER_CENTER,
+                            beats.to_string(),
+                            font::strong(13.0),
+                            if active.is_some() { ACTIVE_LOOP_COLOR } else { color::LABEL },
+                        );
+                        if crate::ui::button::glyph(ui, "›", idx + 1 < LOOP_BEATS.len())
+                            .on_hover_note("Double the loop")
+                            .clicked()
+                        {
+                            loop_cmd = Some(LoopCmd::Beats(idx + 1));
+                        }
+                        let loop_label = if active.is_some() { "Exit" } else { "Loop" };
+                        let loop_btn = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(loop_label).color(if active.is_some() {
+                                    egui::Color32::from_gray(16)
+                                } else {
+                                    color::LABEL
+                                }),
+                            )
+                            .fill(if active.is_some() { ACTIVE_LOOP_COLOR } else { color::SURFACE_HI })
+                            .min_size(egui::vec2(48.0, 0.0)),
+                        );
+                        if loop_btn
+                            .on_hover_note(if active.is_some() {
+                                "Stop looping"
+                            } else {
+                                "Loop this many beats from the playhead"
+                            })
+                            .clicked()
+                        {
+                            loop_cmd = Some(if active.is_some() { LoopCmd::Exit } else { LoopCmd::BeatLoop });
+                        }
+                        let q = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new("Q")
+                                    .font(font::strong(13.0))
+                                    .color(if quantize { egui::Color32::from_gray(16) } else { color::LABEL_2 }),
+                            )
+                            .fill(if quantize { color::ACCENT_HOVER } else { color::SURFACE_HI })
+                            .min_size(egui::vec2(30.0, 0.0)),
+                        );
+                        if q
+                            .on_hover_note(if quantize {
+                                "Quantize on: cues and loops snap to the beat"
+                            } else {
+                                "Quantize off: cues land exactly at the playhead"
+                            })
+                            .clicked()
+                        {
+                            loop_cmd = Some(LoopCmd::ToggleQuantize);
+                        }
+                    });
+                });
+            });
+
+            // --- Memory cues ---------------------------------------------
+            let compact_add = mem_rect.width() < ADD_W + SECT_GAP + 120.0;
+            let add_w = match (editable, compact_add) {
+                (false, _) => 0.0,
+                (true, false) => ADD_W,
+                (true, true) => ADD_W_COMPACT,
+            };
+            let chips_row = egui::Rect::from_min_max(
+                egui::pos2(mem_rect.left(), row_top),
+                egui::pos2(mem_rect.right() - add_w - if editable { SECT_GAP } else { 0.0 }, mem_rect.bottom()),
+            );
+            let add_row = egui::Rect::from_min_max(
+                egui::pos2(mem_rect.right() - add_w, row_top),
+                mem_rect.right_bottom(),
+            );
+            if editable {
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(add_row), |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = GAP;
+                        crate::ui::control_row(ui, |ui| {
+                            let full = memory.len() >= MAX_MEMORY_CUES;
+                            if crate::ui::button::button_enabled(ui, !full, if compact_add { "⟲" } else { "+ Loop" })
+                                .on_hover_note(if active.is_some() {
+                                    "Save the running loop as a memory loop"
+                                } else {
+                                    "Memory loop of the set length at the playhead"
+                                })
+                                .clicked()
+                            {
+                                add_memory = Some(true);
+                            }
+                            if crate::ui::button::button_enabled(ui, !full, if compact_add { "+" } else { "+ Cue" })
+                                .on_hover_note("Memory cue at the playhead")
+                                .clicked()
+                            {
+                                add_memory = Some(false);
+                            }
+                        });
+                    });
+                });
+            }
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(chips_row), |ui| {
+                // The strip scrolls; nothing of it may run under the buttons.
+                ui.set_clip_rect(chips_row.intersect(ui.clip_rect()));
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = GAP;
+                    // Renaming: the strip becomes the name field until Save.
+                    if let Some((idx, buf)) = rename_buf.as_mut() {
+                        crate::ui::control_row(ui, |ui| {
                             let edit = ui.add(
                                 crate::ui::field::Field::singleline(buf)
                                     .hint("Cue name")
-                                    .width(W - 120.0),
+                                    .width((chips_row.width() - 130.0).max(80.0)),
                             );
                             if !edit.has_focus() && !edit.lost_focus() {
                                 edit.request_focus();
                             }
                             let enter = edit.lost_focus()
                                 && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            if ui.button("Save").clicked() || enter {
+                            if crate::ui::button::button(ui, "Save").clicked() || enter {
                                 rename_done = Some(Some(buf.clone()));
                             }
-                            if ui.button("Cancel").clicked()
+                            if crate::ui::button::button(ui, "Cancel").clicked()
                                 || ui.input(|i| i.key_pressed(egui::Key::Escape))
                             {
                                 rename_done = Some(None);
                             }
                             let _ = idx;
                         });
-                    });
-                }
+                        return;
+                    }
+                    if memory.is_empty() {
+                        ui.label(
+                            egui::RichText::new(if editable {
+                                "None yet. + Cue marks the playhead."
+                            } else {
+                                "None on the stick."
+                            })
+                            .font(font::footnote())
+                            .color(color::LABEL_4),
+                        );
+                        return;
+                    }
+                    egui::ScrollArea::horizontal()
+                        .id_salt("memory_cue_strip")
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = GAP;
+                            for (idx, c) in &memory {
+                                let (idx, c) = (*idx, *c);
+                                let glyph = if c.is_loop() { "⟲" } else { "▸" };
+                                let mut text = format!("{glyph} {}", fmt_time(c.position_ms as f32 / 1000.0));
+                                if let (Some(end), true) = (c.loop_end_ms, c.is_loop()) {
+                                    if let Some(n) = loop_beats_of(c.position_ms, end) {
+                                        text.push_str(&format!(" ·{n}"));
+                                    }
+                                }
+                                let label = c.label.as_deref().filter(|l| !l.is_empty());
+                                let g_time = ui.fonts(|f| {
+                                    f.layout_no_wrap(text.clone(), font::mono_small(), MEMORY_COLOR)
+                                });
+                                let g_label = label.map(|l| {
+                                    ui.fonts(|f| {
+                                        f.layout_no_wrap(l.to_string(), font::footnote(), color::LABEL_2)
+                                    })
+                                });
+                                let pad_x = 8.0;
+                                let x_w = if editable { 16.0 } else { 0.0 };
+                                let w = pad_x
+                                    + g_time.size().x
+                                    + g_label.as_ref().map_or(0.0, |g| 6.0 + g.size().x)
+                                    + x_w
+                                    + pad_x;
+                                let (rect, resp) = ui.allocate_exact_size(
+                                    egui::vec2(w, CHIP_H),
+                                    egui::Sense::click(),
+                                );
+                                let lit = same_loop(c);
+                                ui.painter().rect_filled(
+                                    rect,
+                                    egui::Rounding::same(radius::SM),
+                                    if resp.hovered() { color::SURFACE_HOVER } else { color::SURFACE_HI },
+                                );
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    egui::Rounding::same(radius::SM),
+                                    egui::Stroke::new(
+                                        1.0,
+                                        if lit { MEMORY_COLOR } else { color::OUTLINE },
+                                    ),
+                                );
+                                let mut x = rect.left() + pad_x;
+                                ui.painter().galley(
+                                    egui::pos2(x, rect.center().y - g_time.size().y / 2.0),
+                                    g_time.clone(),
+                                    MEMORY_COLOR,
+                                );
+                                x += g_time.size().x;
+                                if let Some(g) = &g_label {
+                                    x += 6.0;
+                                    ui.painter().galley(
+                                        egui::pos2(x, rect.center().y - g.size().y / 2.0),
+                                        g.clone(),
+                                        color::LABEL_2,
+                                    );
+                                }
+                                let mut x_clicked = false;
+                                if editable {
+                                    let x_rect = egui::Rect::from_center_size(
+                                        egui::pos2(rect.right() - pad_x - 6.0, rect.center().y),
+                                        egui::vec2(16.0, 16.0),
+                                    );
+                                    let x_resp = ui
+                                        .interact(x_rect, resp.id.with("x"), egui::Sense::click())
+                                        .on_hover_note("Remove this memory cue");
+                                    crate::ui::icon::close(
+                                        ui.painter(),
+                                        x_rect.center(),
+                                        if x_resp.hovered() { egui::Color32::WHITE } else { color::LABEL_3 },
+                                        3.5,
+                                    );
+                                    x_clicked = x_resp.clicked();
+                                }
+                                if resp.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                if x_clicked {
+                                    action = Some((idx, CueAction::Delete));
+                                } else if resp.clicked() {
+                                    action = Some((idx, CueAction::Jump));
+                                }
+                                let is_loop = c.is_loop();
+                                let after = playhead > c.position_ms;
+                                resp.on_hover_note(if is_loop { "Play this loop" } else { "Jump to this cue" })
+                                    .context_menu(|ui| {
+                                        cue_context_menu(ui, idx, is_loop, editable, after, &mut action);
+                                    });
+                            }
+                        });
+                });
             });
+        });
 
         if let Some(slot) = pad_hit {
             self.trigger_hot_cue(slot);
+        }
+        match loop_cmd {
+            Some(LoopCmd::BeatLoop) => self.beat_loop_here(),
+            Some(LoopCmd::Exit) => self.exit_loop(),
+            Some(LoopCmd::Beats(i)) => self.set_loop_beats(i),
+            Some(LoopCmd::ToggleQuantize) => {
+                self.config.cue_quantize = !self.config.cue_quantize;
+                let _ = self.config.save();
+            }
+            None => {}
         }
         if let Some(as_loop) = add_memory {
             self.add_memory_cue(as_loop);
@@ -661,7 +1117,7 @@ fn cue_context_menu(
     playhead_after: bool,
     action: &mut Option<(usize, CueAction)>,
 ) {
-    if ui.button("Jump to cue").clicked() {
+    if ui.button(if is_loop { "Play loop" } else { "Jump to cue" }).clicked() {
         *action = Some((idx, CueAction::Jump));
         ui.close_menu();
     }
@@ -678,16 +1134,16 @@ fn cue_context_menu(
     }
     ui.separator();
     if is_loop {
-        if ui.button("Remove loop").clicked() {
+        if ui.button("Make it a point").clicked() {
             *action = Some((idx, CueAction::ClearLoop));
             ui.close_menu();
         }
-    } else if ui.button("Loop 4 beats").clicked() {
+    } else if ui.button("Make it a loop").clicked() {
         *action = Some((idx, CueAction::LoopDefault));
         ui.close_menu();
     }
     if ui
-        .add_enabled(playhead_after, egui::Button::new("Loop to playhead"))
+        .add_enabled(playhead_after, egui::Button::new("Loop out at playhead"))
         .clicked()
     {
         *action = Some((idx, CueAction::LoopToPlayhead));
@@ -720,5 +1176,31 @@ fn cue_context_menu(
     if ui.button("Delete cue").clicked() {
         *action = Some((idx, CueAction::Delete));
         ui.close_menu();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_slot_gets_its_own_colour() {
+        let mut seen = std::collections::HashSet::new();
+        for slot in 0..Cue::HOT_SLOTS {
+            assert!(seen.insert(slot_rgb(slot)), "slot {slot} repeats a colour");
+        }
+    }
+
+    #[test]
+    fn uncoloured_cue_takes_its_slot_colour() {
+        let c = Cue {
+            hot_slot: Some(5),
+            position_ms: 0,
+            loop_end_ms: None,
+            label: None,
+            color: None,
+        };
+        let [r, g, b] = slot_rgb(5);
+        assert_eq!(cue_rgb(&c), egui::Color32::from_rgb(r, g, b));
     }
 }

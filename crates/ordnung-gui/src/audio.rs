@@ -116,6 +116,8 @@ impl StreamingPcm {
 /// layout is preserved.
 struct BufferSource {
     pcm: Arc<StreamingPcm>,
+    /// The engine's active loop, read at every chunk refill (see [`LoopRegion`]).
+    looping: Arc<LoopRegion>,
     pos: usize,
     /// Locally cached run of samples starting at `chunk_start`.
     chunk: Vec<f32>,
@@ -124,14 +126,46 @@ struct BufferSource {
     channels: u16,
 }
 
+/// The active loop, shared between the engine (which sets it from the cue
+/// panel) and the playing [`BufferSource`] (which honours it on the audio
+/// thread). Bounds are interleaved sample indices, frame-aligned; `end == 0`
+/// means no loop. The source clamps each refill chunk to `end` and jumps
+/// back to `start` when it gets there, so the loop point is sample-exact and
+/// a change takes effect within one chunk (~90 ms).
+#[derive(Default)]
+pub struct LoopRegion {
+    start: AtomicUsize,
+    end: AtomicUsize,
+}
+
+impl LoopRegion {
+    fn get(&self) -> Option<(usize, usize)> {
+        let end = self.end.load(Ordering::Acquire);
+        (end > 0).then(|| (self.start.load(Ordering::Acquire), end))
+    }
+
+    fn set(&self, region: Option<(usize, usize)>) {
+        let (start, end) = region.unwrap_or((0, 0));
+        self.start.store(start, Ordering::Release);
+        self.end.store(end, Ordering::Release);
+    }
+}
+
 /// How many samples `BufferSource` copies out per lock. ~0.09 s of 48 kHz
 /// stereo: small enough to stay responsive, large enough that locking is noise.
 const REFILL_SAMPLES: usize = 16_384;
 
 impl BufferSource {
-    fn new(pcm: Arc<StreamingPcm>, pos: usize, sample_rate: u32, channels: u16) -> Self {
+    fn new(
+        pcm: Arc<StreamingPcm>,
+        looping: Arc<LoopRegion>,
+        pos: usize,
+        sample_rate: u32,
+        channels: u16,
+    ) -> Self {
         Self {
             pcm,
+            looping,
             pos,
             chunk: Vec::new(),
             chunk_start: pos,
@@ -151,10 +185,24 @@ impl Iterator for BufferSource {
                 self.pos += 1;
                 return Some(s);
             }
+            // At the loop's end, wrap to its start before refilling; the
+            // chunk below then stops exactly at the end so the wrap lands
+            // on the sample.
+            let looping = self.looping.get();
+            if let Some((start, end)) = looping {
+                if self.pos >= end && start < end {
+                    self.pos = start;
+                }
+            }
             let len = self.pcm.published_len();
             if self.pos < len {
                 let data = self.pcm.data.read().unwrap();
-                let end = len.min(self.pos + REFILL_SAMPLES).min(data.len());
+                let mut end = len.min(self.pos + REFILL_SAMPLES).min(data.len());
+                if let Some((_, loop_end)) = looping {
+                    if loop_end > self.pos {
+                        end = end.min(loop_end);
+                    }
+                }
                 self.chunk_start = self.pos;
                 self.chunk.clear();
                 self.chunk.extend_from_slice(&data[self.pos..end]);
@@ -221,6 +269,12 @@ pub struct AudioEngine {
     /// Cancels the in-flight decode thread when the track is superseded, so a
     /// skipped-past long file doesn't keep a core busy for minutes.
     load_cancel: Option<Arc<AtomicBool>>,
+    /// The active loop as the audio thread sees it (sample bounds), shared
+    /// with every `BufferSource` the engine builds.
+    loop_region: Arc<LoopRegion>,
+    /// The active loop in seconds, `(start, end)`, for the wall-clock
+    /// position and the UI. `None` when playback runs straight through.
+    loop_secs: Option<(f32, f32)>,
     sample_rate: u32,
     /// Channel count of the loaded track (interleaved in `samples`).
     channels: u16,
@@ -277,6 +331,8 @@ impl AudioEngine {
             pcm_buf: None,
             decode_done: false,
             load_cancel: None,
+            loop_region: Arc::new(LoopRegion::default()),
+            loop_secs: None,
             sample_rate: 0,
             channels: 1,
             duration: 0.0,
@@ -328,11 +384,56 @@ impl AudioEngine {
 
     /// Current playback position in seconds, clamped to the track length.
     pub fn position(&self) -> f32 {
-        let p = match self.started_at {
+        let mut p = match self.started_at {
             Some(t) => self.base_secs + t.elapsed().as_secs_f32(),
             None => self.base_secs,
         };
+        // The audio thread wraps at the loop end; fold the wall clock the
+        // same way so the playhead circles the loop with it.
+        if let Some((a, b)) = self.loop_secs {
+            if b > a && p >= b {
+                p = a + (p - a) % (b - a);
+            }
+        }
         p.clamp(0.0, self.duration)
+    }
+
+    /// The active loop `(start, end)` in seconds, if playback is looping.
+    pub fn active_loop(&self) -> Option<(f32, f32)> {
+        self.loop_secs
+    }
+
+    /// Start looping between `start` and `end` seconds, or stop looping with
+    /// `None`. Playback that is past the loop's end jumps to its start; before
+    /// the start, it runs into the loop. Clearing keeps the current position.
+    pub fn set_loop(&mut self, region: Option<(f32, f32)>) {
+        if self.current.is_none() {
+            return;
+        }
+        // Rebase the clock on the position as the old loop folded it, so the
+        // new fold (or none) starts from where the playhead actually is.
+        let now = self.position();
+        self.base_secs = now;
+        if self.started_at.is_some() {
+            self.started_at = Some(Instant::now());
+        }
+        let region = region.filter(|(a, b)| b > a && *a >= 0.0);
+        match region {
+            Some((a, b)) => {
+                let b = b.min(self.duration.max(a + 0.01));
+                self.loop_secs = Some((a, b));
+                let ch = self.channels.max(1) as usize;
+                let frame = |secs: f32| (secs * self.sample_rate as f32) as usize * ch;
+                self.loop_region.set(Some((frame(a), frame(b))));
+                if now >= b {
+                    self.seek(a);
+                }
+            }
+            None => {
+                self.loop_secs = None;
+                self.loop_region.set(None);
+            }
+        }
     }
 
     /// Length of the loaded track in seconds (0 when nothing is loaded).
@@ -491,7 +592,14 @@ impl AudioEngine {
             }
         }
         let was_playing = self.is_playing();
-        self.start_sink_at(secs.clamp(0.0, max));
+        let target = secs.clamp(0.0, max);
+        if let Some((a, b)) = self.loop_secs {
+            if target < a || target >= b {
+                self.loop_secs = None;
+                self.loop_region.set(None);
+            }
+        }
+        self.start_sink_at(target);
         if !was_playing {
             if let Some(s) = &self.sink {
                 s.pause();
@@ -518,6 +626,7 @@ impl AudioEngine {
                 let pos = (frame * ch).min(pcm.published_len());
                 sink.append(BufferSource::new(
                     pcm,
+                    self.loop_region.clone(),
                     pos,
                     self.sample_rate,
                     self.channels.max(1),
@@ -559,6 +668,8 @@ impl AudioEngine {
         self.started_at = None;
         self.base_secs = 0.0;
         self.duration = 0.0;
+        self.loop_secs = None;
+        self.loop_region.set(None);
         self.np_meta = None;
         self.status_dirty = true;
     }
@@ -692,6 +803,8 @@ impl AudioEngine {
                     self.decode_done = false;
                     self.current = Some(id);
                     self.base_secs = 0.0;
+                    self.loop_secs = None;
+                    self.loop_region.set(None);
                     self.start_sink_at(0.0);
                     // A provisional duration is known now — refresh the OS
                     // panel so its scrubber shows the track length.
@@ -810,14 +923,14 @@ mod tests {
 
     #[test]
     fn buffer_source_reports_duration_and_drains() {
-        let src = BufferSource::new(finished_pcm(vec![0.0; 100]), 0, 50, 1);
+        let src = BufferSource::new(finished_pcm(vec![0.0; 100]), Arc::new(LoopRegion::default()), 0, 50, 1);
         assert_eq!(src.sample_rate(), 50);
         assert_eq!(src.channels(), 1);
         assert_eq!(src.total_duration(), Some(Duration::from_secs_f32(2.0)));
         assert_eq!(src.count(), 100);
 
         // Stereo: 100 interleaved samples = 50 frames at 50 Hz = 1 s.
-        let stereo = BufferSource::new(finished_pcm(vec![0.0; 100]), 0, 50, 2);
+        let stereo = BufferSource::new(finished_pcm(vec![0.0; 100]), Arc::new(LoopRegion::default()), 0, 50, 2);
         assert_eq!(stereo.channels(), 2);
         assert_eq!(stereo.total_duration(), Some(Duration::from_secs_f32(1.0)));
     }
@@ -830,7 +943,7 @@ mod tests {
     fn buffer_source_starves_with_silence_and_resumes_without_skipping() {
         let pcm = Arc::new(StreamingPcm::default());
         pcm.append(&[1.0, 2.0]);
-        let mut src = BufferSource::new(pcm.clone(), 0, 50, 1);
+        let mut src = BufferSource::new(pcm.clone(), Arc::new(LoopRegion::default()), 0, 50, 1);
         assert_eq!(src.next(), Some(1.0));
         assert_eq!(src.next(), Some(2.0));
         // Starved: silence, but the cursor must not advance…
@@ -845,5 +958,21 @@ mod tests {
         pcm.finish();
         assert_eq!(src.next(), None);
         assert_eq!(pcm.with(|s| s.to_vec()), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    /// A loop wraps on the sample: reaching `end` continues from `start`,
+    /// however the refill chunks fall, and clearing it lets the source run
+    /// out to the real end.
+    #[test]
+    fn buffer_source_loops_between_bounds_until_cleared() {
+        let pcm = finished_pcm((0..10).map(|i| i as f32).collect());
+        let region = Arc::new(LoopRegion::default());
+        region.set(Some((2, 5)));
+        let mut src = BufferSource::new(pcm, region.clone(), 0, 50, 1);
+        let first: Vec<f32> = (0..9).map(|_| src.next().unwrap()).collect();
+        assert_eq!(first, vec![0.0, 1.0, 2.0, 3.0, 4.0, 2.0, 3.0, 4.0, 2.0]);
+        region.set(None);
+        let rest: Vec<f32> = src.by_ref().collect();
+        assert_eq!(rest, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
     }
 }

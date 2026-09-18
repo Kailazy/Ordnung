@@ -1971,9 +1971,9 @@ struct App {
     /// are moving the grid live. The catalog write is deferred until the release
     /// (one write per gesture, not one per repeat tick). See [`player`].
     grid_nudge_held: bool,
-    /// The zoom lane's CUES panel is open — pads and memory cues show above
-    /// the lane's left edge. See [`cues`].
-    cue_edit_open: bool,
+    /// Beats the beat-loop control is set to, an index into
+    /// `cues::LOOP_BEATS` (default four beats). See [`cues`].
+    loop_beats: usize,
     /// A cue being renamed from its context menu: its index in the loaded
     /// track's cue list and the text typed so far. See [`cues`].
     cue_rename: Option<(usize, String)>,
