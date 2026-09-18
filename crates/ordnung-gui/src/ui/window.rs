@@ -7,7 +7,8 @@
 //! the centre of the screen every time (a window dragged aside comes back
 //! to the centre on its next open), with a title bar and a close button. A
 //! panel that grows with its list is `resizable_height`; one the user may
-//! drag to size is `resizable`; a popover opens `at` a point, or `anchored`
+//! drag to size is `resizable`, by its bottom-right corner unless its
+//! `grips` say otherwise; a popover opens `at` a point, or `anchored`
 //! to a screen edge. A window whose content carries its own heading turns
 //! the `title_bar` off and keeps the close button, in the corner. None
 //! collapse.
@@ -36,12 +37,60 @@ enum Place {
     Anchor(egui::Align2, egui::Vec2),
 }
 
+/// Where the user can grab a resizable window to size it: any set of its
+/// edges and corners. A corner sizes both ways, an edge one. The default
+/// is the bottom-right corner alone, which is where a window is expected
+/// to be sized from; a window sized only in height offers its bottom edge.
+/// The top edge is never a default: egui sizes from the top by moving the
+/// top and keeping the height when the content can't shrink, which drags
+/// the whole window rather than sizing it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Grips(u8);
+
+#[allow(dead_code)] // the set is the API; callers pick from it
+impl Grips {
+    pub const NONE: Self = Self(0);
+    pub const LEFT: Self = Self(1);
+    pub const RIGHT: Self = Self(2);
+    pub const TOP: Self = Self(4);
+    pub const BOTTOM: Self = Self(8);
+    pub const TOP_LEFT: Self = Self(16);
+    pub const TOP_RIGHT: Self = Self(32);
+    pub const BOTTOM_LEFT: Self = Self(64);
+    pub const BOTTOM_RIGHT: Self = Self(128);
+    pub const EDGES: Self = Self(15);
+    pub const CORNERS: Self = Self(240);
+    pub const ALL: Self = Self(255);
+
+    pub const fn with(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn has(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl std::ops::BitOr for Grips {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        self.with(rhs)
+    }
+}
+
+/// Half the side of the square a corner grip answers to: a little more
+/// than egui's own, so the corner is caught without aiming for the pixel.
+/// Set into the style by `theme`, read back from it here so the blockers
+/// below cover exactly what egui offers.
+pub const CORNER_GRIP: f32 = 14.0;
+
 pub struct Window<'o> {
     title: egui::WidgetText,
     id: Option<egui::Id>,
     open: Option<&'o mut bool>,
     title_bar: bool,
     resizable: [bool; 2],
+    grips: Option<Grips>,
     default_size: [Option<f32>; 2],
     min_size: [Option<f32>; 2],
     max_size: [Option<f32>; 2],
@@ -59,6 +108,7 @@ impl<'o> Window<'o> {
             open: None,
             title_bar: true,
             resizable: [false, false],
+            grips: None,
             default_size: [None, None],
             min_size: [None, None],
             max_size: [None, None],
@@ -100,15 +150,24 @@ impl<'o> Window<'o> {
         self
     }
 
-    /// The user may drag it to size, both ways.
+    /// The user may drag it to size, both ways, by the bottom-right corner
+    /// (or the [`Self::grips`] given).
     pub fn resizable(mut self, resizable: bool) -> Self {
         self.resizable = [resizable, resizable];
         self
     }
 
-    /// Fixed width, height following the content up to a drag.
+    /// Fixed width, height following the content up to a drag on the
+    /// bottom edge (or the [`Self::grips`] given).
     pub fn resizable_height(mut self) -> Self {
         self.resizable = [false, true];
+        self
+    }
+
+    /// Which edges and corners size the window, for one that is resizable.
+    #[allow(dead_code)]
+    pub fn grips(mut self, grips: Grips) -> Self {
+        self.grips = Some(grips);
         self
     }
 
@@ -238,6 +297,22 @@ impl<'o> Window<'o> {
             .size()
             .x
         });
+        // egui grabs every edge and corner of a resizable window. The
+        // grips this window doesn't offer are covered by blockers (see
+        // `block_grips`), and a drag on a blocker moves the window, as a
+        // drag on the frame there would without them.
+        let grips = self.grips.unwrap_or(if self.resizable[0] {
+            Grips::BOTTOM_RIGHT
+        } else {
+            Grips::BOTTOM
+        });
+        let last_rect = egui::AreaState::load(ctx, id).map(|s| s.rect());
+        let moved = BLOCKERS
+            .iter()
+            .flat_map(|key| HALVES.map(|half| blocker_id(id, key, half)))
+            .filter_map(|bid| ctx.read_response(bid))
+            .filter(|r| r.dragged())
+            .fold(egui::Vec2::ZERO, |acc, r| acc + r.drag_delta());
         let mut w = egui::Window::new(self.title)
             .id(id)
             .collapsible(false)
@@ -276,23 +351,39 @@ impl<'o> Window<'o> {
                 (title_w + 2.0 * CLOSE_W).max(self.min_size[0].unwrap_or(0.0)),
             );
         }
-        w = match self.place {
+        // A window is placed by the pivot its placement names on the pass
+        // it opens, then held by its top-left corner: egui keeps the pivot
+        // where it is as the size changes, so any other pivot makes a
+        // resize mirror (the top-left corner moving out as the bottom-right
+        // is dragged out). The corner comes from where the window was last
+        // pass, plus any drag on a grip blocker.
+        let held = if opening { None } else { last_rect };
+        w = match (self.place, held) {
+            (Place::Center | Place::At(..), Some(r)) => w
+                .pivot(egui::Align2::LEFT_TOP)
+                .current_pos(r.left_top() + moved),
             // Centred on the pass it opens (`current_pos` overrides the
             // place egui remembers for it), free to drag after.
-            Place::Center if opening => w
+            (Place::Center, None) if opening => w
                 .pivot(egui::Align2::CENTER_CENTER)
                 .current_pos(ctx.screen_rect().center()),
-            Place::Center => w
+            (Place::Center, None) => w
                 .pivot(egui::Align2::CENTER_CENTER)
                 .default_pos(ctx.screen_rect().center()),
-            Place::At(pivot, pos) => w.pivot(pivot).default_pos(pos),
-            Place::Fixed(pivot, pos) => w.pivot(pivot).fixed_pos(pos),
-            Place::Anchor(align, offset) => w.anchor(align, offset),
+            (Place::At(pivot, pos), None) => w.pivot(pivot).default_pos(pos),
+            (Place::Fixed(pivot, pos), _) => w.pivot(pivot).fixed_pos(pos),
+            (Place::Anchor(align, offset), _) => w.anchor(align, offset),
         };
         let mut slot = None;
         let mut closed = false;
+        let resizable = self.resizable;
         let shown = w.show(ctx, |ui| {
             slot = Some(glass::begin(ui));
+            // Before the content, so the content's own controls stay on
+            // top of the blockers where they overlap the frame's edge.
+            if let Some(rect) = last_rect.filter(|_| resizable[0] || resizable[1]) {
+                block_grips(ui, id, rect, resizable, grips);
+            }
             let r = contents(ui);
             // After the content, not before: the chrome is placed from
             // what the content took (`min_rect`), which is what the frame
@@ -358,6 +449,124 @@ fn close_button(ui: &mut egui::Ui, id: egui::Id, centre_y: f32) -> bool {
     icon::close(ui.painter(), rect.center(), icon::col(&resp), icon::CLOSE_ARM);
     ui.set_clip_rect(clip);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// The blockers a window may register, by key (see [`block_grips`]).
+const BLOCKERS: [&str; 8] = ["left", "right", "top", "bottom", "tl", "tr", "bl", "br"];
+
+/// Each blocker is two widgets, each a pixel short of the grip at one end
+/// (see [`block_grips`]).
+const HALVES: [&str; 2] = ["a", "b"];
+
+fn blocker_id(id: egui::Id, key: &str, half: &str) -> egui::Id {
+    id.with("grip-block").with(key).with(half)
+}
+
+/// Cover the grips egui offers on `rect` (the window's outer rect last
+/// frame) that `grips` doesn't, with drag-sensing widgets registered after
+/// egui's own so they take the pointer first. egui's side grips are bands
+/// `resize_grab_radius_side` either side of an edge, its corner grips
+/// squares `resize_grab_radius_corner` around a corner, corners on top
+/// (only where both axes size). A side blocker stops short of an allowed
+/// corner; a corner blocker covers the ends of allowed sides, as egui's
+/// corner would have taken those anyway. Sizing in one axis only has no
+/// corner grips, so a corner named there is that end of the band.
+///
+/// Each blocker goes in as two widgets, one a pixel short at each end:
+/// egui's hit test gives a drag hit to a smaller drag widget the hit one
+/// contains, taking it for a handle on a background, and a blocker the
+/// same size as the grip counts as containing it. Neither half does.
+fn block_grips(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    rect: egui::Rect,
+    axes: [bool; 2],
+    grips: Grips,
+) {
+    let (sr, cr) = {
+        let i = &ui.style().interaction;
+        (i.resize_grab_radius_side, i.resize_grab_radius_corner)
+    };
+    let mut blocks: Vec<(&str, egui::Rect)> = Vec::new();
+    if axes[0] && axes[1] {
+        for (g, key, p) in [
+            (Grips::TOP_LEFT, "tl", rect.left_top()),
+            (Grips::TOP_RIGHT, "tr", rect.right_top()),
+            (Grips::BOTTOM_LEFT, "bl", rect.left_bottom()),
+            (Grips::BOTTOM_RIGHT, "br", rect.right_bottom()),
+        ] {
+            if !grips.has(g) {
+                blocks.push((
+                    key,
+                    egui::Rect::from_center_size(p, egui::Vec2::splat(2.0 * cr)),
+                ));
+            }
+        }
+    }
+    // A side band, its ends pulled in where the corner is offered.
+    let band = |a: egui::Pos2, b: egui::Pos2| egui::Rect::from_min_max(a, b).expand(sr);
+    if axes[1] && !grips.has(Grips::TOP) {
+        let mut r = band(rect.left_top(), rect.right_top());
+        if grips.has(Grips::TOP_LEFT) {
+            r.min.x = rect.min.x + cr;
+        }
+        if grips.has(Grips::TOP_RIGHT) {
+            r.max.x = rect.max.x - cr;
+        }
+        blocks.push(("top", r));
+    }
+    if axes[1] && !grips.has(Grips::BOTTOM) {
+        let mut r = band(rect.left_bottom(), rect.right_bottom());
+        if grips.has(Grips::BOTTOM_LEFT) {
+            r.min.x = rect.min.x + cr;
+        }
+        if grips.has(Grips::BOTTOM_RIGHT) {
+            r.max.x = rect.max.x - cr;
+        }
+        blocks.push(("bottom", r));
+    }
+    if axes[0] && !grips.has(Grips::LEFT) {
+        let mut r = band(rect.left_top(), rect.left_bottom());
+        if grips.has(Grips::TOP_LEFT) {
+            r.min.y = rect.min.y + cr;
+        }
+        if grips.has(Grips::BOTTOM_LEFT) {
+            r.max.y = rect.max.y - cr;
+        }
+        blocks.push(("left", r));
+    }
+    if axes[0] && !grips.has(Grips::RIGHT) {
+        let mut r = band(rect.right_top(), rect.right_bottom());
+        if grips.has(Grips::TOP_RIGHT) {
+            r.min.y = rect.min.y + cr;
+        }
+        if grips.has(Grips::BOTTOM_RIGHT) {
+            r.max.y = rect.max.y - cr;
+        }
+        blocks.push(("right", r));
+    }
+    if blocks.is_empty() {
+        return;
+    }
+    // The bands reach outside the frame, past the content's clip.
+    let clip = ui.clip_rect();
+    ui.set_clip_rect(clip.union(rect.expand(cr.max(sr))));
+    for (key, r) in blocks {
+        if !r.is_positive() {
+            continue;
+        }
+        let (mut a, mut b) = (r, r);
+        if r.width() >= r.height() {
+            a.max.x -= 1.0;
+            b.min.x += 1.0;
+        } else {
+            a.max.y -= 1.0;
+            b.min.y += 1.0;
+        }
+        ui.interact(a, blocker_id(id, key, HALVES[0]), egui::Sense::drag());
+        ui.interact(b, blocker_id(id, key, HALVES[1]), egui::Sense::drag());
+    }
+    ui.set_clip_rect(clip);
 }
 
 /// The glass's edge, for a surface that isn't a window (a menu, a popup)

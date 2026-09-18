@@ -304,6 +304,9 @@ fn apply_style(ctx: &egui::Context) {
     // report) all has an explicit Copy action or ⌘C, so none of it relies on
     // hand-selection; `TextEdit` fields are unaffected by this flag.
     style.interaction.selectable_labels = false;
+    // A window's corner grip is caught from a little further out (see
+    // `window::CORNER_GRIP`).
+    style.interaction.resize_grab_radius_corner = super::window::CORNER_GRIP;
 
     ctx.set_style(style);
 }
