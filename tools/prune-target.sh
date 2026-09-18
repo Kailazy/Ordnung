@@ -55,5 +55,8 @@ if (( used_gb < LIMIT_GB )); then
   exit 0
 fi
 echo "$(date '+%F %T') prune: target/debug is ${used_gb} GB, over the ${LIMIT_GB} GB limit, deleting"
-rm -rf "$DEBUG"
+# Finder recreates .DS_Store in a folder it has open while rm is still
+# walking it, which makes rm exit non-zero on an otherwise emptied tree.
+# A second pass clears that; anything still left afterwards is a real error.
+rm -rf "$DEBUG" || rm -rf "$DEBUG"
 echo "$(date '+%F %T') prune: freed about ${used_gb} GB"
