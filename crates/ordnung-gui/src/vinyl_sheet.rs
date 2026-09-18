@@ -908,6 +908,14 @@ impl App {
         {
             return;
         }
+        // The record is over when its last video is: the page is youtube.com
+        // itself, and left alone it would roll on into whatever YouTube
+        // recommends next. With the radio on the player is the radio's, and
+        // the radio moves to the next record instead.
+        if !self.radio.on && webview::ended() {
+            self.stop_sheet_video();
+            return;
+        }
         if webview::status() != webview::PlayerStatus::Stuck {
             return;
         }
@@ -1282,40 +1290,23 @@ impl App {
                 ui.set_min_width(SHEET_W);
                 ui.set_max_width(SHEET_W);
                 ui.add_space(2.0);
-                // Which pressing is on the sheet is a choice, not a fact: the
-                // one a dig landed on is whichever the page listed. A small
-                // button at the top right lists the siblings to swap one in,
-                // out of the row of things to do with the record.
-                {
-                    let r = ui.max_rect();
-                    // Short of the window's close button in the corner.
-                    let right = r.right() - crate::ui::window::CLOSE_W;
-                    let slot = egui::Rect::from_min_max(
-                        egui::pos2(right - 160.0, r.top()),
-                        egui::pos2(right, r.top() + crate::ui::control_h(ui) + 8.0),
-                    );
-                    let mut tui = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(slot)
-                            .layout(egui::Layout::right_to_left(egui::Align::Min)),
-                    );
-                    if crate::ui::button::button(&mut tui, "Pressings")
-                        .on_hover_note("Other pressings of this record, to swap one in")
-                        .clicked()
-                    {
-                        act = Some(Act::Pressings);
-                    }
-                }
+                // The cover runs exactly the height of the header beside it
+                // (names, imprint, price, the row of buttons): a square that
+                // stops short leaves a blank strip under it, one that runs
+                // past pushes the tracks down. That height is only known once
+                // the column is laid out, so it's the last frame's, kept in
+                // egui memory; the first frame of a sheet takes a floor that
+                // is within a few points of the truth.
+                let col_h_id = ui.id().with("sheet-header-col-h");
+                let col_h: Option<f32> = ui.data(|d| d.get_temp(col_h_id));
                 ui.horizontal(|ui| {
-                    // Cover. Tall enough to run the height of the header
-                    // beside it (names, imprint, price, the row of buttons)
-                    // rather than stopping short with a blank strip under it.
-                    const C: f32 = 160.0;
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(C, C), egui::Sense::hover());
+                    const C_MIN: f32 = 160.0;
+                    let c = col_h.map_or(C_MIN, |h| h.max(C_MIN)).round();
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(c, c), egui::Sense::hover());
                     match &cover {
                         Some(h) => {
                             egui::Image::new(h)
-                                .fit_to_exact_size(egui::vec2(C, C))
+                                .fit_to_exact_size(egui::vec2(c, c))
                                 .rounding(egui::Rounding::same(6.0))
                                 .paint_at(ui, rect);
                         }
@@ -1328,7 +1319,10 @@ impl App {
                         }
                     }
                     ui.add_space(14.0);
-                    ui.vertical(|ui| {
+                    let col = ui.vertical(|ui| {
+                        // Clear of the window's close button in the corner,
+                        // which sits on the artist's line.
+                        ui.set_max_width(ui.available_width() - crate::ui::window::CLOSE_W);
                         ui.label(egui::RichText::new(&artist).font(
                             crate::ui::tokens::font::strong(
                                 crate::ui::tokens::font::headline().size,
@@ -1342,9 +1336,23 @@ impl App {
                         if let Some(line) = &label_line {
                             ui.label(egui::RichText::new(line).color(crate::ui::tokens::color::LABEL_2));
                         }
-                        if !sub.is_empty() {
-                            ui.label(egui::RichText::new(&sub).weak());
-                        }
+                        // Which version is on the sheet is a choice, not a
+                        // fact: the one a dig landed on is whichever the page
+                        // listed. The word that swaps one in sits on the line
+                        // that names the version, not in the row of things to
+                        // do with the record.
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            if !sub.is_empty() {
+                                ui.label(egui::RichText::new(&sub).weak());
+                            }
+                            if crate::ui::button::inline(ui, "Versions")
+                                .on_hover_note("Other versions of this record, to swap one in")
+                                .clicked()
+                            {
+                                act = Some(Act::Pressings);
+                            }
+                        });
                         if let Some(line) = &genre_line {
                             ui.label(egui::RichText::new(line).small().weak());
                         }
@@ -1722,6 +1730,14 @@ impl App {
                             }
                         });
                     });
+                    // What the cover matches next frame. Rounded, so a
+                    // fractional line height can't leave it flickering
+                    // between two sizes.
+                    let h = col.response.rect.height().round();
+                    if col_h != Some(h) {
+                        ui.data_mut(|d| d.insert_temp(col_h_id, h));
+                        ui.ctx().request_repaint();
+                    }
                 });
                 ui.add_space(10.0);
                 ui.separator();

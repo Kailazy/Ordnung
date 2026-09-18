@@ -496,8 +496,8 @@ fn vinyl_cell_menu(
     // Which pressing you hold is the collector's question, and the answer often
     // is "the wrong one". This lists the siblings and swaps one in.
     if ui
-        .button("See other releases")
-        .on_hover_note("Other pressings of this record, to swap one in")
+        .button("See other versions")
+        .on_hover_note("Other versions of this record, to swap one in")
         .clicked()
     {
         *action = Some(VinylGridAction::Versions(c.key));

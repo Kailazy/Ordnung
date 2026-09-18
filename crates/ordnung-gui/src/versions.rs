@@ -237,7 +237,7 @@ impl App {
         let busy = self.vinyl_edit_running();
         let mut act: Option<Act> = None;
         let mut open = true;
-        crate::ui::window::Window::new(format!("Other pressings — {artist} — {title}"))
+        crate::ui::window::Window::new(format!("Versions — {artist} — {title}"))
             .id(egui::Id::new(("versions", current)))
             .open(&mut open)
             .resizable_height()
@@ -257,7 +257,7 @@ impl App {
                 if loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(egui::RichText::new("Looking up other pressings…").weak());
+                        ui.label(egui::RichText::new("Looking up versions…").weak());
                     });
                     return;
                 }
@@ -586,5 +586,5 @@ fn versions_for(
         Some(cat) => cat.master_versions_cached_or(master_id, fetch),
         None => fetch(),
     }
-    .map_err(|e| format!("Couldn't load other pressings: {e}"))
+    .map_err(|e| format!("Couldn't load versions: {e}"))
 }
