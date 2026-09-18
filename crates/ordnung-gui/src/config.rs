@@ -147,8 +147,9 @@ pub struct Config {
     pub auto_analyze: bool,
     /// The cue bar (hot cue pads, loop, memory cues) is showing above the
     /// player's zoom lane. Mirrors the lane's CUES tab so it comes back the
-    /// way it was left. On by default, a fresh install included.
-    #[serde(default = "default_true")]
+    /// way it was left. Hidden by default: the player stays a bar until a
+    /// DJ asks for pads.
+    #[serde(default)]
     pub cue_bar_open: bool,
     /// Quantize: new cues and loops snap to the track's beatgrid, and beat
     /// loops are exact beat multiples, the way rekordbox's Q button works.
@@ -709,7 +710,7 @@ impl Default for Config {
             inspector_open: false,
             startup_view: default_startup_view(),
             auto_analyze: true,
-            cue_bar_open: true,
+            cue_bar_open: false,
             cue_quantize: true,
             auto_write_tags: true,
             onboarding_completed_version: 0,

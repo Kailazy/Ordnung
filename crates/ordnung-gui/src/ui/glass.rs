@@ -123,6 +123,39 @@ pub fn ready(ctx: &egui::Context, id: egui::Id) -> bool {
     e.frost.ready(ctx, &reg.graveyard)
 }
 
+/// Mark a surface that is always up and never sits a pass out: the player
+/// bar. Its frost is taken from a region it doesn't cover (see [`end_from`]),
+/// so drawing while the snapshot is in flight puts nothing of it in its
+/// own backdrop. The first call takes the snapshot; later ones move it
+/// along. Re-take it with [`refresh`] when what it frosts has changed.
+pub fn live(ctx: &egui::Context, id: egui::Id) {
+    let Some(reg) = registry(ctx) else {
+        return;
+    };
+    let pass = ctx.cumulative_pass_nr();
+    let mut entries = reg.entries.lock().unwrap();
+    let e = entries.entry(id).or_insert_with(|| Entry {
+        frost: Frost::new(),
+        shown: 0,
+        drawn: 0,
+    });
+    e.shown = pass;
+    e.drawn = pass;
+    let _ = e.frost.ready(ctx, &reg.graveyard);
+}
+
+/// Take a [`live`] surface's snapshot again: the screen it frosts has
+/// scrolled or changed view. The old frost stays up until the new lands.
+pub fn refresh(ctx: &egui::Context, id: egui::Id) {
+    let Some(reg) = registry(ctx) else {
+        return;
+    };
+    let mut entries = reg.entries.lock().unwrap();
+    if let Some(e) = entries.get_mut(&id) {
+        e.frost.prime(ctx);
+    }
+}
+
 /// Whether this pass is the surface's first drawn since it opened: what it
 /// does once per open spell (take its place on screen) it does now. Ask
 /// after [`ready`] says draw, before [`drawn`] records it.
@@ -183,9 +216,23 @@ pub fn end(
     rounding: egui::Rounding,
     stroke: egui::Stroke,
 ) {
+    end_from(ctx, slot, id, rect, rect, rounding, stroke);
+}
+
+/// [`end`] for a surface that frosts the screen under `src` rather than
+/// under itself (see [`live`]).
+pub fn end_from(
+    ctx: &egui::Context,
+    slot: Slot,
+    id: egui::Id,
+    src: egui::Rect,
+    rect: egui::Rect,
+    rounding: egui::Rounding,
+    stroke: egui::Stroke,
+) {
     let frost = registry(ctx).and_then(|reg| {
         let entries = reg.entries.lock().unwrap();
-        entries.get(&id).and_then(|e| e.frost.shape(rect, rounding))
+        entries.get(&id).and_then(|e| e.frost.shape_from(src, rect, rounding))
     });
     if let Some(shape) = frost {
         slot.painter.set(slot.frost, shape);

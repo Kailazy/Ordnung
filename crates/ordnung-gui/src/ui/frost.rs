@@ -69,6 +69,10 @@ pub struct Frost {
     state: State,
     /// The screen the snapshot covers, in points, to map a window rect onto it.
     screen: egui::Rect,
+    /// The snapshot before the one in flight, with its screen: a surface
+    /// that re-takes its frost while up (the player) keeps showing this one
+    /// until the new one lands, so it never flashes plain between the two.
+    stale: Option<(Tex, egui::Rect)>,
 }
 
 impl Frost {
@@ -76,6 +80,7 @@ impl Frost {
         Self {
             state: State::Fresh,
             screen: egui::Rect::NOTHING,
+            stale: None,
         }
     }
 
@@ -161,6 +166,9 @@ impl Frost {
     }
 
     fn ask(&mut self, ctx: &egui::Context) {
+        if let State::Have(tex, _) = std::mem::replace(&mut self.state, State::Fresh) {
+            self.stale = Some((tex, self.screen));
+        }
         self.screen = ctx.screen_rect();
         ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
         self.state = State::Asked(Instant::now());
@@ -172,10 +180,25 @@ impl Frost {
     /// `glass`), so a window over another window blurs that one too. `None`
     /// until a snapshot is in hand, or when none came.
     pub fn shape(&self, rect: egui::Rect, rounding: egui::Rounding) -> Option<egui::Shape> {
-        let State::Have(tex, _) = &self.state else {
-            return None;
+        self.shape_from(rect, rect, rounding)
+    }
+
+    /// The frost for a surface at `rect`, showing the screen under `src`
+    /// instead: for a surface nothing sits under (the player bar at the
+    /// window's bottom), which frosts the content just above it as the
+    /// continuation of what it covers. Falls back to the snapshot before a
+    /// re-take until the new one lands.
+    pub fn shape_from(
+        &self,
+        src: egui::Rect,
+        rect: egui::Rect,
+        rounding: egui::Rounding,
+    ) -> Option<egui::Shape> {
+        let (tex, s) = match (&self.state, &self.stale) {
+            (State::Have(tex, _), _) => (tex, self.screen),
+            (_, Some((tex, screen))) => (tex, *screen),
+            _ => return None,
         };
-        let s = self.screen;
         if s.width() <= 0.0 || s.height() <= 0.0 {
             return None;
         }
@@ -189,7 +212,7 @@ impl Frost {
             stroke: egui::Stroke::NONE,
             blur_width: 0.0,
             fill_texture_id: tex.id(),
-            uv: egui::Rect::from_min_max(uv(rect.min), uv(rect.max)),
+            uv: egui::Rect::from_min_max(uv(src.min), uv(src.max)),
         }))
     }
 
@@ -197,6 +220,7 @@ impl Frost {
     /// different screen.
     pub fn clear(&mut self) {
         self.state = State::Fresh;
+        self.stale = None;
     }
 }
 

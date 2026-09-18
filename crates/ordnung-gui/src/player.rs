@@ -270,28 +270,66 @@ impl App {
         // The panel grows with the (resizable) lane; the controls row below is a
         // fixed base. Only reserve the lane's extra height when there's a waveform
         // to show — unanalyzed tracks have no lane.
-        // The cue bar stacks above the lane when it's open (see `cues`).
-        let cue_bar = !waveform.is_empty() && self.config.cue_bar_open;
+        // The cue bar stacks above the lane when it's open (see `cues`),
+        // sliding down into place and fading in, and back out the same way.
+        let cue_t = ctx.animate_bool_with_time(
+            egui::Id::new("cue_bar_reveal"),
+            !waveform.is_empty() && self.config.cue_bar_open,
+            CUE_BAR_ANIM,
+        );
+        let cue_strip_h = (crate::cues::CUE_BAR_H + 8.0) * cue_t;
         let panel_h = if waveform.is_empty() {
             150.0
-        } else if cue_bar {
-            PANEL_BASE_H + lane_h + crate::cues::CUE_BAR_H + 8.0
         } else {
-            PANEL_BASE_H + lane_h
+            PANEL_BASE_H + lane_h + cue_strip_h
         };
         let active_loop = self.active_loop_ms();
+
+        // The bar is glass, like a window: the app blurred under a tint.
+        // Nothing scrolls under a bar at the window's bottom, so it frosts
+        // the strip of content just above it, the continuation of what it
+        // covers, and takes that snapshot again once a scroll settles, the
+        // view changes, or the window is resized.
+        let glass_id = egui::Id::new("player_glass");
+        crate::ui::glass::live(ctx, glass_id);
+        self.refresh_player_frost(ctx, glass_id);
+        let avail = ctx.available_rect();
+        let panel_rect = egui::Rect::from_min_max(
+            egui::pos2(avail.left(), avail.bottom() - panel_h),
+            avail.right_bottom(),
+        );
         egui::TopBottomPanel::bottom("player")
             .exact_height(panel_h)
+            .frame(
+                egui::Frame::none()
+                    .inner_margin(egui::Margin::symmetric(8.0, 2.0))
+                    .fill(egui::Color32::TRANSPARENT),
+            )
+            .show_separator_line(false)
             .show(ctx, |ui| {
+                let slot = crate::ui::glass::begin(ui);
                 ui.add_space(8.0);
 
                 // Zoomed detail lane — a window of `wave_zoom_secs` centered on the
                 // playhead, scrolling under it during playback. Wheel to zoom,
                 // click/drag to seek. Skipped for unanalyzed tracks (no waveform).
                 if !waveform.is_empty() {
-                    if cue_bar {
-                        self.draw_cue_bar(ui);
-                        ui.add_space(8.0);
+                    if cue_t > 0.0 {
+                        // The strip grows with the reveal; the bar sits at its
+                        // bottom, so it slides down out from under the top edge.
+                        let (strip, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), cue_strip_h),
+                            egui::Sense::hover(),
+                        );
+                        let full = egui::Rect::from_min_size(
+                            egui::pos2(strip.left(), strip.bottom() - 8.0 - crate::cues::CUE_BAR_H),
+                            egui::vec2(strip.width(), crate::cues::CUE_BAR_H),
+                        );
+                        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(full), |ui| {
+                            ui.set_clip_rect(strip.intersect(ui.clip_rect()));
+                            ui.set_opacity(cue_t);
+                            self.draw_cue_bar(ui);
+                        });
                     }
                     // Prefer the high-res envelope; fall back to the coarse preview
                     // bands while the PCM is still decoding.
@@ -651,6 +689,15 @@ impl App {
                         close = true;
                     }
                 });
+                crate::ui::glass::end_from(
+                    ctx,
+                    slot,
+                    glass_id,
+                    panel_rect.translate(egui::vec2(0.0, -panel_h)),
+                    panel_rect,
+                    egui::Rounding::ZERO,
+                    crate::ui::window::edge(),
+                );
             });
 
         if let Some(s) = seek_to {
@@ -2453,6 +2500,60 @@ pub(crate) const DEFAULT_ZOOM_SECS: f32 = 16.0;
 const MIN_ZOOM_SECS: f32 = 0.5;
 /// Widest zoom before the lane is essentially the full-track overview again.
 const MAX_ZOOM_SECS: f32 = 90.0;
+
+/// How long the cue bar takes to slide into or out of the player.
+const CUE_BAR_ANIM: f32 = 0.16;
+
+/// What the player's frost was last taken over, to know when to take it
+/// again. Kept in the context's memory.
+#[derive(Clone, Default)]
+struct FrostTrack {
+    scrolling: bool,
+    view: Option<LibraryView>,
+    screen: Option<egui::Rect>,
+    /// `ctx.input().time` of the last re-take, to keep them at least
+    /// [`FROST_MIN_GAP`] apart.
+    last: Option<f64>,
+}
+
+/// Least time between two snapshots of the player's backdrop, in seconds:
+/// each one stalls the frame for the readback.
+const FROST_MIN_GAP: f64 = 0.3;
+
+impl App {
+    /// Re-take the player's frost when what it frosts has changed: a scroll
+    /// that just came to rest, a switch of view, a resized window.
+    fn refresh_player_frost(&self, ctx: &egui::Context, glass_id: egui::Id) {
+        let now = ctx.input(|i| i.time);
+        let scrolling = ctx.input(|i| {
+            i.smooth_scroll_delta != egui::Vec2::ZERO || i.raw_scroll_delta != egui::Vec2::ZERO
+        });
+        let screen = ctx.screen_rect();
+        let view = self.view.clone();
+        let want = ctx.data_mut(|d| {
+            let t = d.get_temp_mut_or_default::<FrostTrack>(glass_id.with("track"));
+            let mut want = t.scrolling && !scrolling;
+            t.scrolling = scrolling;
+            if t.view.as_ref() != Some(&view) {
+                t.view = Some(view);
+                want = true;
+            }
+            if t.screen != Some(screen) {
+                t.screen = Some(screen);
+                want = true;
+            }
+            if want && t.last.map_or(true, |l| now - l >= FROST_MIN_GAP) {
+                t.last = Some(now);
+                true
+            } else {
+                false
+            }
+        });
+        if want {
+            crate::ui::glass::refresh(ctx, glass_id);
+        }
+    }
+}
 
 /// Default pixel height of the moving zoomed detail lane.
 pub(crate) const DEFAULT_LANE_H: f32 = 46.0;

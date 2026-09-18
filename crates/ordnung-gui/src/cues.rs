@@ -98,12 +98,18 @@ pub(crate) fn draw_cue_markers(
             );
         }
     };
+    // The loop playback is circling gets the one white wash below; the cue
+    // it came from skips its own, so the two never stack into a glare.
+    let is_active = |c: &Cue| {
+        matches!((active, c.loop_end_ms), (Some((a, b)), Some(end))
+            if a.abs_diff(c.position_ms) <= 2 && b.abs_diff(end) <= 2)
+    };
     for c in cues {
         let color = if c.is_hot() { cue_rgb(c) } else { MEMORY_COLOR };
         let x = x_of(c.position_ms);
         // Loop body first, so the markers sit on top of the wash.
-        if let Some(end) = c.loop_end_ms {
-            wash(painter, c.position_ms, end, color, 38);
+        if let Some(end) = c.loop_end_ms.filter(|_| !is_active(c)) {
+            wash(painter, c.position_ms, end, color, 30);
         }
         if x < rect.left() || x > rect.right() {
             continue;
@@ -177,7 +183,7 @@ pub(crate) fn draw_cue_markers(
     // The live loop on top of everything: a white wash with both edges
     // drawn, so it reads as the thing playing rather than another cue.
     if let Some((start, end)) = active.filter(|(a, b)| b > a) {
-        wash(painter, start, end, ACTIVE_LOOP_COLOR, if compact { 40 } else { 28 });
+        wash(painter, start, end, ACTIVE_LOOP_COLOR, if compact { 36 } else { 22 });
         let x0 = x_of(start);
         if x0 >= rect.left() && x0 <= rect.right() {
             painter.line_segment(
@@ -655,10 +661,23 @@ impl App {
                     Some((idx, c)) => {
                         let col = cue_rgb(c);
                         let lit = same_loop(c);
+                        // The ✕ is a widget every frame, not only while the
+                        // pad is hovered: the pointer moving onto it leaves
+                        // the pad, and a ✕ that vanished then would flicker
+                        // under the pointer and never take the click.
+                        let x_rect = egui::Rect::from_min_size(
+                            rect.right_top() + egui::vec2(-18.0, 2.0),
+                            egui::vec2(16.0, 16.0),
+                        );
+                        let x_resp = editable.then(|| {
+                            ui.interact(x_rect, id.with("x"), egui::Sense::click())
+                                .on_hover_note(format!("Remove hot cue {letter}"))
+                        });
+                        let hot = resp.hovered() || x_resp.as_ref().map_or(false, |x| x.hovered());
                         // A rubber pad: the colour, with a darker lip at the
                         // bottom so it stands off the bar; full brightness
                         // under the pointer.
-                        let body_col = if resp.hovered() || lit {
+                        let body_col = if hot || lit {
                             col
                         } else {
                             egui::Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 205)
@@ -693,23 +712,16 @@ impl App {
                             ink,
                         );
                         // Top right: the loop badge, or the ✕ while hovered.
-                        let x_rect = egui::Rect::from_min_size(
-                            rect.right_top() + egui::vec2(-18.0, 2.0),
-                            egui::vec2(16.0, 16.0),
-                        );
-                        let x_resp = if editable && resp.hovered() {
-                            let x_resp = ui.interact(x_rect, id.with("x"), egui::Sense::click());
+                        let show_x = hot && x_resp.is_some();
+                        if let (true, Some(x)) = (show_x, x_resp.as_ref()) {
                             crate::ui::icon::close(
                                 &painter,
                                 x_rect.center(),
-                                if x_resp.hovered() { egui::Color32::WHITE } else { ink },
+                                if x.hovered() { egui::Color32::WHITE } else { ink },
                                 3.5,
                             );
-                            Some(x_resp.on_hover_note(format!("Remove hot cue {letter}")))
-                        } else {
-                            None
-                        };
-                        if x_resp.is_none() {
+                        }
+                        if !show_x {
                             if let Some(end) = c.loop_end_ms {
                                 let badge = match loop_beats_of(c.position_ms, end) {
                                     Some(n) if pad_w >= 60.0 => format!("⟲{n}"),
@@ -734,7 +746,7 @@ impl App {
                         } else if resp.clicked() {
                             pad_hit = Some(slot);
                         }
-                        if resp.hovered() {
+                        if hot {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
                         let is_loop = c.is_loop();
@@ -986,11 +998,20 @@ impl App {
                                     egui::vec2(w, CHIP_H),
                                     egui::Sense::click(),
                                 );
+                                let x_rect = egui::Rect::from_center_size(
+                                    egui::pos2(rect.right() - pad_x - 6.0, rect.center().y),
+                                    egui::vec2(16.0, 16.0),
+                                );
+                                let x_resp = editable.then(|| {
+                                    ui.interact(x_rect, resp.id.with("x"), egui::Sense::click())
+                                        .on_hover_note("Remove this memory cue")
+                                });
+                                let hot = resp.hovered() || x_resp.as_ref().map_or(false, |x| x.hovered());
                                 let lit = same_loop(c);
                                 ui.painter().rect_filled(
                                     rect,
                                     egui::Rounding::same(radius::SM),
-                                    if resp.hovered() { color::SURFACE_HOVER } else { color::SURFACE_HI },
+                                    if hot { color::SURFACE_HOVER } else { color::SURFACE_HI },
                                 );
                                 ui.painter().rect_stroke(
                                     rect,
@@ -1016,23 +1037,16 @@ impl App {
                                     );
                                 }
                                 let mut x_clicked = false;
-                                if editable {
-                                    let x_rect = egui::Rect::from_center_size(
-                                        egui::pos2(rect.right() - pad_x - 6.0, rect.center().y),
-                                        egui::vec2(16.0, 16.0),
-                                    );
-                                    let x_resp = ui
-                                        .interact(x_rect, resp.id.with("x"), egui::Sense::click())
-                                        .on_hover_note("Remove this memory cue");
+                                if let Some(x) = &x_resp {
                                     crate::ui::icon::close(
                                         ui.painter(),
                                         x_rect.center(),
-                                        if x_resp.hovered() { egui::Color32::WHITE } else { color::LABEL_3 },
+                                        if x.hovered() { egui::Color32::WHITE } else { color::LABEL_3 },
                                         3.5,
                                     );
-                                    x_clicked = x_resp.clicked();
+                                    x_clicked = x.clicked();
                                 }
-                                if resp.hovered() {
+                                if hot {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                 }
                                 if x_clicked {
