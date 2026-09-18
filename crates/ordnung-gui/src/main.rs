@@ -1294,7 +1294,8 @@ struct App {
     tracklist_entries: Vec<TracklistEntry>,
     tracklist_entries_for: Option<Id>,
     /// The inline paste box: open or not, its text, and the name field.
-    tracklist_paste_open: bool,
+    /// Put the caret in the paste box on the next pass (the window just opened).
+    tracklist_focus_paste: bool,
     tracklist_paste: String,
     tracklist_name: String,
     /// A "pick another" popup open on one line: (tracklist, position).

@@ -225,9 +225,9 @@ impl App {
                     ui.set_min_width(220.0);
                     ui.horizontal(|ui| {
                         let edit = ui.add(
-                            egui::TextEdit::singleline(&mut self.seller_add)
-                                .desired_width(180.0)
-                                .hint_text("Seller username or URL"),
+                            crate::ui::field::Field::singleline(&mut self.seller_add)
+                                .width(180.0)
+                                .hint("Seller username or URL"),
                         );
                         if just_opened {
                             edit.request_focus();
@@ -702,9 +702,9 @@ impl App {
 
         let n_sellers = self.sellers.len();
         let edit = ui.add(
-            egui::TextEdit::singleline(&mut self.seller_find)
-                .desired_width(240.0)
-                .hint_text(format!("Find a record across {n_sellers} sellers")),
+            crate::ui::field::Field::singleline(&mut self.seller_find)
+                .width(240.0)
+                .hint(format!("Find a record across {n_sellers} sellers")),
         );
         let edit = edit.on_hover_note(
             "Search every saved seller's crates by artist, title or label; \

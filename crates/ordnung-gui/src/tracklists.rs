@@ -2,9 +2,9 @@
 //! up and matched to its Discogs record. Opened from the tiny ≡ glyph in
 //! the top bar, left of the counts; a tool, not a tab.
 //!
-//! Inside, a quiet *Paste tracklist* text button (or ⌘V with the window
-//! open and nothing focused) opens an inline paste box that starts one line tall and grows
-//! only as the pasted text does. Match saves the paste as a tracklist and
+//! Inside, the paste box is simply there, one line tall, and grows only as
+//! the pasted text does (⌘V with the window open and nothing focused lands
+//! in it too). Match saves the paste as a tracklist and
 //! runs the background job in `jobs::run_match_tracklist`, whose rows fill
 //! in one at a time. Each row shows the song as pasted, the record it
 //! matched (cover, title, year, label and catalog number, format), a
@@ -167,8 +167,8 @@ impl App {
             .id(egui::Id::new("tracklists_window"))
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(1000.0, 640.0))
-            .min_size(egui::vec2(640.0, 360.0))
+            .default_size(egui::vec2(780.0, 540.0))
+            .min_size(egui::vec2(560.0, 320.0))
             .show(ctx, |ui| {
                 let query = self.tracklist_filter.trim().to_lowercase();
                 self.draw_tracklists(ui, ctx, &query);
@@ -179,20 +179,17 @@ impl App {
     }
 
     fn draw_tracklists(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, query: &str) {
-        // ⌘V with nothing focused opens the paste box on the clipboard text,
-        // so the button needn't be found first.
-        if !self.tracklist_paste_open {
-            let pasted = ctx.input(|i| {
-                i.events.iter().find_map(|e| match e {
-                    egui::Event::Paste(t) if !t.trim().is_empty() => Some(t.clone()),
-                    _ => None,
-                })
-            });
-            if let Some(t) = pasted {
-                if ctx.memory(|m| m.focused().is_none()) {
-                    self.tracklist_paste = t;
-                    self.tracklist_paste_open = true;
-                }
+        // ⌘V with nothing focused lands in the paste box, so it needn't be
+        // clicked first.
+        let pasted = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Paste(t) if !t.trim().is_empty() => Some(t.clone()),
+                _ => None,
+            })
+        });
+        if let Some(t) = pasted {
+            if ctx.memory(|m| m.focused().is_none()) {
+                self.tracklist_paste = t;
             }
         }
         if self.tracklist_current.is_none() {
@@ -205,21 +202,13 @@ impl App {
         ui.add_space(space::S3);
 
         if self.tracklists.is_empty() {
-            if !self.tracklist_paste_open {
+            if self.tracklist_paste.trim().is_empty() {
                 ui.add_space(space::S6);
                 ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new("No tracklists yet")
                             .font(font::headline())
                             .color(color::LABEL_2),
-                    );
-                    ui.add_space(space::S2);
-                    ui.label(
-                        egui::RichText::new(
-                            "Copy a mix's tracklist from 1001tracklists, SoundCloud, MixesDB or a \
-                             comment, paste it here, and every line is matched to its record.",
-                        )
-                        .weak(),
                     );
                 });
             }
@@ -228,8 +217,8 @@ impl App {
 
         egui::SidePanel::left("tracklists_side")
             .resizable(true)
-            .default_width(220.0)
-            .min_width(160.0)
+            .default_width(180.0)
+            .min_width(140.0)
             .show_inside(ui, |ui| self.draw_tracklist_side(ui));
         egui::CentralPanel::default().show_inside(ui, |ui| {
             self.draw_tracklist_rows(ui, ctx, query);
@@ -237,66 +226,44 @@ impl App {
         self.draw_tracklist_pick(ctx);
     }
 
-    /// The quiet entry button, or the inline paste box once it's open.
+    /// The paste box, simply there: one line tall until the text asks for
+    /// more, capped at a third of the view and scrolling inside past that.
+    /// Once it holds text, the name field, Match and the parse preview sit
+    /// beneath it. The window's search field shares its row on the right.
     fn draw_tracklist_paste(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        if !self.tracklist_paste_open {
-            crate::ui::control_row(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let btn = egui::Button::new(
-                        egui::RichText::new("Paste tracklist").color(color::LABEL_2),
-                    )
-                    .frame(false);
-                    let resp = ui.add(btn).on_hover_note(
-                        "Paste a mix tracklist, then match every line to its record. ⌘V here does the same",
-                    );
-                    if resp.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-                    if resp.clicked() {
-                        self.tracklist_paste_open = true;
-                        self.tracklist_paste.clear();
-                        self.tracklist_name.clear();
-                    }
-                    if !self.tracklists.is_empty() {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.tracklist_filter)
-                                    .desired_width(180.0)
-                                    .hint_text("Search the tracklist"),
-                            )
-                            .on_hover_note("Filter the lines by song, artist, label or matched record");
-                        });
+        let box_id = egui::Id::new("tracklist_paste_box");
+        let was_focused = ctx.memory(|m| m.has_focus(box_id));
+        if was_focused && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.clear_tracklist_paste(ctx, box_id);
+        }
+        let focus = std::mem::take(&mut self.tracklist_focus_paste);
+        let max_h = (ui.available_height() / 3.0).max(60.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+            if !self.tracklists.is_empty() {
+                crate::ui::field::Field::singleline(&mut self.tracklist_filter)
+                    .width(160.0)
+                    .hint("Search the tracklist")
+                    .show(ui)
+                    .on_hover_note("Filter the lines by song, artist, label or matched record");
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("tracklist_paste_scroll")
+                .max_height(max_h)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let resp = crate::ui::field::Field::multiline(&mut self.tracklist_paste)
+                        .id(box_id)
+                        .rows(1)
+                        .width(f32::INFINITY)
+                        .hint("Paste the tracklist here")
+                        .font(egui::TextStyle::Body)
+                        .show(ui);
+                    if focus {
+                        resp.request_focus();
                     }
                 });
-            });
-            return;
-        }
-
-        // The box: one line tall until the text asks for more, capped at a
-        // third of the view and scrolling inside past that.
-        let max_h = (ui.available_height() / 3.0).max(60.0);
-        let mut focus_box = false;
-        let scroll = egui::ScrollArea::vertical()
-            .id_salt("tracklist_paste_scroll")
-            .max_height(max_h)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                let edit = egui::TextEdit::multiline(&mut self.tracklist_paste)
-                    .desired_rows(1)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("Paste the tracklist here")
-                    .font(egui::TextStyle::Body);
-                let resp = ui.add(edit);
-                if !ui.memory(|m| m.has_focus(resp.id)) && ui.data(|d| d.get_temp::<bool>(resp.id.with("fresh")).unwrap_or(true)) {
-                    focus_box = true;
-                    resp.request_focus();
-                    ui.data_mut(|d| d.insert_temp(resp.id.with("fresh"), false));
-                }
-                resp
-            });
-        let box_id = scroll.inner.id;
-        if !focus_box && ctx.input(|i| i.key_pressed(egui::Key::Escape)) && ctx.memory(|m| m.has_focus(box_id)) {
-            self.close_tracklist_paste(ctx, box_id);
+        });
+        if self.tracklist_paste.trim().is_empty() {
             return;
         }
 
@@ -312,15 +279,13 @@ impl App {
         let mut cancel = false;
         crate::ui::control_row(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.tracklist_name)
-                        .desired_width(220.0)
-                        .hint_text(suggested.as_str()),
-                )
-                .on_hover_note("A name for this tracklist");
+                crate::ui::field::Field::singleline(&mut self.tracklist_name)
+                    .width(220.0)
+                    .hint(suggested.as_str())
+                    .show(ui)
+                    .on_hover_note("A name for this tracklist");
                 let can = tracks + ids > 0 && !self.is_busy();
-                if ui
-                    .add_enabled(can, egui::Button::new("Match"))
+                if crate::ui::button::button_enabled(ui, can, "Match")
                     .on_hover_note(if self.is_busy() {
                         "Wait for the current job to finish"
                     } else {
@@ -330,32 +295,30 @@ impl App {
                 {
                     save = true;
                 }
-                if ui.button("Cancel").on_hover_note("Close the paste box").clicked() {
+                if crate::ui::button::button(ui, "Cancel").on_hover_note("Clear the paste box").clicked() {
                     cancel = true;
                 }
-                if !self.tracklist_paste.trim().is_empty() {
-                    let mut parts = vec![format!("{tracks} track{}", if tracks == 1 { "" } else { "s" })];
-                    if ids > 0 {
-                        parts.push(format!("{ids} ID{}", if ids == 1 { "" } else { "s" }));
-                    }
-                    if skipped > 0 {
-                        parts.push(format!("{skipped} line{} skipped", if skipped == 1 { "" } else { "s" }));
-                    }
-                    let est = tracks as f32 * 1.8;
-                    let est = if est >= 90.0 {
-                        format!(" · about {} min", (est / 60.0).round().max(1.0) as u32)
-                    } else if tracks > 0 {
-                        format!(" · about {} s", (est / 10.0).ceil() as u32 * 10)
-                    } else {
-                        String::new()
-                    };
-                    ui.label(egui::RichText::new(format!("{}{est}", parts.join(" · "))).weak())
-                        .on_hover_note("What the paste reads as, and how long the lookups take at Discogs's pace");
+                let mut parts = vec![format!("{tracks} track{}", if tracks == 1 { "" } else { "s" })];
+                if ids > 0 {
+                    parts.push(format!("{ids} ID{}", if ids == 1 { "" } else { "s" }));
                 }
+                if skipped > 0 {
+                    parts.push(format!("{skipped} line{} skipped", if skipped == 1 { "" } else { "s" }));
+                }
+                let est = tracks as f32 * 1.8;
+                let est = if est >= 90.0 {
+                    format!(" · about {} min", (est / 60.0).round().max(1.0) as u32)
+                } else if tracks > 0 {
+                    format!(" · about {} s", (est / 10.0).ceil() as u32 * 10)
+                } else {
+                    String::new()
+                };
+                ui.label(egui::RichText::new(format!("{}{est}", parts.join(" · "))).weak())
+                    .on_hover_note("What the paste reads as, and how long the lookups take at Discogs's pace");
             });
         });
         if cancel {
-            self.close_tracklist_paste(ctx, box_id);
+            self.clear_tracklist_paste(ctx, box_id);
         }
         if save {
             let name = if self.tracklist_name.trim().is_empty() {
@@ -368,7 +331,7 @@ impl App {
                 Ok(id) => {
                     self.reload_tracklists();
                     self.tracklist_current = Some(id);
-                    self.close_tracklist_paste(ctx, box_id);
+                    self.clear_tracklist_paste(ctx, box_id);
                     self.spawn_match_tracklist(ctx.clone(), id, true);
                 }
                 Err(e) => self.fail(format!("Couldn't save the tracklist: {e}")),
@@ -376,11 +339,9 @@ impl App {
         }
     }
 
-    fn close_tracklist_paste(&mut self, ctx: &egui::Context, box_id: egui::Id) {
-        self.tracklist_paste_open = false;
+    fn clear_tracklist_paste(&mut self, ctx: &egui::Context, box_id: egui::Id) {
         self.tracklist_paste.clear();
         self.tracklist_name.clear();
-        ctx.data_mut(|d| d.remove::<bool>(box_id.with("fresh")));
         ctx.memory_mut(|m| m.surrender_focus(box_id));
     }
 
@@ -436,14 +397,12 @@ impl App {
         let busy = self.is_busy();
 
         let mut act: Option<ListAct> = None;
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(&t.name).font(font::headline()));
-            let when = match t.matched_at {
-                Some(m) => format!("{} of {} matched · matched {}", t.matched, t.lines, fmt_day(m)),
-                None => format!("{} lines · not matched yet", t.lines),
-            };
-            ui.label(egui::RichText::new(when).weak());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // One control row: the buttons take their width first; the name and
+        // status get what's left and truncate, so a narrow window never runs
+        // them together.
+        let row = egui::vec2(ui.available_width(), crate::ui::control_h(ui));
+        ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            {
                 crate::ui::control_row(ui, |ui| {
                     ui.menu_button("⋯", |ui| {
                         if ui.button("Re-match every line").on_hover_note("Search again for every line you haven't chosen by hand").clicked() {
@@ -460,7 +419,7 @@ impl App {
                             ui.close_menu();
                         }
                     });
-                    if ui.button("Show on map").on_hover_note("Open the record map, where the matched records now sit").clicked() {
+                    if crate::ui::button::button(ui, "Show on map").on_hover_note("Open the record map, where the matched records now sit").clicked() {
                         act = Some(ListAct::ShowOnMap);
                     }
                     let wantable = self
@@ -468,8 +427,7 @@ impl App {
                         .iter()
                         .filter(|e| e.release_id.is_some_and(|r| !self.vinyl_owned.contains(&r) && !self.vinyl_wanted.contains(&r)))
                         .count();
-                    if ui
-                        .add_enabled(wantable > 0 && !busy, egui::Button::new("♥ Want all matched"))
+                    if crate::ui::button::button_enabled(ui, wantable > 0 && !busy, "♥ Want all")
                         .on_hover_note("Put every matched record you don't own or want on your wantlist")
                         .clicked()
                     {
@@ -480,14 +438,24 @@ impl App {
                         .iter()
                         .filter(|e| e.kind == LineKind::Track && e.chosen_by != ChosenBy::User && (e.release_id.is_none() || e.confidence < Confidence::Likely))
                         .count();
-                    if ui
-                        .add_enabled(unsettled > 0 && !busy, egui::Button::new("Match"))
+                    if crate::ui::button::button_enabled(ui, unsettled > 0 && !busy, "Match")
                         .on_hover_note("Look up the lines that aren't settled yet")
                         .clicked()
                     {
                         act = Some(ListAct::Match);
                     }
                 });
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&t.name).font(font::headline()))
+                        .truncate(),
+                );
+                let when = match t.matched_at {
+                    Some(m) => format!("{} of {} matched · matched {}", t.matched, t.lines, fmt_day(m)),
+                    None => format!("{} lines · not matched yet", t.lines),
+                };
+                ui.add(egui::Label::new(egui::RichText::new(when).weak()).truncate());
             });
         });
         ui.add_space(space::S2);

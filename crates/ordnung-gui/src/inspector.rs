@@ -1211,9 +1211,9 @@ pub(crate) fn edit_row(ui: &mut egui::Ui, label: &str, value: &mut String) {
             .color(color::LABEL_3),
     );
     ui.add(
-        egui::TextEdit::singleline(value)
-            .hint_text("—")
-            .desired_width(f32::INFINITY),
+        crate::ui::field::Field::singleline(value)
+            .hint("—")
+            .width(f32::INFINITY),
     );
     ui.end_row();
 }
@@ -1228,10 +1228,10 @@ pub(crate) fn edit_row_multiline(ui: &mut egui::Ui, label: &str, value: &mut Str
             .color(color::LABEL_3),
     );
     ui.add(
-        egui::TextEdit::multiline(value)
-            .hint_text("—")
-            .desired_rows(2)
-            .desired_width(f32::INFINITY),
+        crate::ui::field::Field::multiline(value)
+            .hint("—")
+            .rows(2)
+            .width(f32::INFINITY),
     );
     ui.end_row();
 }

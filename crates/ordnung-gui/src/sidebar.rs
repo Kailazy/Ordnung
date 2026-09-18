@@ -458,9 +458,9 @@ fn inline_rename_editor(
         .horizontal(|ui| {
             ui.add_space(inset);
             ui.add(
-                egui::TextEdit::singleline(&mut state.buf)
-                    .hint_text(hint)
-                    .desired_width(avail - 2.0 * inset - margin.sum().x)
+                crate::ui::field::Field::singleline(&mut state.buf)
+                    .hint(hint)
+                    .width(avail - 2.0 * inset - margin.sum().x)
                     .margin(margin),
             )
         })

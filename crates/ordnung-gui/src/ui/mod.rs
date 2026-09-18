@@ -2,13 +2,14 @@
 //!
 //! [`tokens`] holds the design tokens (colours, radii, spacing, type ramp) and
 //! [`theme`] pushes them into egui's global style. The components sit beside
-//! them: [`button`] is the one push button, [`chip`] the avatar pill, [`menu`]
-//! the dropdown a button anchors,
+//! them: [`button`] is the one push button, [`field`] the one text box,
+//! [`chip`] the avatar pill, [`menu`] the dropdown a button anchors,
 //! [`window`] the one floating window, [`glass`] the surface they all sit
 //! on, [`control_row`] the rule that a row of controls shares one height.
 
 pub mod button;
 pub mod chip;
+pub mod field;
 pub mod frost;
 pub mod glass;
 pub mod hover;

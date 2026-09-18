@@ -158,7 +158,7 @@ impl App {
             tracklist_current: None,
             tracklist_entries: Vec::new(),
             tracklist_entries_for: None,
-            tracklist_paste_open: false,
+            tracklist_focus_paste: false,
             tracklist_paste: String::new(),
             tracklist_name: String::new(),
             tracklist_pick: None,
@@ -2538,6 +2538,7 @@ impl eframe::App for App {
                             }
                             if resp.clicked() {
                                 self.tracklist_open = !self.tracklist_open;
+                                self.tracklist_focus_paste = self.tracklist_open;
                             }
                         }
                         ui.separator();
@@ -2569,11 +2570,8 @@ impl eframe::App for App {
                                 (avail.right() - group_w - clear_w).max(avail.left()),
                             );
                             ui.add_space((left - avail.left()).max(0.0));
-                            // egui's TextEdit defaults to a 4×2 inner margin, which
-                            // leaves the caret and hint text jammed against the
-                            // frame. Give the field real breathing room and a
-                            // comfortable hit height — it's the most-used control in
-                            // the toolbar, so it earns the space.
+                            // Taller than the standard field: it's the most-used
+                            // control in the toolbar, so it earns the space.
                             // Read before the field borrows `search_query`
                             // mutably, so the hint can depend on the scope.
                             let hint = if self.searching_discogs() {
@@ -2582,11 +2580,11 @@ impl eframe::App for App {
                                 "Search songs and records"
                             };
                             let resp = ui.add(
-                                egui::TextEdit::singleline(&mut self.search_query)
-                                    .desired_width(w)
+                                crate::ui::field::Field::singleline(&mut self.search_query)
+                                    .width(w)
                                     .margin(egui::Margin::symmetric(space::S3, space::S2 + 1.0))
                                     .min_size(egui::vec2(0.0, 26.0))
-                                    .hint_text(hint),
+                                    .hint(hint),
                             );
                             // ⌘F (or Edit ▸ Find) asked for this field. Focus
                             // it and select whatever's already typed, so the
@@ -3747,9 +3745,9 @@ impl eframe::App for App {
                             ui.horizontal(|ui| {
                                 ui.add_enabled(
                                     lossy,
-                                    egui::TextEdit::singleline(&mut modal.bitrate_kbps)
-                                        .hint_text(default_bitrate_hint(modal.target))
-                                        .desired_width(70.0),
+                                    crate::ui::field::Field::singleline(&mut modal.bitrate_kbps)
+                                        .hint(default_bitrate_hint(modal.target))
+                                        .width(70.0),
                                 );
                                 ui.label(
                                     egui::RichText::new(if lossy { "kbps" } else { "lossless" })

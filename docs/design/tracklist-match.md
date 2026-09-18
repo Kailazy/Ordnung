@@ -11,10 +11,12 @@ Deviations from the draft: it is not a tab (v0.116.1): a tiny ≡ glyph in
 the top bar, left of the counts, opens a Tracklists window with its own
 search box, so the feature is reachable from every view and the vinyl
 tab strip stays shelves + market + map; the pressing rule (`best_candidate`) stayed in
-the GUI jobs module since its `ReleaseAutoMatch` enum is GUI config; the
-paste box sits on its own line with the name field, Match and the parse
-preview on the control row under it, so growing text never distorts the
-row; and the row carries no live price, the record sheet a click away does.
+the GUI jobs module since its `ReleaseAutoMatch` enum is GUI config; there
+is no *Paste tracklist* button at all (v0.120.3): the one-line paste box is
+simply there at the top of the window and grows with its text, with the
+name field, Match and the parse preview on a control row under it once it
+holds text; and the row carries no live price, the record sheet a click
+away does.
 Still open from §7 D: playlist-from-owned-lines, wantlist-watch tie-in,
 a `source` on `DugRelease`, Soulseek hand-off.
 **Target surface:** Ordnung GUI, vinyl side (`ordnung-gui`), engine in `ordnung-core`.

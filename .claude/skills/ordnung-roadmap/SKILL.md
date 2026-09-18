@@ -283,9 +283,9 @@ and are marked when already owned or wanted; picking one opens the existing
 
 **Tracklist match (v0.116.0; window instead of a tab since v0.116.1).** A
 tiny ≡ glyph in the top bar, left of the counts, opens the **Tracklists**
-window (`tracklists.rs`): a quiet *Paste tracklist* text button (or ⌘V with
-the window open) opens an inline paste box one line tall that grows only
-with its text; Match
+window (`tracklists.rs`): a one-line paste box (`ui::field`) sits at the
+top and grows only with its text, no button in front of it (⌘V with the
+window open lands there too); Match
 saves the paste (`tracklists` + `tracklist_lines`, schema v17) and runs
 `jobs::run_match_tracklist`, which per line searches Discogs
 (`discogs::find_track_releases`: label-hint rung, then artist+track, then

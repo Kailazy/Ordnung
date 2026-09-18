@@ -616,9 +616,9 @@ impl App {
                             .weak(),
                     );
                     let edit = ui.add(
-                        egui::TextEdit::singleline(&mut text)
-                            .hint_text("contains… or \"exact\"")
-                            .desired_width(150.0),
+                        crate::ui::field::Field::singleline(&mut text)
+                            .hint("contains… or \"exact\"")
+                            .width(150.0),
                     );
                     // Grab the keyboard the frame the bar opens so the user can
                     // type immediately; Enter dismisses the bar (filter stays).
@@ -692,13 +692,13 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_space(crate::ui::tokens::space::S2);
             let field = ui.add(
-                egui::TextEdit::singleline(&mut self.filter)
-                    .desired_width(220.0)
+                crate::ui::field::Field::singleline(&mut self.filter)
+                    .width(220.0)
                     .margin(egui::Margin::symmetric(
                         crate::ui::tokens::space::S3,
                         crate::ui::tokens::space::S2,
                     ))
-                    .hint_text("Filter these tracks"),
+                    .hint("Filter these tracks"),
             );
             field.clone().on_hover_note(
                 "Narrow the table by artist, title, album or filename",

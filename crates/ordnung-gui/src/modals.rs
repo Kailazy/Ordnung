@@ -178,9 +178,9 @@ impl App {
                             let lossy = matches!(m.target, Format::Mp3 | Format::Aac);
                             ui.add_enabled(
                                 lossy,
-                                egui::TextEdit::singleline(&mut m.bitrate_kbps)
-                                    .hint_text(default_bitrate_hint(m.target))
-                                    .desired_width(80.0),
+                                crate::ui::field::Field::singleline(&mut m.bitrate_kbps)
+                                    .hint(default_bitrate_hint(m.target))
+                                    .width(80.0),
                             );
                             ui.end_row();
 
@@ -430,10 +430,10 @@ impl App {
         }
         ui.add_space(8.0);
         let token_field = ui.add(
-            egui::TextEdit::singleline(&mut self.token_input)
+            crate::ui::field::Field::singleline(&mut self.token_input)
                 .password(true)
-                .hint_text("paste your Discogs token")
-                .desired_width(f32::INFINITY),
+                .hint("paste your Discogs token")
+                .width(f32::INFINITY),
         );
         // Enter in the field saves, matching the Save button.
         let submitted = token_field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -1651,11 +1651,11 @@ impl App {
                                                     matches!(target, Format::Mp3 | Format::Aac);
                                                 let resp = ui.add_enabled(
                                                     lossy,
-                                                    egui::TextEdit::singleline(
+                                                    crate::ui::field::Field::singleline(
                                                         &mut self.config.convert_bitrate_kbps,
                                                     )
-                                                    .hint_text(default_bitrate_hint(target))
-                                                    .desired_width(80.0),
+                                                    .hint(default_bitrate_hint(target))
+                                                    .width(80.0),
                                                 );
                                                 if resp.lost_focus() {
                                                     convert_dirty = true;
@@ -3536,9 +3536,9 @@ impl App {
                 ui.add_space(space::S2);
                 let search = &mut self.look_editor.as_mut().expect("editor open").search;
                 ui.add(
-                    egui::TextEdit::singleline(search)
-                        .hint_text("Search icons")
-                        .desired_width(f32::INFINITY),
+                    crate::ui::field::Field::singleline(search)
+                        .hint("Search icons")
+                        .width(f32::INFINITY),
                 );
                 let needle = search.trim().to_ascii_lowercase();
                 let matches: Vec<&(&str, &str)> = crate::ui::phosphor_icons::ICONS

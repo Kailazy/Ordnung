@@ -626,10 +626,10 @@ impl App {
                                         );
                                         ui.add_space(crate::ui::tokens::space::S2);
                                         ui.add(
-                                            egui::TextEdit::singleline(&mut token_input)
+                                            crate::ui::field::Field::singleline(&mut token_input)
                                                 .password(true)
-                                                .hint_text("Paste your Discogs token")
-                                                .desired_width(ui.available_width()),
+                                                .hint("Paste your Discogs token")
+                                                .width(ui.available_width()),
                                         );
                                         ui.add_space(crate::ui::tokens::space::S2);
                                         ui.horizontal(|ui| {

@@ -583,9 +583,9 @@ impl App {
                     crate::ui::control_row(ui, |ui| {
                         ui.horizontal(|ui| {
                             let edit = ui.add(
-                                egui::TextEdit::singleline(buf)
-                                    .hint_text("Cue name")
-                                    .desired_width(W - 120.0),
+                                crate::ui::field::Field::singleline(buf)
+                                    .hint("Cue name")
+                                    .width(W - 120.0),
                             );
                             if !edit.has_focus() && !edit.lost_focus() {
                                 edit.request_focus();

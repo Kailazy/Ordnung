@@ -1348,15 +1348,15 @@ impl App {
         m.ui().horizontal(|ui| {
             ui.add_space(pad);
             ui.add(
-                egui::TextEdit::singleline(&mut self.vinyl_flt.year_from)
-                    .desired_width(48.0)
-                    .hint_text("from"),
+                crate::ui::field::Field::singleline(&mut self.vinyl_flt.year_from)
+                    .width(48.0)
+                    .hint("from"),
             );
             ui.label("–");
             ui.add(
-                egui::TextEdit::singleline(&mut self.vinyl_flt.year_to)
-                    .desired_width(48.0)
-                    .hint_text("to"),
+                crate::ui::field::Field::singleline(&mut self.vinyl_flt.year_to)
+                    .width(48.0)
+                    .hint("to"),
             );
         });
 
@@ -1381,9 +1381,9 @@ impl App {
                 ui.add_space(pad);
                 ui.label("Price up to");
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.vinyl_flt.price_max)
-                        .desired_width(56.0)
-                        .hint_text("any"),
+                    crate::ui::field::Field::singleline(&mut self.vinyl_flt.price_max)
+                        .width(56.0)
+                        .hint("any"),
                 )
                 .on_hover_note("Ceiling in the shop's own listing currency");
             });
@@ -1652,9 +1652,9 @@ impl App {
                 "Search vinyl"
             };
             let search = ui.add(
-                egui::TextEdit::singleline(&mut self.vinyl_filter)
-                    .desired_width(200.0)
-                    .hint_text(hint),
+                crate::ui::field::Field::singleline(&mut self.vinyl_filter)
+                    .width(200.0)
+                    .hint(hint),
             );
             let search = search.on_hover_note(if seller_mode {
                 "Filter the crates by artist, title, label, year or format"
