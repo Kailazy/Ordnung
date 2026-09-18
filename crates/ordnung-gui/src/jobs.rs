@@ -4120,16 +4120,27 @@ mod usb_transfer_tests {
 
 // --- Tracklist match ---------------------------------------------------------
 
+/// Which of a tracklist's lines a match run looks up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MatchScope {
+    /// Lines without a Likely or Sure release yet.
+    Unsettled,
+    /// Every line the user hasn't settled by hand.
+    All,
+    /// One line, by position, whatever its state: the row's ↻.
+    Line(u32),
+}
+
 impl App {
     /// Match a saved tracklist's lines to Discogs records in the background
-    /// (see `tracklists.rs` and `docs/design/tracklist-match.md`).
-    /// `only_unsettled` skips lines that already have a Likely or Sure
-    /// release; a line the user settled by hand is never touched either way.
+    /// (see `tracklists.rs` and `docs/design/tracklist-match.md`). A line
+    /// the user settled by hand is only touched when it is the one line
+    /// asked for.
     pub(crate) fn spawn_match_tracklist(
         &mut self,
         ctx: egui::Context,
         tracklist_id: Id,
-        only_unsettled: bool,
+        scope: MatchScope,
     ) {
         if self.is_busy() {
             self.status = "Busy — wait for the current job to finish.".into();
@@ -4155,7 +4166,7 @@ impl App {
             hidden_mediums: self.config.hidden_release_mediums.clone(),
         };
         thread::spawn(move || {
-            run_match_tracklist(db, spec, tracklist_id, only_unsettled, cancel, tx, ctx)
+            run_match_tracklist(db, spec, tracklist_id, scope, cancel, tx, ctx)
         });
     }
 }
@@ -4171,7 +4182,7 @@ pub(crate) fn run_match_tracklist(
     db: PathBuf,
     spec: AutoMatchSpec,
     tracklist_id: Id,
-    only_unsettled: bool,
+    scope: MatchScope,
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
@@ -4197,9 +4208,14 @@ pub(crate) fn run_match_tracklist(
     };
     let targets: Vec<_> = entries
         .into_iter()
-        .filter(|e| e.kind == LineKind::Track && e.chosen_by != ChosenBy::User)
-        .filter(|e| {
-            !only_unsettled || e.release_id.is_none() || e.confidence < Confidence::Likely
+        .filter(|e| e.kind == LineKind::Track)
+        .filter(|e| match scope {
+            MatchScope::Line(p) => e.position == p,
+            MatchScope::All => e.chosen_by != ChosenBy::User,
+            MatchScope::Unsettled => {
+                e.chosen_by != ChosenBy::User
+                    && (e.release_id.is_none() || e.confidence < Confidence::Likely)
+            }
         })
         .collect();
     let total = targets.len();
@@ -4243,7 +4259,23 @@ pub(crate) fn run_match_tracklist(
 
         let line = entry.as_line();
         let (artist, title) = tracklist::search_terms(&line);
-        let cands = match client.find_track_releases(&artist, &title, entry.label_hint.as_deref()) {
+        let mut cands = client.find_track_releases(&artist, &title, entry.label_hint.as_deref());
+        if let Err(ordnung_core::Error::Discogs { status: 429, .. }) = &cands {
+            // Discogs said slow down and the client's own retries ran out:
+            // wait a whole window out and ask once more before the line
+            // counts as failed, so a long list gets through on its own.
+            let _ = tx.send(JobMsg::Status(format!(
+                "Discogs asked us to slow down. Waiting a minute, then {song}"
+            )));
+            ctx.request_repaint();
+            if !wait_unless_cancelled(&cancel, Duration::from_secs(60)) {
+                stopped = true;
+                break;
+            }
+            let _ = tx.send(JobMsg::Status(format!("Matching {} of {total}: {song}", i + 1)));
+            cands = client.find_track_releases(&artist, &title, entry.label_hint.as_deref());
+        }
+        let cands = match cands {
             Ok(c) => c,
             Err(e) => {
                 errored += 1;
@@ -4406,6 +4438,19 @@ pub(crate) fn run_match_tracklist(
         if parts.is_empty() { "nothing to match".to_string() } else { parts.join(", ") }
     )));
     ctx.request_repaint();
+}
+
+/// Sleep for `wait`, checking the cancel flag as it goes. False when the
+/// job was cancelled before the wait was up.
+fn wait_unless_cancelled(cancel: &AtomicBool, wait: Duration) -> bool {
+    let until = std::time::Instant::now() + wait;
+    while std::time::Instant::now() < until {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    !cancel.load(Ordering::Relaxed)
 }
 
 /// The local library track that is this line's song, if exactly one

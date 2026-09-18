@@ -12,11 +12,13 @@
 //! didn't change, and only the new lines get looked up. Each row shows the song as pasted, the record it
 //! matched (cover, title, year, label and catalog number, format), a
 //! confidence pip and OWNED / WANT / IN LIBRARY badges; a click opens the
-//! ordinary record sheet, and the context menu wants, digs, re-picks or
-//! rejects. Matched records join the record map. Parsing and scoring live
+//! ordinary record sheet, the ↻ at the row's edge looks that one line up
+//! again (a line Discogs rate-limited, say), and the context menu wants,
+//! digs, re-picks or rejects. Matched records join the record map. Parsing and scoring live
 //! in `ordnung_core::tracklist`; see `docs/design/tracklist-match.md`.
 
 use super::*;
+use crate::jobs::MatchScope;
 use crate::records::SearchScope;
 use crate::ui::tokens::{color, font, space};
 use egui_extras::{Column, TableBuilder};
@@ -34,6 +36,8 @@ enum LineAct {
     SearchDiscogs(usize),
     NotThis(usize),
     PlayLocal(usize),
+    /// Look this one line up again, whatever it holds.
+    Retry(usize),
 }
 
 /// Whole-list actions from the header.
@@ -387,7 +391,7 @@ impl App {
                             && (e.release_id.is_none() || e.confidence < Confidence::Likely)
                     });
                     if unsettled {
-                        self.spawn_match_tracklist(ctx.clone(), id, true);
+                        self.spawn_match_tracklist(ctx.clone(), id, MatchScope::Unsettled);
                     } else {
                         self.status = format!("Saved the tracklist {name}.");
                     }
@@ -561,7 +565,7 @@ impl App {
             .column(Column::exact(THUMB + 6.0))
             .column(Column::remainder().at_least(160.0))
             .column(Column::remainder().at_least(160.0))
-            .column(Column::exact(118.0))
+            .column(Column::exact(140.0))
             .body(|body| {
                 body.rows(row_h, shown.len(), |mut row| {
                     let i = shown[row.index()];
@@ -663,28 +667,42 @@ impl App {
                             }
                         });
                     });
-                    // pip + badges
+                    // pip + badges, and the ↻ at the row's edge
                     row.col(|ui| {
-                        let (c, words) = confidence_look(&e);
-                        let (pr, presp) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                        ui.painter().circle_filled(pr.center(), 4.0, c);
-                        presp.on_hover_note(words);
-                        let badge = |ui: &mut egui::Ui, text: &str, col: egui::Color32, tip: &str| {
-                            ui.add(egui::Label::new(
-                                egui::RichText::new(text).font(font::caption()).color(col).strong(),
-                            ))
-                            .on_hover_note(tip);
-                        };
-                        if let Some(r) = e.release_id {
-                            if self.vinyl_owned.contains(&r) {
-                                badge(ui, "OWNED", color::GREEN, "In your collection");
-                            } else if self.vinyl_wanted.contains(&r) {
-                                badge(ui, "WANT", color::ACCENT_HOVER, "On your wantlist");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if e.kind == LineKind::Track {
+                                let note = match (busy, e.release_id) {
+                                    (true, _) => "Wait for the current job to finish",
+                                    (false, Some(_)) => "Look this line up on Discogs again",
+                                    (false, None) => "Look this line up on Discogs again. Use it once Discogs has stopped asking us to slow down",
+                                };
+                                if crate::ui::button::glyph(ui, "↻", !busy).on_hover_note(note).clicked() {
+                                    line_act = Some(LineAct::Retry(i));
+                                }
                             }
-                        }
-                        if e.local_track_id.is_some() {
-                            badge(ui, "FILE", color::LABEL_2, "A track in your library is this song");
-                        }
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                let (c, words) = confidence_look(&e);
+                                let (pr, presp) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                                ui.painter().circle_filled(pr.center(), 4.0, c);
+                                presp.on_hover_note(words);
+                                let badge = |ui: &mut egui::Ui, text: &str, col: egui::Color32, tip: &str| {
+                                    ui.add(egui::Label::new(
+                                        egui::RichText::new(text).font(font::caption()).color(col).strong(),
+                                    ))
+                                    .on_hover_note(tip);
+                                };
+                                if let Some(r) = e.release_id {
+                                    if self.vinyl_owned.contains(&r) {
+                                        badge(ui, "OWNED", color::GREEN, "In your collection");
+                                    } else if self.vinyl_wanted.contains(&r) {
+                                        badge(ui, "WANT", color::ACCENT_HOVER, "On your wantlist");
+                                    }
+                                }
+                                if e.local_track_id.is_some() {
+                                    badge(ui, "FILE", color::LABEL_2, "A track in your library is this song");
+                                }
+                            });
+                        });
                     });
                     let resp = row.response();
                     if resp.hovered() && e.release_id.is_some() {
@@ -728,6 +746,10 @@ impl App {
                                 line_act = Some(LineAct::Pick(i));
                                 ui.close_menu();
                             }
+                            if ui.add_enabled(!busy, egui::Button::new("↻ Look up again")).on_hover_note("Search Discogs for this line once more").clicked() {
+                                line_act = Some(LineAct::Retry(i));
+                                ui.close_menu();
+                            }
                             if ui.button("Search Discogs for this line").on_hover_note("Put the line in the search box, Discogs mode").clicked() {
                                 line_act = Some(LineAct::SearchDiscogs(i));
                                 ui.close_menu();
@@ -742,8 +764,8 @@ impl App {
             });
 
         match act {
-            Some(ListAct::Match) => self.spawn_match_tracklist(ctx.clone(), id, true),
-            Some(ListAct::Rematch) => self.spawn_match_tracklist(ctx.clone(), id, false),
+            Some(ListAct::Match) => self.spawn_match_tracklist(ctx.clone(), id, MatchScope::Unsettled),
+            Some(ListAct::Rematch) => self.spawn_match_tracklist(ctx.clone(), id, MatchScope::All),
             Some(ListAct::Edit) => self.edit_tracklist(id),
             Some(ListAct::WantAll) => {
                 let ids: Vec<u64> = self
@@ -808,11 +830,12 @@ impl App {
         let Some(act) = line_act else { return };
         let Some(e) = self.tracklist_entries.get(match act {
             LineAct::Open(i) | LineAct::Want(i) | LineAct::Dig(i) | LineAct::Buy(i) | LineAct::Pick(i)
-            | LineAct::SearchDiscogs(i) | LineAct::NotThis(i) | LineAct::PlayLocal(i) => i,
+            | LineAct::SearchDiscogs(i) | LineAct::NotThis(i) | LineAct::PlayLocal(i) | LineAct::Retry(i) => i,
         }).cloned() else { return };
         let rel_artist = e.rel_artist.clone().unwrap_or_default();
         let rel_title = e.rel_title.clone().unwrap_or_default();
         match act {
+            LineAct::Retry(_) => self.spawn_match_tracklist(ctx.clone(), id, MatchScope::Line(e.position)),
             LineAct::Open(_) => {
                 if let Some(r) = e.release_id {
                     self.open_release_sheet(r, rel_artist, rel_title, record_sub(&e), e.rel_thumb.clone(), ctx);

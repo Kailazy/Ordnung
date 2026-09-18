@@ -74,3 +74,41 @@ pub fn inline(ui: &mut egui::Ui, label: &str) -> egui::Response {
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
+
+/// A glyph that acts, sitting at the edge of a row: a square the row's
+/// height, the glyph in the weak label tone until the pointer is on it,
+/// then strong on the hover fill. For the one action a row keeps at hand
+/// (look this up again, refresh), the way the track table's Discogs release
+/// line keeps its ↻. Disabled, it fades and takes no click.
+pub fn glyph(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
+    let side = ui.spacing().interact_size.y;
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(side, side),
+        if enabled { egui::Sense::click() } else { egui::Sense::hover() },
+    );
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals();
+        if enabled && resp.hovered() {
+            ui.painter().rect_filled(
+                rect,
+                visuals.widgets.hovered.rounding,
+                visuals.widgets.hovered.weak_bg_fill,
+            );
+        }
+        let ink = if !enabled {
+            visuals.weak_text_color().gamma_multiply(0.5)
+        } else if resp.hovered() {
+            visuals.strong_text_color()
+        } else {
+            visuals.weak_text_color()
+        };
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            egui::TextStyle::Button.resolve(ui.style()),
+            ink,
+        );
+    }
+    resp
+}
