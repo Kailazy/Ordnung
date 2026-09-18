@@ -128,6 +128,29 @@ fn fmt_clock(secs: u32) -> String {
     }
 }
 
+/// The row table's columns: #, cover, the two text columns at their
+/// narrowest, and the badge column (pip, OWNED, FILE, +, ↻). The badge
+/// column is the window's outer bound: the window never shrinks, and the
+/// side panel never widens, past where it would push the ↻ out of view.
+const COL_INDEX: f32 = 30.0;
+const THUMB: f32 = 36.0;
+const COL_COVER: f32 = THUMB + 6.0;
+const COL_TEXT_MIN: f32 = 150.0;
+const COL_BADGES: f32 = 180.0;
+/// The side panel at its narrowest.
+const SIDE_MIN: f32 = 150.0;
+/// egui's own inner margin on a central panel, each side.
+const PANEL_MARGIN: f32 = 8.0;
+
+/// The width the row table needs to show every column in full: the columns,
+/// the gaps between them, and room for the scrollbar.
+fn table_min_width(style: &egui::Style) -> f32 {
+    let gaps = 4.0 * style.spacing.item_spacing.x;
+    let scroll = &style.spacing.scroll;
+    let bar = scroll.bar_width + scroll.bar_inner_margin + scroll.bar_outer_margin;
+    COL_INDEX + COL_COVER + 2.0 * COL_TEXT_MIN + COL_BADGES + gaps + bar
+}
+
 /// Pad a cell so its one- or two-line text block (body line, 1 pt, caption
 /// line) sits in the middle of the row rather than against its top.
 fn center_lines(ui: &mut egui::Ui, two: bool) {
@@ -241,12 +264,16 @@ impl App {
             return;
         }
         let mut open = true;
+        // No narrower than the side panel at its narrowest beside the table
+        // with every column showing (the content's width: egui adds the
+        // frame's margins outside it).
+        let min_w = SIDE_MIN + 2.0 * PANEL_MARGIN + table_min_width(&ctx.style());
         crate::ui::window::Window::new("Tracklists")
             .id(egui::Id::new("tracklists_window"))
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(780.0, 540.0))
-            .min_size(egui::vec2(560.0, 320.0))
+            .default_size(egui::vec2(min_w.max(860.0), 540.0))
+            .min_size(egui::vec2(min_w, 320.0))
             .show(ctx, |ui| {
                 let query = self.tracklist_filter.trim().to_lowercase();
                 self.draw_tracklists(ui, ctx, &query);
@@ -318,10 +345,15 @@ impl App {
             return;
         }
 
+        // The side panel gives way first: it can't widen past where the
+        // table's last column would leave the window, and a shrinking window
+        // narrows it before the window's own minimum stops the resize.
+        let side_max = ui.available_width() - 2.0 * PANEL_MARGIN - table_min_width(ui.style());
         egui::SidePanel::left("tracklists_side")
             .resizable(true)
             .default_width(200.0)
-            .min_width(150.0)
+            .min_width(SIDE_MIN)
+            .max_width(side_max.max(SIDE_MIN))
             .show_inside(ui, |ui| self.draw_tracklist_side(ui, ctx));
         egui::CentralPanel::default().show_inside(ui, |ui| {
             self.draw_tracklist_rows(ui, ctx, query);
@@ -633,23 +665,37 @@ impl App {
         }
         let mut line_act: Option<LineAct> = None;
         let row_h = 46.0;
-        const THUMB: f32 = 36.0;
-        TableBuilder::new(ui)
-            .id_salt(("tracklist_rows", id))
+        // egui_extras never lets a column shrink below what it used last
+        // frame, clipped or not, and a truncated label uses all it's given:
+        // once laid out, the table only ever grows, and a narrowing window
+        // pushes the badge column out of view. So the moment the width
+        // changes, the remembered widths go and the columns are laid out
+        // afresh for the new width.
+        let width_key = egui::Id::new(("tracklist_rows_width", id));
+        let avail = ui.available_width();
+        let last: Option<f32> = ui.data(|d| d.get_temp(width_key));
+        let refit = last.map_or(true, |w| (w - avail).abs() > 0.5);
+        ui.data_mut(|d| d.insert_temp(width_key, avail));
+        let builder = TableBuilder::new(ui)
+            .id_salt(("tracklist_rows", id));
+        if refit {
+            builder.reset();
+        }
+        builder
             .striped(true)
             .sense(egui::Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(30.0))
-            .column(Column::exact(THUMB + 6.0))
+            .column(Column::exact(COL_INDEX))
+            .column(Column::exact(COL_COVER))
             // Both text columns clip: an unclipped column grows to the widest
             // thing any row ever put in it, so two tracklists would split the
             // width differently and the pip and buttons would sit at
             // different x. Clipped, the two always share the space evenly.
-            .column(Column::remainder().at_least(160.0).clip(true))
-            .column(Column::remainder().at_least(160.0).clip(true))
+            .column(Column::remainder().at_least(COL_TEXT_MIN).clip(true))
+            .column(Column::remainder().at_least(COL_TEXT_MIN).clip(true))
             // Wide enough for the fullest row (pip, OWNED, FILE, +, ↻) so it
-            // never has to grow either.
-            .column(Column::exact(180.0).clip(true))
+            // never has to grow either. See `table_min_width`.
+            .column(Column::exact(COL_BADGES).clip(true))
             .body(|body| {
                 body.rows(row_h, shown.len(), |mut row| {
                     let i = shown[row.index()];
