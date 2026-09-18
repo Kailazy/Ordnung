@@ -1271,6 +1271,9 @@ impl App {
             // One backdrop for every record: the press that opens a sheet
             // primes it before the record is known.
             .glass_id(sheet_glass())
+            // Every record's sheet opens centred until one is dragged
+            // aside; from then on they all open where it was left.
+            .spawn_with(egui::Id::new("vinyl-sheet-spawn"))
             .open(&mut open)
             // The header under the cover names the record; a title bar
             // would say it twice.

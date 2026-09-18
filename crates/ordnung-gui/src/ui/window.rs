@@ -98,6 +98,7 @@ pub struct Window<'o> {
     place: Place,
     inner_margin: Option<egui::Margin>,
     glass: Option<egui::Id>,
+    spawn: Option<egui::Id>,
 }
 
 impl<'o> Window<'o> {
@@ -116,6 +117,7 @@ impl<'o> Window<'o> {
             place: Place::Center,
             inner_margin: None,
             glass: None,
+            spawn: None,
         }
     }
 
@@ -231,6 +233,15 @@ impl<'o> Window<'o> {
     /// Pinned to a screen edge; the user can't drag it.
     pub fn anchored(mut self, align: egui::Align2, offset: impl Into<egui::Vec2>) -> Self {
         self.place = Place::Anchor(align, offset.into());
+        self
+    }
+
+    /// One of a family of centred windows (the record sheets, one per
+    /// record) that open where the family was last left: centred, until
+    /// the user drags one somewhere, then every one opens with its top-left
+    /// corner there for the rest of the session.
+    pub fn spawn_with(mut self, family: egui::Id) -> Self {
+        self.spawn = Some(family);
         self
     }
 
@@ -351,17 +362,46 @@ impl<'o> Window<'o> {
                 (title_w + 2.0 * CLOSE_W).max(self.min_size[0].unwrap_or(0.0)),
             );
         }
-        // A window is placed by the pivot its placement names on the pass
-        // it opens, then held by its top-left corner: egui keeps the pivot
-        // where it is as the size changes, so any other pivot makes a
-        // resize mirror (the top-left corner moving out as the bottom-right
-        // is dragged out). The corner comes from where the window was last
-        // pass, plus any drag on a grip blocker.
+        // egui keeps a window's pivot where it is as the size changes.
+        // That is the placement's pivot while the content sets the size
+        // (a sheet whose tracklist arrives stays centred), and the top-left
+        // corner while the user drags a grip: any other pivot then mirrors
+        // the resize, the top-left corner moving out as the bottom-right is
+        // dragged out. Either way the pivot is put back each pass from
+        // where the window was last pass, so switching between them doesn't
+        // move it; a drag on a grip blocker is added.
+        // Opening: the pass it first draws, whether the backdrop's (the
+        // family of sheets shares one, so a sheet swapped in over another
+        // is opening too) or its own.
+        let pass = ctx.cumulative_pass_nr();
+        let drawn_id = id.with("drawn-pass");
+        let opening = opening
+            || ctx
+                .data(|d| d.get_temp::<u64>(drawn_id))
+                .map_or(true, |p| p + 1 < pass);
+        // The family's remembered corner, once one of them has been moved.
+        let spawn = self.spawn;
+        let remembered = spawn.and_then(|f| ctx.data(|d| d.get_temp::<egui::Pos2>(f)));
         let held = if opening { None } else { last_rect };
+        let resizing = held.is_some() && grip_dragged(ctx, id);
         w = match (self.place, held) {
-            (Place::Center | Place::At(..), Some(r)) => w
+            (Place::Center | Place::At(..), Some(r)) if resizing => {
+                w.pivot(egui::Align2::LEFT_TOP).current_pos(r.left_top())
+            }
+            // Held by the corner it opened at, once the family has one.
+            (Place::Center, Some(r)) if remembered.is_some() => w
                 .pivot(egui::Align2::LEFT_TOP)
                 .current_pos(r.left_top() + moved),
+            (Place::Center, Some(r)) => w
+                .pivot(egui::Align2::CENTER_CENTER)
+                .current_pos(r.center() + moved),
+            (Place::At(pivot, _), Some(r)) => {
+                w.pivot(pivot).current_pos(pivot.pos_in_rect(&r) + moved)
+            }
+            // Where the family was left, on the pass it opens.
+            (Place::Center, None) if opening && remembered.is_some() => w
+                .pivot(egui::Align2::LEFT_TOP)
+                .current_pos(remembered.unwrap()),
             // Centred on the pass it opens (`current_pos` overrides the
             // place egui remembers for it), free to drag after.
             (Place::Center, None) if opening => w
@@ -405,6 +445,18 @@ impl<'o> Window<'o> {
         if let (Some(shown), Some(slot)) = (&shown, slot) {
             glass::end(ctx, slot, glass_id, shown.response.rect, rounding, stroke);
             glass::drawn(ctx, glass_id);
+            ctx.data_mut(|d| d.insert_temp(drawn_id, pass));
+            // A drag by the user, on the frame or a grip blocker, is where
+            // the family opens from now on. The window's own size changes
+            // and a resize leave the corner alone.
+            let dragged = moved != egui::Vec2::ZERO
+                || ctx
+                    .read_response(id.with("move"))
+                    .is_some_and(|r| r.dragged());
+            if let (Some(family), true) = (spawn, dragged) {
+                let corner = shown.response.rect.left_top();
+                ctx.data_mut(|d| d.insert_temp(family, corner));
+            }
         }
         if closed {
             if let Some(open) = open {
@@ -449,6 +501,25 @@ fn close_button(ui: &mut egui::Ui, id: egui::Id, centre_y: f32) -> bool {
     icon::close(ui.painter(), rect.center(), icon::col(&resp), icon::CLOSE_ARM);
     ui.set_clip_rect(clip);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// Whether one of egui's own grips on the window is being dragged: egui
+/// registers them under its area's layer, by these names.
+fn grip_dragged(ctx: &egui::Context, id: egui::Id) -> bool {
+    let layer = egui::LayerId::new(egui::Order::Middle, id);
+    let base = egui::Id::new(layer).with("edge_drag");
+    [
+        "left",
+        "right",
+        "top",
+        "bottom",
+        "right_bottom",
+        "right_top",
+        "left_bottom",
+        "left_top",
+    ]
+    .iter()
+    .any(|k| ctx.read_response(base.with(k)).is_some_and(|r| r.dragged()))
 }
 
 /// The blockers a window may register, by key (see [`block_grips`]).
