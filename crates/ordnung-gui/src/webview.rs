@@ -184,20 +184,24 @@ pub fn set_volume(_volume: f32) {}
 /// default: the record sheet's own transport is the interface, and the panel is
 /// only worth looking at when the user wants the picture.
 #[cfg(target_os = "macos")]
+#[allow(dead_code)] // no button reaches for it now; kept for the panel
 pub fn set_video_visible(visible: bool) {
     imp::set_video_visible(visible);
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)] // no button reaches for it now; kept for the panel
 pub fn set_video_visible(_visible: bool) {}
 
 /// Whether the video panel is currently on screen.
 #[cfg(target_os = "macos")]
+#[allow(dead_code)] // no button reaches for it now; kept for the panel
 pub fn video_visible() -> bool {
     imp::video_visible()
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)] // no button reaches for it now; kept for the panel
 pub fn video_visible() -> bool {
     false
 }
@@ -1159,6 +1163,7 @@ mod imp {
         }
     }
 
+    #[allow(dead_code)] // no button reaches for it now; kept for the panel
     pub fn set_video_visible(visible: bool) {
         if MainThreadMarker::new().is_none() {
             return;
@@ -1183,6 +1188,7 @@ mod imp {
         });
     }
 
+    #[allow(dead_code)] // no button reaches for it now; kept for the panel
     pub fn video_visible() -> bool {
         if MainThreadMarker::new().is_none() {
             return false;

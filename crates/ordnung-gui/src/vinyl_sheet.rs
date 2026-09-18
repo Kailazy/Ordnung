@@ -1117,6 +1117,12 @@ impl App {
             // it. Height still follows the tracklist.
             .resizable([false, true])
             .default_width(SHEET_W)
+            // The same slightly see-through surface as the radio bar over
+            // the map, so the two read as one kind of thing laid on the app.
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(crate::ui::tokens::color::SURFACE.gamma_multiply(0.96)),
+            )
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
@@ -1129,6 +1135,29 @@ impl App {
                 ui.set_min_width(SHEET_W);
                 ui.set_max_width(SHEET_W);
                 ui.add_space(2.0);
+                // Which pressing is on the sheet is a choice, not a fact: the
+                // one a dig landed on is whichever the page listed. A small
+                // button at the top right lists the siblings to swap one in,
+                // out of the row of things to do with the record.
+                {
+                    let r = ui.max_rect();
+                    let slot = egui::Rect::from_min_max(
+                        egui::pos2(r.right() - 160.0, r.top()),
+                        egui::pos2(r.right(), r.top() + 24.0),
+                    );
+                    let mut tui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(slot)
+                            .layout(egui::Layout::right_to_left(egui::Align::Min)),
+                    );
+                    if tui
+                        .small_button("Pressings")
+                        .on_hover_note("Other pressings of this record, to swap one in")
+                        .clicked()
+                    {
+                        act = Some(Act::Pressings);
+                    }
+                }
                 ui.horizontal(|ui| {
                     // Cover.
                     const C: f32 = 120.0;
@@ -1313,16 +1342,6 @@ impl App {
                                 .clicked()
                             {
                                 open_url(&format!("https://www.discogs.com/release/{release_id}"));
-                            }
-                            // Which pressing is on the sheet is a choice, not
-                            // a fact: the one a dig landed on is whichever
-                            // the page listed. List the siblings and swap.
-                            if ui
-                                .button("Pressings")
-                                .on_hover_note("Other pressings of this record, to swap one in")
-                                .clicked()
-                            {
-                                act = Some(Act::Pressings);
                             }
                             // The deliberate label move: not one random pull
                             // down the thread, the whole run as a list.
@@ -1666,7 +1685,6 @@ impl App {
                     self.radio_stop("Radio off");
                 }
             }
-            Some(VideoAct::ToggleVideo) => webview::set_video_visible(!webview::video_visible()),
             None => {}
         }
 
@@ -1892,25 +1910,6 @@ enum RecordPlay {
 /// transport bar sizes against — see the `set_max_width` note in the sheet.
 const SHEET_W: f32 = 620.0;
 
-/// The video-window toggle: a small display outline, filled once the window is
-/// actually on screen, so the button shows the state rather than only the verb.
-fn draw_screen_glyph(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, showing: bool) {
-    let screen = egui::Rect::from_center_size(egui::pos2(c.x, c.y - 1.0), egui::vec2(15.0, 11.0));
-    if showing {
-        p.rect_filled(screen, 2.0, col);
-    } else {
-        p.rect_stroke(screen, 2.0, egui::Stroke::new(1.5, col));
-    }
-    // Stand, so the mark reads as a screen at this size instead of a bare box.
-    p.line_segment(
-        [
-            egui::pos2(c.x - 3.5, screen.max.y + 2.5),
-            egui::pos2(c.x + 3.5, screen.max.y + 2.5),
-        ],
-        egui::Stroke::new(1.5, col),
-    );
-}
-
 /// The tracklist's two fixed left-hand columns: the play marker, then the
 /// position. Shared with the transport bar, whose own play button is drawn
 /// [`MARKER_W`] wide over the same left edge, so the bar's pause icon sits
@@ -1938,8 +1937,6 @@ enum VideoAct {
     TogglePause,
     Seek(f32),
     Stop,
-    /// Show the video panel, or park it off screen again.
-    ToggleVideo,
 }
 
 /// The transport for the video mini-player: a play/pause button, a wide
@@ -2031,7 +2028,6 @@ fn video_transport_ui(ui: &mut egui::Ui, scrub: &mut Option<f32>) -> Option<Vide
                 // subtracting — `available_width` has already shed the play
                 // button and elapsed clock behind it.
                 const TRAILING: f32 = space::S4 + CLOCK_W // gap, total clock
-                    + space::S4 + 24.0                    // gap, video toggle
                     + space::S3 + 24.0; // gap, close
                 let track_w = (ui.available_width() - TRAILING).max(60.0);
                 let (rect, resp) = ui
@@ -2100,32 +2096,8 @@ fn video_transport_ui(ui: &mut egui::Ui, scrub: &mut Option<f32>) -> Option<Vide
                     ),
                 );
 
-                // The picture, for when the user wants it. The panel plays
-                // parked off screen otherwise, since this bar is the interface.
-                // Painted rather than a text glyph in button chrome, so both of
-                // these sit beside the play triangle as the same kind of mark.
-                ui.add_space(space::S4);
-                let showing = webview::video_visible();
-                let (rect, resp) =
-                    ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
-                let resp = resp.on_hover_note(if showing {
-                    "Hide the video window"
-                } else {
-                    "Show the video window"
-                });
-                draw_screen_glyph(
-                    ui.painter(),
-                    rect.center(),
-                    crate::ui::icon::col(&resp),
-                    showing,
-                );
-                if resp.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                if resp.clicked() {
-                    act = Some(VideoAct::ToggleVideo);
-                }
-
+                // The picture stays parked off screen: this bar is the
+                // interface, painted beside the play triangle as one set.
                 ui.add_space(space::S3);
                 if crate::ui::icon::close_button(ui, "Close the video player") {
                     act = Some(VideoAct::Stop);
