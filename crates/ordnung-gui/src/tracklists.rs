@@ -1,8 +1,9 @@
-//! The Tracklists tab of the vinyl view: paste a mix tracklist, and every
-//! line gets looked up and matched to its Discogs record.
+//! The Tracklists window: paste a mix tracklist, and every line gets looked
+//! up and matched to its Discogs record. Opened from the tiny ≡ glyph in
+//! the top bar, left of the counts; a tool, not a tab.
 //!
-//! The entry is quiet, a small text button; pressing it (or ⌘V with the tab
-//! focused) opens an inline paste box that starts one line tall and grows
+//! Inside, a quiet *Paste tracklist* text button (or ⌘V with the window
+//! open and nothing focused) opens an inline paste box that starts one line tall and grows
 //! only as the pasted text does. Match saves the paste as a tracklist and
 //! runs the background job in `jobs::run_match_tracklist`, whose rows fill
 //! in one at a time. Each row shows the song as pasted, the record it
@@ -156,7 +157,29 @@ impl App {
         self.tracklist_entries_for = None;
     }
 
-    pub(crate) fn draw_tracklists(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, query: &str) {
+    /// The window itself; everything else here draws inside it.
+    pub(crate) fn draw_tracklist_window(&mut self, ctx: &egui::Context) {
+        if !self.tracklist_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Tracklists")
+            .id(egui::Id::new("tracklists_window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size(egui::vec2(1000.0, 640.0))
+            .min_size(egui::vec2(640.0, 360.0))
+            .show(ctx, |ui| {
+                let query = self.tracklist_filter.trim().to_lowercase();
+                self.draw_tracklists(ui, ctx, &query);
+            });
+        if !open {
+            self.tracklist_open = false;
+        }
+    }
+
+    fn draw_tracklists(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, query: &str) {
         // ⌘V with nothing focused opens the paste box on the clipboard text,
         // so the button needn't be found first.
         if !self.tracklist_paste_open {
@@ -218,22 +241,34 @@ impl App {
     /// The quiet entry button, or the inline paste box once it's open.
     fn draw_tracklist_paste(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         if !self.tracklist_paste_open {
-            ui.horizontal(|ui| {
-                let btn = egui::Button::new(
-                    egui::RichText::new("Paste tracklist").color(color::LABEL_2),
-                )
-                .frame(false);
-                let resp = ui.add(btn).on_hover_note(
-                    "Paste a mix tracklist, then match every line to its record. ⌘V here does the same",
-                );
-                if resp.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                if resp.clicked() {
-                    self.tracklist_paste_open = true;
-                    self.tracklist_paste.clear();
-                    self.tracklist_name.clear();
-                }
+            crate::ui::control_row(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let btn = egui::Button::new(
+                        egui::RichText::new("Paste tracklist").color(color::LABEL_2),
+                    )
+                    .frame(false);
+                    let resp = ui.add(btn).on_hover_note(
+                        "Paste a mix tracklist, then match every line to its record. ⌘V here does the same",
+                    );
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if resp.clicked() {
+                        self.tracklist_paste_open = true;
+                        self.tracklist_paste.clear();
+                        self.tracklist_name.clear();
+                    }
+                    if !self.tracklists.is_empty() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.tracklist_filter)
+                                    .desired_width(180.0)
+                                    .hint_text("Search the tracklist"),
+                            )
+                            .on_hover_note("Filter the lines by song, artist, label or matched record");
+                        });
+                    }
+                });
             });
             return;
         }
@@ -664,7 +699,11 @@ impl App {
                     );
                 }
             }
-            Some(ListAct::ShowOnMap) => self.vinyl_tab = VinylTab::Graph,
+            Some(ListAct::ShowOnMap) => {
+                self.view = LibraryView::Vinyl;
+                self.vinyl_tab = VinylTab::Graph;
+                self.tracklist_open = false;
+            }
             Some(ListAct::CopyText) => {
                 let mut out = String::new();
                 for e in &self.tracklist_entries {

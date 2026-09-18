@@ -281,9 +281,11 @@ pressing-disambiguating fields (year · format · label + catalog number · coun
 and are marked when already owned or wanted; picking one opens the existing
 `open_release_sheet`. Lives in `ordnung-gui/src/records.rs`.
 
-**Tracklist match (v0.116.0).** A **Tracklists** tab beside Market in the
-vinyl view: a quiet *Paste tracklist* text button (or ⌘V on the focused tab)
-opens an inline paste box one line tall that grows only with its text; Match
+**Tracklist match (v0.116.0; window instead of a tab since v0.116.1).** A
+tiny ≡ glyph in the top bar, left of the counts, opens the **Tracklists**
+window (`tracklists.rs`): a quiet *Paste tracklist* text button (or ⌘V with
+the window open) opens an inline paste box one line tall that grows only
+with its text; Match
 saves the paste (`tracklists` + `tracklist_lines`, schema v17) and runs
 `jobs::run_match_tracklist`, which per line searches Discogs
 (`discogs::find_track_releases`: label-hint rung, then artist+track, then
@@ -292,7 +294,7 @@ catno decisive, artist/title/label weighted, "Various" neutral), commits by
 the user's `ReleaseAutoMatch` rule within the format filter, verifies
 anything short of Sure against the cached release tracklist, pins matched
 records on the record map, and announces each settled line
-(`JobMsg::TracklistChanged`) so rows fill in one by one. Rows: song as
+(`JobMsg::TracklistChanged`) so rows fill in one by one. Rows (own search box in the window): song as
 pasted, matched record with cover, year, label + catno, format, a
 confidence pip, OWNED / WANT / FILE badges; click opens the record sheet,
 the context menu wants, digs, opens on Discogs, re-picks from the saved

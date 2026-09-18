@@ -275,9 +275,6 @@ enum VinylTab {
     /// The record map: every record you've crossed paths with, as one web
     /// (see `graph`). Both shelves and every dug record, in one place.
     Graph,
-    /// Pasted mix tracklists, each line matched to its record (see
-    /// `tracklists`).
-    Tracklists,
 }
 
 /// Discogs's coarse genre vocabulary — a small closed set, which is what lets
@@ -849,7 +846,7 @@ enum JobMsg {
     /// when the job then reports `Failed`, which on its own asks for no reload.
     VinylChanged,
     /// A tracklist match settled another line of this tracklist, so the
-    /// Tracklists tab re-reads its rows on the next frame (rows fill in as
+    /// Tracklists window re-reads its rows on the next frame (rows fill in as
     /// they land rather than all at once when the job ends).
     TracklistChanged(Id),
 }
@@ -1281,10 +1278,15 @@ struct App {
     /// is mined from the release-detail cache plus the user's own shelves; a
     /// listing missing here has unknown tags and drops out of a genre filter.
     seller_genres: HashMap<u64, Vec<String>>,
-    /// Saved mix tracklists (the Tracklists tab), from the `tracklists`
+    /// The Tracklists window (see `tracklists`), opened from the tiny ≡
+    /// button in the top bar.
+    tracklist_open: bool,
+    /// The window's own search box, filtering the current tracklist's lines.
+    tracklist_filter: String,
+    /// Saved mix tracklists (the Tracklists window), from the `tracklists`
     /// table; a handful of rows, reloaded with the vinyl lists.
     tracklists: Vec<Tracklist>,
-    /// Which tracklist the tab is showing. Kept valid against `tracklists`.
+    /// Which tracklist the window is showing. Kept valid against `tracklists`.
     tracklist_current: Option<Id>,
     /// The current tracklist's lines, loaded lazily; `tracklist_entries_for`
     /// names the tracklist they belong to, and a match job settling a line

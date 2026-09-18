@@ -7,7 +7,10 @@ weights in §4.2), `discogs::Client::find_track_releases` with the label rung,
 kept as JSON, the streaming job `jobs::run_match_tracklist` (verification
 against the cached release tracklist for anything short of Sure, map pins
 for matched records), and the Tracklists tab in `ordnung-gui/src/tracklists.rs`.
-Deviations from the draft: the pressing rule (`best_candidate`) stayed in
+Deviations from the draft: it is not a tab (v0.116.1): a tiny ≡ glyph in
+the top bar, left of the counts, opens a Tracklists window with its own
+search box, so the feature is reachable from every view and the vinyl
+tab strip stays shelves + market + map; the pressing rule (`best_candidate`) stayed in
 the GUI jobs module since its `ReleaseAutoMatch` enum is GUI config; the
 paste box sits on its own line with the name field, Match and the parse
 preview on the control row under it, so growing text never distorts the

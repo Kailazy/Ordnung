@@ -150,6 +150,8 @@ impl App {
             seller_current: None,
             seller_listings: Vec::new(),
             seller_listings_for: None,
+            tracklist_open: false,
+            tracklist_filter: String::new(),
             tracklists: Vec::new(),
             tracklist_current: None,
             tracklist_entries: Vec::new(),
@@ -871,7 +873,7 @@ impl App {
                 .and_then(|c| c.list_sellers())
                 .unwrap_or_default();
             // Saved tracklists likewise: a few rows each; their lines load
-            // lazily in the Tracklists tab.
+            // lazily in the Tracklists window.
             self.tracklists = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_tracklists())
                 .unwrap_or_default();
@@ -2507,6 +2509,33 @@ impl eframe::App for App {
                                 }
                             }
                         }
+                        // Tracklist match: paste a mix's tracklist and match every
+                        // line to its record. A tiny glyph left of the counts, not a
+                        // tab: it's a tool you reach for, not a place you live in.
+                        {
+                            let on = self.tracklist_open;
+                            let n = self.tracklists.len();
+                            let glyph = egui::RichText::new("≡")
+                                .size(15.0)
+                                .color(if on {
+                                    crate::ui::tokens::color::ACCENT_HOVER
+                                } else {
+                                    crate::ui::tokens::color::LABEL_2
+                                });
+                            let resp = ui
+                                .add(egui::Button::new(glyph).frame(false))
+                                .on_hover_note(if n == 0 {
+                                    "Paste a mix tracklist and match every line to its record".to_string()
+                                } else {
+                                    format!("Tracklists ({n}): paste a mix tracklist and match every line to its record")
+                                });
+                            if resp.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if resp.clicked() {
+                                self.tracklist_open = !self.tracklist_open;
+                            }
+                        }
                         ui.separator();
                         // The filter group fills whatever horizontal space the utility
                         // group left over. Rendered left-to-right inside the reserved
@@ -3825,6 +3854,7 @@ impl eframe::App for App {
         self.draw_batch_convert(ctx);
         self.draw_artwork_review(ctx);
         self.draw_settings(ctx);
+        self.draw_tracklist_window(ctx);
         self.draw_clear_db_confirm(ctx);
         self.draw_look_editor(ctx);
         self.draw_bulk_write_confirm(ctx);

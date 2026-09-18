@@ -239,16 +239,6 @@ fn vinyl_tabs(
     ) {
         clicked = Some(VinylTab::Sellers);
     }
-    // Pasted mix tracklists, each line matched to its record.
-    if tab(
-        ui,
-        "Tracklists".to_string(),
-        current == VinylTab::Tracklists,
-        "Paste a mix tracklist and match every line to its record",
-        None,
-    ) {
-        clicked = Some(VinylTab::Tracklists);
-    }
     ui.spacing_mut().item_spacing.x = prev_spacing;
     clicked
 }
@@ -1536,9 +1526,6 @@ impl App {
         // The map has no sort, layout or filters of its own: the search box
         // lights matching records in place, and that's the whole toolbar.
         let graph_mode = self.vinyl_tab == VinylTab::Graph;
-        // Tracklists have their own header (paste box, list actions); the
-        // shared search box filters their lines and nothing else applies.
-        let tracklist_mode = self.vinyl_tab == VinylTab::Tracklists;
         // The user's Discogs collection page, known once a sync has resolved the
         // username. `None` until the first sync.
         // Whichever shelf is showing, its own Discogs page is what the link
@@ -1608,7 +1595,7 @@ impl App {
                         }
                     }
                 }
-                VinylTab::Graph | VinylTab::Tracklists => {}
+                VinylTab::Graph => {}
                 VinylTab::Sellers => {
                     for l in &self.seller_listings {
                         if let Some(tags) = self.seller_genres.get(&l.release_id) {
@@ -1663,8 +1650,6 @@ impl App {
                 "Search the crates"
             } else if graph_mode {
                 "Find on the map"
-            } else if tracklist_mode {
-                "Search the tracklist"
             } else {
                 "Search vinyl"
             };
@@ -1677,8 +1662,6 @@ impl App {
                 "Filter the crates by artist, title, label, year or format"
             } else if graph_mode {
                 "Light up records on the map by artist, title, label or year"
-            } else if tracklist_mode {
-                "Filter the lines by song, artist, label or matched record"
             } else {
                 "Filter both shelves by artist, title, year or format"
             });
@@ -1698,9 +1681,6 @@ impl App {
                     }
                 },
             );
-            if tracklist_mode {
-                return;
-            }
             if graph_mode {
                 // What the map gathers around: artists, or genre clouds.
                 // Switching re-homes every record in place and the springs
@@ -1895,10 +1875,6 @@ impl App {
             self.draw_sellers(ui, ctx, &query);
             return;
         }
-        if tracklist_mode {
-            self.draw_tracklists(ui, ctx, &query);
-            return;
-        }
         if graph_mode {
             let rect = ui.available_rect_before_wrap();
             self.graph_rect = rect;
@@ -1969,8 +1945,8 @@ impl App {
         // Only the active tab's shelf is built: the other one isn't on screen.
         let tab = match self.vinyl_tab {
             VinylTab::Shelf(list) => list,
-            // Unreachable: seller, graph and tracklist modes returned above.
-            VinylTab::Sellers | VinylTab::Graph | VinylTab::Tracklists => VinylList::Collection,
+            // Unreachable: seller and graph modes returned above.
+            VinylTab::Sellers | VinylTab::Graph => VinylList::Collection,
         };
         let recs = match tab {
             VinylList::Collection => &owned_recs,
