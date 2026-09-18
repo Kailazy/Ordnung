@@ -213,9 +213,9 @@ impl App {
             .sense(egui::Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::exact(THUMB + 6.0))
-            .column(Column::remainder().at_least(160.0))
-            .column(Column::remainder().at_least(160.0))
-            .column(Column::exact(150.0))
+            .column(Column::remainder().at_least(160.0).clip(true))
+            .column(Column::remainder().at_least(160.0).clip(true))
+            .column(Column::exact(150.0).clip(true))
             .body(|body| {
                 body.rows(row_h, shown.len(), |mut row| {
                     let i = shown[row.index()];

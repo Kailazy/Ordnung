@@ -641,9 +641,15 @@ impl App {
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::exact(30.0))
             .column(Column::exact(THUMB + 6.0))
-            .column(Column::remainder().at_least(160.0))
-            .column(Column::remainder().at_least(160.0))
-            .column(Column::exact(140.0))
+            // Both text columns clip: an unclipped column grows to the widest
+            // thing any row ever put in it, so two tracklists would split the
+            // width differently and the pip and buttons would sit at
+            // different x. Clipped, the two always share the space evenly.
+            .column(Column::remainder().at_least(160.0).clip(true))
+            .column(Column::remainder().at_least(160.0).clip(true))
+            // Wide enough for the fullest row (pip, OWNED, FILE, +, ↻) so it
+            // never has to grow either.
+            .column(Column::exact(180.0).clip(true))
             .body(|body| {
                 body.rows(row_h, shown.len(), |mut row| {
                     let i = shown[row.index()];
