@@ -1658,13 +1658,6 @@ impl App {
                     .width(200.0)
                     .hint(hint),
             );
-            let search = search.on_hover_note(if seller_mode {
-                "Filter the crates by artist, title, label, year or format"
-            } else if graph_mode {
-                "Light up records on the map by artist, title, label or year"
-            } else {
-                "Filter both shelves by artist, title, year or format"
-            });
             // The ✖ keeps its slot even while hidden, so the Filters button and
             // everything right of it stay put as a search is typed or cleared.
             ui.allocate_ui_with_layout(

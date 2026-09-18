@@ -245,14 +245,6 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_min_width(PANEL_W);
                 ui.set_max_width(PANEL_W);
-                ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new(
-                        "Every pressing Discogs lists of this record, most widely held first.",
-                    )
-                    .weak()
-                    .small(),
-                );
                 ui.add_space(6.0);
                 if loading {
                     ui.horizontal(|ui| {
@@ -412,7 +404,7 @@ impl App {
                                         }
                                         if !is_current
                                             && ui
-                                                .button("Tracklist")
+                                                .button("View")
                                                 .on_hover_note(
                                                     "Open this pressing's sheet without swapping",
                                                 )
