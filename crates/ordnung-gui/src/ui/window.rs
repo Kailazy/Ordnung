@@ -13,12 +13,17 @@
 //! the `title_bar` off and keeps the close button, in the corner. None
 //! collapse.
 //!
-//! The close button is the component's, not egui's: one mark (the same
-//! cross every close in the app is drawn with, see `icon`), one size, and
-//! one place, the top-right corner of the content. With a title bar it
-//! sits on the title's line; without one, on the content's first row of
-//! controls, so a button placed up there (short of [`CLOSE_W`]) and the
-//! cross share a centre line.
+//! The title bar and the close button are the component's, not egui's.
+//! The window is as wide as its content: the title never widens it past
+//! the width the content or its `default_width` asked for, and a title
+//! longer than that is cut with an ellipsis, centred and clear of the
+//! close button on both sides. (egui's own bar widened the frame to the
+//! title and left the content, and the close on its edge, short of the
+//! corner.) The close is one mark (the same cross every close in the app
+//! is drawn with, see `icon`), one size, and one place, the top-right
+//! corner of the frame. With a title bar it sits on the title's line;
+//! without one, on the content's first row of controls, so a button placed
+//! up there (short of [`CLOSE_W`]) and the cross share a centre line.
 
 use super::glass;
 use super::icon;
@@ -281,33 +286,15 @@ impl<'o> Window<'o> {
         if let Some(m) = self.inner_margin {
             frame = frame.inner_margin(m);
         }
-        // With a title bar, the close sits on the title's line, which egui
-        // lays out as a row `title_h` tall under the frame's top margin
-        // and `title_gap` above the content. Measured here, the way egui
-        // does, so the cross can be put back on it from inside the content.
+        // The title bar is a row of the content (see `title_bar` below),
+        // set off from the rest by the gap egui's own bar kept.
         let margin = frame.inner_margin;
-        let (title_h, title_gap) = if self.title_bar {
-            // egui sizes the bar by the default font, whatever the title is
-            // then drawn in.
-            let font_h = ctx.fonts(|f| f.row_height(&egui::FontSelection::Default.resolve(&style)));
-            (
-                font_h.max(style.spacing.interact_size.y),
-                margin.top + margin.bottom,
-            )
+        let title_gap = if self.title_bar {
+            margin.top + margin.bottom
         } else {
-            (0.0, 0.0)
+            0.0
         };
-        // egui centres the title in the bar, so the window has to be wide
-        // enough for the cross to clear it on both sides.
-        let title_w = ctx.fonts(|f| {
-            f.layout_no_wrap(
-                self.title.text().to_owned(),
-                egui::TextStyle::Heading.resolve(&style),
-                egui::Color32::WHITE,
-            )
-            .size()
-            .x
-        });
+        let title = self.title;
         // egui grabs every edge and corner of a resizable window. The
         // grips this window doesn't offer are covered by blockers (see
         // `block_grips`), and a drag on a blocker moves the window, as a
@@ -324,15 +311,18 @@ impl<'o> Window<'o> {
             .filter_map(|bid| ctx.read_response(bid))
             .filter(|r| r.dragged())
             .fold(egui::Vec2::ZERO, |acc, r| acc + r.drag_delta());
-        let mut w = egui::Window::new(self.title)
+        // egui sees neither the title nor `open`: both are drawn here, in
+        // the content, so the title can't widen the frame past the content
+        // and the close is in the frame's corner whether there's a title
+        // bar or not. (egui's bar also registers a double-click widget
+        // across the title's line that would take the close's click.) The
+        // flag is cleared below from the click.
+        let mut w = egui::Window::new(egui::WidgetText::default())
             .id(id)
             .collapsible(false)
-            .title_bar(self.title_bar)
+            .title_bar(false)
             .frame(frame)
             .resizable(self.resizable);
-        // egui never sees `open`: the close button is drawn here, in the
-        // one place and with the one mark, whether there's a title bar or
-        // not. The flag is cleared below from the click.
         let open = self.open;
         let close = open.is_some();
         if self.auto_sized {
@@ -355,12 +345,6 @@ impl<'o> Window<'o> {
         }
         if let Some(y) = self.max_size[1] {
             w = w.max_height(y);
-        }
-        if self.title_bar && close {
-            // After `auto_sized`, which zeroes the minimum.
-            w = w.min_width(
-                (title_w + 2.0 * CLOSE_W).max(self.min_size[0].unwrap_or(0.0)),
-            );
         }
         // egui keeps a window's pivot where it is as the size changes.
         // That is the placement's pivot while the content sets the size
@@ -417,6 +401,7 @@ impl<'o> Window<'o> {
         let mut slot = None;
         let mut closed = false;
         let resizable = self.resizable;
+        let with_title_bar = self.title_bar;
         let shown = w.show(ctx, |ui| {
             slot = Some(glass::begin(ui));
             // Before the content, so the content's own controls stay on
@@ -424,21 +409,30 @@ impl<'o> Window<'o> {
             if let Some(rect) = last_rect.filter(|_| resizable[0] || resizable[1]) {
                 block_grips(ui, id, rect, resizable, grips);
             }
+            let bar = with_title_bar.then(|| title_row(ui, &title, close, title_gap));
             let r = contents(ui);
             // After the content, not before: the chrome is placed from
             // what the content took (`min_rect`), which is what the frame
             // wraps. The rect egui offers before layout (`max_rect`) is its
             // remembered desired width, which never shrinks, so it can run
-            // past the frame and put the button on the edge. Last also
+            // past the frame and put the button on the edge; only where
+            // the user sizes the width is the frame that wide. Last also
             // puts it above anything the content drew in the corner.
+            let left = ui.min_rect().left();
+            let right = if resizable[0] {
+                ui.max_rect().right().max(ui.min_rect().right())
+            } else {
+                ui.min_rect().right()
+            };
+            if let Some(bar) = bar {
+                title_bar(ui, &title, bar, close, title_gap, left..=right, margin);
+            }
             if close {
-                let top = ui.max_rect().top();
-                let centre_y = if self.title_bar {
-                    top - title_gap - title_h / 2.0
-                } else {
-                    top + control_row_h(ui) / 2.0
+                let centre_y = match bar {
+                    Some(bar) => bar.center().y,
+                    None => ui.max_rect().top() + control_row_h(ui) / 2.0,
                 };
-                closed = close_button(ui, id, centre_y);
+                closed = close_button(ui, id, right, centre_y);
             }
             r
         });
@@ -483,12 +477,90 @@ fn control_row_h(ui: &egui::Ui) -> f32 {
         .max(ui.spacing().interact_size.y)
 }
 
+/// Clearance the title keeps from each side of its row: the close
+/// button's width when there is one, a gap otherwise, on both sides so it
+/// stays centred.
+fn title_clear(close: bool) -> f32 {
+    if close {
+        CLOSE_W
+    } else {
+        space::S3
+    }
+}
+
+/// Take the title's row from the top of the content, before the content:
+/// as tall as the title (never shorter than a control), the gap under it
+/// included, and as wide as the title with its clearance, up to the width
+/// on offer. The row can widen a window whose content is narrower than
+/// its title, up to the width egui was asked for (`default_width`, or
+/// egui's own), never past it: that's where the title gets cut instead.
+/// Returns the title's line, without the gap.
+fn title_row(ui: &mut egui::Ui, title: &egui::WidgetText, close: bool, gap: f32) -> egui::Rect {
+    let full = title.clone().into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Heading,
+    );
+    let h = full
+        .size()
+        .y
+        .max(ui.spacing().interact_size.y)
+        .max(CLOSE_SIDE);
+    let w = (full.size().x + 2.0 * title_clear(close))
+        .min(ui.available_width())
+        .max(0.0);
+    let spacing = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let (_, rect) = ui.allocate_space(egui::vec2(w, h + gap));
+    ui.spacing_mut().item_spacing.y = spacing;
+    egui::Rect::from_min_size(rect.min, egui::vec2(w, h))
+}
+
+/// Paint the title bar on its row, after the content: the title centred
+/// across the frame's width, cut with an ellipsis where it would reach the
+/// clearance at either side, and the hairline egui drew under its own bar,
+/// at the content's top (the `gap` under the row), across the frame from
+/// margin to margin.
+fn title_bar(
+    ui: &mut egui::Ui,
+    title: &egui::WidgetText,
+    row: egui::Rect,
+    close: bool,
+    gap: f32,
+    x: std::ops::RangeInclusive<f32>,
+    margin: egui::Margin,
+) {
+    let row = egui::Rect::from_x_y_ranges(x, row.y_range());
+    let avail = (row.width() - 2.0 * title_clear(close)).max(0.0);
+    let galley = title.clone().into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        avail,
+        egui::TextStyle::Heading,
+    );
+    let pos = egui::Align2::CENTER_CENTER
+        .align_size_within_rect(galley.size(), row)
+        .min;
+    let outer = egui::Rangef::new(row.left() - margin.left, row.right() + margin.right);
+    // The hairline reaches into the margins, past the content's clip.
+    let clip = ui.clip_rect();
+    ui.set_clip_rect(clip.union(egui::Rect::from_x_y_ranges(outer, row.y_range())));
+    ui.painter()
+        .galley(pos, galley, ui.visuals().text_color());
+    ui.painter().hline(
+        outer.shrink(0.1),
+        row.bottom() + gap,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
+    ui.set_clip_rect(clip);
+}
+
 /// The window's close button: the app's close cross, in a square flush
-/// with the content's right edge and centred on `centre_y`, taking no
-/// space from the layout. Call after the content: it sits on the content's
-/// own extent, and paints over whatever is there.
-fn close_button(ui: &mut egui::Ui, id: egui::Id, centre_y: f32) -> bool {
-    let right = ui.min_rect().right();
+/// with the frame's right edge (`right`) and centred on `centre_y`, taking
+/// no space from the layout. Call after the content: it sits on the
+/// content's own extent, and paints over whatever is there.
+fn close_button(ui: &mut egui::Ui, id: egui::Id, right: f32, centre_y: f32) -> bool {
     let rect = egui::Rect::from_center_size(
         egui::pos2(right - CLOSE_SIDE / 2.0, centre_y),
         egui::Vec2::splat(CLOSE_SIDE),
