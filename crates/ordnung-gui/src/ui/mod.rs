@@ -5,8 +5,8 @@
 //! them: [`button`] is the one push button, [`field`] the one text box,
 //! [`chip`] the avatar pill, [`menu`] the dropdown a button anchors,
 //! [`window`] the one floating window, [`sidebar`] the window docked to an
-//! edge, [`glass`] the surface they all sit on, [`control_row`] the rule
-//! that a row of controls shares one height.
+//! edge, [`tooltip`] the hover note, [`glass`] the surface they all sit on,
+//! [`control_row`] the rule that a row of controls shares one height.
 
 pub mod button;
 pub mod chip;
@@ -26,6 +26,7 @@ pub mod theme;
 // literals. Allow the interim dead-code until that pass lands.
 #[allow(dead_code)]
 pub mod tokens;
+pub mod tooltip;
 pub mod window;
 
 use eframe::egui;

@@ -2395,7 +2395,7 @@ impl App {
                                     egui::Button::new("  ♪  Dig the artist  "),
                                 )
                                 .on_hover_note(artist_tip.clone())
-                                .on_disabled_hover_text(crate::ui::hover::note(artist_tip))
+                                .on_disabled_hover_note(artist_tip)
                                 .clicked()
                             {
                                 step = Some(DigThread::Artist);
@@ -2414,7 +2414,7 @@ impl App {
                                     egui::Button::new("  ⌂  Dig the label  "),
                                 )
                                 .on_hover_note(label_tip.clone())
-                                .on_disabled_hover_text(crate::ui::hover::note(label_tip))
+                                .on_disabled_hover_note(label_tip)
                                 .clicked()
                             {
                                 step = Some(DigThread::Label);
@@ -2432,7 +2432,7 @@ impl App {
                                     egui::Button::new("  ◈  Dig the style  "),
                                 )
                                 .on_hover_note(style_tip.clone())
-                                .on_disabled_hover_text(crate::ui::hover::note(style_tip))
+                                .on_disabled_hover_note(style_tip)
                                 .clicked()
                             {
                                 step = Some(DigThread::Style);

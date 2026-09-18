@@ -361,9 +361,9 @@ fn export_menu_items(
                 false,
                 egui::Button::new(format!("Export to {} (plain storage)", v.name)),
             )
-            .on_disabled_hover_text(crate::ui::hover::note(
+            .on_disabled_hover_note(
                 "Not a rekordbox device. Open it and click Set up for rekordbox first",
-            ));
+            );
         }
     }
 }
@@ -553,9 +553,8 @@ const PLAYLIST_ROW_GAP_RAIL: f32 = 4.0;
 /// One playlist row, shared by both trees: a "♪" tile with the name truncated
 /// clear of the count lane and the track count painted inside the right end.
 /// At the rail tier the row collapses to a glyph square and the name moves to
-/// the tooltip; `note` is the hover note shown at the captioned tier. The
-/// trailing row gap is added here so every tree spaces its rows identically.
-/// Returns the tile's response so callers wire clicks, drag-and-drop and
+/// the tooltip. The trailing row gap is added here so every tree spaces its
+/// rows identically. Returns the tile's response so callers wire clicks, drag-and-drop and
 /// context menus on top of it.
 fn playlist_row(
     ui: &mut egui::Ui,
@@ -564,7 +563,6 @@ fn playlist_row(
     mark: RowMark,
     selected: bool,
     count: usize,
-    note: &str,
 ) -> egui::Response {
     // The rail shows a playlist as a glyph like everything else. Keeping the
     // name here was tried and it is what broke the tier: 56pt cannot hold
@@ -577,7 +575,7 @@ fn playlist_row(
     // a playlist's chosen icon keeps its chosen hue whether or not the row
     // is selected.
     let resp = if density.icons_only() {
-        rail_tile(ui, "", selected).on_hover_text(name)
+        rail_tile(ui, "", selected).on_hover_note(name)
     } else {
         // The track count is painted over the tile's right end, so the name is
         // truncated to leave that lane clear — otherwise a long name runs
@@ -594,8 +592,7 @@ fn playlist_row(
             PLAYLIST_TEXT_SIZE,
             COUNT_LANE,
         )
-        .on_hover_text(name)
-        .on_hover_note(note)
+        .on_hover_note(name)
     };
     let (mark_pos, mark_size) = if density.icons_only() {
         (resp.rect.center(), RAIL_GLYPH)
@@ -668,7 +665,6 @@ pub(crate) fn draw_playlist_leaf(
         RowMark::of(p),
         selected,
         p.track_ids.len(),
-        "Click to view. Drag tracks here to add them",
     );
     if resp.dnd_hover_payload::<DraggedTracks>().is_some() {
         // Inset the highlight so the stroke sits inside the tile's rounded box
@@ -820,7 +816,6 @@ pub(crate) fn draw_usb_playlist_nodes(
                 RowMark::DEFAULT,
                 selected,
                 tracks_by_playlist.get(&p.id).map(Vec::len).unwrap_or(0),
-                "Click to view. Drag device tracks here to add them",
             );
             // Device tracks dragged over the row: same landing-zone outline as
             // the catalog tree, and the drop appends them on the stick.

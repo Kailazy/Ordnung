@@ -665,7 +665,7 @@ fn artist_band(
             selected == Some(i),
         );
         if resp
-            .on_hover_text(format!("Every release by {}", a.name))
+            .on_hover_note(format!("Every release by {}", a.name))
             .clicked()
         {
             clicked = Some(i);
@@ -947,7 +947,7 @@ fn record_row(
         draw_list_button(ui, c, list, present, br.hovered(), hot);
         // A tooltip, because a symbol alone can't say that clicking a filled one
         // takes the record back out again.
-        br.on_hover_text(match (list, present) {
+        br.on_hover_note(match (list, present) {
             (VinylList::Collection, false) => "Add to your collection",
             (VinylList::Collection, true) => "Remove from your collection",
             (VinylList::Wantlist, false) => "Add to your wantlist",

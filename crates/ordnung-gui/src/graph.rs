@@ -2185,7 +2185,7 @@ impl App {
                         }
                     }
                 };
-                resp.clone().on_hover_ui_at_pointer(|ui| {
+                resp.clone().on_hover_note_at_pointer(|ui| {
                     ui.set_max_width(260.0);
                     ui.label(crate::ui::hover::note(words));
                 });
@@ -2194,7 +2194,7 @@ impl App {
             let small = g.nodes[i].r * g.zoom < HOVER_MIN_R;
             if let Some(rel) = g.nodes[i].release.clone() {
                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                resp.clone().on_hover_ui_at_pointer(|ui| {
+                resp.clone().on_hover_note_at_pointer(|ui| {
                     ui.set_max_width(260.0);
                     ui.label(egui::RichText::new(&rel.title).font(font::strong(font::body().size)));
                     ui.label(&rel.artist);
@@ -2230,7 +2230,7 @@ impl App {
                     n.weight,
                     if n.weight == 1 { "" } else { "s" }
                 );
-                resp.clone().on_hover_ui_at_pointer(|ui| {
+                resp.clone().on_hover_note_at_pointer(|ui| {
                     ui.label(words);
                 });
             }

@@ -1572,7 +1572,7 @@ impl App {
                                 "⌂ Label",
                             )
                             .on_hover_note(label_page_tip.clone())
-                                .on_disabled_hover_text(crate::ui::hover::note(label_page_tip))
+                                .on_disabled_hover_note(label_page_tip)
                                 .clicked()
                             {
                                 act = Some(Act::LabelPage);
@@ -1700,7 +1700,7 @@ impl App {
                                         .fill(dig_fill(*has_artist_id && !busy)),
                                     )
                                     .on_hover_note(artist_tip.clone())
-                                    .on_disabled_hover_text(crate::ui::hover::note(artist_tip))
+                                    .on_disabled_hover_note(artist_tip)
                                     .clicked()
                                 {
                                     act = Some(Act::Branch(crate::dig::DigThread::Artist));
@@ -1724,7 +1724,7 @@ impl App {
                                         .fill(dig_fill(*has_label_id && !busy)),
                                     )
                                     .on_hover_note(label_tip.clone())
-                                    .on_disabled_hover_text(crate::ui::hover::note(label_tip))
+                                    .on_disabled_hover_note(label_tip)
                                     .clicked()
                                 {
                                     act = Some(Act::Branch(crate::dig::DigThread::Label));
@@ -1744,7 +1744,7 @@ impl App {
                                         .fill(dig_fill(can_style && !busy)),
                                     )
                                     .on_hover_note(style_tip.clone())
-                                    .on_disabled_hover_text(crate::ui::hover::note(style_tip))
+                                    .on_disabled_hover_note(style_tip)
                                     .clicked()
                                 {
                                     act = Some(Act::Branch(crate::dig::DigThread::Style));

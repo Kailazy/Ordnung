@@ -3,8 +3,11 @@
 //! use the same proportional UI font as the body, just one shade darker than the
 //! primary label so they read as quiet, supplementary chrome. Call sites use
 //! [`HoverNoteExt::on_hover_note`] in place of egui's `Response::on_hover_text`;
-//! [`note`] styles ad-hoc labels inside `on_hover_ui` closures the same way.
+//! [`note`] styles ad-hoc labels inside `on_hover_note_ui` closures the same
+//! way. Every note is shown through [`super::tooltip`], on glass; nothing
+//! calls egui's `on_hover_*` directly.
 
+use super::tooltip;
 use eframe::egui::{self, Color32, RichText};
 
 /// Name of the serif font family installed in [`super::theme`]. No longer used
@@ -24,14 +27,41 @@ pub fn note(text: impl Into<String>) -> RichText {
     RichText::new(text.into()).size(SIZE).color(COLOR)
 }
 
-/// Extension giving every widget a serif tooltip. Drop-in for egui's
-/// `Response::on_hover_text`, but renders the copy in the formal serif face.
+/// Extension giving every widget a tooltip in the note style, on glass.
+/// Drop-ins for egui's `on_hover_text`, `on_disabled_hover_text`,
+/// `on_hover_ui` and `on_hover_ui_at_pointer`.
 pub trait HoverNoteExt {
+    /// `text`, styled as a note, beside the widget while it is enabled.
     fn on_hover_note(self, text: impl Into<String>) -> Self;
+    /// `text`, styled as a note, beside the widget while it is disabled.
+    fn on_disabled_hover_note(self, text: impl Into<String>) -> Self;
+    /// A note with its own layout; style its labels with [`note`].
+    fn on_hover_note_ui(self, add: impl FnOnce(&mut egui::Ui)) -> Self;
+    /// [`Self::on_hover_note_ui`] at the pointer, for a widget too large to
+    /// sit a note beside.
+    fn on_hover_note_at_pointer(self, add: impl FnOnce(&mut egui::Ui)) -> Self;
 }
 
 impl HoverNoteExt for egui::Response {
     fn on_hover_note(self, text: impl Into<String>) -> Self {
-        self.on_hover_text(note(text))
+        let text = note(text);
+        tooltip::on_hover_ui(self, |ui| {
+            ui.label(text);
+        })
+    }
+
+    fn on_disabled_hover_note(self, text: impl Into<String>) -> Self {
+        let text = note(text);
+        tooltip::on_disabled_hover_ui(self, |ui| {
+            ui.label(text);
+        })
+    }
+
+    fn on_hover_note_ui(self, add: impl FnOnce(&mut egui::Ui)) -> Self {
+        tooltip::on_hover_ui(self, add)
+    }
+
+    fn on_hover_note_at_pointer(self, add: impl FnOnce(&mut egui::Ui)) -> Self {
+        tooltip::on_hover_ui_at_pointer(self, add)
     }
 }

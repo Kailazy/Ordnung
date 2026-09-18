@@ -2372,7 +2372,7 @@ impl eframe::App for App {
                                 let count = self.missing_count;
                                 if ui
                                     .add(btn)
-                                    .on_hover_ui(|ui| {
+                                    .on_hover_note_ui(|ui| {
                                         ui.set_max_width(420.0);
                                         ui.label(
                                             crate::ui::hover::note(format!(
@@ -3064,7 +3064,7 @@ impl eframe::App for App {
                             // (dashed, unfilled) so it reads as "add one" and
                             // not as another playlist in the stack.
                             if crate::sidebar::rail_add_tile(ui)
-                                .on_hover_text("New playlist")
+                                .on_hover_note("New playlist")
                                 .clicked()
                             {
                                 *sidebar_action = Some(SidebarAction::NewPlaylist(None));

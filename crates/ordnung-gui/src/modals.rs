@@ -1403,9 +1403,9 @@ impl App {
                                                         egui::Button::new(slot.to_string()),
                                                     )
                                                     .on_hover_note(format!("Apply preset {slot}"))
-                                                    .on_disabled_hover_text(crate::ui::hover::note(
+                                                    .on_disabled_hover_note(
                                                         format!("Preset {slot} is empty. Save to it first"),
-                                                    ));
+                                                    );
                                                 if resp.clicked() {
                                                     load_slot = Some(slot);
                                                 }
@@ -3575,7 +3575,7 @@ impl App {
                             );
                         }
                         resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .on_hover_text(name)
+                            .on_hover_note(name)
                             .clicked()
                     };
                     if swatch(ui, None, "No color", p.color.is_none()) {
@@ -3633,7 +3633,7 @@ impl App {
                                     if chosen {
                                         btn = btn.fill(color::ACCENT);
                                     }
-                                    if ui.add(btn).on_hover_text(*name).clicked() {
+                                    if ui.add(btn).on_hover_note(*name).clicked() {
                                         pick = Some((Some((*name).to_string()), p.color));
                                     }
                                 }

@@ -1195,7 +1195,7 @@ impl App {
                                 // shows the chip legend (what clean / ~320? / lossy / ltd
                                 // mean) plus how to act on it.
                                 let resp = if col == TableColumn::Quality {
-                                    resp.on_hover_ui(|ui| {
+                                    resp.on_hover_note_ui(|ui| {
                                         quality_legend_ui(ui);
                                         ui.add_space(4.0);
                                         ui.label(
@@ -2033,9 +2033,9 @@ impl App {
                                                 egui::Button::new(want_label),
                                             )
                                             .on_hover_note(want_tip.clone())
-                                            .on_disabled_hover_text(crate::ui::hover::note(
+                                            .on_disabled_hover_note(
                                                 want_tip,
-                                            ))
+                                            )
                                             .clicked()
                                         {
                                             // Name the *release* in the status

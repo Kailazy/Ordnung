@@ -389,7 +389,7 @@ impl App {
                                             if ui
                                                 .add_enabled(can_swap, egui::Button::new("Swap in"))
                                                 .on_hover_note(tip)
-                                                .on_disabled_hover_text(crate::ui::hover::note(tip))
+                                                .on_disabled_hover_note(tip)
                                                 .clicked()
                                             {
                                                 act = Some(Act::Swap(r.release_id));

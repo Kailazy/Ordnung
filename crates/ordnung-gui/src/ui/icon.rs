@@ -180,7 +180,7 @@ pub fn mark_button(
     let resp = if enabled {
         resp.on_hover_note(tip)
     } else {
-        resp.on_disabled_hover_text(super::hover::note(tip))
+        resp.on_disabled_hover_note(tip)
     };
     let ink = if !enabled {
         REST.gamma_multiply(0.45)
