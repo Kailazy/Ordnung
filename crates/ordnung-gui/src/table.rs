@@ -1860,6 +1860,20 @@ impl App {
                                             ui.close_menu();
                                         }
                                         ui.separator();
+                                        // The record sheet, in the app: tracklist,
+                                        // which positions are in the catalog, and
+                                        // whether it's on a shelf. Only when this
+                                        // track has a matched release, since there
+                                        // is nothing to open otherwise.
+                                        if track_releases.contains_key(&r.id)
+                                            && ui
+                                                .button("View release")
+                                                .on_hover_note("Show this record's tracklist")
+                                                .clicked()
+                                        {
+                                            menu_action = Some(TrackMenuAction::ViewRelease(r.id));
+                                            ui.close_menu();
+                                        }
                                         // Open the track's release/album on Discogs in
                                         // the default browser. Deep-links to the exact
                                         // release when one was fetched; otherwise the
@@ -2412,6 +2426,9 @@ impl App {
                         format!("Copied {n} tracks for Soulseek (one per line).")
                     };
                 }
+            }
+            Some(TrackMenuAction::ViewRelease(id)) => {
+                self.open_track_release_sheet(id, &ctx_clone)
             }
             Some(TrackMenuAction::OpenDiscogs(id, query)) => {
                 // Prefer the exact release the artwork run picked; fall back to

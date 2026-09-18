@@ -2213,6 +2213,10 @@ enum TrackMenuAction {
     /// Copy the target device rows' files into the local library and import
     /// them (USB view only).
     AddToLibrary(Vec<Id>),
+    /// Open the record sheet for the track's matched Discogs release, in the
+    /// app — the same sheet the inspector's "View release" opens. Only offered
+    /// for a track that has a release on file.
+    ViewRelease(Id),
     /// Open the track's release/album page on Discogs in the browser. Carries
     /// the track id (to look up a previously-fetched release id) and a search
     /// query (artist + album/title) used when no exact release is on file.
