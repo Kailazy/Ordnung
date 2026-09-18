@@ -236,6 +236,70 @@ fn offer_line(o: &SellerOffer) -> String {
     )
 }
 
+/// One row of the sheet's "from your sellers" dropdown.
+#[derive(Debug, Clone, PartialEq)]
+struct StockedRow {
+    seller: String,
+    /// `€21.59 · NM/Generic · SandkastenVinylstore ×2`
+    label: String,
+    /// Right-aligned: how many identical copies when more than one, and the
+    /// quoted shipping — `×2 · +€5.00 shipping`, either half, or nothing.
+    detail: String,
+    /// The first listing's page — for a folded pair, the two are the same
+    /// copy twice over as far as buying goes.
+    uri: Option<String>,
+}
+
+/// Fold the saved sellers' copies into dropdown rows. A shop listing the same
+/// grade at the same price twice is one row with a count, not two identical
+/// lines; the copy the sheet was opened on (`skip`) is left out, since it has
+/// its own line above. Order is kept — the catalog hands them over cheapest
+/// first.
+fn stocked_rows(stocked: &[SellerOffer], skip: Option<u64>) -> Vec<StockedRow> {
+    let short = crate::sellers::cond_short;
+    let mut rows: Vec<(String, StockedRow, usize)> = Vec::new();
+    for o in stocked.iter().filter(|o| Some(o.listing_id) != skip) {
+        let grade = match (o.condition.as_deref(), o.sleeve_condition.as_deref()) {
+            (Some(m), Some(s)) => format!(" · {}/{}", short(m), short(s)),
+            (Some(m), None) => format!(" · {}", short(m)),
+            _ => String::new(),
+        };
+        let base = format!("{}{grade} · {}", fmt_market_price(&o.price), o.seller);
+        let detail = o
+            .shipping
+            .as_ref()
+            .map(|s| format!("+{} shipping", fmt_market_price(s)))
+            .unwrap_or_default();
+        let key = format!("{base}\n{detail}");
+        if let Some((_, _, n)) = rows.iter_mut().find(|(k, _, _)| *k == key) {
+            *n += 1;
+            continue;
+        }
+        rows.push((
+            key,
+            StockedRow {
+                seller: o.seller.clone(),
+                label: base,
+                detail,
+                uri: o.uri.clone(),
+            },
+            1,
+        ));
+    }
+    rows.into_iter()
+        .map(|(_, mut r, n)| {
+            if n > 1 {
+                r.detail = if r.detail.is_empty() {
+                    format!("×{n}")
+                } else {
+                    format!("×{n} · {}", r.detail)
+                };
+            }
+            r
+        })
+        .collect()
+}
+
 pub(crate) fn fmt_market_price(p: &discogs::MarketPrice) -> String {
     let code = p.currency.trim().to_uppercase();
     let symbol = match code.as_str() {
@@ -1139,17 +1203,10 @@ impl App {
             .map(|o| (offer_line(&o), o.uri));
         // What the saved shops want for this pressing, beyond the copy the
         // sheet was opened on. Snapshot for the same reason as `offer`.
-        let stocked: Vec<(String, Option<String>)> = self
+        let stocked = self
             .vinyl_sheet
             .as_ref()
-            .map(|s| {
-                let opened = s.offer.as_ref().map(|o| o.listing_id);
-                s.stocked
-                    .iter()
-                    .filter(|o| Some(o.listing_id) != opened)
-                    .map(|o| (offer_line(o), o.uri.clone()))
-                    .collect()
-            })
+            .map(|s| stocked_rows(&s.stocked, s.offer.as_ref().map(|o| o.listing_id)))
             .unwrap_or_default();
         // A different pressing of the same record that *is* for sale. Snapshot
         // what the row needs so the window closure doesn't borrow the sheet.
@@ -1227,7 +1284,7 @@ impl App {
             // bar's plain see-through surface is its small cousin.
             .frame(
                 egui::Frame::window(&ctx.style())
-                    .fill(crate::ui::tokens::color::SURFACE.gamma_multiply(0.9)),
+                    .fill(crate::ui::tokens::color::SURFACE_GLASS),
             )
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.screen_rect().center())
@@ -1306,11 +1363,50 @@ impl App {
                         }
                         // What it costs, right under what it is — the sheet is
                         // where the buy decision happens.
-                        if let Some(line) = &price_line {
-                            ui.label(
-                                egui::RichText::new(line)
-                                    .color(egui::Color32::from_rgb(120, 200, 140)),
-                            );
+                        // Next to it, the shops the user already digs
+                        // through that have this pressing in stock, folded
+                        // into one dropdown so five copies don't take five
+                        // lines. Reads from the sellers' cached crates, so
+                        // it's exactly as fresh as the last sweep.
+                        if price_line.is_some() || !stocked.is_empty() {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                if let Some(line) = &price_line {
+                                    ui.label(
+                                        egui::RichText::new(line)
+                                            .color(egui::Color32::from_rgb(120, 200, 140)),
+                                    );
+                                }
+                                if !stocked.is_empty() {
+                                    let shops = stocked
+                                        .iter()
+                                        .map(|r| r.seller.as_str())
+                                        .collect::<std::collections::BTreeSet<_>>()
+                                        .len();
+                                    let label = if offer.is_some() {
+                                        format!("More from your sellers ({shops}) ▾")
+                                    } else {
+                                        format!("From your sellers ({shops}) ▾")
+                                    };
+                                    let btn = ui.small_button(label).on_hover_note(
+                                        "Copies in the shops you follow, cheapest first",
+                                    );
+                                    crate::ui::menu::dropdown(&btn, 420.0, |m| {
+                                        for r in &stocked {
+                                            if m.item_detail(&r.label, &r.detail) {
+                                                let url = r.uri.clone().unwrap_or_else(|| {
+                                                    format!(
+                                                        "https://www.discogs.com/release/{release_id}"
+                                                    )
+                                                });
+                                                open_url(&url);
+                                                m.close();
+                                            }
+                                        }
+                                        m.note("Click a copy to open its listing");
+                                    });
+                                }
+                            });
                         }
                         // The copy the user was actually looking at, when the
                         // sheet was opened from a seller card: that shop's
@@ -1334,41 +1430,6 @@ impl App {
                                     open_url(&url);
                                 }
                             });
-                        }
-                        // The shops the user already digs through that have
-                        // this pressing in stock, cheapest first. Reads from
-                        // the sellers' cached crates, so it's exactly as
-                        // fresh as the last sweep — and the reason to sweep.
-                        if !stocked.is_empty() {
-                            ui.label(
-                                egui::RichText::new(if offer.is_some() {
-                                    "Also from your sellers"
-                                } else {
-                                    "From your sellers"
-                                })
-                                .small()
-                                .weak(),
-                            );
-                            for (line, uri) in &stocked {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    ui.label(
-                                        egui::RichText::new(line)
-                                            .small()
-                                            .color(egui::Color32::from_rgb(120, 200, 140)),
-                                    );
-                                    if ui
-                                        .small_button("Buy ↗")
-                                        .on_hover_note("Open this listing on discogs.com")
-                                        .clicked()
-                                    {
-                                        let url = uri.clone().unwrap_or_else(|| {
-                                            format!("https://www.discogs.com/release/{release_id}")
-                                        });
-                                        open_url(&url);
-                                    }
-                                });
-                            }
                         }
                         // This pressing is a dead end, but another isn't. Say
                         // which one and offer it, rather than leaving "no copies
@@ -2493,4 +2554,57 @@ fn extra_video_ui(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     hit.clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn offer(id: u64, seller: &str, price: f64, cond: Option<&str>, ship: Option<f64>) -> SellerOffer {
+        SellerOffer {
+            listing_id: id,
+            seller: seller.into(),
+            price: discogs::MarketPrice {
+                value: price,
+                currency: "EUR".into(),
+            },
+            condition: cond.map(str::to_string),
+            sleeve_condition: Some("Generic".into()),
+            shipping: ship.map(|value| discogs::MarketPrice {
+                value,
+                currency: "EUR".into(),
+            }),
+            uri: Some(format!("https://www.discogs.com/sell/item/{id}")),
+        }
+    }
+
+    #[test]
+    fn stocked_rows_fold_identical_copies_and_skip_the_open_one() {
+        let nm = Some("Near Mint (NM or M-)");
+        let stocked = vec![
+            offer(1, "discos", 12.99, Some("Mint (M)"), Some(6.0)),
+            offer(2, "sandkasten", 21.59, nm, Some(5.0)),
+            offer(3, "sandkasten", 21.59, nm, Some(5.0)),
+            // Same shop and price, different grade: its own row.
+            offer(4, "sandkasten", 21.59, Some("Very Good Plus (VG+)"), Some(5.0)),
+            offer(5, "ton", 24.65, None, None),
+        ];
+        let rows = stocked_rows(&stocked, Some(1));
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "€21.59 · NM or M-/Generic · sandkasten",
+                "€21.59 · VG+/Generic · sandkasten",
+                // No media grade: no grade text, as the offer line does it.
+                "€24.65 · ton",
+            ]
+        );
+        assert_eq!(rows[0].detail, "×2 · +€5.00 shipping");
+        assert_eq!(rows[1].detail, "+€5.00 shipping");
+        assert_eq!(rows[2].detail, "");
+        // The folded pair keeps the first copy's listing page.
+        assert_eq!(rows[0].uri.as_deref(), Some("https://www.discogs.com/sell/item/2"));
+        assert!(stocked_rows(&stocked, None).len() == 4);
+    }
 }

@@ -58,6 +58,11 @@ pub mod color {
     pub const SURFACE: Color32 = Color32::from_rgb(32, 32, 35);
     /// Raised surface — cards, hovered rows, menus.
     pub const SURFACE_HI: Color32 = Color32::from_rgb(44, 44, 48);
+    /// The see-through surface every floating layer shares: the record sheet
+    /// over its frost, and the dropdowns and popups over whatever they open
+    /// on. One alpha, so a menu opened over the sheet reads as the same
+    /// glass. `SURFACE` at 90% (what `gamma_multiply(0.9)` of it comes to).
+    pub const SURFACE_GLASS: Color32 = Color32::from_rgba_premultiplied(29, 29, 32, 230);
     /// Sunken surface — text fields and other inputs.
     pub const FIELD: Color32 = Color32::from_rgb(20, 20, 22);
     /// Hovered interactive surface — one step above `SURFACE_HI`.

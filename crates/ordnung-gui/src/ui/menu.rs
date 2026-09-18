@@ -107,7 +107,9 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
         .show(&ctx, |ui| {
             ui.multiply_opacity(open_t);
             egui::Frame::none()
-                .fill(color::SURFACE_HI)
+                // The same glass as the record sheet, so a menu opened over
+                // the sheet is one surface with it rather than a darker slab.
+                .fill(color::SURFACE_GLASS)
                 .stroke(egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE))
                 .rounding(egui::Rounding::same(radius::MD))
                 .inner_margin(egui::Margin::symmetric(space::S2, space::S2))
@@ -176,6 +178,18 @@ impl MenuUi<'_> {
     /// A plain action row. Returns true on click.
     pub fn item(&mut self, label: impl Into<String>) -> bool {
         self.row(None, label.into(), None, color::LABEL)
+    }
+
+    /// A plain action row with a quiet right-aligned detail — a price's
+    /// shipping, a count. Returns true on click.
+    pub fn item_detail(&mut self, label: impl Into<String>, detail: impl Into<String>) -> bool {
+        let detail = detail.into();
+        self.row(
+            None,
+            label.into(),
+            (!detail.is_empty()).then_some(detail),
+            color::LABEL,
+        )
     }
 
     /// An action row in the destructive red, for deletes and their kin.
@@ -355,20 +369,34 @@ impl MenuUi<'_> {
         if selected.is_some() {
             x += CHECK_W;
         }
-        painter.text(
-            egui::pos2(x, rect.center().y),
-            egui::Align2::LEFT_CENTER,
+        // The detail claims its width first; the label gets the rest and
+        // truncates with an ellipsis rather than running under the detail.
+        let detail_galley = detail.map(|d| {
+            painter.layout_no_wrap(d, font::callout(), color::LABEL_3.gamma_multiply(enter))
+        });
+        let label_max = rect.right()
+            - ROW_PAD
+            - x
+            - detail_galley
+                .as_ref()
+                .map_or(0.0, |g| g.size().x + ROW_PAD);
+        let mut job = egui::text::LayoutJob::simple_singleline(
             label,
             font::body(),
             text_color.gamma_multiply(enter),
         );
-        if let Some(detail) = detail {
-            painter.text(
-                egui::pos2(rect.right() - ROW_PAD, rect.center().y),
-                egui::Align2::RIGHT_CENTER,
-                detail,
-                font::callout(),
-                color::LABEL_3.gamma_multiply(enter),
+        job.wrap = egui::text::TextWrapping::truncate_at_width(label_max.max(0.0));
+        let label_galley = painter.layout_job(job);
+        painter.galley(
+            egui::pos2(x, rect.center().y - label_galley.size().y / 2.0),
+            label_galley,
+            text_color,
+        );
+        if let Some(g) = detail_galley {
+            painter.galley(
+                egui::pos2(rect.right() - ROW_PAD - g.size().x, rect.center().y - g.size().y / 2.0),
+                g,
+                color::LABEL_3,
             );
         }
         resp.clicked()

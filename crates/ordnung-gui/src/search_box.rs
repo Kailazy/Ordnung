@@ -335,6 +335,8 @@ impl App {
             .show(&ctx, |ui| {
                 ui.multiply_opacity(open_t);
                 egui::Frame::popup(ui.style())
+                    // The record sheet's glass, shared by every dropdown.
+                    .fill(color::SURFACE_GLASS)
                     .inner_margin(egui::Margin::symmetric(space::S1, space::S2))
                     .rounding(egui::Rounding::same(radius::MD))
                     .show(ui, |ui| {
