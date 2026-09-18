@@ -1117,11 +1117,15 @@ impl App {
             // it. Height still follows the tracklist.
             .resizable([false, true])
             .default_width(SHEET_W)
-            // The same slightly see-through surface as the radio bar over
-            // the map, so the two read as one kind of thing laid on the app.
+            // A near-opaque take on the radio bar's see-through surface, so
+            // the two still read as one kind of thing laid on the app. The
+            // sheet is far larger than the bar and full of text, and at the
+            // bar's 0.96 whatever sat under it (graph labels, covers) ghosted
+            // through it; egui can't blur a backdrop, so the surface goes
+            // almost solid instead.
             .frame(
                 egui::Frame::window(&ctx.style())
-                    .fill(crate::ui::tokens::color::SURFACE.gamma_multiply(0.96)),
+                    .fill(crate::ui::tokens::color::SURFACE.gamma_multiply(0.985)),
             )
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.screen_rect().center())
