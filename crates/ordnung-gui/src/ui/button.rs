@@ -238,7 +238,7 @@ fn like_note(resp: egui::Response, liked: bool) -> egui::Response {
     resp.on_hover_note(if liked {
         "Liked. Click to take it out of Liked songs"
     } else {
-        "Like this song: put it in Liked songs"
+        "Add to Liked songs"
     })
 }
 

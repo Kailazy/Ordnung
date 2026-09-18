@@ -47,6 +47,9 @@ pub struct Field<'t> {
     outline: bool,
     trailing: Option<String>,
     margin: Margin,
+    /// The text width asked for, kept so a trailing button can be taken
+    /// out of it rather than added to the frame.
+    width: Option<f32>,
 }
 
 #[allow(dead_code)]
@@ -58,6 +61,7 @@ impl<'t> Field<'t> {
             outline: true,
             trailing: None,
             margin: MARGIN,
+            width: None,
         }
     }
 
@@ -68,6 +72,7 @@ impl<'t> Field<'t> {
             outline: true,
             trailing: None,
             margin: MARGIN,
+            width: None,
         }
     }
 
@@ -81,6 +86,7 @@ impl<'t> Field<'t> {
     /// `f32::INFINITY` fills the row.
     pub fn width(mut self, w: f32) -> Self {
         self.edit = self.edit.desired_width(w);
+        self.width = Some(w);
         self
     }
 
@@ -159,10 +165,13 @@ impl<'t> Field<'t> {
             outline,
             trailing,
             mut margin,
+            width,
         } = self;
         // Size the button from its label first: the text's right inset
-        // grows by the button's width, so the frame widens to hold it and
-        // the text never runs under it.
+        // grows by the button's width, so the text never runs under it.
+        // A field given a width keeps it: the button comes out of the
+        // text's room, so the frame (and everything laid out after it)
+        // stays put as the label changes ("Filters" to "Filters (2)").
         let trailing = trailing.map(|label| {
             let galley = ui
                 .painter()
@@ -172,8 +181,12 @@ impl<'t> Field<'t> {
             (galley, size)
         });
         if let Some((_, size)) = &trailing {
-            margin.right += TRAILING_GAP + size.x + TRAILING_INSET;
+            let extra = TRAILING_GAP + size.x + TRAILING_INSET;
+            margin.right += extra;
             edit = edit.margin(margin);
+            if let Some(w) = width.filter(|w| w.is_finite()) {
+                edit = edit.desired_width((w - extra).max(0.0));
+            }
         }
         let field = if outline {
             edit.ui(ui)
@@ -201,6 +214,11 @@ impl<'t> Field<'t> {
                 size,
             );
             let resp = ui.interact(rect, field.id.with("trailing"), egui::Sense::click());
+            // The field claims the text cursor over its whole frame; over
+            // the button the pointer is a pointer.
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
             if ui.is_rect_visible(rect) {
                 let visuals = ui.style().interact(&resp);
                 ui.painter().rect(
@@ -297,5 +315,27 @@ mod tests {
         assert_eq!(button.rect.right(), frame_right - TRAILING_INSET);
         assert_eq!(button.rect.height(), 32.0 - 2.0 * TRAILING_INSET);
         assert!(text_rect.right() + TRAILING_GAP <= button.rect.left());
+        // The button came out of the text's width: the frame is as wide as
+        // the same field without one.
+        assert_eq!(frame_right - text_rect.left() + MARGIN.left, 120.0 + MARGIN.sum().x);
+    }
+
+    /// The frame does not move with the button's label.
+    #[test]
+    fn trailing_label_does_not_change_the_frame() {
+        let right = |label: &str| {
+            let mut text = String::new();
+            let mut out = None;
+            row_height(|ui| {
+                out = Some(
+                    Field::singleline(&mut text)
+                        .width(120.0)
+                        .trailing(label.to_string())
+                        .show_with_trailing(ui),
+                );
+            });
+            out.unwrap().trailing.unwrap().rect.right() + TRAILING_INSET
+        };
+        assert_eq!(right("Filters"), right("Filters (12)"));
     }
 }

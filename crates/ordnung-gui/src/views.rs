@@ -66,17 +66,21 @@ fn health_tabs(
 /// away. Counts follow the active search, so you can see which shelf holds the
 /// hits without switching. Returns the tab the user clicked, if any; the caller
 /// owns the switch.
+/// `owned` and `wanted` are each (shown, total): the count on the tab is
+/// what the search and filters left, but the tab is sized for the whole
+/// shelf, so narrowing 161 records to 1 does not move the search field and
+/// everything right of it.
 fn vinyl_tabs(
     ui: &mut egui::Ui,
     current: VinylTab,
-    owned: usize,
-    wanted: usize,
+    owned: (usize, usize),
+    wanted: (usize, usize),
 ) -> Option<VinylTab> {
     use crate::ui::tokens::{color, font, radius, space};
 
-    let tab = |ui: &mut egui::Ui, label: String, active: bool, tip: &str, mark: Option<VinylList>| -> bool {
-        // Size the tab from its own text, so the two sit shoulder to shoulder at
-        // whatever width their counts need.
+    let tab = |ui: &mut egui::Ui, label: String, widest: String, active: bool, tip: &str, mark: Option<VinylList>| -> bool {
+        // Size the tab from the widest text it will show, so the two sit
+        // shoulder to shoulder at whatever width their counts need.
         let text_font = if active {
             font::strong(font::headline().size)
         } else {
@@ -93,7 +97,7 @@ fn vinyl_tabs(
         // pixels on every tab switch.
         let bold =
             ui.painter()
-                .layout_no_wrap(label, font::strong(font::headline().size), color::LABEL);
+                .layout_no_wrap(widest, font::strong(font::headline().size), color::LABEL);
         // Room for the shelf mark before the words, on the two shelf tabs.
         let mark_w = if mark.is_some() {
             crate::ui::icon::SHELF_R * 2.0 + space::S2 + 2.0
@@ -206,7 +210,8 @@ fn vinyl_tabs(
     }
     if tab(
         ui,
-        format!("Collection ({owned})"),
+        format!("Collection ({})", owned.0),
+        format!("Collection ({})", owned.1.max(owned.0)),
         current == VinylTab::Shelf(VinylList::Collection),
         "Records you own",
         Some(VinylList::Collection),
@@ -215,7 +220,8 @@ fn vinyl_tabs(
     }
     if tab(
         ui,
-        format!("Wantlist ({wanted})"),
+        format!("Wantlist ({})", wanted.0),
+        format!("Wantlist ({})", wanted.1.max(wanted.0)),
         current == VinylTab::Shelf(VinylList::Wantlist),
         "Records you want but don't own yet",
         Some(VinylList::Wantlist),
@@ -227,6 +233,7 @@ fn vinyl_tabs(
     // a count of sellers next to them would read as one.
     if tab(
         ui,
+        "Market".to_string(),
         "Market".to_string(),
         current == VinylTab::Sellers,
         "Dig through a Discogs seller's crates",
@@ -1635,8 +1642,8 @@ impl App {
             if let Some(tab) = vinyl_tabs(
                 ui,
                 self.vinyl_tab,
-                owned_recs.len(),
-                wanted_recs.len(),
+                (owned_recs.len(), self.vinyl.len()),
+                (wanted_recs.len(), self.wantlist.len()),
             ) {
                 self.vinyl_tab = tab;
             }
@@ -1669,28 +1676,28 @@ impl App {
                 field = field.trailing(flt_label);
             }
             let out = field.show_with_trailing(ui);
-            let search = out.field;
             let flt_btn = out.trailing.map(|b| {
                 b.on_hover_note(
                     "Filter by year, format, genre and style; each added constraint narrows further",
                 )
             });
-            // The ✖ keeps its slot even while hidden, so the Filters button and
-            // everything right of it stay put as a search is typed or cleared.
-            ui.allocate_ui_with_layout(
-                egui::vec2(22.0, search.rect.height()),
-                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                |ui| {
-                    if !self.vinyl_filter.is_empty()
-                        && ui
-                            .small_button("✖")
-                            .on_hover_note("Clear the search")
-                            .clicked()
-                    {
-                        self.vinyl_filter.clear();
-                    }
-                },
-            );
+            // The ✖ keeps its slot even while hidden, so the view toggle and
+            // everything right of it stay put as a search is typed or
+            // cleared. The slot is the button's own size, a square at the
+            // row's height, and the button fills it, so the two agree.
+            // Allocated outright, not through a child ui: a child with
+            // nothing in it takes no room, and the toggle used to step
+            // left the moment the search was cleared.
+            let side = crate::ui::control_h(ui);
+            let (slot, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+            if !self.vinyl_filter.is_empty()
+                && ui
+                    .put(slot, egui::Button::new("✖"))
+                    .on_hover_note("Clear the search")
+                    .clicked()
+            {
+                self.vinyl_filter.clear();
+            }
             if graph_mode {
                 // What the map gathers around: artists, or genre clouds.
                 // Switching re-homes every record in place and the springs
