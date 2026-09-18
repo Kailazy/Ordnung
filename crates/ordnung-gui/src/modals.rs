@@ -1925,6 +1925,66 @@ impl App {
         }
     }
 
+    /// "Forget every discovered record?" popup, from the map's Show menu.
+    /// Confirming drops every record that was only ever dug to, from the
+    /// map and the catalog; wanted ones and the shelves are untouched.
+    pub(crate) fn draw_clear_dug_confirm(&mut self, ctx: &egui::Context) {
+        if !self.confirm_clear_dug {
+            return;
+        }
+        let n = self
+            .map_status_counts()
+            .iter()
+            .find(|(s, _)| *s == crate::graph::Status::Dug)
+            .map(|(_, n)| *n)
+            .unwrap_or(0);
+        let mut open = true;
+        let mut confirm = false;
+        crate::ui::window::Window::new("Forget discovered records?")
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_min_width(380.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "This takes {n} record{} you dug to off the map.",
+                        if n == 1 { "" } else { "s" }
+                    ))
+                    .strong(),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Your collection and wantlist stay, and so does anything you \
+                         asked for on a list. A later dig can find them again.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if crate::ui::button::button(ui, "Cancel").clicked() {
+                        self.confirm_clear_dug = false;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let btn = egui::Button::new(
+                            egui::RichText::new("Forget them").color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(150, 40, 40));
+                        if ui.add(btn).clicked() {
+                            confirm = true;
+                        }
+                    });
+                });
+            });
+        if confirm {
+            self.confirm_clear_dug = false;
+            self.clear_dug();
+        }
+        if !open {
+            self.confirm_clear_dug = false;
+        }
+    }
+
     /// Report popup listing every item a background job skipped or errored on,
     /// with the reason. Auto-opens after a job that had any failures (scan, write
     /// edits, analyze, relocate) so the user knows exactly what didn't go through.

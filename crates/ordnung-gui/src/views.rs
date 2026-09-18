@@ -1706,6 +1706,65 @@ impl App {
                         self.status = format!("Couldn't save settings: {e}");
                     }
                 }
+                // Which kinds of record are on the map. Each row toggles
+                // one kind and the menu stays open, so a dig's flood of
+                // discovered records can be hidden in one click and the
+                // shelves come back. The button wears the hidden count.
+                ui.add_space(6.0);
+                let hidden_n = graph::Status::hidden(&self.config.graph_hide).len();
+                let show_label = if hidden_n == 0 {
+                    "⚟ Show".to_string()
+                } else {
+                    format!("⚟ Show ({hidden_n} hidden)")
+                };
+                let show_btn = ui.button(show_label).on_hover_note(
+                    "Choose which records are on the map: your collection, your wantlist, and the records dug to",
+                );
+                let counts = self.map_status_counts();
+                let mut hide = self.config.graph_hide.clone();
+                let mut clear_dug = false;
+                crate::ui::menu::dropdown(&show_btn, 240.0, |m| {
+                    if hidden_n > 0 {
+                        m.ui().horizontal(|ui| {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button("✖ Clear")
+                                        .on_hover_note("Show every kind of record")
+                                        .clicked()
+                                    {
+                                        hide.clear();
+                                    }
+                                },
+                            );
+                        });
+                    }
+                    for (status, n) in counts {
+                        let on = !hide.iter().any(|k| k == status.key());
+                        if m.selectable_detail(on, status.label(), n.to_string()) {
+                            if on {
+                                hide.push(status.key().to_string());
+                            } else {
+                                hide.retain(|k| k != status.key());
+                            }
+                        }
+                    }
+                    m.separator();
+                    if m.item_danger("Forget discovered records") {
+                        clear_dug = true;
+                        m.close();
+                    }
+                });
+                if hide != self.config.graph_hide {
+                    self.config.graph_hide = hide;
+                    if let Err(e) = self.config.save() {
+                        self.status = format!("Couldn't save settings: {e}");
+                    }
+                }
+                if clear_dug {
+                    self.confirm_clear_dug = true;
+                }
                 ui.add_space(6.0);
                 // The radio: play a record, dig to the next, keep going.
                 let on = self.radio.on;

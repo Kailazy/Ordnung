@@ -41,6 +41,36 @@ pub(crate) enum Status {
     Dug,
 }
 
+impl Status {
+    pub(crate) const ALL: [Status; 3] = [Status::Owned, Status::Wanted, Status::Dug];
+
+    /// The word the config stores for a kind hidden from the map.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Owned => "owned",
+            Self::Wanted => "wanted",
+            Self::Dug => "dug",
+        }
+    }
+
+    /// The kind's name in the map's filter menu and legend.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Owned => "Collection",
+            Self::Wanted => "Wantlist",
+            Self::Dug => "Discovered",
+        }
+    }
+
+    /// The kinds `hide` (the config's list of keys) leaves off the map.
+    pub(crate) fn hidden(hide: &[String]) -> Vec<Status> {
+        Self::ALL
+            .into_iter()
+            .filter(|s| hide.iter().any(|k| k == s.key()))
+            .collect()
+    }
+}
+
 /// What the map gathers records around. Switching re-homes every record
 /// under new hubs in place, and the springs carry them across.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -526,6 +556,7 @@ impl GraphState {
         wanted: &[VinylRecord],
         dug: &[DugRelease],
         dug_genres: &HashMap<u64, Vec<String>>,
+        hidden: &[Status],
     ) {
         // Merge by release: a record on a shelf is that shelf's, whatever a
         // dig also knows about it; a dug record asked for on a list reads as
@@ -586,6 +617,11 @@ impl GraphState {
                 },
                 &mut seen,
             );
+        }
+        // The filter applies after the merge, so a shelf record a dig also
+        // landed on stays with its shelf when discovered records are hidden.
+        if !hidden.is_empty() {
+            releases.retain(|r| !hidden.contains(&r.status));
         }
 
         let mut sig = 0xcbf2_9ce4_8422_2325u64;
@@ -1191,7 +1227,15 @@ impl App {
         use crate::ui::tokens::{color, font};
         let mut g = std::mem::take(&mut self.graph);
         let arrange = Arrange::from_key(&self.config.graph_arrange);
-        g.sync(arrange, &self.vinyl, &self.wantlist, &self.dug, &self.dug_genres);
+        let hidden = Status::hidden(&self.config.graph_hide);
+        g.sync(
+            arrange,
+            &self.vinyl,
+            &self.wantlist,
+            &self.dug,
+            &self.dug_genres,
+            &hidden,
+        );
         self.map_dig_tick(&mut g);
 
         let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
@@ -1201,17 +1245,31 @@ impl App {
         let mut act = None;
 
         if g.nodes.is_empty() {
+            // Empty because there's nothing, or because the filters hide
+            // all of what there is: the second wants a different nudge.
+            let have_any = !self.vinyl.is_empty() || !self.wantlist.is_empty() || !self.dug.is_empty();
+            let (head, hint) = if !hidden.is_empty() && have_any {
+                (
+                    "Everything is hidden",
+                    "Show more kinds of record from the Show menu above",
+                )
+            } else {
+                (
+                    "Nothing on the map yet",
+                    "Sync your Discogs shelves, or start a dig from any record",
+                )
+            };
             painter.text(
                 rect.center() - egui::vec2(0.0, 10.0),
                 egui::Align2::CENTER_CENTER,
-                "Nothing on the map yet",
+                head,
                 font::headline(),
                 color::LABEL_2,
             );
             painter.text(
                 rect.center() + egui::vec2(0.0, 12.0),
                 egui::Align2::CENTER_CENTER,
-                "Sync your Discogs shelves, or start a dig from any record",
+                hint,
                 font::footnote(),
                 color::LABEL_3,
             );
@@ -2417,6 +2475,16 @@ impl App {
     /// the shelves). Kept in memory for this frame and written through to the
     /// catalog, so the map remembers it next launch.
     pub(crate) fn note_dug(&mut self, d: DugRelease) {
+        // A landing is meant to be seen: if discovered records are hidden
+        // when a dig lands on a new one, they come back into view rather
+        // than the find vanishing into a hidden kind.
+        let is_new = !self.dug.iter().any(|x| x.release_id == d.release_id);
+        if is_new && !d.wanted && self.config.graph_hide.iter().any(|k| k == Status::Dug.key()) {
+            self.config.graph_hide.retain(|k| k != Status::Dug.key());
+            if let Err(e) = self.config.save() {
+                self.status = format!("Couldn't save settings: {e}");
+            }
+        }
         match self.dug.iter_mut().find(|x| x.release_id == d.release_id) {
             Some(x) => {
                 if d.label.is_some() {
@@ -2434,6 +2502,59 @@ impl App {
         }
         if let Ok(cat) = Catalog::open(&self.db_path) {
             let _ = cat.record_dug_release(&d);
+        }
+    }
+
+    /// How many records the map would show of each kind with no filter,
+    /// merged the way `sync` merges them: a shelf record a dig also landed
+    /// on is its shelf's, and a dug record asked for on a list is wanted.
+    pub(crate) fn map_status_counts(&self) -> [(Status, usize); 3] {
+        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut owned = 0;
+        for v in &self.vinyl {
+            if seen.insert(v.release_id) {
+                owned += 1;
+            }
+        }
+        let mut wanted = 0;
+        for v in &self.wantlist {
+            if seen.insert(v.release_id) {
+                wanted += 1;
+            }
+        }
+        let mut dug = 0;
+        for d in &self.dug {
+            if seen.insert(d.release_id) {
+                if d.wanted {
+                    wanted += 1;
+                } else {
+                    dug += 1;
+                }
+            }
+        }
+        [
+            (Status::Owned, owned),
+            (Status::Wanted, wanted),
+            (Status::Dug, dug),
+        ]
+    }
+
+    /// Forget every record that was only ever dug to, on the map and in the
+    /// catalog. Wanted ones stay: they're on a list, not merely discovered.
+    pub(crate) fn clear_dug(&mut self) {
+        match Catalog::open(&self.db_path).and_then(|c| c.clear_dug_releases()) {
+            Ok(n) => {
+                self.dug.retain(|d| d.wanted);
+                let keep: std::collections::HashSet<u64> =
+                    self.dug.iter().map(|d| d.release_id).collect();
+                self.dug_genres.retain(|id, _| keep.contains(id));
+                self.graph.wake();
+                self.status = format!(
+                    "Forgot {n} discovered record{}",
+                    if n == 1 { "" } else { "s" }
+                );
+            }
+            Err(e) => self.status = format!("Couldn't clear discovered records: {e}"),
         }
     }
 

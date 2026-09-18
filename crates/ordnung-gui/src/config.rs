@@ -104,6 +104,12 @@ pub struct Config {
     /// reads as genre clouds). Unknown values fall back to artists.
     #[serde(default)]
     pub graph_arrange: String,
+    /// Kinds of record the map leaves out: any of `"owned"`, `"wanted"`
+    /// and `"dug"` (see `graph::Status::key`). Empty shows everything. A
+    /// long dig fills the map with discovered records; hiding them brings
+    /// the shelves back into view without forgetting the finds.
+    #[serde(default)]
+    pub graph_hide: Vec<String>,
     /// Which library sits at the top of the left navigation sidebar:
     /// `"digital"` (Library / New / playlists first, the default) or
     /// `"vinyl"` (the Discogs vinyl collection first). A vinyl-led collector
@@ -686,6 +692,7 @@ impl Default for Config {
             vinyl_view: default_vinyl_view(),
             radio_dock: default_radio_dock(),
             graph_arrange: String::new(),
+            graph_hide: Vec::new(),
             nav_primary: default_nav_primary(),
             export_convert_for_older_players: false,
             nav_density: default_nav_density(),

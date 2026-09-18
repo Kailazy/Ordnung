@@ -1709,6 +1709,8 @@ struct App {
     discogs_auth_rx: Option<Receiver<DiscogsAuth>>,
     /// Whether the "clear the whole catalog?" confirmation popup is showing.
     confirm_clear_db: bool,
+    /// Whether the "forget every discovered record?" popup is showing.
+    confirm_clear_dug: bool,
     /// USB export pending confirmation. The modal either spawns the export
     /// job or clears this.
     export_confirm: Option<ExportConfirm>,

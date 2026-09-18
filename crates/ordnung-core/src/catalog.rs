@@ -4268,6 +4268,16 @@ impl Catalog {
         Ok(())
     }
 
+    /// Forget every release that was only ever dug to. Rows flagged wanted
+    /// stay: those are on (or on their way to) a Discogs list, and the map
+    /// reads them as wanted rather than discovered. Returns how many went.
+    pub fn clear_dug_releases(&self) -> Result<usize> {
+        let n = self
+            .conn
+            .execute("DELETE FROM dug_releases WHERE wanted = 0", [])?;
+        Ok(n)
+    }
+
     /// Every dug release, oldest first. Grows one row per record dug to, so
     /// it loads whole.
     pub fn list_dug_releases(&self) -> Result<Vec<DugRelease>> {
@@ -6547,6 +6557,33 @@ mod tests {
         // Unknown ids are ignored by the flag, not invented.
         cat.mark_dug_wanted(77).unwrap();
         assert_eq!(cat.list_dug_releases().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn clear_dug_releases_keeps_the_wanted_ones() {
+        let cat = Catalog::open(temp_db_path("dug-clear")).unwrap();
+        let base = DugRelease {
+            release_id: 1,
+            artist: "A".into(),
+            title: "T".into(),
+            label: None,
+            sub: String::new(),
+            thumb_url: None,
+            wanted: false,
+            dug_at: 1,
+        };
+        for id in 1..=3 {
+            cat.record_dug_release(&DugRelease { release_id: id, ..base.clone() })
+                .unwrap();
+        }
+        cat.mark_dug_wanted(2).unwrap();
+        assert_eq!(cat.clear_dug_releases().unwrap(), 2);
+        let rows = cat.list_dug_releases().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].release_id, 2);
+        assert!(rows[0].wanted);
+        // Nothing left to clear is not an error.
+        assert_eq!(cat.clear_dug_releases().unwrap(), 0);
     }
 
     #[test]

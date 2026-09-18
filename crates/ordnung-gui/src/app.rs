@@ -273,6 +273,7 @@ impl App {
             discogs_auth: DiscogsAuth::default(),
             discogs_auth_rx: None,
             confirm_clear_db: false,
+            confirm_clear_dug: false,
             look_editor: None,
             export_confirm: None,
             usb_setup_confirm: None,
@@ -3855,6 +3856,7 @@ impl eframe::App for App {
         self.draw_settings(ctx);
         self.draw_tracklist_window(ctx);
         self.draw_clear_db_confirm(ctx);
+        self.draw_clear_dug_confirm(ctx);
         self.draw_look_editor(ctx);
         self.draw_bulk_write_confirm(ctx);
         self.draw_delete_confirm(ctx);
