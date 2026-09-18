@@ -336,6 +336,8 @@ impl App {
             }) {
                 Ok(sellers) => {
                     self.sellers = sellers;
+                    // Their copies leave the open sheet's seller block too.
+                    self.refresh_sheet_stocked();
                     if self.seller_current.as_deref() == Some(name.as_str()) {
                         self.seller_current = self.sellers.first().map(|s| s.username.clone());
                         self.seller_listings_for = None;
@@ -1417,6 +1419,7 @@ impl App {
         if let Some(sheet) = self.vinyl_sheet.as_mut() {
             if sheet.release_id == l.release_id {
                 sheet.offer = Some(SellerOffer {
+                    listing_id: l.listing_id,
                     seller,
                     price: discogs::MarketPrice {
                         value: l.price,

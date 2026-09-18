@@ -278,6 +278,7 @@ impl App {
         if let Some(sheet) = self.vinyl_sheet.as_mut() {
             if sheet.release_id == l.release_id {
                 sheet.offer = Some(SellerOffer {
+                    listing_id: l.listing_id,
                     seller,
                     price: discogs::MarketPrice {
                         value: l.price,

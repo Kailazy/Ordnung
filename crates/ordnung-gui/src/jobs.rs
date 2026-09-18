@@ -100,6 +100,10 @@ impl App {
                 self.auto_write_pending_latch = true;
                 reload = true;
             }
+            // If that job was a seller sweep, the open record sheet's "from
+            // your sellers" block reads stale until re-read; cheap, so re-read
+            // it after every finished job rather than track which one ran.
+            self.refresh_sheet_stocked();
             if self.write_edits_running {
                 self.write_edits_running = false;
                 self.cover_cache.clear();

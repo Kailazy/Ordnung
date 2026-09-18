@@ -3755,6 +3755,55 @@ impl Catalog {
         Ok(rows)
     }
 
+    /// Every cached listing of one concrete pressing across *all* saved
+    /// sellers — the record sheet's "your sellers" block, answering "can I buy
+    /// this from a shop I already dig through?" without a network request.
+    /// Cheapest first, then by seller so equal prices land in a stable order.
+    /// Empty when no saved seller stocks it (or none has been swept).
+    pub fn seller_listings_for_release(
+        &self,
+        release_id: u64,
+    ) -> Result<Vec<(String, SellerListing)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seller, listing_id, release_id, title, artist, year, label,
+                    catalog_number, format, thumb_url, price, currency, condition,
+                    sleeve_condition, ships_from, shipping_price, shipping_currency,
+                    allow_offers, uri, posted
+             FROM seller_listings
+             WHERE release_id=?1
+             ORDER BY price ASC, seller COLLATE NOCASE ASC, listing_id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![release_id as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    SellerListing {
+                        listing_id: r.get::<_, i64>(1)? as u64,
+                        release_id: r.get::<_, i64>(2)? as u64,
+                        title: r.get(3)?,
+                        artist: r.get(4)?,
+                        year: r.get::<_, Option<i64>>(5)?.map(|y| y as u16),
+                        label: r.get(6)?,
+                        catalog_number: r.get(7)?,
+                        format: r.get(8)?,
+                        thumb_url: r.get(9)?,
+                        price: r.get(10)?,
+                        currency: r.get(11)?,
+                        condition: r.get(12)?,
+                        sleeve_condition: r.get(13)?,
+                        ships_from: r.get(14)?,
+                        shipping_price: r.get(15)?,
+                        shipping_currency: r.get(16)?,
+                        allow_offers: r.get::<_, i64>(17)? != 0,
+                        uri: r.get(18)?,
+                        posted: r.get(19)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Every cached seller listing whose release is on the wantlist — the
     /// wantlist watch, and the payoff for sweeping shops: which of the user's
     /// wants are in stock right now, and at what price. Each row pairs the
@@ -6245,6 +6294,59 @@ mod tests {
         // Buying it (the want leaves the wantlist) empties the watch.
         cat.prune_vinyl_not_in(VinylList::Wantlist, &[]).unwrap();
         assert!(cat.wantlist_offers().unwrap().is_empty());
+    }
+
+    /// The record sheet asks which saved shops stock the open pressing: every
+    /// listing of that release id, cheapest first, other pressings left out.
+    #[test]
+    fn release_listings_span_sellers_cheapest_first() {
+        fn listing(id: u64, release_id: u64, price: f64) -> SellerListing {
+            SellerListing {
+                listing_id: id,
+                release_id,
+                title: "Azure".into(),
+                artist: "Vainqueur".into(),
+                year: None,
+                label: None,
+                catalog_number: None,
+                format: None,
+                thumb_url: None,
+                price,
+                currency: "EUR".into(),
+                condition: None,
+                sleeve_condition: None,
+                ships_from: None,
+                shipping_price: None,
+                shipping_currency: None,
+                allow_offers: false,
+                uri: None,
+                posted: None,
+            }
+        }
+        let cat = Catalog::open(":memory:").unwrap();
+        assert!(cat.seller_listings_for_release(9001).unwrap().is_empty());
+        cat.add_seller("hardwax").unwrap();
+        cat.add_seller("rushhour").unwrap();
+        cat.upsert_seller_listing("hardwax", &listing(1, 9001, 14.0))
+            .unwrap();
+        cat.upsert_seller_listing("rushhour", &listing(2, 9001, 9.5))
+            .unwrap();
+        // A second copy in the same shop is its own row.
+        cat.upsert_seller_listing("hardwax", &listing(4, 9001, 20.0))
+            .unwrap();
+        // Another pressing of the same record doesn't count as this one.
+        cat.upsert_seller_listing("hardwax", &listing(3, 7777, 4.0))
+            .unwrap();
+
+        let rows = cat.seller_listings_for_release(9001).unwrap();
+        let seen: Vec<(&str, u64)> = rows.iter().map(|(s, l)| (s.as_str(), l.listing_id)).collect();
+        assert_eq!(seen, vec![("rushhour", 2), ("hardwax", 1), ("hardwax", 4)]);
+
+        // Dropping the shop drops its copies from the answer.
+        cat.remove_seller("hardwax").unwrap();
+        let rows = cat.seller_listings_for_release(9001).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "rushhour");
     }
 
     #[test]

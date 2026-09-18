@@ -115,11 +115,19 @@ pub(crate) struct VinylSheet {
     /// the market floor, because "£14 VG+ from this shop" is the number the
     /// buy decision actually weighs. `None` everywhere else.
     pub offer: Option<SellerOffer>,
+    /// Every copy of this pressing the saved sellers have in their cached
+    /// crates, cheapest first — "can I buy this from a shop I already dig
+    /// through?" answered from the local cache the moment the sheet opens.
+    /// Includes the copy `offer` was opened on, which the sheet skips when
+    /// drawing so the same listing isn't shown twice.
+    pub stocked: Vec<SellerOffer>,
 }
 
 /// One seller's concrete offer of the open record — see [`VinylSheet::offer`].
 #[derive(Clone)]
 pub(crate) struct SellerOffer {
+    /// Discogs marketplace listing id — what tells two copies apart.
+    pub listing_id: u64,
     pub seller: String,
     pub price: discogs::MarketPrice,
     pub condition: Option<String>,
@@ -209,6 +217,25 @@ pub(crate) fn imprint_line(label: Option<&str>, catno: Option<&str>) -> Option<S
     }
 }
 
+/// One seller's copy on a line: `€14.00 · VG+/VG +€6.50 shipping from hardwax`.
+fn offer_line(o: &SellerOffer) -> String {
+    let short = crate::sellers::cond_short;
+    let grade = match (o.condition.as_deref(), o.sleeve_condition.as_deref()) {
+        (Some(m), Some(s)) => format!(" · {}/{}", short(m), short(s)),
+        (Some(m), None) => format!(" · {}", short(m)),
+        _ => String::new(),
+    };
+    let shipping = match &o.shipping {
+        Some(s) => format!(" +{} shipping", fmt_market_price(s)),
+        None => String::new(),
+    };
+    format!(
+        "{}{grade}{shipping} from {}",
+        fmt_market_price(&o.price),
+        o.seller
+    )
+}
+
 pub(crate) fn fmt_market_price(p: &discogs::MarketPrice) -> String {
     let code = p.currency.trim().to_uppercase();
     let symbol = match code.as_str() {
@@ -282,6 +309,7 @@ impl App {
                 _ => PriceState::Idle,
             },
             offer: None,
+            stocked: self.sheet_stocked(record.release_id),
         });
         self.spawn_sheet_fetch(record.release_id, ctx.clone());
         self.spawn_sheet_price(record.release_id, ctx.clone());
@@ -333,6 +361,7 @@ impl App {
             pending_play: false,
             price: PriceState::Idle,
             offer: None,
+            stocked: self.sheet_stocked(release_id),
         });
         self.spawn_sheet_fetch(release_id, ctx.clone());
         self.spawn_sheet_price(release_id, ctx.clone());
@@ -430,6 +459,46 @@ impl App {
     /// The catalog tracks linked to `release_id`, with the analysis figures the
     /// sheet shows. One small read per linked track — a record is a handful of
     /// tracks, so this stays on the UI thread like the other inline reads.
+    /// The saved sellers' cached copies of one pressing, as offers the sheet
+    /// can draw — see [`VinylSheet::stocked`]. A local read, so it costs no
+    /// request; a shop that was never swept simply contributes nothing.
+    fn sheet_stocked(&self, release_id: u64) -> Vec<SellerOffer> {
+        let Ok(cat) = Catalog::open(&self.db_path) else {
+            return Vec::new();
+        };
+        cat.seller_listings_for_release(release_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(seller, l)| SellerOffer {
+                listing_id: l.listing_id,
+                seller,
+                price: discogs::MarketPrice {
+                    value: l.price,
+                    currency: l.currency.clone(),
+                },
+                condition: l.condition,
+                sleeve_condition: l.sleeve_condition,
+                shipping: l.shipping_price.map(|value| discogs::MarketPrice {
+                    value,
+                    currency: l.shipping_currency.unwrap_or(l.currency),
+                }),
+                uri: l.uri,
+            })
+            .collect()
+    }
+
+    /// Re-read the open sheet's saved-seller copies — after a sweep lands or a
+    /// seller is removed, so the block tracks the cache it reads from.
+    pub(crate) fn refresh_sheet_stocked(&mut self) {
+        let Some(release_id) = self.vinyl_sheet.as_ref().map(|s| s.release_id) else {
+            return;
+        };
+        let stocked = self.sheet_stocked(release_id);
+        if let Some(s) = self.vinyl_sheet.as_mut() {
+            s.stocked = stocked;
+        }
+    }
+
     fn sheet_local_tracks(&self, release_id: u64) -> Vec<SheetLocal> {
         let mut ids = self
             .vinyl_links
@@ -1067,26 +1136,21 @@ impl App {
             .vinyl_sheet
             .as_ref()
             .and_then(|s| s.offer.clone())
-            .map(|o| {
-                let short = crate::sellers::cond_short;
-                let grade = match (o.condition.as_deref(), o.sleeve_condition.as_deref()) {
-                    (Some(m), Some(s)) => format!(" · {}/{}", short(m), short(s)),
-                    (Some(m), None) => format!(" · {}", short(m)),
-                    _ => String::new(),
-                };
-                let shipping = match &o.shipping {
-                    Some(s) => format!(" +{} shipping", fmt_market_price(s)),
-                    None => String::new(),
-                };
-                (
-                    format!(
-                        "{}{grade}{shipping} from {}",
-                        fmt_market_price(&o.price),
-                        o.seller
-                    ),
-                    o.uri,
-                )
-            });
+            .map(|o| (offer_line(&o), o.uri));
+        // What the saved shops want for this pressing, beyond the copy the
+        // sheet was opened on. Snapshot for the same reason as `offer`.
+        let stocked: Vec<(String, Option<String>)> = self
+            .vinyl_sheet
+            .as_ref()
+            .map(|s| {
+                let opened = s.offer.as_ref().map(|o| o.listing_id);
+                s.stocked
+                    .iter()
+                    .filter(|o| Some(o.listing_id) != opened)
+                    .map(|o| (offer_line(o), o.uri.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         // A different pressing of the same record that *is* for sale. Snapshot
         // what the row needs so the window closure doesn't borrow the sheet.
         let alt = match self.vinyl_sheet.as_ref().map(|s| &s.price) {
@@ -1270,6 +1334,41 @@ impl App {
                                     open_url(&url);
                                 }
                             });
+                        }
+                        // The shops the user already digs through that have
+                        // this pressing in stock, cheapest first. Reads from
+                        // the sellers' cached crates, so it's exactly as
+                        // fresh as the last sweep — and the reason to sweep.
+                        if !stocked.is_empty() {
+                            ui.label(
+                                egui::RichText::new(if offer.is_some() {
+                                    "Also from your sellers"
+                                } else {
+                                    "From your sellers"
+                                })
+                                .small()
+                                .weak(),
+                            );
+                            for (line, uri) in &stocked {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    ui.label(
+                                        egui::RichText::new(line)
+                                            .small()
+                                            .color(egui::Color32::from_rgb(120, 200, 140)),
+                                    );
+                                    if ui
+                                        .small_button("Buy ↗")
+                                        .on_hover_note("Open this listing on discogs.com")
+                                        .clicked()
+                                    {
+                                        let url = uri.clone().unwrap_or_else(|| {
+                                            format!("https://www.discogs.com/release/{release_id}")
+                                        });
+                                        open_url(&url);
+                                    }
+                                });
+                            }
                         }
                         // This pressing is a dead end, but another isn't. Say
                         // which one and offer it, rather than leaving "no copies
