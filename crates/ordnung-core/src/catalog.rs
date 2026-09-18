@@ -1498,8 +1498,12 @@ impl Catalog {
     /// `release_id` (see [`Self::release_track_links`]). **Metadata** matching is
     /// only a *fallback*, applied to a record solely when it has no exact link —
     /// a track whose album equals the record's title (the release/album name), or
-    /// whose title equals it and whose artist overlaps (catches singles/EPs named
-    /// after their lead track). Matching ignores punctuation/spacing/case, so
+    /// whose title equals it (catches singles/EPs named after their lead track).
+    /// Either way the track's artist has to overlap the record's: half a
+    /// library's white labels are called "Untitled", and an album name alone
+    /// used to hand every one of them to whichever record shared the word. A
+    /// compilation ("Various") has no artist to agree with, so its album match
+    /// stands on the name. Matching ignores punctuation/spacing/case, so
     /// "Guardwatcher Pt. 1" and "guardwatcher pt 1" link.
     pub fn vinyl_catalog_links(&self, records: &[VinylRecord]) -> Result<Vec<(u64, Id)>> {
         // Primary: exact release-id links. The metadata pass below runs for
@@ -1538,9 +1542,12 @@ impl Catalog {
                 continue;
             }
             let rartist = norm_match(&rec.artist);
+            let various = rartist == "various" || rartist == "various artists";
             for row in &rows {
-                let album_hit = !row.album.is_empty() && row.album == rtitle;
-                let title_hit = row.title == rtitle && artist_overlaps(&row.artist, &rartist);
+                let same_artist = artist_overlaps(&row.artist, &rartist);
+                let album_hit =
+                    !row.album.is_empty() && row.album == rtitle && (same_artist || various);
+                let title_hit = row.title == rtitle && same_artist;
                 if album_hit || title_hit {
                     out.push((rec.release_id, row.id));
                 }
@@ -7273,6 +7280,43 @@ mod tests {
             (7000u64, d),             // exact release-id link
             (7000u64, e),             // album == title, alongside the id link
         ];
+        expected.sort();
+        assert_eq!(links, expected);
+    }
+
+    #[test]
+    fn vinyl_links_need_the_artist_to_agree_on_an_album_name() {
+        let cat = Catalog::open(":memory:").unwrap();
+        // Three white labels, all called "Untitled", by three artists.
+        let mut a = scanned("/m/a.mp3", "2601", "Techno", 1000);
+        a.tags.album = Some("Untitled".into());
+        a.tags.title = Some("Untitled".into());
+        let (a, _) = cat.upsert_scanned(&a).unwrap();
+        let mut b = scanned("/m/b.mp3", "Hank", "Techno", 1000);
+        b.tags.album = Some("Untitled".into());
+        b.tags.title = Some("Mongoos".into());
+        let (b, _) = cat.upsert_scanned(&b).unwrap();
+        let mut c = scanned("/m/c.mp3", "SnPLO", "Techno", 1000);
+        c.tags.album = Some("Untitled".into());
+        c.tags.title = Some("Fuzz".into());
+        let (c, _) = cat.upsert_scanned(&c).unwrap();
+        // A compilation track, filed under the compilation's name.
+        let mut d = scanned("/m/d.mp3", "Surgeon", "Techno", 1000);
+        d.tags.album = Some("Untitled".into());
+        let (d, _) = cat.upsert_scanned(&d).unwrap();
+
+        // SnPLO's record gets SnPLO's track and nobody else's.
+        let rec = vinyl(1, "SnPLO", "Untitled");
+        let links = cat.vinyl_catalog_links(&[rec.clone()]).unwrap();
+        assert_eq!(links, vec![(rec.release_id, c)]);
+
+        // A Various compilation has no artist to agree with: every track
+        // filed under its name is on it.
+        let comp = vinyl(2, "Various", "Untitled");
+        let mut links = cat.vinyl_catalog_links(&[comp.clone()]).unwrap();
+        links.sort();
+        let mut expected: Vec<(u64, Id)> =
+            [a, b, c, d].into_iter().map(|t| (comp.release_id, t)).collect();
         expected.sort();
         assert_eq!(links, expected);
     }

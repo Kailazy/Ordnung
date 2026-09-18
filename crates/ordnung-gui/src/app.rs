@@ -577,6 +577,29 @@ impl App {
                 .contains(&crate::dig::work_key(artist, title))
     }
 
+    /// Refresh after a write that only changed which tracks a playlist holds.
+    /// The sidebar's tree and stats are re-read, and the rows when a
+    /// playlist is the view; the catalog-wide row sources are kept. A full
+    /// [`Self::reload`] sees "the catalog changed" and re-reads every track's
+    /// analysis — every waveform envelope in the library, tens of megabytes —
+    /// which is the hitch a drop onto a playlist used to land with. Nothing
+    /// about the tracks themselves moved, so none of that is stale.
+    ///
+    /// The caller has to have proved the playlist write is the only change
+    /// since the last reload (see `SidebarAction::AddTracks`): the probe is
+    /// consumed here so `reload` doesn't take the write for a track change.
+    pub(crate) fn reload_after_playlist_edit(&mut self) {
+        if let Some(p) = self.catalog_probe.as_mut() {
+            let _ = p.changed();
+        }
+        (self.playlists, self.playlist_stats) = Catalog::open(&self.db_path)
+            .and_then(|c| Ok((c.list_playlists()?, c.playlist_stats()?)))
+            .unwrap_or_default();
+        if matches!(self.view, LibraryView::Playlist(_)) {
+            self.reload();
+        }
+    }
+
     pub(crate) fn reload(&mut self) {
         // One question first: has anything written the catalog since the last
         // reload? A view switch or a search keystroke hasn't, and then every
@@ -3417,13 +3440,23 @@ impl eframe::App for App {
                 self.reload();
             }
             Some(SidebarAction::AddTracks(pid, ids)) => {
+                // Was anything else written since the last reload? Asked
+                // before this write, so the answer can't be this write. If
+                // so the full reload below picks that up too; if not, the
+                // drop's own write is the only change and the light refresh
+                // is enough.
+                let others_wrote = self.catalog_probe.as_mut().map_or(true, |p| p.changed());
                 if let Ok(cat) = Catalog::open(&self.db_path) {
                     match cat.add_tracks(pid, &ids) {
                         Ok(n) => self.status = format!("Added {n} track(s) to playlist."),
                         Err(e) => self.fail(format!("Couldn't add to the playlist: {e}")),
                     }
                 }
-                self.reload();
+                if others_wrote {
+                    self.reload();
+                } else {
+                    self.reload_after_playlist_edit();
+                }
             }
             Some(SidebarAction::OpenHealth) => {
                 let tab = self.health_tab.clone();

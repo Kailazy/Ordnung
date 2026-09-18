@@ -1053,7 +1053,7 @@ impl App {
             error,
             playing_video,
             video_open,
-            has_video,
+            can_play,
         ) = {
             let s = self.vinyl_sheet.as_ref().unwrap();
             // The mini-player is shared with the radio. It belongs to this
@@ -1092,11 +1092,12 @@ impl App {
                         .position(|v| v.youtube_id() == Some(song.youtube_id.as_str()))
                 }),
                 webview::is_open() && (s.playing_video.is_some() || radio_here),
-                // Can anything on this record play through the mini-player? Only
-                // then does the transport's slot need holding open.
+                // Can anything on this record play at all — a video through
+                // the mini-player, or a local file through the audio engine?
+                // Only then does the transport's slot need holding open.
                 s.rows
                     .iter()
-                    .any(|r| matches!(r.source, SheetSource::Video(_)) || r.also_video.is_some())
+                    .any(|r| !matches!(r.source, SheetSource::None) || r.also_video.is_some())
                     || !s.extra_videos.is_empty(),
             )
         };
@@ -1179,6 +1180,20 @@ impl App {
                 }
             }
         };
+        // Where the audio engine has got to, when what it holds is one of
+        // this record's own files: the transport draws it exactly as it draws
+        // the mini-player's video, so a local track scrubs from the sheet too.
+        let audio_transport = match record_play {
+            RecordPlay::Playing(PlayEngine::Audio) | RecordPlay::Paused(PlayEngine::Audio) => {
+                self.audio.as_ref().map(|a| webview::Transport {
+                    position: a.position(),
+                    duration: a.duration(),
+                    playing: matches!(record_play, RecordPlay::Playing(_)),
+                    ready: true,
+                })
+            }
+            _ => None,
+        };
         // Digging is offered for any record with something to search on: a
         // shelf record digs by its cached row, and a keyless one (a seller's
         // listing, or a record reached by an earlier dig) seeds a dig from the
@@ -1246,7 +1261,6 @@ impl App {
         // what the row needs so the window closure doesn't borrow the sheet.
         let alt = match self.vinyl_sheet.as_ref().map(|s| &s.price) {
             Some(PriceState::Elsewhere { version, price }) => Some((
-                version.release_id,
                 // The pressing detail is what distinguishes it from the one on
                 // screen — "12\", White Label, Limited Edition" against the
                 // promo the user is looking at.
@@ -1257,8 +1271,6 @@ impl App {
                 },
                 version.catno.clone(),
                 fmt_market_price(price),
-                self.vinyl_owned.contains(&version.release_id),
-                self.vinyl_wanted.contains(&version.release_id),
             )),
             _ => None,
         };
@@ -1268,9 +1280,6 @@ impl App {
         // it. Other records' edits don't hold these up.
         let col_pending = self.vinyl_pending(VinylList::Collection, release_id);
         let want_pending = self.vinyl_pending(VinylList::Wantlist, release_id);
-        // The alternative pressing's id is only known inside the window, so
-        // that one button waits out any edit at all.
-        let editing = self.vinyl_edit_running();
 
         /// What the user clicked this frame, applied after the window closes its
         /// borrow of `self`.
@@ -1290,11 +1299,10 @@ impl App {
             ToggleList(VinylList),
             /// Open the label page — this record's imprint, front to back.
             LabelPage,
-            /// Want a *different* pressing of the same record — the one that
-            /// has copies for sale.
-            WantAlternative(u64),
-            /// Look at that pressing here: swap the sheet over to it instead
-            /// of sending the user to discogs.com.
+            /// Look at the pressing that has copies for sale, here: swap the
+            /// sheet over to it instead of sending the user to discogs.com.
+            /// Its own sheet is where it gets wanted; a second wantlist
+            /// button on this one read as a second button for this record.
             OpenAlternative,
             /// Every pressing of this record, to swap one in.
             Pressings,
@@ -1470,15 +1478,7 @@ impl App {
                         // This pressing is a dead end, but another isn't. Say
                         // which one and offer it, rather than leaving "no copies
                         // for sale" to imply the record can't be bought.
-                        if let Some((
-                            alt_id,
-                            alt_fmt,
-                            alt_catno,
-                            alt_price,
-                            alt_owned,
-                            alt_wanted,
-                        )) = &alt
-                        {
+                        if let Some((alt_fmt, alt_catno, alt_price)) = &alt {
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
                                 ui.label(egui::RichText::new("Another pressing:").small().weak());
@@ -1497,25 +1497,6 @@ impl App {
                                     .clicked()
                                 {
                                     act = Some(Act::OpenAlternative);
-                                }
-                                // Want the pressing you can actually buy, not
-                                // the promo you happened to land on.
-                                let already = *alt_owned || *alt_wanted;
-                                let want_tip = if already {
-                                    "That pressing is already in one of your lists"
-                                } else {
-                                    "Add that pressing to your Discogs wantlist"
-                                };
-                                if crate::ui::button::button_enabled(
-                                    ui,
-                                    !already && !editing,
-                                    "＋ Wantlist",
-                                )
-                                .on_hover_note(want_tip)
-                                    .on_disabled_hover_text(crate::ui::hover::note(want_tip))
-                                    .clicked()
-                                {
-                                    act = Some(Act::WantAlternative(*alt_id));
                                 }
                             });
                         }
@@ -1783,16 +1764,26 @@ impl App {
                 ui.add_space(10.0);
                 ui.separator();
 
-                // The transport for the mini-player. Sits above the tracklist
-                // so it's in reach of the rows that feed it, on every record
-                // that *can* play a video: there from the start, at rest until
-                // something plays, so the tracklist never jumps by a bar's
-                // height at the moment the user starts something. A record
-                // with no video has nothing for it to drive, and gets no bar.
-                if has_video {
+                // The transport. Sits above the tracklist so it's in reach of
+                // the rows that feed it, on every record that *can* play
+                // something — a video through the mini-player, or a local
+                // file through the audio engine: there from the start, at
+                // rest until something plays, so the tracklist never jumps
+                // by a bar's height at the moment the user starts something.
+                // A record with nothing to play has nothing for it to drive,
+                // and gets no bar.
+                if can_play {
                     ui.add_space(8.0);
                     let mut scrub = self.vinyl_sheet.as_ref().and_then(|s| s.video_scrub);
-                    video_act = video_transport_ui(ui, &mut scrub, video_open);
+                    let (live, transport) = if video_open {
+                        (true, webview::transport())
+                    } else {
+                        match audio_transport {
+                            Some(t) => (true, t),
+                            None => (false, webview::Transport::default()),
+                        }
+                    };
+                    video_act = video_transport_ui(ui, &mut scrub, live, transport);
                     if let Some(s) = self.vinyl_sheet.as_mut() {
                         s.video_scrub = scrub;
                     }
@@ -1909,12 +1900,24 @@ impl App {
                     }
                 });
             });
-        // The transport talks straight to the panel — nothing here touches the
-        // sheet's own state. Play on a bar at rest is the record's own play
-        // button: it starts the record from its first playable track.
+        // The transport talks straight to the engine that holds the record —
+        // the panel for a video, the audio engine for a local file — nothing
+        // here touches the sheet's own state. Play on a bar at rest is the
+        // record's own play button: it starts the record from its first
+        // playable track.
         match video_act {
-            Some(VideoAct::TogglePause) => webview::toggle_pause(),
-            Some(VideoAct::Seek(secs)) => webview::seek(secs),
+            Some(VideoAct::TogglePause) if video_open => webview::toggle_pause(),
+            Some(VideoAct::Seek(secs)) if video_open => webview::seek(secs),
+            Some(VideoAct::TogglePause) => {
+                if let Some(a) = self.audio.as_mut() {
+                    a.toggle_pause();
+                }
+            }
+            Some(VideoAct::Seek(secs)) => {
+                if let Some(a) = self.audio.as_mut() {
+                    a.seek(secs);
+                }
+            }
             Some(VideoAct::Start) => {
                 if act.is_none() {
                     act = Some(Act::TogglePlay);
@@ -1929,15 +1932,6 @@ impl App {
             }
             // Starting a dig closes the sheet: the strip it drives sits behind
             // this window, and the first thing a digger does is look at it.
-            Some(Act::WantAlternative(id)) => {
-                self.request_vinyl_edit(
-                    ctx.clone(),
-                    VinylEdit::Want {
-                        release_ids: vec![id],
-                        label: format!("{artist} — {title}"),
-                    },
-                );
-            }
             Some(Act::Pressings) => {
                 let sheet_key = self.vinyl_sheet.as_ref().and_then(|s| s.key);
                 match sheet_key {
@@ -2204,16 +2198,15 @@ enum VideoAct {
     Start,
 }
 
-/// The transport for the video mini-player: a play/pause button, a wide
-/// draggable scrubber and the clock, drawn at egui's scale rather than
-/// YouTube's.
+/// The record's transport: a play/pause button, a wide draggable scrubber and
+/// the clock, drawn at egui's scale rather than YouTube's.
 ///
-/// The panel's own controls are a few pixels tall inside a 480px window and
-/// vanish under the page's chrome styling, so scrubbing there is guesswork.
-/// Everything here drives the same `<video>` element through
-/// [`crate::webview::seek`] / [`crate::webview::toggle_pause`]; the position it
-/// paints comes back from the page on the next poll, so the bar always shows
-/// what the video is really doing.
+/// The mini-player's own controls are a few pixels tall inside a 480px window
+/// and vanish under the page's chrome styling, so scrubbing there is
+/// guesswork. The bar paints whatever transport `t` it's handed — the panel's
+/// `<video>` position as of the last poll, or the audio engine's clock when a
+/// local file of the record is what's playing — and reports what was asked of
+/// it; the caller sends that to the engine that holds the record.
 ///
 /// Drawn in the record sheet, between the record's buttons and its tracklist:
 /// the rows that feed the player are right underneath, so the transport sits
@@ -2228,13 +2221,14 @@ enum VideoAct {
 /// to the screen edge.
 ///
 /// `scrub` is the in-flight drag fraction, borrowed mutably so the drag can own
-/// the playhead until it's released. `live` says the panel is playing this
-/// record; otherwise the bar is at rest, a play button and an empty track,
-/// and play starts the record.
+/// the playhead until it's released. `live` says an engine is playing this
+/// record and `t` is where it's got to; otherwise the bar is at rest, a play
+/// button and an empty track, and play starts the record.
 fn video_transport_ui(
     ui: &mut egui::Ui,
     scrub: &mut Option<f32>,
     live: bool,
+    t: webview::Transport,
 ) -> Option<VideoAct> {
     use crate::ui::tokens::space;
 
@@ -2242,11 +2236,7 @@ fn video_transport_ui(
     /// Breathing room inside the bar's ends, so the pause button and the
     /// total clock aren't flush against its rounded corners.
     const EDGE: f32 = space::S4;
-    let t = if live {
-        webview::transport()
-    } else {
-        webview::Transport::default()
-    };
+    let t = if live { t } else { webview::Transport::default() };
     let mut act = None;
 
     // The bar fills the sheet, so its own width is the width it's offered.

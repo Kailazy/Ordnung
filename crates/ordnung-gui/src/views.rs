@@ -2323,6 +2323,13 @@ impl App {
                     egui::vec2(cover_side, cover_side + 42.0),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
+                        // The caption hugs the cover. The cell inherits the
+                        // wall's 14pt cell gap as its line spacing, and egui
+                        // applies the spacing in force when a widget is
+                        // *allocated* as the gap after it — so the tightening
+                        // has to happen before the cover is placed, not after,
+                        // or the title still floats a cell gap below it.
+                        ui.spacing_mut().item_spacing.y = 4.0;
                         // The cover is a link to the release page on Discogs —
                         // click-sensing, with a hand cursor on hover.
                         let (rect, resp) = ui.allocate_exact_size(
@@ -2550,12 +2557,8 @@ impl App {
                         // than a bare "Move".
                         resp.context_menu(|ui| vinyl_cell_menu(ui, c, &release_url, &mut action));
                         ui.set_max_width(cover_side);
-                        // The caption hugs the cover: the wrap layout's cell
-                        // gap must not open up between the cover and its own
-                        // lines, so the cell tightens its vertical spacing here
-                        // and the two lines sit close.
+                        // Title and artist sit close: 2pt between the lines.
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.add_space(4.0);
                         // Title doubles as the textual link to the release page.
                         // The price, what the sort orders by, sits right after
                         // it as a small green figure: the cover stays clean, and

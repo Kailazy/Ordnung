@@ -4302,23 +4302,30 @@ pub(crate) fn run_match_tracklist(
 
         // Rank locally (no requests), keep the ranked order for "pick another".
         let ranked = tracklist::rank_candidates(&line, &cands);
+        // The user's formats come first among the records that are as sure a
+        // match as the best one: a song that scores the same on a FLAC
+        // release and on the 12" it was cut from lands on the 12". Other
+        // formats stay in the order as the fallback, and take the line only
+        // when nothing the user collects is as good — a wanted format that
+        // is a *worse* match (a different record that merely shares the
+        // artist) never beats a sure hit on an unwanted one.
+        let ranked: Vec<tracklist::RankedCandidate> = {
+            let top_conf = ranked[0].confidence;
+            let (wanted, rest): (Vec<_>, Vec<_>) = ranked.into_iter().partition(|r| {
+                r.confidence == top_conf && medium_filter.shows_release_format(&cands[r.index].format)
+            });
+            wanted.into_iter().chain(rest).collect()
+        };
         let ordered: Vec<discogs::ReleaseCandidate> =
             ranked.iter().map(|r| cands[r.index].clone()).collect();
         let best_score = ranked[0].score;
-        // The top-scoring group, narrowed to the user's formats when that
-        // leaves anything, and the pressing rule picks among what's left.
+        // The top-scoring group, and the pressing rule picks among it.
         let top: Vec<discogs::ReleaseCandidate> = ranked
             .iter()
             .take_while(|r| r.score == best_score)
             .map(|r| cands[r.index].clone())
             .collect();
-        let shown: Vec<discogs::ReleaseCandidate> = top
-            .iter()
-            .filter(|c| medium_filter.shows_release_format(&c.format))
-            .cloned()
-            .collect();
-        let pool = if shown.is_empty() { &top } else { &shown };
-        let mut chosen = best_candidate(pool, spec.criterion)
+        let mut chosen = best_candidate(&top, spec.criterion)
             .cloned()
             .unwrap_or_else(|| ordered[0].clone());
         let mut confidence = tracklist::confidence_for(best_score);
