@@ -57,9 +57,11 @@ fn health_tabs(
 }
 
 /// The vinyl view's shelf tabs: Collection and Wantlist, drawn as browser-style
-/// tabs — rounded on top only, the active one filled and seated on the hairline
-/// so it reads as continuous with the shelf below it while the inactive one
-/// recedes. Both shelves are the same grid of the same records, so stacking them
+/// tabs — rounded on top only, the active one filled and underlined in the
+/// accent while the inactive one recedes. Every tab is [`crate::ui::control_h`]
+/// tall, the height of the search field and buttons on the same row, so the
+/// strip sits on the row's centre line rather than a touch above and below it.
+/// Both shelves are the same grid of the same records, so stacking them
 /// buried the wantlist under a large collection; as tabs, either is one click
 /// away. Counts follow the active search, so you can see which shelf holds the
 /// hits without switching. Returns the tab the user clicked, if any; the caller
@@ -100,7 +102,7 @@ fn vinyl_tabs(
         };
         let size = egui::vec2(
             bold.size().x + mark_w + space::S4 * 2.0,
-            bold.size().y + space::S3 * 2.0,
+            crate::ui::control_h(ui),
         );
         let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
 
@@ -162,15 +164,8 @@ fn vinyl_tabs(
     // solar system. Emphasised by its ink rather than its size, so it reads
     // as the map's own door and not as a fourth shelf.
     {
-        let h = {
-            let bold = ui.painter().layout_no_wrap(
-                "Collection".to_string(),
-                font::strong(font::headline().size),
-                color::LABEL,
-            );
-            bold.size().y + space::S3 * 2.0
-        };
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(h + space::S2, h), egui::Sense::click());
+        let h = crate::ui::control_h(ui);
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(h, h), egui::Sense::click());
         let active = current == VinylTab::Graph;
         let rounding = egui::Rounding {
             nw: radius::SM,
@@ -1627,7 +1622,10 @@ impl App {
         // Set inside the genre menu; applied after the toolbar closes its
         // borrows.
         let mut import_genredb = false;
-        ui.add_space(6.0);
+        // The toolbar keeps the panel's inset on every side: the central
+        // frame gives it left, right and above, and the same gap is laid down
+        // below before the hairline, so the row sits centred in its bar.
+        let pad = crate::ui::tokens::space::S3;
         // A row of controls around the search field: every button on it
         // takes the field's height (see `ui::control_row`).
         ui.horizontal(|ui| crate::ui::control_row(ui, |ui| {
@@ -1902,9 +1900,8 @@ impl App {
                 }
             });
         }));
-        // The tab strip sits directly on the separator below, so the active tab's
-        // underline and that hairline read as one baseline.
-        ui.add_space(-2.0);
+        // The row's trailing item spacing is part of the gap.
+        ui.add_space(pad - ui.spacing().item_spacing.y);
         if sort.key() != self.config.vinyl_sort
             || ascending != self.config.vinyl_sort_ascending
             || self.config.vinyl_view != view_before
@@ -1915,7 +1912,9 @@ impl App {
                 self.status = format!("Couldn't save settings: {e}");
             }
         }
-        ui.separator();
+        // The hairline itself, with no spacing of its own: the gap above is
+        // `pad`, and the content below keeps the usual item spacing.
+        ui.add(egui::Separator::default().spacing(0.0));
 
         if import_genredb {
             self.spawn_import_genredb(ctx.clone());
