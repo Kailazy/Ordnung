@@ -37,6 +37,9 @@ pub fn close(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
     );
 }
 
+/// The arm of every close cross: a button's, a card's, a window's.
+pub const CLOSE_ARM: f32 = 4.5;
+
 /// A frameless close button: allocates its own square, paints the cross, and
 /// answers the pointer. `tip` is the hover note. Returns true when clicked.
 ///
@@ -45,10 +48,9 @@ pub fn close(p: &egui::Painter, c: egui::Pos2, col: egui::Color32, r: f32) {
 /// drifting apart at each call site.
 pub fn close_button(ui: &mut egui::Ui, tip: &str) -> bool {
     const SIZE: f32 = 24.0;
-    const ARM: f32 = 4.5;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::click());
     let resp = resp.on_hover_note(tip);
-    close(ui.painter(), rect.center(), col(&resp), ARM);
+    close(ui.painter(), rect.center(), col(&resp), CLOSE_ARM);
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }

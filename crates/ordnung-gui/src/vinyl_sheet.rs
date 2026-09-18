@@ -1011,7 +1011,6 @@ impl App {
             error,
             playing_video,
             video_open,
-            radio_here,
             has_video,
         ) = {
             let s = self.vinyl_sheet.as_ref().unwrap();
@@ -1051,7 +1050,6 @@ impl App {
                         .position(|v| v.youtube_id() == Some(song.youtube_id.as_str()))
                 }),
                 webview::is_open() && (s.playing_video.is_some() || radio_here),
-                radio_here,
                 // Can anything on this record play through the mini-player? Only
                 // then does the transport's slot need holding open.
                 s.rows
@@ -1309,8 +1307,10 @@ impl App {
                     }
                 }
                 ui.horizontal(|ui| {
-                    // Cover.
-                    const C: f32 = 120.0;
+                    // Cover. Tall enough to run the height of the header
+                    // beside it (names, imprint, price, the row of buttons)
+                    // rather than stopping short with a blank strip under it.
+                    const C: f32 = 160.0;
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(C, C), egui::Sense::hover());
                     match &cover {
                         Some(h) => {
@@ -1726,43 +1726,20 @@ impl App {
                 ui.add_space(10.0);
                 ui.separator();
 
-                // The transport for whatever the mini-player is playing. Sits
-                // above the tracklist so it's in reach of the rows that feed it,
-                // and only while there's a panel to drive.
-                //
-                // Its slot is held open whether or not it's there. The window
-                // auto-sizes to its content, so a bar that appears on play and
-                // vanishes on close would grow and shrink the whole sheet under
-                // the pointer — and the rows the user is aiming at would jump by
-                // the bar's height at the exact moment they started something
-                // playing. Reserving the space costs a strip of empty sheet and
-                // keeps the tracklist still.
-                //
-                // The height is measured from the real bar rather than written
-                // down as a constant, so it can't drift out of step if the bar's
-                // contents change. Until it has been measured once, the slot is
-                // simply absent — one frame, on the first play of a session.
-                let bar_h_id = egui::Id::new("vinyl-sheet-transport-h");
-                if video_open {
+                // The transport for the mini-player. Sits above the tracklist
+                // so it's in reach of the rows that feed it, on every record
+                // that *can* play a video: there from the start, at rest until
+                // something plays, so the tracklist never jumps by a bar's
+                // height at the moment the user starts something. A record
+                // with no video has nothing for it to drive, and gets no bar.
+                if has_video {
                     ui.add_space(8.0);
-                    let before = ui.cursor().top();
                     let mut scrub = self.vinyl_sheet.as_ref().and_then(|s| s.video_scrub);
-                    video_act = video_transport_ui(ui, &mut scrub);
+                    video_act = video_transport_ui(ui, &mut scrub, video_open);
                     if let Some(s) = self.vinyl_sheet.as_mut() {
                         s.video_scrub = scrub;
                     }
-                    let measured = ui.cursor().top() - before;
-                    if measured > 0.0 {
-                        ui.ctx().data_mut(|d| d.insert_temp(bar_h_id, measured));
-                    }
                     ui.add_space(4.0);
-                } else if has_video {
-                    // Only on a record that *can* play a video. A record with no
-                    // video never shows the bar, so reserving its slot there
-                    // would be dead space at the top of every such sheet.
-                    if let Some(h) = ui.ctx().data(|d| d.get_temp::<f32>(bar_h_id)) {
-                        ui.add_space(8.0 + h + 4.0);
-                    }
                 }
 
                 if loading {
@@ -1857,19 +1834,14 @@ impl App {
                 });
             });
         // The transport talks straight to the panel — nothing here touches the
-        // sheet's own state except the stop, which also clears the row marker.
+        // sheet's own state. Play on a bar at rest is the record's own play
+        // button: it starts the record from its first playable track.
         match video_act {
             Some(VideoAct::TogglePause) => webview::toggle_pause(),
             Some(VideoAct::Seek(secs)) => webview::seek(secs),
-            Some(VideoAct::Stop) => {
-                let own = self
-                    .vinyl_sheet
-                    .as_ref()
-                    .is_some_and(|s| s.playing_video.is_some());
-                if own {
-                    self.stop_sheet_video();
-                } else if radio_here {
-                    self.radio_stop("Radio off");
+            Some(VideoAct::Start) => {
+                if act.is_none() {
+                    act = Some(Act::TogglePlay);
                 }
             }
             None => {}
@@ -2123,7 +2095,8 @@ const CLOCK_W: f32 = 48.0;
 enum VideoAct {
     TogglePause,
     Seek(f32),
-    Stop,
+    /// Play pressed on a bar with nothing loaded: start the record.
+    Start,
 }
 
 /// The transport for the video mini-player: a play/pause button, a wide
@@ -2150,15 +2123,25 @@ enum VideoAct {
 /// to the screen edge.
 ///
 /// `scrub` is the in-flight drag fraction, borrowed mutably so the drag can own
-/// the playhead until it's released.
-fn video_transport_ui(ui: &mut egui::Ui, scrub: &mut Option<f32>) -> Option<VideoAct> {
+/// the playhead until it's released. `live` says the panel is playing this
+/// record; otherwise the bar is at rest, a play button and an empty track,
+/// and play starts the record.
+fn video_transport_ui(
+    ui: &mut egui::Ui,
+    scrub: &mut Option<f32>,
+    live: bool,
+) -> Option<VideoAct> {
     use crate::ui::tokens::space;
 
     const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
-    /// Breathing room inside the bar's ends, so the pause button and the close
-    /// cross aren't flush against its rounded corners.
+    /// Breathing room inside the bar's ends, so the pause button and the
+    /// total clock aren't flush against its rounded corners.
     const EDGE: f32 = space::S4;
-    let t = webview::transport();
+    let t = if live {
+        webview::transport()
+    } else {
+        webview::Transport::default()
+    };
     let mut act = None;
 
     // The bar fills the sheet, so its own width is the width it's offered.
@@ -2183,20 +2166,30 @@ fn video_transport_ui(ui: &mut egui::Ui, scrub: &mut Option<f32>) -> Option<Vide
                 if btn.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
-                let btn = btn.on_hover_note(if t.playing { "Pause" } else { "Play" });
+                let btn = btn.on_hover_note(if t.playing {
+                    "Pause"
+                } else if live {
+                    "Play"
+                } else {
+                    "Play from the first track that has a source"
+                });
                 if btn.clicked() {
-                    act = Some(VideoAct::TogglePause);
+                    act = Some(if live {
+                        VideoAct::TogglePause
+                    } else {
+                        VideoAct::Start
+                    });
                 }
                 ui.add_space(space::S4);
 
                 // The fraction the bar paints: the drag while one is in flight,
                 // the video's real position otherwise.
-                let live = if t.duration > 0.0 {
+                let real = if t.duration > 0.0 {
                     (t.position / t.duration).clamp(0.0, 1.0)
                 } else {
                     0.0
                 };
-                let shown = scrub.unwrap_or(live);
+                let shown = scrub.unwrap_or(real);
 
                 // Elapsed. Fixed width, so digits changing mid-scrub can't shift
                 // the scrubber that follows them (same reason as the player bar).
@@ -2214,8 +2207,7 @@ fn video_transport_ui(ui: &mut egui::Ui, scrub: &mut Option<f32>) -> Option<Vide
                 // it have been accounted for. Only the trailing ones need
                 // subtracting — `available_width` has already shed the play
                 // button and elapsed clock behind it.
-                const TRAILING: f32 = space::S4 + CLOCK_W // gap, total clock
-                    + space::S3 + 24.0; // gap, close
+                const TRAILING: f32 = space::S4 + CLOCK_W; // gap, total clock
                 let track_w = (ui.available_width() - TRAILING).max(60.0);
                 let (rect, resp) = ui
                     .allocate_exact_size(egui::vec2(track_w, 26.0), egui::Sense::click_and_drag());
@@ -2242,8 +2234,9 @@ fn video_transport_ui(ui: &mut egui::Ui, scrub: &mut Option<f32>) -> Option<Vide
                 }
 
                 // A live stream (or a page that hasn't reported a length) has
-                // nothing to seek within, so the bar stays a readout.
-                let seekable = t.duration > 0.0;
+                // nothing to seek within, so the bar stays a readout; so does
+                // a bar at rest.
+                let seekable = live && t.duration > 0.0;
                 let frac_at = |pos: egui::Pos2| ((pos.x - x0) / (x1 - x0)).clamp(0.0, 1.0);
                 if seekable {
                     if resp.dragged() || resp.drag_started() {
@@ -2282,13 +2275,6 @@ fn video_transport_ui(ui: &mut egui::Ui, scrub: &mut Option<f32>) -> Option<Vide
                         .color(egui::Color32::from_gray(170)),
                     ),
                 );
-
-                // The picture stays parked off screen: this bar is the
-                // interface, painted beside the play triangle as one set.
-                ui.add_space(space::S3);
-                if crate::ui::icon::close_button(ui, "Close the video player") {
-                    act = Some(VideoAct::Stop);
-                }
             });
         });
     act

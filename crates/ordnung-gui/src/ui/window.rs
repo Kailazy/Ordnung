@@ -11,9 +11,17 @@
 //! to a screen edge. A window whose content carries its own heading turns
 //! the `title_bar` off and keeps the close button, in the corner. None
 //! collapse.
+//!
+//! The close button is the component's, not egui's: one mark (the same
+//! cross every close in the app is drawn with, see `icon`), one size, and
+//! one place, the top-right corner of the content. With a title bar it
+//! sits on the title's line; without one, on the content's first row of
+//! controls, so a button placed up there (short of [`CLOSE_W`]) and the
+//! cross share a centre line.
 
 use super::glass;
-use super::tokens::color;
+use super::icon;
+use super::tokens::{color, space};
 use eframe::egui;
 
 /// How the window is placed when it first opens (the user may drag it after).
@@ -76,7 +84,8 @@ impl<'o> Window<'o> {
         self
     }
 
-    /// Show a close button in the title bar; it clears the flag.
+    /// Show a close button (in the title bar, or the corner without one);
+    /// it clears the flag.
     pub fn open(mut self, open: &'o mut bool) -> Self {
         self.open = Some(open);
         self
@@ -84,8 +93,8 @@ impl<'o> Window<'o> {
 
     /// No title bar. A popover, or a window whose content leads with its
     /// own heading; with [`Self::open`] set it still gets a close button,
-    /// in the top-right corner of the content, which the content should
-    /// leave clear ([`CLOSE_W`] wide).
+    /// in the top-right corner of the content on its first row, which the
+    /// content should leave clear ([`CLOSE_W`] wide).
     pub fn title_bar(mut self, title_bar: bool) -> Self {
         self.title_bar = title_bar;
         self
@@ -202,16 +211,46 @@ impl<'o> Window<'o> {
         if let Some(m) = self.inner_margin {
             frame = frame.inner_margin(m);
         }
+        // With a title bar, the close sits on the title's line, which egui
+        // lays out as a row `title_h` tall under the frame's top margin
+        // and `title_gap` above the content. Measured here, the way egui
+        // does, so the cross can be put back on it from inside the content.
+        let margin = frame.inner_margin;
+        let (title_h, title_gap) = if self.title_bar {
+            // egui sizes the bar by the default font, whatever the title is
+            // then drawn in.
+            let font_h = ctx.fonts(|f| f.row_height(&egui::FontSelection::Default.resolve(&style)));
+            (
+                font_h.max(style.spacing.interact_size.y),
+                margin.top + margin.bottom,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        // egui centres the title in the bar, so the window has to be wide
+        // enough for the cross to clear it on both sides.
+        let title_w = ctx.fonts(|f| {
+            f.layout_no_wrap(
+                self.title.text().to_owned(),
+                egui::TextStyle::Heading.resolve(&style),
+                egui::Color32::WHITE,
+            )
+            .size()
+            .x
+        });
         let mut w = egui::Window::new(self.title)
             .id(id)
             .collapsible(false)
             .title_bar(self.title_bar)
             .frame(frame)
             .resizable(self.resizable);
-        let mut open = self.open;
-        let corner_close = !self.title_bar && open.is_some();
-        if let Some(open) = open.as_deref_mut() {
-            w = w.open(open);
+        // egui never sees `open`: the close button is drawn here, in the
+        // one place and with the one mark, whether there's a title bar or
+        // not. The flag is cleared below from the click.
+        let open = self.open;
+        let close = open.is_some();
+        if self.auto_sized {
+            w = w.auto_sized();
         }
         match (self.default_size[0], self.default_size[1]) {
             (Some(x), Some(y)) => w = w.default_size([x, y]),
@@ -231,8 +270,11 @@ impl<'o> Window<'o> {
         if let Some(y) = self.max_size[1] {
             w = w.max_height(y);
         }
-        if self.auto_sized {
-            w = w.auto_sized();
+        if self.title_bar && close {
+            // After `auto_sized`, which zeroes the minimum.
+            w = w.min_width(
+                (title_w + 2.0 * CLOSE_W).max(self.min_size[0].unwrap_or(0.0)),
+            );
         }
         w = match self.place {
             // Centred on the pass it opens (`current_pos` overrides the
@@ -258,8 +300,14 @@ impl<'o> Window<'o> {
             // remembered desired width, which never shrinks, so it can run
             // past the frame and put the button on the edge. Last also
             // puts it above anything the content drew in the corner.
-            if corner_close {
-                closed = close_button(ui, id);
+            if close {
+                let top = ui.max_rect().top();
+                let centre_y = if self.title_bar {
+                    top - title_gap - title_h / 2.0
+                } else {
+                    top + control_row_h(ui) / 2.0
+                };
+                closed = close_button(ui, id, centre_y);
             }
             r
         });
@@ -276,28 +324,39 @@ impl<'o> Window<'o> {
     }
 }
 
-/// Width the close button takes at the top-right of a window without a
-/// title bar; content on that row stops short of it.
-pub const CLOSE_W: f32 = 28.0;
+/// The close button's square: the standard interact height, so its target
+/// is the size of a control.
+pub const CLOSE_SIDE: f32 = 24.0;
 
-/// The close button of a window without a title bar: a cross in the
-/// top-right corner of the content, taking no space from the layout. Call
-/// after the content: it sits on the content's own extent.
-fn close_button(ui: &mut egui::Ui, id: egui::Id) -> bool {
-    let r = ui.min_rect();
-    let side = ui.spacing().interact_size.y;
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(r.right() - side, r.top() - 2.0),
-        egui::vec2(side, side),
+/// Width the close button takes at the top-right of a window without a
+/// title bar, a gap included; content on that row stops short of it.
+pub const CLOSE_W: f32 = CLOSE_SIDE + space::S3;
+
+/// The height of a push button, which is what the first row of a window's
+/// content is taken to hold: the close button is centred on it.
+fn control_row_h(ui: &egui::Ui) -> f32 {
+    (ui.text_style_height(&egui::TextStyle::Button).round()
+        + 2.0 * ui.spacing().button_padding.y)
+        .max(ui.spacing().interact_size.y)
+}
+
+/// The window's close button: the app's close cross, in a square flush
+/// with the content's right edge and centred on `centre_y`, taking no
+/// space from the layout. Call after the content: it sits on the content's
+/// own extent, and paints over whatever is there.
+fn close_button(ui: &mut egui::Ui, id: egui::Id, centre_y: f32) -> bool {
+    let right = ui.min_rect().right();
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(right - CLOSE_SIDE / 2.0, centre_y),
+        egui::Vec2::splat(CLOSE_SIDE),
     );
+    // On the title's line the square is above the content, outside the
+    // clip egui gives the content; let it through for this one control.
+    let clip = ui.clip_rect();
+    ui.set_clip_rect(clip.union(rect));
     let resp = ui.interact(rect, id.with("corner-close"), egui::Sense::click());
-    let visuals = ui.style().interact(&resp);
-    let cross = rect.shrink(rect.width() * 0.32);
-    let stroke = visuals.fg_stroke;
-    ui.painter()
-        .line_segment([cross.left_top(), cross.right_bottom()], stroke);
-    ui.painter()
-        .line_segment([cross.right_top(), cross.left_bottom()], stroke);
+    icon::close(ui.painter(), rect.center(), icon::col(&resp), icon::CLOSE_ARM);
+    ui.set_clip_rect(clip);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
