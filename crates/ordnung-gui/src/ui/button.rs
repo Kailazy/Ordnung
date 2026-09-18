@@ -19,7 +19,7 @@
 
 use eframe::egui;
 
-use super::tokens::{color, font};
+use super::tokens::{color, font, radius};
 
 /// A push button. Same as `ui.button`, named so call sites reach for the
 /// one component rather than choosing between egui's variants.
@@ -42,6 +42,101 @@ pub fn button_enabled(
 /// than doing something.
 pub fn menu_button(ui: &mut egui::Ui, label: impl Into<String>) -> egui::Response {
     button(ui, format!("{} ▾", label.into()))
+}
+
+/// One part of a [`segmented`] button: its label and its hover note.
+pub struct Segment<'a> {
+    pub label: &'a str,
+    pub tip: &'a str,
+}
+
+/// Several buttons in one frame, parted by hairlines: a choice between a
+/// few views of the same thing (a wall of covers or rows), where separate
+/// buttons would read as separate actions and take a gap each. The frame
+/// is the button's own (fill, outline, corner radius) and the row's height,
+/// so it sits on a control row like any button; inside it, the chosen
+/// segment carries the selection fill and a pointed-at one the hover fill,
+/// and each segment carries its own hover note. Hands back the index of
+/// the segment clicked this frame, if any; the caller owns the choice.
+pub fn segmented(ui: &mut egui::Ui, selected: Option<usize>, segments: &[Segment]) -> Option<usize> {
+    let pad = ui.spacing().button_padding;
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let galleys: Vec<_> = segments
+        .iter()
+        .map(|s| ui.painter().layout_no_wrap(s.label.to_owned(), font_id.clone(), color::LABEL))
+        .collect();
+    let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + 2.0 * pad.x).collect();
+    let h = ui.spacing().interact_size.y;
+    let size = egui::vec2(widths.iter().sum(), h);
+    let (rect, whole) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let id = whole.id;
+    // Every segment's hit area is claimed before anything is painted, so
+    // the frame can be painted once, under all of them.
+    let mut x = rect.left();
+    let rects: Vec<egui::Rect> = widths
+        .iter()
+        .map(|w| {
+            let r = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(*w, h));
+            x += w;
+            r
+        })
+        .collect();
+    let resps: Vec<egui::Response> = rects
+        .iter()
+        .enumerate()
+        .map(|(i, r)| ui.interact(*r, id.with(i), egui::Sense::click()))
+        .collect();
+    let mut clicked = None;
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals();
+        let rest = &visuals.widgets.inactive;
+        let rounding = egui::Rounding::same(radius::SM);
+        ui.painter().rect_filled(rect, rounding, rest.weak_bg_fill);
+        // Fills under the outline: each segment's rect is inset by the
+        // stroke so its fill never covers the frame's edge, and the end
+        // segments keep the frame's corners.
+        let inset = rest.bg_stroke.width / 2.0;
+        let last = rects.len().saturating_sub(1);
+        for (i, (r, resp)) in rects.iter().zip(&resps).enumerate() {
+            let fill = if selected == Some(i) {
+                Some(visuals.selection.bg_fill)
+            } else if resp.is_pointer_button_down_on() {
+                Some(visuals.widgets.active.weak_bg_fill)
+            } else if resp.hovered() {
+                Some(visuals.widgets.hovered.weak_bg_fill)
+            } else {
+                None
+            };
+            if let Some(fill) = fill {
+                let r = r.shrink(inset);
+                let rounding = egui::Rounding {
+                    nw: if i == 0 { radius::SM - inset } else { 0.0 },
+                    sw: if i == 0 { radius::SM - inset } else { 0.0 },
+                    ne: if i == last { radius::SM - inset } else { 0.0 },
+                    se: if i == last { radius::SM - inset } else { 0.0 },
+                };
+                ui.painter().rect_filled(r, rounding, fill);
+            }
+        }
+        ui.painter().rect_stroke(rect, rounding, rest.bg_stroke);
+        // The dividers, in the outline's own colour and weight.
+        for r in rects.iter().take(last) {
+            ui.painter().line_segment(
+                [egui::pos2(r.right(), rect.top()), egui::pos2(r.right(), rect.bottom())],
+                rest.bg_stroke,
+            );
+        }
+        for (r, g) in rects.iter().zip(galleys) {
+            ui.painter().galley(r.center() - g.size() / 2.0, g, color::LABEL);
+        }
+    }
+    for (i, (resp, seg)) in resps.into_iter().zip(segments).enumerate() {
+        use super::hover::HoverNoteExt;
+        if resp.on_hover_note(seg.tip).clicked() {
+            clicked = Some(i);
+        }
+    }
+    clicked
 }
 
 /// A control on a line of text: a footnote-sized word in the secondary label

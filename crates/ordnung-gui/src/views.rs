@@ -1651,11 +1651,30 @@ impl App {
             } else {
                 "Search vinyl"
             };
-            let search = ui.add(
-                crate::ui::field::Field::singleline(&mut self.vinyl_filter)
-                    .width(200.0)
-                    .hint(hint),
-            );
+            // Every structured filter — year range, format, genre + style
+            // tags, and the seller-only facets — lives behind one popup,
+            // opened from a small button inside the search box: the filters
+            // narrow the same search, so they sit in its field rather than
+            // beside it. The button wears the active-constraint count.
+            let active = flt.active(seller_mode);
+            let flt_label = if active == 0 {
+                "⚟ Filters".to_string()
+            } else {
+                format!("⚟ Filters ({active})")
+            };
+            let mut field = crate::ui::field::Field::singleline(&mut self.vinyl_filter)
+                .width(200.0)
+                .hint(hint);
+            if !graph_mode {
+                field = field.trailing(flt_label);
+            }
+            let out = field.show_with_trailing(ui);
+            let search = out.field;
+            let flt_btn = out.trailing.map(|b| {
+                b.on_hover_note(
+                    "Filter by year, format, genre and style; each added constraint narrows further",
+                )
+            });
             // The ✖ keeps its slot even while hidden, so the Filters button and
             // everything right of it stay put as a search is typed or cleared.
             ui.allocate_ui_with_layout(
@@ -1786,56 +1805,60 @@ impl App {
                 }
                 return;
             }
-            // Every structured filter — year range, format, genre + style
-            // tags, and the seller-only facets — lives behind this one popup,
-            // so the toolbar stays a single row however many are active. The
-            // button wears the active-constraint count in their place.
-            ui.add_space(6.0);
-            let active = flt.active(seller_mode);
-            let flt_label = if active == 0 {
-                "⚟ Filters".to_string()
-            } else {
-                format!("⚟ Filters ({active})")
-            };
-            let flt_btn = ui.button(flt_label).on_hover_note(
-                "Filter by year, format, genre and style; each added constraint narrows further",
-            );
-            crate::ui::menu::dropdown(&flt_btn, 260.0, |m| {
-                self.vinyl_filter_popup(
-                    m,
-                    seller_mode,
-                    busy,
-                    &genre_options,
-                    seller_tagged,
-                    &mut import_genredb,
-                );
-            });
+            if let Some(flt_btn) = &flt_btn {
+                crate::ui::menu::dropdown(flt_btn, 260.0, |m| {
+                    self.vinyl_filter_popup(
+                        m,
+                        seller_mode,
+                        busy,
+                        &genre_options,
+                        seller_tagged,
+                        &mut import_genredb,
+                    );
+                });
+            }
             // Grid vs list: one layout choice for all three tabs, so it sits
             // with the shared controls rather than the shelf-only ones. A wall
             // of covers browses; rows compare — price, year and format line up.
+            // One segmented button, not two: the pair is a single choice, and
+            // in one frame it takes less of the row than two buttons and a gap.
             ui.add_space(6.0);
             let list_mode = self.config.vinyl_view == "list";
-            if ui
-                .selectable_label(!list_mode, "⊞")
-                .on_hover_note("Show records as a wall of covers")
-                .clicked()
-            {
-                self.config.vinyl_view = "grid".to_string();
-            }
-            if ui
-                .selectable_label(list_mode, "☰")
-                .on_hover_note("Show records as compact rows")
-                .clicked()
-            {
-                self.config.vinyl_view = "list".to_string();
+            let pick = crate::ui::button::segmented(
+                ui,
+                Some(if list_mode { 1 } else { 0 }),
+                &[
+                    crate::ui::button::Segment {
+                        label: "⊞",
+                        tip: "Show records as a wall of covers",
+                    },
+                    crate::ui::button::Segment {
+                        label: "☰",
+                        tip: "Show records as compact rows",
+                    },
+                ],
+            );
+            match pick {
+                Some(0) => self.config.vinyl_view = "grid".to_string(),
+                Some(1) => self.config.vinyl_view = "list".to_string(),
+                _ => {}
             }
             if seller_mode {
                 return;
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // The right-hand group is laid from the right edge in, so in a
+            // narrow window it ran back over the view toggle. It remembers
+            // the width its full labels took last frame; when the row no
+            // longer has that much room, every button drops to its glyph
+            // and the group fits. Full labels come back once the room does.
+            let avail = ui.available_width();
+            let need_id = ui.id().with("vinyl-right-need");
+            let need: Option<f32> = ctx.data(|d| d.get_temp(need_id));
+            let compact = need.is_some_and(|w| w > avail);
+            let group = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_enabled_ui(!busy, |ui| {
                     if ui
-                        .button("↻ Refresh")
+                        .button(if compact { "↻" } else { "↻ Refresh" })
                         .on_hover_note(
                             "Sync with Discogs, download missing covers and check prices",
                         )
@@ -1846,7 +1869,7 @@ impl App {
                 });
                 if let Some(url) = &collection_url {
                     if ui
-                        .button("↗ Open in Discogs")
+                        .button(if compact { "↗" } else { "↗ Open in Discogs" })
                         .on_hover_note(list_tip)
                         .clicked()
                     {
@@ -1856,8 +1879,13 @@ impl App {
                 // Sort: field first, then a direction pair whose wording follows
                 // the field ("Newest first" reads better than "Descending").
                 let arrow = if ascending { "↑" } else { "↓" };
+                let sort_label = if compact {
+                    format!("⇅ {arrow}")
+                } else {
+                    format!("⇅ {} {arrow}", sort.label())
+                };
                 let sort_btn = ui
-                    .button(format!("⇅ {} {arrow}", sort.label()))
+                    .button(sort_label)
                     .on_hover_note("Order both shelves by date added, price or artist");
                 crate::ui::menu::dropdown(&sort_btn, 170.0, |m| {
                     for option in [VinylSort::Added, VinylSort::Price, VinylSort::Artist] {
@@ -1882,10 +1910,11 @@ impl App {
                 // shelf — and wears the count of records in stock.
                 if self.vinyl_tab == VinylTab::Shelf(VinylList::Wantlist) {
                     let n = self.watch_record_count();
-                    let label = if n > 0 {
-                        format!("⛃ In stock ({n})")
-                    } else {
-                        "⛃ In stock".to_string()
+                    let label = match (compact, n > 0) {
+                        (true, true) => format!("⛃ {n}"),
+                        (true, false) => "⛃".to_string(),
+                        (false, true) => format!("⛃ In stock ({n})"),
+                        (false, false) => "⛃ In stock".to_string(),
                     };
                     if ui
                         .selectable_label(self.show_watch, label)
@@ -1899,6 +1928,12 @@ impl App {
                     }
                 }
             });
+            // Only a full-label frame measures the width the group wants;
+            // a compact frame keeps the last full measure, so the group
+            // doesn't flip back the moment it has shrunk.
+            if !compact {
+                ctx.data_mut(|d| d.insert_temp(need_id, group.response.rect.width()));
+            }
         }));
         // The row's trailing item spacing is part of the gap.
         ui.add_space(pad - ui.spacing().item_spacing.y);
@@ -2476,30 +2511,6 @@ impl App {
                         if card_hovered && action.is_none() {
                             action = Some(VinylGridAction::Warm(c.release_id));
                         }
-                        // Price chip, bottom-left of the cover: what the sort is
-                        // ordering by, shown where it can't push the caption
-                        // around. Absent until a sync has priced this record.
-                        if let Some(p) = c.price {
-                            let text = format_price(p, c.price_currency.as_deref(), false);
-                            let galley = ui.painter().layout_no_wrap(
-                                text,
-                                crate::ui::tokens::font::callout(),
-                                egui::Color32::from_gray(240),
-                            );
-                            let pad = egui::vec2(6.0, 3.0);
-                            let size = galley.size() + pad * 2.0;
-                            let chip = egui::Rect::from_min_size(
-                                egui::pos2(rect.left() + 4.0, rect.bottom() - size.y - 4.0),
-                                size,
-                            );
-                            ui.painter().rect_filled(
-                                chip,
-                                egui::Rounding::same(5.0),
-                                egui::Color32::from_black_alpha(190),
-                            );
-                            ui.painter()
-                                .galley(chip.min + pad, galley, egui::Color32::WHITE);
-                        }
                         let price_line = match c.price {
                             Some(p) => format!(
                                 "\nFrom {} on Discogs",
@@ -2534,17 +2545,51 @@ impl App {
                         ui.set_max_width(cover_side);
                         ui.add_space(4.0);
                         // Title doubles as the textual link to the release page.
-                        let title = ui.add(
-                            egui::Label::new(egui::RichText::new(&c.title).strong())
-                                .truncate()
-                                .sense(egui::Sense::click()),
-                        );
-                        if title
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .clicked()
-                        {
-                            open_url(&release_url);
-                        }
+                        // The price, what the sort orders by, sits right after
+                        // it as a small green figure: the cover stays clean, and
+                        // the title yields it the room it needs before
+                        // truncating. Absent until a sync has priced the record.
+                        let price = c
+                            .price
+                            .map(|p| format_price(p, c.price_currency.as_deref(), false));
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = crate::ui::tokens::space::S2 + 1.0;
+                            let price_font = crate::ui::tokens::font::callout();
+                            let price_w = price.as_ref().map_or(0.0, |p| {
+                                let galley = ui.painter().layout_no_wrap(
+                                    p.clone(),
+                                    price_font.clone(),
+                                    crate::ui::tokens::color::GREEN,
+                                );
+                                galley.size().x + ui.spacing().item_spacing.x
+                            });
+                            let title = ui
+                                .scope(|ui| {
+                                    ui.set_max_width(cover_side - price_w);
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(&c.title).strong())
+                                            .truncate()
+                                            .sense(egui::Sense::click()),
+                                    )
+                                })
+                                .inner;
+                            if title
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .clicked()
+                            {
+                                open_url(&release_url);
+                            }
+                            if let Some(price) = price {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(price)
+                                            .font(price_font)
+                                            .color(crate::ui::tokens::color::GREEN),
+                                    )
+                                    .extend(),
+                                );
+                            }
+                        });
                         ui.add(egui::Label::new(egui::RichText::new(&c.artist).weak()).truncate());
                     },
                 );

@@ -18,11 +18,26 @@
 //! The builder forwards the `TextEdit` settings a call site needs; anything
 //! rarer goes through [`Field::edit`].
 
-use super::tokens::space;
+use super::tokens::{color, font, radius, space};
 use eframe::egui::{self, Margin, Stroke, TextBuffer, Widget};
 
 /// The standard inset of the text from the frame: 12 × 8.
 pub const MARGIN: Margin = Margin::symmetric(space::S4, space::S3);
+
+/// Inset of a trailing button from the field's frame, on every side.
+const TRAILING_INSET: f32 = space::S2;
+/// Horizontal padding of a trailing button's label inside its own frame.
+const TRAILING_PAD: f32 = space::S3;
+/// Gap between the text and the trailing button, so the caret never runs
+/// under it.
+const TRAILING_GAP: f32 = space::S2;
+
+/// What a field with a trailing button hands back: the field itself, and
+/// the button, which is `None` when the field has no trailing button.
+pub struct FieldResponse {
+    pub field: egui::Response,
+    pub trailing: Option<egui::Response>,
+}
 
 // The builder is complete ahead of use: a setting no call site needs yet
 // stays, so a new field never reaches past the component.
@@ -30,6 +45,8 @@ pub const MARGIN: Margin = Margin::symmetric(space::S4, space::S3);
 pub struct Field<'t> {
     edit: egui::TextEdit<'t>,
     outline: bool,
+    trailing: Option<String>,
+    margin: Margin,
 }
 
 #[allow(dead_code)]
@@ -39,6 +56,8 @@ impl<'t> Field<'t> {
         Self {
             edit: egui::TextEdit::singleline(text).margin(MARGIN),
             outline: true,
+            trailing: None,
+            margin: MARGIN,
         }
     }
 
@@ -47,6 +66,8 @@ impl<'t> Field<'t> {
         Self {
             edit: egui::TextEdit::multiline(text).margin(MARGIN),
             outline: true,
+            trailing: None,
+            margin: MARGIN,
         }
     }
 
@@ -92,7 +113,19 @@ impl<'t> Field<'t> {
 
     /// A looser or tighter inset than [`MARGIN`].
     pub fn margin(mut self, margin: impl Into<Margin>) -> Self {
-        self.edit = self.edit.margin(margin);
+        self.margin = margin.into();
+        self.edit = self.edit.margin(self.margin);
+        self
+    }
+
+    /// A small button at the right end of the field, inside its frame: a
+    /// control that belongs to the search (its filters) rather than to the
+    /// row. It sits a few points in from the frame on every side, so it
+    /// reads as part of the box, and the text keeps clear of it. Its click
+    /// comes back through [`Field::show_with_trailing`]; `show` and `ui.add`
+    /// draw it but only hand back the field.
+    pub fn trailing(mut self, label: impl Into<String>) -> Self {
+        self.trailing = Some(label.into());
         self
     }
 
@@ -118,21 +151,76 @@ impl<'t> Field<'t> {
     pub fn show(self, ui: &mut egui::Ui) -> egui::Response {
         ui.add(self)
     }
-}
 
-impl Widget for Field<'_> {
-    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
-        if self.outline {
-            self.edit.ui(ui)
+    /// Draw it and hand back the trailing button too (see [`Field::trailing`]).
+    pub fn show_with_trailing(self, ui: &mut egui::Ui) -> FieldResponse {
+        let Field {
+            mut edit,
+            outline,
+            trailing,
+            mut margin,
+        } = self;
+        // Size the button from its label first: the text's right inset
+        // grows by the button's width, so the frame widens to hold it and
+        // the text never runs under it.
+        let trailing = trailing.map(|label| {
+            let galley = ui
+                .painter()
+                .layout_no_wrap(label, font::callout(), color::LABEL);
+            let h = super::control_h(ui) - 2.0 * TRAILING_INSET;
+            let size = egui::vec2(galley.size().x + 2.0 * TRAILING_PAD, h);
+            (galley, size)
+        });
+        if let Some((_, size)) = &trailing {
+            margin.right += TRAILING_GAP + size.x + TRAILING_INSET;
+            edit = edit.margin(margin);
+        }
+        let field = if outline {
+            edit.ui(ui)
         } else {
             // egui frames a focused field with the selection stroke; drop
             // it for this widget alone.
             ui.scope(|ui| {
                 ui.visuals_mut().selection.stroke = Stroke::NONE;
-                self.edit.ui(ui)
+                edit.ui(ui)
             })
             .inner
-        }
+        };
+        let trailing = trailing.map(|(galley, size)| {
+            // The field's response rect is the text; the frame is that
+            // rect plus the (widened) margin on each side.
+            let frame = egui::Rect::from_min_max(
+                field.rect.min - egui::vec2(margin.left, margin.top),
+                field.rect.max + egui::vec2(margin.right, margin.bottom),
+            );
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    frame.right() - TRAILING_INSET - size.x,
+                    frame.center().y - size.y / 2.0,
+                ),
+                size,
+            );
+            let resp = ui.interact(rect, field.id.with("trailing"), egui::Sense::click());
+            if ui.is_rect_visible(rect) {
+                let visuals = ui.style().interact(&resp);
+                ui.painter().rect(
+                    rect,
+                    egui::Rounding::same(radius::XS),
+                    visuals.weak_bg_fill,
+                    visuals.bg_stroke,
+                );
+                let pos = rect.center() - galley.size() / 2.0;
+                ui.painter().galley(pos, galley, visuals.text_color());
+            }
+            resp
+        });
+        FieldResponse { field, trailing }
+    }
+}
+
+impl Widget for Field<'_> {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        self.show_with_trailing(ui).field
     }
 }
 
@@ -185,5 +273,29 @@ mod tests {
         });
         assert_eq!(field, button, "field {field} vs button {button}");
         assert_eq!(button, 32.0);
+    }
+
+    /// A trailing button sits inside the field's frame, inset from its
+    /// right edge and shorter than the field, and the text's inset grows
+    /// so it stops short of the button.
+    #[test]
+    fn trailing_button_sits_inside_the_frame() {
+        let mut text = String::new();
+        let mut out = None;
+        row_height(|ui| {
+            out = Some(
+                Field::singleline(&mut text)
+                    .width(120.0)
+                    .trailing("Filters")
+                    .show_with_trailing(ui),
+            );
+        });
+        let out = out.unwrap();
+        let button = out.trailing.expect("a trailing button");
+        let text_rect = out.field.rect;
+        let frame_right = text_rect.right() + MARGIN.right + TRAILING_GAP + button.rect.width() + TRAILING_INSET;
+        assert_eq!(button.rect.right(), frame_right - TRAILING_INSET);
+        assert_eq!(button.rect.height(), 32.0 - 2.0 * TRAILING_INSET);
+        assert!(text_rect.right() + TRAILING_GAP <= button.rect.left());
     }
 }
