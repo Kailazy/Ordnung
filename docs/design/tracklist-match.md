@@ -1,6 +1,19 @@
 # Tracklist match — paste a mix, get the records
 
-**Status:** draft (2026-09-17). Nothing built yet.
+**Status:** built (2026-09-17, v0.116.0). Parser and scorer in
+`ordnung-core/src/tracklist.rs` (25 unit tests on the shapes in §3 and the
+weights in §4.2), `discogs::Client::find_track_releases` with the label rung,
+`tracklists` / `tracklist_lines` tables (schema v17) with the candidate list
+kept as JSON, the streaming job `jobs::run_match_tracklist` (verification
+against the cached release tracklist for anything short of Sure, map pins
+for matched records), and the Tracklists tab in `ordnung-gui/src/tracklists.rs`.
+Deviations from the draft: the pressing rule (`best_candidate`) stayed in
+the GUI jobs module since its `ReleaseAutoMatch` enum is GUI config; the
+paste box sits on its own line with the name field, Match and the parse
+preview on the control row under it, so growing text never distorts the
+row; and the row carries no live price, the record sheet a click away does.
+Still open from §7 D: playlist-from-owned-lines, wantlist-watch tie-in,
+a `source` on `DugRelease`, Soulseek hand-off.
 **Target surface:** Ordnung GUI, vinyl side (`ordnung-gui`), engine in `ordnung-core`.
 **One line:** paste any mix tracklist, Ordnung looks every song up and matches it
 to its Discogs record, then lets you want, dig or buy the ones you don't have.

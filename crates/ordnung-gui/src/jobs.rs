@@ -31,6 +31,7 @@ impl App {
                     // cache loads lazily, so just mark it stale and let the
                     // Sellers tab re-read on its next frame.
                     self.seller_listings_for = None;
+                    self.tracklist_entries_for = None;
                 }
                 Ok(JobMsg::Failed(s)) => {
                     // Same as `fail`, inlined: `rx` holds a borrow of `self`.
@@ -64,6 +65,11 @@ impl App {
                     }
                 }
                 Ok(JobMsg::VinylChanged) => reload = true,
+                Ok(JobMsg::TracklistChanged(id)) => {
+                    if self.tracklist_entries_for == Some(id) {
+                        self.tracklist_entries_for = None;
+                    }
+                }
                 Ok(JobMsg::VinylUsername(u)) => {
                     // Persist the resolved username so the collection link works
                     // across launches. Only write when it actually changed.
@@ -3988,6 +3994,8 @@ mod auto_match_tests {
     fn cand(year: &str, have: u32, want: u32) -> discogs::ReleaseCandidate {
         discogs::ReleaseCandidate {
             release_id: format!("{year}-{have}-{want}"),
+            artist: String::new(),
+            catno: String::new(),
             title: String::new(),
             year: year.into(),
             label: String::new(),
@@ -4103,4 +4111,313 @@ mod usb_transfer_tests {
         assert_eq!(unique_destination(&f), dir.join("song (3).mp3"));
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+// --- Tracklist match ---------------------------------------------------------
+
+impl App {
+    /// Match a saved tracklist's lines to Discogs records in the background
+    /// (see `tracklists.rs` and `docs/design/tracklist-match.md`).
+    /// `only_unsettled` skips lines that already have a Likely or Sure
+    /// release; a line the user settled by hand is never touched either way.
+    pub(crate) fn spawn_match_tracklist(
+        &mut self,
+        ctx: egui::Context,
+        tracklist_id: Id,
+        only_unsettled: bool,
+    ) {
+        if self.is_busy() {
+            self.status = "Busy — wait for the current job to finish.".into();
+            return;
+        }
+        let token = self.discogs_token();
+        if token.trim().is_empty() {
+            self.status = "No Discogs token set. Add one in Settings \
+                (https://www.discogs.com/settings/developers)."
+                .into();
+            self.settings_open = true;
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.job_rx = Some(rx);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.job_cancel = Some(cancel.clone());
+        self.status = "Matching the tracklist…".into();
+        let db = self.db_path.clone();
+        let spec = AutoMatchSpec {
+            token,
+            criterion: config::ReleaseAutoMatch::from_key(&self.config.discogs_auto_match),
+            hidden_mediums: self.config.hidden_release_mediums.clone(),
+        };
+        thread::spawn(move || {
+            run_match_tracklist(db, spec, tracklist_id, only_unsettled, cancel, tx, ctx)
+        });
+    }
+}
+
+/// Worker for [`App::spawn_match_tracklist`]. Per line: search Discogs for
+/// the song (one to three paced requests), score the hits locally, commit
+/// the best by the user's pressing rule, and for anything short of Sure
+/// check the record's own tracklist (one more request, cached) so
+/// "matched" means the track is really on it. Each settled line is written
+/// to the catalog at once and announced with `TracklistChanged`, so the tab
+/// fills in row by row. Matched records are pinned on the record map.
+pub(crate) fn run_match_tracklist(
+    db: PathBuf,
+    spec: AutoMatchSpec,
+    tracklist_id: Id,
+    only_unsettled: bool,
+    cancel: Arc<AtomicBool>,
+    tx: Sender<JobMsg>,
+    ctx: egui::Context,
+) {
+    use ordnung_core::model::{ChosenBy, DugRelease};
+    use ordnung_core::tracklist::{self, Confidence, LineKind};
+
+    let catalog = match Catalog::open(&db) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
+            ctx.request_repaint();
+            return;
+        }
+    };
+    let entries = match catalog.tracklist_entries(tracklist_id) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't read the tracklist: {e}")));
+            ctx.request_repaint();
+            return;
+        }
+    };
+    let targets: Vec<_> = entries
+        .into_iter()
+        .filter(|e| e.kind == LineKind::Track && e.chosen_by != ChosenBy::User)
+        .filter(|e| {
+            !only_unsettled || e.release_id.is_none() || e.confidence < Confidence::Likely
+        })
+        .collect();
+    let total = targets.len();
+    if total == 0 {
+        let _ = tx.send(JobMsg::Done("Every line is already settled.".into()));
+        ctx.request_repaint();
+        return;
+    }
+    let medium_filter = config::Config {
+        hidden_release_mediums: spec.hidden_mediums.clone(),
+        ..config::Config::default()
+    };
+    // Paced as background: a click elsewhere in the app takes the request
+    // slot ahead of this run rather than queueing behind it.
+    let client = discogs::Client::new(
+        spec.token.clone(),
+        "Ordnung/0.1 +https://kailazy.github.io/Ordnung/",
+    )
+    .background();
+    let _ = tx.send(JobMsg::Progress { done: 0, total });
+    ctx.request_repaint();
+
+    let (mut sure, mut likely, mut unsure, mut none, mut errored) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    let mut fails: Vec<(String, String)> = Vec::new();
+    let mut stopped = false;
+    for (i, entry) in targets.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            stopped = true;
+            break;
+        }
+        let song = entry.song_label();
+        let _ = tx.send(JobMsg::Status(format!(
+            "Matching {} of {total}: {song}",
+            i + 1
+        )));
+        ctx.request_repaint();
+
+        // Free first: is this song already in the local library?
+        let local = local_track_for(&catalog, entry);
+        let _ = catalog.set_tracklist_local_track(tracklist_id, entry.position, local);
+
+        let line = entry.as_line();
+        let (artist, title) = tracklist::search_terms(&line);
+        let cands = match client.find_track_releases(&artist, &title, entry.label_hint.as_deref()) {
+            Ok(c) => c,
+            Err(e) => {
+                errored += 1;
+                fails.push((song.clone(), e.to_string()));
+                let _ = tx.send(JobMsg::Progress { done: i + 1, total });
+                continue;
+            }
+        };
+        if cands.is_empty() {
+            none += 1;
+            let _ = catalog.set_tracklist_match(
+                tracklist_id,
+                entry.position,
+                None,
+                Confidence::None,
+                ChosenBy::Auto,
+                &[],
+            );
+            let _ = tx.send(JobMsg::TracklistChanged(tracklist_id));
+            let _ = tx.send(JobMsg::Progress { done: i + 1, total });
+            ctx.request_repaint();
+            continue;
+        }
+
+        // Rank locally (no requests), keep the ranked order for "pick another".
+        let ranked = tracklist::rank_candidates(&line, &cands);
+        let ordered: Vec<discogs::ReleaseCandidate> =
+            ranked.iter().map(|r| cands[r.index].clone()).collect();
+        let best_score = ranked[0].score;
+        // The top-scoring group, narrowed to the user's formats when that
+        // leaves anything, and the pressing rule picks among what's left.
+        let top: Vec<discogs::ReleaseCandidate> = ranked
+            .iter()
+            .take_while(|r| r.score == best_score)
+            .map(|r| cands[r.index].clone())
+            .collect();
+        let shown: Vec<discogs::ReleaseCandidate> = top
+            .iter()
+            .filter(|c| medium_filter.shows_release_format(&c.format))
+            .cloned()
+            .collect();
+        let pool = if shown.is_empty() { &top } else { &shown };
+        let mut chosen = best_candidate(pool, spec.criterion)
+            .cloned()
+            .unwrap_or_else(|| ordered[0].clone());
+        let mut confidence = tracklist::confidence_for(best_score);
+
+        // Verify anything short of Sure against the record's own tracklist:
+        // the chosen one first, then the runner-up. A hit is Sure; two
+        // misses leave the first choice standing as Unsure.
+        if confidence < Confidence::Sure {
+            if let Some(t) = entry.title.as_deref() {
+                let want = vec![t.to_string()];
+                let mut tried = 0usize;
+                let mut verified: Option<discogs::ReleaseCandidate> = None;
+                let runner_up = ordered.iter().find(|c| c.release_id != chosen.release_id).cloned();
+                for cand in std::iter::once(chosen.clone()).chain(runner_up) {
+                    if tried >= 2 || cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    tried += 1;
+                    let id = cand.release_id.clone();
+                    let detail = catalog.release_cached_or(&id, || client.fetch_release(&id));
+                    if let Ok(detail) = detail {
+                        if detail.file_matches(&want).first().copied().flatten().is_some() {
+                            verified = Some(cand);
+                            break;
+                        }
+                    }
+                }
+                match verified {
+                    Some(c) => {
+                        chosen = c;
+                        confidence = Confidence::Sure;
+                    }
+                    None => confidence = confidence.min(Confidence::Unsure),
+                }
+            }
+        }
+        match confidence {
+            Confidence::Sure => sure += 1,
+            Confidence::Likely => likely += 1,
+            _ => unsure += 1,
+        }
+        let _ = catalog.set_tracklist_match(
+            tracklist_id,
+            entry.position,
+            Some(&chosen),
+            confidence,
+            ChosenBy::Auto,
+            &ordered,
+        );
+        // A matched record joins the record map like a dug one.
+        if confidence >= Confidence::Likely {
+            let sub = match (chosen.year.trim(), chosen.format.trim()) {
+                ("", "") => String::new(),
+                (y, "") => y.to_string(),
+                ("", f) => f.to_string(),
+                (y, f) => format!("{y} · {f}"),
+            };
+            let _ = catalog.record_dug_release(&DugRelease {
+                release_id: chosen.release_id.parse().unwrap_or(0),
+                artist: chosen.artist.clone(),
+                title: chosen.release_title().to_string(),
+                label: Some(chosen.label.clone()).filter(|l| !l.is_empty()),
+                sub,
+                thumb_url: Some(chosen.thumb_url.clone()).filter(|u| !u.is_empty()),
+                wanted: false,
+                dug_at: 0,
+            });
+        }
+        let _ = tx.send(JobMsg::TracklistChanged(tracklist_id));
+        let _ = tx.send(JobMsg::Progress { done: i + 1, total });
+        ctx.request_repaint();
+    }
+    if !stopped {
+        let _ = catalog.touch_tracklist_matched(tracklist_id);
+    }
+    if !fails.is_empty() {
+        let _ = tx.send(JobMsg::Failures {
+            title: "Tracklist match".into(),
+            items: fails,
+        });
+    }
+    let done = sure + likely + unsure + none + errored;
+    let mut parts = Vec::new();
+    if sure + likely > 0 {
+        parts.push(format!("{} matched", sure + likely));
+    }
+    if unsure > 0 {
+        parts.push(format!("{unsure} unsure"));
+    }
+    if none > 0 {
+        parts.push(format!("{none} not found"));
+    }
+    if errored > 0 {
+        parts.push(format!("{errored} failed"));
+    }
+    let note = if stopped {
+        format!(" (stopped after {done} of {total})")
+    } else {
+        String::new()
+    };
+    let _ = tx.send(JobMsg::Done(format!(
+        "Tracklist: {}{note}",
+        if parts.is_empty() { "nothing to match".to_string() } else { parts.join(", ") }
+    )));
+    ctx.request_repaint();
+}
+
+/// The local library track that is this line's song, if exactly one
+/// matches on folded artist and title (title alone when the line has no
+/// artist, and then only when the title is unique in the library).
+fn local_track_for(catalog: &Catalog, entry: &TracklistEntry) -> Option<Id> {
+    use ordnung_core::tracklist::{fold_name, fold_title};
+    let title = entry.title.as_deref()?;
+    let want_title = fold_title(title);
+    if want_title.is_empty() {
+        return None;
+    }
+    let want_artist = entry.artist.as_deref().map(fold_name);
+    let query = match entry.artist.as_deref() {
+        Some(a) => format!("{a} {title}"),
+        None => title.to_string(),
+    };
+    let tracks = catalog.list_tracks(Some(&query), 40).ok()?;
+    let mut hits = tracks.iter().filter(|t| {
+        let t_title = t.tags.title.as_deref().map(fold_title).unwrap_or_default();
+        if t_title != want_title {
+            return false;
+        }
+        match &want_artist {
+            Some(a) => t.tags.artist.as_deref().map(fold_name).as_deref() == Some(a.as_str()),
+            None => true,
+        }
+    });
+    let first = hits.next()?;
+    if want_artist.is_none() && hits.next().is_some() {
+        return None;
+    }
+    Some(first.id)
 }

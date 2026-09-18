@@ -29,6 +29,7 @@ mod search_box;
 mod sellers;
 mod sidebar;
 mod table;
+mod tracklists;
 mod tex;
 mod ui;
 mod util;
@@ -51,8 +52,8 @@ use ordnung_core::discogs;
 use ordnung_core::genredb;
 use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
-    Analysis, Cue, Format, Id, Playlist, SellerListing, SellerShop, Tags, Track,
-    TranscodeVerdict, VinylList, VinylRecord,
+    Analysis, Cue, Format, Id, Playlist, SellerListing, SellerShop, Tags, Track, Tracklist,
+    TracklistEntry, TranscodeVerdict, VinylList, VinylRecord,
 };
 use ordnung_core::search::{ScoredHit, SearchHit};
 use ordnung_core::{
@@ -274,6 +275,9 @@ enum VinylTab {
     /// The record map: every record you've crossed paths with, as one web
     /// (see `graph`). Both shelves and every dug record, in one place.
     Graph,
+    /// Pasted mix tracklists, each line matched to its record (see
+    /// `tracklists`).
+    Tracklists,
 }
 
 /// Discogs's coarse genre vocabulary — a small closed set, which is what lets
@@ -844,6 +848,10 @@ enum JobMsg {
     /// changed and the rows should reload when the job finishes — sent even
     /// when the job then reports `Failed`, which on its own asks for no reload.
     VinylChanged,
+    /// A tracklist match settled another line of this tracklist, so the
+    /// Tracklists tab re-reads its rows on the next frame (rows fill in as
+    /// they land rather than all at once when the job ends).
+    TracklistChanged(Id),
 }
 
 /// A Discogs run's "only hidden formats" outcome: the tracks it applied to,
@@ -1273,6 +1281,22 @@ struct App {
     /// is mined from the release-detail cache plus the user's own shelves; a
     /// listing missing here has unknown tags and drops out of a genre filter.
     seller_genres: HashMap<u64, Vec<String>>,
+    /// Saved mix tracklists (the Tracklists tab), from the `tracklists`
+    /// table; a handful of rows, reloaded with the vinyl lists.
+    tracklists: Vec<Tracklist>,
+    /// Which tracklist the tab is showing. Kept valid against `tracklists`.
+    tracklist_current: Option<Id>,
+    /// The current tracklist's lines, loaded lazily; `tracklist_entries_for`
+    /// names the tracklist they belong to, and a match job settling a line
+    /// clears it to force a re-read.
+    tracklist_entries: Vec<TracklistEntry>,
+    tracklist_entries_for: Option<Id>,
+    /// The inline paste box: open or not, its text, and the name field.
+    tracklist_paste_open: bool,
+    tracklist_paste: String,
+    tracklist_name: String,
+    /// A "pick another" popup open on one line: (tracklist, position).
+    tracklist_pick: Option<(Id, u32)>,
     /// Pre-folded search haystack per listing (same indices as
     /// `seller_listings`), built once per load so a keystroke filters tens of
     /// thousands of rows without re-formatting them.

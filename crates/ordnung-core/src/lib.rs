@@ -16,6 +16,7 @@ pub mod model;
 pub mod scan;
 pub mod search;
 pub mod tag;
+pub mod tracklist;
 pub mod update;
 pub mod usb;
 

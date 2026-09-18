@@ -504,3 +504,115 @@ pub struct ExportProfile {
     pub playlist_ids: Vec<Id>,
     pub convert: Option<ConvertRule>,
 }
+
+/// A pasted mix tracklist the user asked Ordnung to match to records — see
+/// [`crate::tracklist`] and the `tracklists` catalog table. Kept with its
+/// match state so a mix worked through once stays worked through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tracklist {
+    pub id: Id,
+    pub name: String,
+    /// The paste as it came in, so the lines can be re-read if the parser
+    /// improves.
+    pub pasted_text: String,
+    /// Unix seconds when it was pasted.
+    pub created_at: i64,
+    /// Unix seconds when a match run last finished; `None` before the first.
+    pub matched_at: Option<i64>,
+    /// How many song lines (tracks and IDs) it has.
+    pub lines: u32,
+    /// How many of those have a release chosen.
+    pub matched: u32,
+}
+
+/// Who chose a tracklist line's release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChosenBy {
+    /// Nobody yet.
+    Nobody,
+    /// The matcher, by score and the user's pressing rule.
+    Auto,
+    /// The user, by picking a candidate or saying "not this". A re-match
+    /// never overrides these.
+    User,
+}
+
+impl ChosenBy {
+    pub fn key(self) -> &'static str {
+        match self {
+            ChosenBy::Nobody => "none",
+            ChosenBy::Auto => "auto",
+            ChosenBy::User => "user",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "auto" => ChosenBy::Auto,
+            "user" => ChosenBy::User,
+            _ => ChosenBy::Nobody,
+        }
+    }
+}
+
+/// One song line of a saved [`Tracklist`], with whatever the matcher (or
+/// the user) has settled for it. The chosen release's display fields ride
+/// on the row — it is a pin, like a dug record, not a release cache — and
+/// the other candidates the search turned up are kept so "pick another"
+/// works without a fresh request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TracklistEntry {
+    pub tracklist_id: Id,
+    /// 1-based, in pasted order.
+    pub position: u32,
+    pub raw: String,
+    pub timestamp_s: Option<u32>,
+    pub artist: Option<String>,
+    pub title: Option<String>,
+    pub label_hint: Option<String>,
+    pub catno_hint: Option<String>,
+    pub kind: crate::tracklist::LineKind,
+    /// The chosen Discogs release, if any.
+    pub release_id: Option<u64>,
+    pub confidence: crate::tracklist::Confidence,
+    pub chosen_by: ChosenBy,
+    /// A track in the local library that is this song, when one was found.
+    pub local_track_id: Option<Id>,
+    /// Display fields of the chosen release.
+    pub rel_artist: Option<String>,
+    pub rel_title: Option<String>,
+    pub rel_year: Option<u16>,
+    pub rel_label: Option<String>,
+    pub rel_catno: Option<String>,
+    pub rel_format: Option<String>,
+    pub rel_thumb: Option<String>,
+    /// Every candidate the last search turned up, best first, so the user
+    /// can pick another offline.
+    pub candidates: Vec<crate::discogs::ReleaseCandidate>,
+}
+
+impl TracklistEntry {
+    /// The parsed line this row was saved from, for re-scoring.
+    pub fn as_line(&self) -> crate::tracklist::TracklistLine {
+        crate::tracklist::TracklistLine {
+            position: self.position as usize,
+            raw: self.raw.clone(),
+            timestamp: self.timestamp_s,
+            artist: self.artist.clone(),
+            title: self.title.clone(),
+            label_hint: self.label_hint.clone(),
+            catno_hint: self.catno_hint.clone(),
+            kind: self.kind,
+        }
+    }
+
+    /// `Artist - Title` as the line reads, for status lines and searches.
+    pub fn song_label(&self) -> String {
+        match (self.artist.as_deref(), self.title.as_deref()) {
+            (Some(a), Some(t)) => format!("{a} - {t}"),
+            (Some(a), None) => a.to_string(),
+            (None, Some(t)) => t.to_string(),
+            (None, None) => self.raw.clone(),
+        }
+    }
+}

@@ -150,6 +150,14 @@ impl App {
             seller_current: None,
             seller_listings: Vec::new(),
             seller_listings_for: None,
+            tracklists: Vec::new(),
+            tracklist_current: None,
+            tracklist_entries: Vec::new(),
+            tracklist_entries_for: None,
+            tracklist_paste_open: false,
+            tracklist_paste: String::new(),
+            tracklist_name: String::new(),
+            tracklist_pick: None,
             seller_genres: HashMap::new(),
             seller_hay: Vec::new(),
             seller_add: String::new(),
@@ -862,6 +870,17 @@ impl App {
             self.sellers = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_sellers())
                 .unwrap_or_default();
+            // Saved tracklists likewise: a few rows each; their lines load
+            // lazily in the Tracklists tab.
+            self.tracklists = Catalog::open(&self.db_path)
+                .and_then(|c| c.list_tracklists())
+                .unwrap_or_default();
+            if self
+                .tracklist_current
+                .is_some_and(|id| !self.tracklists.iter().any(|t| t.id == id))
+            {
+                self.tracklist_current = None;
+            }
             // The auditioned-releases set is one row per record actually
             // listened to, so it loads whole alongside.
             self.viewed_releases = Catalog::open(&self.db_path)

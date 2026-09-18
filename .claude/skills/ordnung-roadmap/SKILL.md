@@ -281,6 +281,27 @@ pressing-disambiguating fields (year · format · label + catalog number · coun
 and are marked when already owned or wanted; picking one opens the existing
 `open_release_sheet`. Lives in `ordnung-gui/src/records.rs`.
 
+**Tracklist match (v0.116.0).** A **Tracklists** tab beside Market in the
+vinyl view: a quiet *Paste tracklist* text button (or ⌘V on the focused tab)
+opens an inline paste box one line tall that grows only with its text; Match
+saves the paste (`tracklists` + `tracklist_lines`, schema v17) and runs
+`jobs::run_match_tracklist`, which per line searches Discogs
+(`discogs::find_track_releases`: label-hint rung, then artist+track, then
+free text), scores hits locally (`ordnung_core::tracklist::rank_candidates`:
+catno decisive, artist/title/label weighted, "Various" neutral), commits by
+the user's `ReleaseAutoMatch` rule within the format filter, verifies
+anything short of Sure against the cached release tracklist, pins matched
+records on the record map, and announces each settled line
+(`JobMsg::TracklistChanged`) so rows fill in one by one. Rows: song as
+pasted, matched record with cover, year, label + catno, format, a
+confidence pip, OWNED / WANT / FILE badges; click opens the record sheet,
+the context menu wants, digs, opens on Discogs, re-picks from the saved
+candidates, sends the line to the Discogs search box, or rejects (user
+choices survive re-match). List actions: Match unsettled, re-match all,
+want all matched, show on map, copy as text, delete. Paste only (no URL
+fetch: the tracklist sites are Cloudflare-fronted). Design and open
+follow-ups in `docs/design/tracklist-match.md`.
+
 Still to do for full GUI parity: a dedicated **harmonic-mixing key view** (the table
 already color-codes the Camelot wheel, but there's no separate mixing view).
 

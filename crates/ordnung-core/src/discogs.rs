@@ -106,12 +106,21 @@ pub struct MarketPrice {
 /// downloaded yet. Powers the GUI multi-candidate picker so the user can choose
 /// among many releases; the caller downloads images on demand via
 /// [`Client::fetch_thumb`] / [`Client::fetch_full`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReleaseCandidate {
     pub release_id: String,
+    /// Credited artist, split off Discogs's joined `"Artist - Title"` label.
+    /// Empty when the label had no ` - ` separator.
+    pub artist: String,
+    /// The release as Discogs labels it, artist and all (`"Artist - Title"`),
+    /// which is how the picker has always shown it. [`ReleaseCandidate::release_title`]
+    /// gives the title alone.
     pub title: String,
     pub year: String,
     pub label: String,
+    /// Catalog number, e.g. `ENV 006`. Empty when Discogs has none. Names one
+    /// pressing outright, which is what a tracklist's `[ENV 006]` hint needs.
+    pub catno: String,
     pub country: String,
     pub format: String,
     pub thumb_url: String,
@@ -122,6 +131,21 @@ pub struct ReleaseCandidate {
     pub in_collection: u32,
     /// How many Discogs users have this release on their wantlist.
     pub in_wantlist: u32,
+}
+
+impl ReleaseCandidate {
+    /// The release's own title, without the `"Artist - "` prefix Discogs
+    /// joins onto its search labels.
+    pub fn release_title(&self) -> &str {
+        let t = self.title.trim();
+        if self.artist.is_empty() {
+            return t;
+        }
+        match t.split_once(" - ") {
+            Some((a, rest)) if a.trim() == self.artist.trim() => rest.trim(),
+            _ => t,
+        }
+    }
 }
 
 /// One release returned by a free-text record lookup ([`Client::search_records`]).
@@ -1214,19 +1238,54 @@ impl Client {
         Ok(hits
             .into_iter()
             .filter(|h| !h.thumb.is_empty())
-            .map(|h| ReleaseCandidate {
-                release_id: h.id.to_string(),
-                title: h.title,
-                year: h.year,
-                label: h.label.into_iter().next().unwrap_or_default(),
-                country: h.country,
-                format: h.format.join(", "),
-                thumb_url: h.thumb,
-                cover_image_url: h.cover_image,
-                in_collection: h.community.have,
-                in_wantlist: h.community.want,
-            })
+            .map(candidate_from_hit)
             .collect())
+    }
+
+    /// Every release a tracklist line's song could be on, for the tracklist
+    /// matcher (see [`crate::tracklist`]).
+    ///
+    /// Like [`Client::find_artwork_candidates`] but built for a line of text
+    /// rather than a tagged file: a `label` hint, when the paste carried one,
+    /// is tried first as a structured filter (it is what tells three
+    /// pressings of one song apart); hits without a thumbnail are kept (a
+    /// record without a cover is still a record); and an artist-less line
+    /// (`ID - Rain`, or a title-only paste) still searches by track title
+    /// alone. One to three requests per call, paced by the shared throttle.
+    pub fn find_track_releases(
+        &self,
+        artist: &str,
+        title: &str,
+        label: Option<&str>,
+    ) -> Result<Vec<ReleaseCandidate>> {
+        let artist = artist.trim();
+        let title = strip_original_mix(title);
+        if title.is_empty() && artist.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut ladder: Vec<Vec<(&str, &str)>> = Vec::new();
+        if let Some(l) = label.map(str::trim).filter(|l| !l.is_empty()) {
+            if !artist.is_empty() && !title.is_empty() {
+                ladder.push(vec![("artist", artist), ("track", title), ("label", l)]);
+            }
+        }
+        if !artist.is_empty() && !title.is_empty() {
+            ladder.push(vec![("artist", artist), ("track", title)]);
+            ladder.push(vec![("q", artist), ("track", title)]);
+        } else if !title.is_empty() {
+            ladder.push(vec![("track", title)]);
+        } else {
+            ladder.push(vec![("artist", artist)]);
+        }
+        for mut params in ladder {
+            params.push(("type", "release"));
+            params.push(("per_page", "12"));
+            let hits = self.search_release(&params)?;
+            if !hits.is_empty() {
+                return Ok(hits.into_iter().map(candidate_from_hit).collect());
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// Download + downscale a thumbnail URL into a small PNG for GUI preview.
@@ -1980,6 +2039,26 @@ fn split_artist_title(combined: &str) -> (String, String) {
     match combined.split_once(" - ") {
         Some((a, t)) => (a.trim().to_string(), t.trim().to_string()),
         None => (String::new(), combined.trim().to_string()),
+    }
+}
+
+/// One search hit as a [`ReleaseCandidate`]: the joined label kept whole
+/// for display, the artist split off it for matching.
+fn candidate_from_hit(h: SearchHit) -> ReleaseCandidate {
+    let (artist, _) = split_artist_title(&h.title);
+    ReleaseCandidate {
+        release_id: h.id.to_string(),
+        artist,
+        title: h.title,
+        year: h.year,
+        label: h.label.into_iter().next().unwrap_or_default(),
+        catno: h.catno,
+        country: h.country,
+        format: h.format.join(", "),
+        thumb_url: h.thumb,
+        cover_image_url: h.cover_image,
+        in_collection: h.community.have,
+        in_wantlist: h.community.want,
     }
 }
 

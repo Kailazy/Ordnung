@@ -7,8 +7,9 @@
 use crate::error::{Error, Result};
 use crate::model::key::{Key, Mode, PitchClass};
 use crate::model::{
-    Analysis, AudioProperties, Beat, Beatgrid, Cue, DugRelease, Format, Id, Playlist,
-    SellerListing, SellerShop, Tags, Track, TranscodeVerdict, VinylList, VinylRecord,
+    Analysis, AudioProperties, Beat, Beatgrid, ChosenBy, Cue, DugRelease, Format, Id, Playlist,
+    SellerListing, SellerShop, Tags, Track, Tracklist, TracklistEntry, TranscodeVerdict,
+    VinylList, VinylRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashMap;
@@ -353,7 +354,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 
 /// How long a master's cached pressing list is served before it's re-listed.
 /// New pressings appear rarely, and the list only feeds "other pressings" and
@@ -740,6 +741,42 @@ impl Catalog {
                 thumb_url  TEXT,
                 wanted     INTEGER NOT NULL DEFAULT 0,
                 dug_at     INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            -- Pasted mix tracklists and their per-line match state (schema
+            -- 17; see `tracklist.rs` and docs/design/tracklist-match.md).
+            -- A line's chosen release rides on the row as display fields, a
+            -- pin like `dug_releases`; the search's other candidates are kept
+            -- as JSON so a re-pick needs no request.
+            CREATE TABLE IF NOT EXISTS tracklists (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,
+                pasted_text TEXT NOT NULL,
+                created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                matched_at  INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS tracklist_lines (
+                tracklist_id   INTEGER NOT NULL REFERENCES tracklists(id) ON DELETE CASCADE,
+                position       INTEGER NOT NULL,
+                raw            TEXT NOT NULL,
+                timestamp_s    INTEGER,
+                artist         TEXT,
+                title          TEXT,
+                label_hint     TEXT,
+                catno_hint     TEXT,
+                kind           TEXT NOT NULL DEFAULT 'track',
+                release_id     INTEGER,
+                confidence     TEXT NOT NULL DEFAULT 'none',
+                chosen_by      TEXT NOT NULL DEFAULT 'none',
+                local_track_id INTEGER,
+                rel_artist     TEXT,
+                rel_title      TEXT,
+                rel_year       INTEGER,
+                rel_label      TEXT,
+                rel_catno      TEXT,
+                rel_format     TEXT,
+                rel_thumb      TEXT,
+                candidates_json TEXT NOT NULL DEFAULT '[]',
+                PRIMARY KEY (tracklist_id, position)
             );",
         )?;
         self.migrate()?;
@@ -3779,6 +3816,227 @@ impl Catalog {
         Ok(())
     }
 
+    // --- Tracklists ----------------------------------------------------------
+
+    /// Save a paste as a tracklist: the text as pasted plus one row per song
+    /// line (noise lines are not stored — they take no position). Returns the
+    /// new tracklist's id.
+    pub fn create_tracklist(
+        &self,
+        name: &str,
+        pasted_text: &str,
+        lines: &[crate::tracklist::TracklistLine],
+    ) -> Result<Id> {
+        use crate::tracklist::LineKind;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Invalid("a tracklist needs a name".into()));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO tracklists (name, pasted_text) VALUES (?1, ?2)",
+            params![name, pasted_text],
+        )?;
+        let id = tx.last_insert_rowid() as Id;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO tracklist_lines
+                    (tracklist_id, position, raw, timestamp_s, artist, title,
+                     label_hint, catno_hint, kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )?;
+            for l in lines.iter().filter(|l| l.kind != LineKind::Noise) {
+                stmt.execute(params![
+                    id as i64,
+                    l.position as i64,
+                    l.raw,
+                    l.timestamp.map(|t| t as i64),
+                    l.artist,
+                    l.title,
+                    l.label_hint,
+                    l.catno_hint,
+                    l.kind.key(),
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Every saved tracklist, newest first, with its line and match counts.
+    pub fn list_tracklists(&self) -> Result<Vec<Tracklist>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.name, t.pasted_text, t.created_at, t.matched_at,
+                    (SELECT COUNT(*) FROM tracklist_lines l WHERE l.tracklist_id = t.id),
+                    (SELECT COUNT(*) FROM tracklist_lines l
+                      WHERE l.tracklist_id = t.id AND l.release_id IS NOT NULL)
+             FROM tracklists t
+             ORDER BY t.created_at DESC, t.id DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Tracklist {
+                    id: r.get::<_, i64>(0)? as Id,
+                    name: r.get(1)?,
+                    pasted_text: r.get(2)?,
+                    created_at: r.get(3)?,
+                    matched_at: r.get(4)?,
+                    lines: r.get::<_, i64>(5)? as u32,
+                    matched: r.get::<_, i64>(6)? as u32,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The song lines of one tracklist, in pasted order.
+    pub fn tracklist_entries(&self, tracklist_id: Id) -> Result<Vec<TracklistEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tracklist_id, position, raw, timestamp_s, artist, title,
+                    label_hint, catno_hint, kind, release_id, confidence, chosen_by,
+                    local_track_id, rel_artist, rel_title, rel_year, rel_label,
+                    rel_catno, rel_format, rel_thumb, candidates_json
+             FROM tracklist_lines
+             WHERE tracklist_id = ?1
+             ORDER BY position",
+        )?;
+        let rows = stmt
+            .query_map(params![tracklist_id as i64], |r| {
+                let kind: String = r.get(8)?;
+                let confidence: String = r.get(10)?;
+                let chosen: String = r.get(11)?;
+                let json: String = r.get(20)?;
+                Ok(TracklistEntry {
+                    tracklist_id: r.get::<_, i64>(0)? as Id,
+                    position: r.get::<_, i64>(1)? as u32,
+                    raw: r.get(2)?,
+                    timestamp_s: r.get::<_, Option<i64>>(3)?.map(|t| t as u32),
+                    artist: r.get(4)?,
+                    title: r.get(5)?,
+                    label_hint: r.get(6)?,
+                    catno_hint: r.get(7)?,
+                    kind: crate::tracklist::LineKind::from_key(&kind),
+                    release_id: r.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+                    confidence: crate::tracklist::Confidence::from_key(&confidence),
+                    chosen_by: ChosenBy::from_key(&chosen),
+                    local_track_id: r.get::<_, Option<i64>>(12)?.map(|v| v as Id),
+                    rel_artist: r.get(13)?,
+                    rel_title: r.get(14)?,
+                    rel_year: r.get::<_, Option<i64>>(15)?.map(|y| y as u16),
+                    rel_label: r.get(16)?,
+                    rel_catno: r.get(17)?,
+                    rel_format: r.get(18)?,
+                    rel_thumb: r.get(19)?,
+                    candidates: serde_json::from_str(&json).unwrap_or_default(),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Settle one line: the chosen release (or none), how sure, who chose,
+    /// and the candidate list to keep for a later re-pick. `release` carries
+    /// the display fields; `None` clears them.
+    pub fn set_tracklist_match(
+        &self,
+        tracklist_id: Id,
+        position: u32,
+        release: Option<&crate::discogs::ReleaseCandidate>,
+        confidence: crate::tracklist::Confidence,
+        chosen_by: ChosenBy,
+        candidates: &[crate::discogs::ReleaseCandidate],
+    ) -> Result<()> {
+        let json = serde_json::to_string(candidates)
+            .map_err(|e| Error::Invalid(format!("serializing candidates: {e}")))?;
+        let (id, artist, title, year, label, catno, format, thumb) = match release {
+            Some(c) => (
+                c.release_id.parse::<i64>().ok(),
+                Some(c.artist.clone()),
+                Some(c.release_title().to_string()),
+                c.year.trim().parse::<i64>().ok(),
+                Some(c.label.clone()).filter(|s| !s.is_empty()),
+                Some(c.catno.clone()).filter(|s| !s.is_empty()),
+                Some(c.format.clone()).filter(|s| !s.is_empty()),
+                Some(c.thumb_url.clone()).filter(|s| !s.is_empty()),
+            ),
+            None => (None, None, None, None, None, None, None, None),
+        };
+        let n = self.conn.execute(
+            "UPDATE tracklist_lines SET
+                release_id = ?3, confidence = ?4, chosen_by = ?5,
+                rel_artist = ?6, rel_title = ?7, rel_year = ?8, rel_label = ?9,
+                rel_catno = ?10, rel_format = ?11, rel_thumb = ?12,
+                candidates_json = ?13
+             WHERE tracklist_id = ?1 AND position = ?2",
+            params![
+                tracklist_id as i64,
+                position as i64,
+                id,
+                confidence.key(),
+                chosen_by.key(),
+                artist,
+                title,
+                year,
+                label,
+                catno,
+                format,
+                thumb,
+                json,
+            ],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!(
+                "tracklist {tracklist_id} line {position}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Note the local library track that is this line's song (or clear it).
+    pub fn set_tracklist_local_track(
+        &self,
+        tracklist_id: Id,
+        position: u32,
+        track_id: Option<Id>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tracklist_lines SET local_track_id = ?3
+             WHERE tracklist_id = ?1 AND position = ?2",
+            params![tracklist_id as i64, position as i64, track_id.map(|t| t as i64)],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp the end of a match run.
+    pub fn touch_tracklist_matched(&self, tracklist_id: Id) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tracklists SET matched_at = unixepoch() WHERE id = ?1",
+            params![tracklist_id as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_tracklist(&self, tracklist_id: Id, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Invalid("a tracklist needs a name".into()));
+        }
+        self.conn.execute(
+            "UPDATE tracklists SET name = ?2 WHERE id = ?1",
+            params![tracklist_id as i64, name],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a tracklist and its lines. Records it matched stay on the map.
+    pub fn delete_tracklist(&self, tracklist_id: Id) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM tracklists WHERE id = ?1",
+            params![tracklist_id as i64],
+        )?;
+        Ok(())
+    }
+
     // --- Record map pins -----------------------------------------------------
 
     /// Note a release the user dug to. Idempotent on the id: a record dug to
@@ -5356,6 +5614,74 @@ mod tests {
             "non-edited tags refresh from file"
         );
         assert_eq!(t.tags.artist.as_deref(), Some("A2"));
+    }
+
+    #[test]
+    fn tracklists_persist_lines_matches_and_cascade() {
+        use crate::discogs::ReleaseCandidate;
+        use crate::tracklist::{parse_tracklist, Confidence};
+        let path = temp_db_path("tracklists");
+        let cat = Catalog::open(&path).unwrap();
+        let text = "Tracklist:\n01. Metro Area - Miura\n02. ID - ID\n03. Theo Parrish - Solitary Flight [Sound Signature]\n";
+        let lines = parse_tracklist(text);
+        let id = cat.create_tracklist("Deep Space", text, &lines).unwrap();
+        let all = cat.list_tracklists().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].name, "Deep Space");
+        assert_eq!((all[0].lines, all[0].matched), (3, 0));
+        let entries = cat.tracklist_entries(id).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].artist.as_deref(), Some("Metro Area"));
+        assert_eq!(entries[1].kind, crate::tracklist::LineKind::Id);
+        assert_eq!(entries[2].label_hint.as_deref(), Some("Sound Signature"));
+
+        let cand = ReleaseCandidate {
+            release_id: "42".into(),
+            artist: "Metro Area".into(),
+            title: "Metro Area - Miura".into(),
+            year: "2001".into(),
+            label: "Environ".into(),
+            catno: "ENV 006".into(),
+            country: "US".into(),
+            format: "Vinyl, 12\"".into(),
+            thumb_url: "http://x/t.jpg".into(),
+            cover_image_url: String::new(),
+            in_collection: 10,
+            in_wantlist: 3,
+        };
+        cat.set_tracklist_match(id, 1, Some(&cand), Confidence::Sure, ChosenBy::Auto, &[cand.clone()])
+            .unwrap();
+        cat.set_tracklist_local_track(id, 1, Some(7)).unwrap();
+        cat.touch_tracklist_matched(id).unwrap();
+        let e = &cat.tracklist_entries(id).unwrap()[0];
+        assert_eq!(e.release_id, Some(42));
+        assert_eq!(e.rel_title.as_deref(), Some("Miura"));
+        assert_eq!(e.rel_year, Some(2001));
+        assert_eq!(e.rel_catno.as_deref(), Some("ENV 006"));
+        assert_eq!(e.local_track_id, Some(7));
+        assert_eq!(e.candidates.len(), 1);
+        assert_eq!(e.chosen_by, ChosenBy::Auto);
+        let t = &cat.list_tracklists().unwrap()[0];
+        assert_eq!(t.matched, 1);
+        assert!(t.matched_at.is_some());
+
+        // "Not this" clears the release but records the user's say.
+        cat.set_tracklist_match(id, 1, None, Confidence::None, ChosenBy::User, &[cand])
+            .unwrap();
+        let e = &cat.tracklist_entries(id).unwrap()[0];
+        assert_eq!(e.release_id, None);
+        assert_eq!(e.chosen_by, ChosenBy::User);
+        assert_eq!(e.candidates.len(), 1);
+
+        // A position that doesn't exist is an error, not a silent no-op.
+        assert!(cat.set_tracklist_match(id, 9, None, Confidence::None, ChosenBy::User, &[]).is_err());
+
+        cat.rename_tracklist(id, "Deep Space 2019").unwrap();
+        assert_eq!(cat.list_tracklists().unwrap()[0].name, "Deep Space 2019");
+        cat.delete_tracklist(id).unwrap();
+        assert!(cat.list_tracklists().unwrap().is_empty());
+        assert!(cat.tracklist_entries(id).unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A unique temp DB path for reload tests (no tempfile dependency).
