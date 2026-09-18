@@ -127,6 +127,10 @@ pub(crate) struct VinylSheet {
     /// Includes the copy `offer` was opened on, which the sheet skips when
     /// drawing so the same listing isn't shown twice.
     pub stocked: Vec<SellerOffer>,
+    /// A song title to light up in the tracklist as if the pointer were on
+    /// it: the line a tracklist row was opened from. Matched to a row the
+    /// way the matcher reads titles, so a spelling difference still lands.
+    pub mark: Option<String>,
 }
 
 /// One seller's concrete offer of the open record — see [`VinylSheet::offer`].
@@ -380,6 +384,7 @@ impl App {
             },
             offer: None,
             stocked: self.sheet_stocked(record.release_id),
+            mark: None,
         });
         self.spawn_sheet_fetch(record.release_id, ctx.clone());
         self.spawn_sheet_price(record.release_id, ctx.clone());
@@ -432,6 +437,7 @@ impl App {
             price: PriceState::Idle,
             offer: None,
             stocked: self.sheet_stocked(release_id),
+            mark: None,
         });
         self.spawn_sheet_fetch(release_id, ctx.clone());
         self.spawn_sheet_price(release_id, ctx.clone());
@@ -1792,6 +1798,11 @@ impl App {
                     .max_height(360.0)
                     .show(ui, |ui| {
                         ui.add_space(4.0);
+                        let marked = sheet.mark.as_deref().and_then(|m| {
+                            let d = sheet.detail.as_ref()?;
+                            let hit = d.matching_track_title(m)?;
+                            d.tracklist.iter().position(|t| t.title == hit)
+                        });
                         for (i, row) in sheet.rows.iter().enumerate() {
                             let playing = match row.source {
                                 SheetSource::Local(l) => sheet
@@ -1801,7 +1812,7 @@ impl App {
                                 SheetSource::Video(v) => playing_video == Some(v),
                                 SheetSource::None => false,
                             };
-                            if sheet_row_ui(ui, sheet, row, i, playing) {
+                            if sheet_row_ui(ui, sheet, row, i, playing, marked == Some(i)) {
                                 act = Some(Act::Play(i));
                             }
                         }
@@ -2300,12 +2311,15 @@ fn video_transport_ui(
 }
 
 /// One tracklist row. Returns true when the user asked to play it.
+/// `marked` paints the hover fill without the pointer (see
+/// [`VinylSheet::mark`]).
 fn sheet_row_ui(
     ui: &mut egui::Ui,
     sheet: &VinylSheet,
     row: &SheetRow,
     index: usize,
     playing: bool,
+    marked: bool,
 ) -> bool {
     const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
     let playable = !matches!(row.source, SheetSource::None);
@@ -2461,16 +2475,18 @@ fn sheet_row_ui(
     // cursor would light up both.
     let id = ui.id().with(("sheet-row", index));
     let hit = ui.interact(rect, id, egui::Sense::click());
+    if marked || (playable && hit.hovered()) {
+        ui.painter().set(
+            bg,
+            egui::epaint::RectShape::filled(
+                rect.expand2(egui::vec2(4.0, 0.0)),
+                egui::Rounding::same(4.0),
+                egui::Color32::from_white_alpha(10),
+            ),
+        );
+    }
     if playable {
         if hit.hovered() {
-            ui.painter().set(
-                bg,
-                egui::epaint::RectShape::filled(
-                    rect.expand2(egui::vec2(4.0, 0.0)),
-                    egui::Rounding::same(4.0),
-                    egui::Color32::from_white_alpha(10),
-                ),
-            );
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         if hit.clicked() {

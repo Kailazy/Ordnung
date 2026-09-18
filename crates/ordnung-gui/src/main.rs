@@ -1293,11 +1293,12 @@ struct App {
     /// clears it to force a re-read.
     tracklist_entries: Vec<TracklistEntry>,
     tracklist_entries_for: Option<Id>,
-    /// The inline paste box: open or not, its text, and the name field.
-    /// Put the caret in the paste box on the next pass (the window just opened).
+    /// The paste window: open or not, and its text.
+    tracklist_paste_open: bool,
+    /// Put the caret in the paste box on the next pass. Set from the top
+    /// bar's ≡ too, where it opens the paste window when nothing is saved yet.
     tracklist_focus_paste: bool,
     tracklist_paste: String,
-    tracklist_name: String,
     /// The saved tracklist the paste box is editing, when it holds one's
     /// text rather than a new paste; Match then saves back into it.
     tracklist_editing: Option<Id>,

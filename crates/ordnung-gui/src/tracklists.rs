@@ -2,14 +2,16 @@
 //! up and matched to its Discogs record. Opened from the tiny ≡ glyph in
 //! the top bar, left of the counts; a tool, not a tab.
 //!
-//! Inside, the paste box is simply there, one line tall, and grows only as
-//! the pasted text does (⌘V with the window open and nothing focused lands
-//! in it too). Match saves the paste as a tracklist and
+//! Inside, the saved tracklists sit in a left bar under a search field and
+//! a + that opens the paste window: one square box for the text and a
+//! Match button, nothing else (⌘V with the window open and nothing focused
+//! lands there too). Match saves the paste as a tracklist and
 //! runs the background job in `jobs::run_match_tracklist`, whose rows fill
-//! in one at a time. A saved tracklist can be reopened in the box (Edit the
-//! paste, in the ⋯ menu) to add or fix lines; Save writes it back through
-//! `Catalog::update_tracklist`, which keeps the matches of lines that
-//! didn't change, and only the new lines get looked up. Each row shows the song as pasted, the record it
+//! in one at a time. A saved tracklist can be reopened in that window (Edit
+//! the paste, in the ⋯ menu or the tab's own menu) to add or fix lines;
+//! Save writes it back through `Catalog::update_tracklist`, which keeps
+//! the matches of lines that didn't change, and only the new lines get
+//! looked up. Each row shows the song as pasted, the record it
 //! matched (cover, title, year, label and catalog number, format), a
 //! confidence pip and OWNED / WANT / IN LIBRARY badges; a click opens the
 //! ordinary record sheet, the ↻ at the row's edge looks that one line up
@@ -40,15 +42,50 @@ enum LineAct {
     Retry(usize),
 }
 
-/// Whole-list actions from the header.
+/// Whole-list actions, from the header's ⋯ or a tab's menu in the left bar.
+#[derive(Clone, Copy)]
 enum ListAct {
     Match,
     Rematch,
     Edit,
-    WantAll,
-    ShowOnMap,
     CopyText,
     Delete,
+}
+
+/// The whole-list menu, shared by the header's ⋯ and the tab's own menu.
+/// `with_match` adds Match, which the header keeps as its own button.
+fn list_menu(ui: &mut egui::Ui, busy: bool, with_match: bool) -> Option<ListAct> {
+    let mut act = None;
+    if with_match
+        && ui.add_enabled(!busy, egui::Button::new("Match")).on_hover_note("Look up the lines that aren't settled yet").clicked()
+    {
+        act = Some(ListAct::Match);
+    }
+    if ui.add_enabled(!busy, egui::Button::new("Re-match every line")).on_hover_note("Search again for every line you haven't chosen by hand").clicked() {
+        act = Some(ListAct::Rematch);
+    }
+    if ui.button("Edit the paste").on_hover_note("Open the text in the paste window to add, fix or remove lines").clicked() {
+        act = Some(ListAct::Edit);
+    }
+    if ui.button("Copy as text").on_hover_note("Copy the lines with their matched records").clicked() {
+        act = Some(ListAct::CopyText);
+    }
+    ui.separator();
+    if ui.button(egui::RichText::new("Delete tracklist").color(color::RED)).on_hover_note("Remove this tracklist. Matched records stay on the map").clicked() {
+        act = Some(ListAct::Delete);
+    }
+    if act.is_some() {
+        ui.close_menu();
+    }
+    act
+}
+
+/// One line of text cut to `max_w` with an ellipsis, for painting where a
+/// label can't go.
+fn truncated(ui: &egui::Ui, text: &str, font: egui::FontId, ink: egui::Color32, max_w: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, ink);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_w.max(0.0));
+    ui.fonts(|f| f.layout_job(job))
 }
 
 /// `17 Sep 2026` from unix seconds, without a date crate: the civil-date
@@ -200,8 +237,9 @@ impl App {
     }
 
     fn draw_tracklists(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, query: &str) {
-        // ⌘V with nothing focused lands in the paste box, so it needn't be
-        // clicked first.
+        // ⌘V with nothing focused lands in the paste window, opening it if
+        // it isn't. While a saved tracklist is being edited there, the
+        // paste adds to it rather than replacing what is being edited.
         let pasted = ctx.input(|i| {
             i.events.iter().find_map(|e| match e {
                 egui::Event::Paste(t) if !t.trim().is_empty() => Some(t.clone()),
@@ -210,16 +248,29 @@ impl App {
         });
         if let Some(t) = pasted {
             if ctx.memory(|m| m.focused().is_none()) {
-                // While a saved tracklist is open for editing, the paste
-                // adds to it rather than replacing what is being edited.
-                if self.tracklist_editing.is_some() && !self.tracklist_paste.trim().is_empty() {
+                if self.tracklist_paste_open
+                    && self.tracklist_editing.is_some()
+                    && !self.tracklist_paste.trim().is_empty()
+                {
                     if !self.tracklist_paste.ends_with('\n') {
                         self.tracklist_paste.push('\n');
                     }
                     self.tracklist_paste.push_str(&t);
                 } else {
                     self.tracklist_paste = t;
+                    self.tracklist_editing = None;
                 }
+                self.tracklist_paste_open = true;
+                self.tracklist_focus_paste = true;
+            }
+        }
+        // Opening the window with nothing saved yet goes straight to the
+        // paste; with tracklists to show, it just shows them.
+        if self.tracklist_focus_paste && !self.tracklist_paste_open {
+            if self.tracklists.is_empty() {
+                self.tracklist_paste_open = true;
+            } else {
+                self.tracklist_focus_paste = false;
             }
         }
         if self.tracklist_current.is_none() {
@@ -227,207 +278,187 @@ impl App {
         }
         self.ensure_tracklist_entries();
 
-        ui.add_space(space::S3);
-        self.draw_tracklist_paste(ui, ctx);
-        ui.add_space(space::S3);
-
         if self.tracklists.is_empty() {
-            if self.tracklist_paste.trim().is_empty() {
-                ui.add_space(space::S6);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new("No tracklists yet")
-                            .font(font::headline())
-                            .color(color::LABEL_2),
-                    );
-                });
-            }
+            ui.add_space(space::S6);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new("No tracklists yet")
+                        .font(font::headline())
+                        .color(color::LABEL_2),
+                );
+                ui.add_space(space::S3);
+                if crate::ui::button::button(ui, "Paste a tracklist")
+                    .on_hover_note("Paste a mix's tracklist and match every line to a record")
+                    .clicked()
+                {
+                    self.open_tracklist_paste(None);
+                }
+            });
+            self.draw_tracklist_paste_window(ctx);
             return;
         }
 
         egui::SidePanel::left("tracklists_side")
             .resizable(true)
-            .default_width(180.0)
-            .min_width(140.0)
-            .show_inside(ui, |ui| self.draw_tracklist_side(ui));
+            .default_width(200.0)
+            .min_width(150.0)
+            .show_inside(ui, |ui| self.draw_tracklist_side(ui, ctx));
         egui::CentralPanel::default().show_inside(ui, |ui| {
             self.draw_tracklist_rows(ui, ctx, query);
         });
         self.draw_tracklist_pick(ctx);
+        self.draw_tracklist_paste_window(ctx);
     }
 
-    /// The paste box, simply there: one line tall until the text asks for
-    /// more, capped at a third of the view and scrolling inside past that.
-    /// Once it holds text, the name field, Match and the parse preview sit
-    /// beneath it. The window's search field shares its row on the right.
-    /// Editing a saved tracklist uses the same box: its text is loaded, the
-    /// name field holds its name, and Match reads Save.
-    fn draw_tracklist_paste(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let box_id = egui::Id::new("tracklist_paste_box");
-        let was_focused = ctx.memory(|m| m.has_focus(box_id));
-        if was_focused && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.clear_tracklist_paste(ctx, box_id);
-        }
-        let focus = std::mem::take(&mut self.tracklist_focus_paste);
-        let max_h = (ui.available_height() / 3.0).max(60.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-            if !self.tracklists.is_empty() {
-                crate::ui::field::Field::singleline(&mut self.tracklist_filter)
-                    .width(160.0)
-                    .hint("Search the tracklist")
-                    .show(ui)
-                    .on_hover_note("Filter the lines by song, artist, label or matched record");
+    /// Open the paste window: empty for a new tracklist, or holding a
+    /// saved one's text to add, fix or remove lines.
+    fn open_tracklist_paste(&mut self, edit: Option<Id>) {
+        self.tracklist_paste.clear();
+        self.tracklist_editing = None;
+        if let Some(t) = edit.and_then(|id| self.tracklists.iter().find(|t| t.id == id)) {
+            self.tracklist_paste = t.pasted_text.clone();
+            if !self.tracklist_paste.ends_with('\n') {
+                self.tracklist_paste.push('\n');
             }
-            egui::ScrollArea::vertical()
-                .id_salt("tracklist_paste_scroll")
-                .max_height(max_h)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    let resp = crate::ui::field::Field::multiline(&mut self.tracklist_paste)
-                        .id(box_id)
-                        .rows(1)
-                        .width(f32::INFINITY)
-                        .hint("Paste the tracklist here")
-                        .font(egui::TextStyle::Body)
-                        .show(ui);
-                    if focus {
-                        resp.request_focus();
-                    }
-                });
-        });
-        if self.tracklist_paste.trim().is_empty() {
+            self.tracklist_editing = Some(t.id);
+        }
+        self.tracklist_paste_open = true;
+        self.tracklist_focus_paste = true;
+    }
+
+    /// The paste window: one square box for the text and a Match button in
+    /// its corner, nothing else. The name comes from a `Tracklist:` line in
+    /// the paste, else the day; a saved tracklist reopened here keeps its
+    /// name, and Match reads Save.
+    fn draw_tracklist_paste_window(&mut self, ctx: &egui::Context) {
+        if !self.tracklist_paste_open {
             return;
         }
-
-        let lines = tracklist::parse_tracklist(&self.tracklist_paste);
-        let tracks = lines.iter().filter(|l| l.kind == LineKind::Track).count();
-        let ids = lines.iter().filter(|l| l.kind == LineKind::Id).count();
-        let skipped = lines.iter().filter(|l| l.kind == LineKind::Noise).count();
+        const SIDE: f32 = 440.0;
+        let box_id = egui::Id::new("tracklist_paste_box");
         let editing = self
             .tracklist_editing
             .and_then(|id| self.tracklists.iter().find(|t| t.id == id))
             .cloned();
-        let suggested = match &editing {
+        let focus = std::mem::take(&mut self.tracklist_focus_paste);
+        let busy = self.is_busy();
+        let mut open = true;
+        let mut save = false;
+        crate::ui::window::Window::new(if editing.is_some() { "Edit tracklist" } else { "New tracklist" })
+            .id(egui::Id::new("tracklist_paste_window"))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_width(SIDE);
+                egui::ScrollArea::vertical()
+                    .id_salt("tracklist_paste_scroll")
+                    .max_height(SIDE)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let resp = crate::ui::field::Field::multiline(&mut self.tracklist_paste)
+                            .id(box_id)
+                            .width(SIDE)
+                            .min_size(egui::vec2(SIDE, SIDE))
+                            .hint("Paste the tracklist here")
+                            .font(egui::TextStyle::Body)
+                            .show(ui);
+                        if focus {
+                            resp.request_focus();
+                        }
+                    });
+                ui.add_space(space::S3);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let lines = tracklist::parse_tracklist(&self.tracklist_paste);
+                    let can = lines.iter().any(|l| l.kind != LineKind::Noise) && !busy;
+                    let (verb, note) = match (&editing, busy) {
+                        (_, true) => ("Match", "Wait for the current job to finish"),
+                        (Some(_), false) => ("Save", "Save the edit. Lines that didn't change keep their records; new ones get looked up"),
+                        (None, false) => ("Match", "Save the tracklist and look every line up on Discogs"),
+                    };
+                    if crate::ui::button::button_enabled(ui, can, verb).on_hover_note(note).clicked() {
+                        save = true;
+                    }
+                });
+            });
+        if !open {
+            self.close_tracklist_paste(ctx, box_id);
+            return;
+        }
+        if !save {
+            return;
+        }
+        let text = self.tracklist_paste.clone();
+        let lines = tracklist::parse_tracklist(&text);
+        let name = match &editing {
             Some(t) => t.name.clone(),
-            None => tracklist::suggested_name(&self.tracklist_paste)
+            None => tracklist::suggested_name(&text)
                 .unwrap_or_else(|| format!("Pasted {}", fmt_day(now_unix()))),
         };
-
-        ui.add_space(space::S2);
-        let mut save = false;
-        let mut cancel = false;
-        crate::ui::control_row(ui, |ui| {
-            ui.horizontal(|ui| {
-                crate::ui::field::Field::singleline(&mut self.tracklist_name)
-                    .width(220.0)
-                    .hint(suggested.as_str())
-                    .show(ui)
-                    .on_hover_note("A name for this tracklist");
-                let can = tracks + ids > 0 && !self.is_busy();
-                let (verb, note) = match (&editing, self.is_busy()) {
-                    (_, true) => ("Match", "Wait for the current job to finish"),
-                    (Some(_), false) => ("Save", "Save the edit. Lines that didn't change keep their records; new ones get looked up"),
-                    (None, false) => ("Match", "Save the tracklist and look every line up on Discogs"),
-                };
-                if crate::ui::button::button_enabled(ui, can, verb).on_hover_note(note).clicked() {
-                    save = true;
-                }
-                if crate::ui::button::button(ui, "Cancel")
-                    .on_hover_note(if editing.is_some() { "Drop the edit and keep the tracklist as it was" } else { "Clear the paste box" })
-                    .clicked()
-                {
-                    cancel = true;
-                }
-                if let Some(t) = &editing {
-                    ui.label(egui::RichText::new(format!("Editing {}", t.name)).color(color::LABEL_2))
-                        .on_hover_note("Add, fix or remove lines, then Save");
-                }
-                let mut parts = vec![format!("{tracks} track{}", if tracks == 1 { "" } else { "s" })];
-                if ids > 0 {
-                    parts.push(format!("{ids} ID{}", if ids == 1 { "" } else { "s" }));
-                }
-                if skipped > 0 {
-                    parts.push(format!("{skipped} line{} skipped", if skipped == 1 { "" } else { "s" }));
-                }
-                let est = tracks as f32 * 1.8;
-                let est = if est >= 90.0 {
-                    format!(" · about {} min", (est / 60.0).round().max(1.0) as u32)
-                } else if tracks > 0 {
-                    format!(" · about {} s", (est / 10.0).ceil() as u32 * 10)
+        let saved = match editing {
+            Some(t) => Catalog::open(&self.db_path)
+                .and_then(|c| c.update_tracklist(t.id, &name, &text, &lines))
+                .map(|()| t.id),
+            None => Catalog::open(&self.db_path).and_then(|c| c.create_tracklist(&name, &text, &lines)),
+        };
+        match saved {
+            Ok(id) => {
+                self.reload_tracklists();
+                self.tracklist_current = Some(id);
+                self.close_tracklist_paste(ctx, box_id);
+                // Only what isn't settled gets looked up, so an edit that
+                // adds three lines costs three lines' requests.
+                self.ensure_tracklist_entries();
+                let unsettled = self.tracklist_entries.iter().any(|e| {
+                    e.kind == LineKind::Track
+                        && e.chosen_by != ChosenBy::User
+                        && (e.release_id.is_none() || e.confidence < Confidence::Likely)
+                });
+                if unsettled {
+                    self.spawn_match_tracklist(ctx.clone(), id, MatchScope::Unsettled);
                 } else {
-                    String::new()
-                };
-                ui.label(egui::RichText::new(format!("{}{est}", parts.join(" · "))).weak())
-                    .on_hover_note("What the paste reads as, and how long the lookups take at Discogs's pace");
-            });
-        });
-        if cancel {
-            self.clear_tracklist_paste(ctx, box_id);
-        }
-        if save {
-            let name = if self.tracklist_name.trim().is_empty() {
-                suggested
-            } else {
-                self.tracklist_name.trim().to_string()
-            };
-            let text = self.tracklist_paste.clone();
-            let saved = match editing {
-                Some(t) => Catalog::open(&self.db_path)
-                    .and_then(|c| c.update_tracklist(t.id, &name, &text, &lines))
-                    .map(|()| t.id),
-                None => Catalog::open(&self.db_path).and_then(|c| c.create_tracklist(&name, &text, &lines)),
-            };
-            match saved {
-                Ok(id) => {
-                    self.reload_tracklists();
-                    self.tracklist_current = Some(id);
-                    self.clear_tracklist_paste(ctx, box_id);
-                    // Only what isn't settled gets looked up, so an edit that
-                    // adds three lines costs three lines' requests.
-                    self.ensure_tracklist_entries();
-                    let unsettled = self.tracklist_entries.iter().any(|e| {
-                        e.kind == LineKind::Track
-                            && e.chosen_by != ChosenBy::User
-                            && (e.release_id.is_none() || e.confidence < Confidence::Likely)
-                    });
-                    if unsettled {
-                        self.spawn_match_tracklist(ctx.clone(), id, MatchScope::Unsettled);
-                    } else {
-                        self.status = format!("Saved the tracklist {name}.");
-                    }
+                    self.status = format!("Saved the tracklist {name}.");
                 }
-                Err(e) => self.fail(format!("Couldn't save the tracklist: {e}")),
             }
+            Err(e) => self.fail(format!("Couldn't save the tracklist: {e}")),
         }
     }
 
-    fn clear_tracklist_paste(&mut self, ctx: &egui::Context, box_id: egui::Id) {
+    fn close_tracklist_paste(&mut self, ctx: &egui::Context, box_id: egui::Id) {
         self.tracklist_paste.clear();
-        self.tracklist_name.clear();
         self.tracklist_editing = None;
+        self.tracklist_paste_open = false;
         ctx.memory_mut(|m| m.surrender_focus(box_id));
     }
 
-    /// Open a saved tracklist's text in the paste box to add or fix lines.
-    fn edit_tracklist(&mut self, id: Id) {
-        let Some(t) = self.tracklists.iter().find(|t| t.id == id) else { return };
-        self.tracklist_paste = t.pasted_text.clone();
-        if !self.tracklist_paste.ends_with('\n') {
-            self.tracklist_paste.push('\n');
-        }
-        self.tracklist_name = t.name.clone();
-        self.tracklist_editing = Some(id);
-        self.tracklist_focus_paste = true;
-    }
-
-    /// The saved tracklists, newest first.
-    fn draw_tracklist_side(&mut self, ui: &mut egui::Ui) {
+    /// The left bar: the search field with the + for a new paste above the
+    /// saved tracklists, newest first. A tab's secondary click opens the
+    /// same menu the header's ⋯ has.
+    fn draw_tracklist_side(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let busy = self.is_busy();
         let mut pick: Option<Id> = None;
+        let mut act: Option<(Id, ListAct)> = None;
+        let mut new_paste = false;
+        ui.add_space(space::S2);
+        // The row takes its own height only; a bare `with_layout` here
+        // would claim the whole bar and leave the tabs nowhere to go.
+        let row = egui::vec2(ui.available_width(), crate::ui::control_h(ui));
+        ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            crate::ui::control_row(ui, |ui| {
+                if crate::ui::button::button(ui, "+").on_hover_note("Paste a new tracklist").clicked() {
+                    new_paste = true;
+                }
+                crate::ui::field::Field::singleline(&mut self.tracklist_filter)
+                    .width(ui.available_width())
+                    .hint("Search")
+                    .show(ui)
+                    .on_hover_note("Filter the lines by song, artist, label or matched record");
+            });
+        });
+        ui.add_space(space::S2);
+        let lists = self.tracklists.clone();
         egui::ScrollArea::vertical()
             .id_salt("tracklists_side_scroll")
             .show(ui, |ui| {
-                ui.add_space(space::S2);
-                for t in &self.tracklists {
+                for t in &lists {
                     let active = self.tracklist_current == Some(t.id);
                     let w = ui.available_width();
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 40.0), egui::Sense::click());
@@ -437,31 +468,88 @@ impl App {
                         ui.painter().rect_filled(rect, egui::Rounding::same(6.0), color::SURFACE);
                     }
                     let ink = if active || resp.hovered() { color::LABEL } else { color::LABEL_2 };
-                    ui.painter().text(
-                        egui::pos2(rect.left() + space::S3, rect.top() + 6.0),
-                        egui::Align2::LEFT_TOP,
-                        &t.name,
-                        font::strong(font::body().size),
-                        ink,
-                    );
-                    ui.painter().text(
-                        egui::pos2(rect.left() + space::S3, rect.bottom() - 6.0),
-                        egui::Align2::LEFT_BOTTOM,
-                        format!("{} of {} matched · {}", t.matched, t.lines, fmt_day(t.created_at)),
+                    // Cut to the bar, not spilling past it.
+                    let inner_w = w - 2.0 * space::S3;
+                    let name = truncated(ui, &t.name, font::strong(font::body().size), ink, inner_w);
+                    ui.painter().galley(egui::pos2(rect.left() + space::S3, rect.top() + 6.0), name, ink);
+                    let sub = truncated(
+                        ui,
+                        &format!("{} of {} matched · {}", t.matched, t.lines, fmt_day(t.created_at)),
                         font::caption(),
                         color::LABEL_3,
+                        inner_w,
                     );
+                    let sub_h = sub.size().y;
+                    ui.painter().galley(egui::pos2(rect.left() + space::S3, rect.bottom() - 6.0 - sub_h), sub, color::LABEL_3);
                     if resp.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
                     if resp.clicked() {
                         pick = Some(t.id);
                     }
+                    resp.context_menu(|ui| {
+                        if let Some(a) = list_menu(ui, busy, true) {
+                            act = Some((t.id, a));
+                        }
+                    });
                 }
             });
+        if new_paste {
+            self.open_tracklist_paste(None);
+        }
         if let Some(id) = pick {
             self.tracklist_current = Some(id);
             self.tracklist_entries_for = None;
+        }
+        if let Some((id, a)) = act {
+            // The action reads the current tracklist's lines, so the tab it
+            // came from becomes current first.
+            self.tracklist_current = Some(id);
+            self.tracklist_entries_for = None;
+            self.ensure_tracklist_entries();
+            self.apply_list_act(ctx, id, a);
+        }
+    }
+
+    /// One whole-list action on tracklist `id`, whose lines are loaded.
+    fn apply_list_act(&mut self, ctx: &egui::Context, id: Id, act: ListAct) {
+        let Some(t) = self.tracklists.iter().find(|t| t.id == id).cloned() else { return };
+        match act {
+            ListAct::Match => self.spawn_match_tracklist(ctx.clone(), id, MatchScope::Unsettled),
+            ListAct::Rematch => self.spawn_match_tracklist(ctx.clone(), id, MatchScope::All),
+            ListAct::Edit => self.open_tracklist_paste(Some(id)),
+            ListAct::CopyText => {
+                let mut out = String::new();
+                for e in &self.tracklist_entries {
+                    let song = if e.kind == LineKind::Id { "ID".to_string() } else { e.song_label() };
+                    out.push_str(&format!("{:02}. {song}", e.position));
+                    if e.release_id.is_some() {
+                        let name = match (e.rel_artist.as_deref(), e.rel_title.as_deref()) {
+                            (Some(a), Some(t)) if !a.is_empty() => format!("{a} - {t}"),
+                            (_, Some(t)) => t.to_string(),
+                            _ => String::new(),
+                        };
+                        out.push_str(&format!("  →  {name}"));
+                        let sub = record_sub(e);
+                        if !sub.is_empty() {
+                            out.push_str(&format!(" ({sub})"));
+                        }
+                    }
+                    out.push('\n');
+                }
+                ctx.output_mut(|o| o.copied_text = out);
+                self.status = format!("Copied {} lines.", self.tracklist_entries.len());
+            }
+            ListAct::Delete => {
+                match Catalog::open(&self.db_path).and_then(|c| c.delete_tracklist(id)) {
+                    Ok(()) => {
+                        self.tracklist_current = None;
+                        self.reload_tracklists();
+                        self.status = format!("Deleted the tracklist {}.", t.name);
+                    }
+                    Err(e) => self.fail(format!("Couldn't delete the tracklist: {e}")),
+                }
+            }
         }
     }
 
@@ -480,38 +568,8 @@ impl App {
             {
                 crate::ui::control_row(ui, |ui| {
                     ui.menu_button("⋯", |ui| {
-                        if ui.button("Re-match every line").on_hover_note("Search again for every line you haven't chosen by hand").clicked() {
-                            act = Some(ListAct::Rematch);
-                            ui.close_menu();
-                        }
-                        if ui.button("Edit the paste").on_hover_note("Open the text in the paste box to add, fix or remove lines").clicked() {
-                            act = Some(ListAct::Edit);
-                            ui.close_menu();
-                        }
-                        if ui.button("Copy as text").on_hover_note("Copy the lines with their matched records").clicked() {
-                            act = Some(ListAct::CopyText);
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button(egui::RichText::new("Delete tracklist").color(color::RED)).on_hover_note("Remove this tracklist. Matched records stay on the map").clicked() {
-                            act = Some(ListAct::Delete);
-                            ui.close_menu();
-                        }
+                        act = list_menu(ui, busy, false);
                     });
-                    if crate::ui::button::button(ui, "Show on map").on_hover_note("Open the record map, where the matched records now sit").clicked() {
-                        act = Some(ListAct::ShowOnMap);
-                    }
-                    let wantable = self
-                        .tracklist_entries
-                        .iter()
-                        .filter(|e| e.release_id.is_some_and(|r| !self.vinyl_owned.contains(&r) && !self.vinyl_wanted.contains(&r)))
-                        .count();
-                    if crate::ui::button::button_enabled(ui, wantable > 0 && !busy, "♥ Want all")
-                        .on_hover_note("Put every matched record you don't own or want on your wantlist")
-                        .clicked()
-                    {
-                        act = Some(ListAct::WantAll);
-                    }
                     let unsettled = self
                         .tracklist_entries
                         .iter()
@@ -763,68 +821,8 @@ impl App {
                 });
             });
 
-        match act {
-            Some(ListAct::Match) => self.spawn_match_tracklist(ctx.clone(), id, MatchScope::Unsettled),
-            Some(ListAct::Rematch) => self.spawn_match_tracklist(ctx.clone(), id, MatchScope::All),
-            Some(ListAct::Edit) => self.edit_tracklist(id),
-            Some(ListAct::WantAll) => {
-                let ids: Vec<u64> = self
-                    .tracklist_entries
-                    .iter()
-                    .filter_map(|e| e.release_id)
-                    .filter(|r| !self.vinyl_owned.contains(r) && !self.vinyl_wanted.contains(r))
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-                if !ids.is_empty() {
-                    let n = ids.len();
-                    self.request_vinyl_edit(
-                        ctx.clone(),
-                        VinylEdit::Want {
-                            release_ids: ids,
-                            label: format!("{n} records from {}", t.name),
-                        },
-                    );
-                }
-            }
-            Some(ListAct::ShowOnMap) => {
-                self.view = LibraryView::Vinyl;
-                self.vinyl_tab = VinylTab::Graph;
-                self.tracklist_open = false;
-            }
-            Some(ListAct::CopyText) => {
-                let mut out = String::new();
-                for e in &self.tracklist_entries {
-                    let song = if e.kind == LineKind::Id { "ID".to_string() } else { e.song_label() };
-                    out.push_str(&format!("{:02}. {song}", e.position));
-                    if e.release_id.is_some() {
-                        let name = match (e.rel_artist.as_deref(), e.rel_title.as_deref()) {
-                            (Some(a), Some(t)) if !a.is_empty() => format!("{a} - {t}"),
-                            (_, Some(t)) => t.to_string(),
-                            _ => String::new(),
-                        };
-                        out.push_str(&format!("  →  {name}"));
-                        let sub = record_sub(e);
-                        if !sub.is_empty() {
-                            out.push_str(&format!(" ({sub})"));
-                        }
-                    }
-                    out.push('\n');
-                }
-                ctx.output_mut(|o| o.copied_text = out);
-                self.status = format!("Copied {} lines.", self.tracklist_entries.len());
-            }
-            Some(ListAct::Delete) => {
-                match Catalog::open(&self.db_path).and_then(|c| c.delete_tracklist(id)) {
-                    Ok(()) => {
-                        self.tracklist_current = None;
-                        self.reload_tracklists();
-                        self.status = format!("Deleted the tracklist {}.", t.name);
-                    }
-                    Err(e) => self.fail(format!("Couldn't delete the tracklist: {e}")),
-                }
-            }
-            None => {}
+        if let Some(a) = act {
+            self.apply_list_act(ctx, id, a);
         }
 
         let Some(act) = line_act else { return };
@@ -839,6 +837,11 @@ impl App {
             LineAct::Open(_) => {
                 if let Some(r) = e.release_id {
                     self.open_release_sheet(r, rel_artist, rel_title, record_sub(&e), e.rel_thumb.clone(), ctx);
+                    // The sheet lights the song's row the way the pointer
+                    // would, so it's found at a glance.
+                    if let Some(sheet) = self.vinyl_sheet.as_mut().filter(|s| s.release_id == r) {
+                        sheet.mark = e.rel_track.clone().or_else(|| e.title.clone());
+                    }
                 }
             }
             LineAct::Want(_) => {
