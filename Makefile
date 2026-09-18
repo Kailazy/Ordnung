@@ -17,7 +17,7 @@ app-only: ## Build + sign the local Ordnung.app, don't touch /Applications
 run: ## Run the GUI from source (debug, no bundle)
 	@cargo run -p ordnung-gui
 
-prune: ## Delete target/debug when it exceeds PRUNE_LIMIT_GB (default 20); release build is kept
+prune: ## Delete target/debug when it exceeds PRUNE_LIMIT_GB (default 50); release build is kept
 	@bash tools/prune-target.sh
 
 prune-install: ## Install a launchd job that runs `make prune` daily at 04:00

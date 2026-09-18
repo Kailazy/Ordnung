@@ -8,12 +8,12 @@
 # so `make app` stays fast. None of this exists on a user's machine; they only
 # get the 28 MB app bundle.
 #
-#   make prune           delete target/debug if it is over PRUNE_LIMIT_GB (default 20)
+#   make prune           delete target/debug if it is over PRUNE_LIMIT_GB (default 50)
 #   make prune-install   install a launchd job that runs the prune daily at 04:00
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-LIMIT_GB="${PRUNE_LIMIT_GB:-20}"
+LIMIT_GB="${PRUNE_LIMIT_GB:-50}"
 LABEL=app.ordnung.prune-target
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$HOME/.ordnung/prune.log"
