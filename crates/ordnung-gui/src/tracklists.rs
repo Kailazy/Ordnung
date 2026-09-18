@@ -514,12 +514,15 @@ impl App {
                             }
                         }
                     });
-                    // the song as pasted
+                    // the song as pasted: its name, with the clock and any
+                    // hints under it; the artist is what the record column
+                    // names
                     row.col(|ui| {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
-                            let label = match e.kind {
-                                LineKind::Id => "ID".to_string(),
+                            let label = match (e.kind, e.title.as_deref()) {
+                                (LineKind::Id, _) => "ID".to_string(),
+                                (_, Some(t)) => t.to_string(),
                                 _ => e.song_label(),
                             };
                             ui.add(egui::Label::new(egui::RichText::new(label).color(color::LABEL)).truncate());
@@ -553,6 +556,8 @@ impl App {
                                     ui.add(egui::Label::new(egui::RichText::new(record_sub(&e)).font(font::caption()).color(color::LABEL_3)).truncate());
                                 }
                                 None => {
+                                    // No record: the pasted artist keeps its
+                                    // place here, the status under it.
                                     let (_, words) = confidence_look(&e);
                                     let text = match (e.kind, e.chosen_by) {
                                         (LineKind::Id, _) => "",
@@ -560,7 +565,16 @@ impl App {
                                         (_, ChosenBy::User) => "Rejected",
                                         (_, ChosenBy::Auto) => "Not found on Discogs",
                                     };
-                                    ui.label(egui::RichText::new(text).color(color::LABEL_3)).on_hover_note(words);
+                                    match e.artist.as_deref().filter(|a| !a.is_empty() && e.kind != LineKind::Id) {
+                                        Some(a) => {
+                                            ui.add(egui::Label::new(egui::RichText::new(a).color(color::LABEL_2)).truncate());
+                                            ui.add(egui::Label::new(egui::RichText::new(text).font(font::caption()).color(color::LABEL_3)).truncate())
+                                                .on_hover_note(words);
+                                        }
+                                        None => {
+                                            ui.label(egui::RichText::new(text).color(color::LABEL_3)).on_hover_note(words);
+                                        }
+                                    }
                                 }
                             }
                         });

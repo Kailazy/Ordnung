@@ -311,6 +311,8 @@ fn parse_line(raw: &str) -> TracklistLine {
         line.timestamp = ts2;
     }
     let rest = strip_ordinal(&rest).trim().to_string();
+    // The mashup credit may sit after the ordinal too: `06. w/ Artist - …`.
+    let rest = strip_with_prefix(&rest).to_string();
     if rest.is_empty() {
         return line;
     }
@@ -364,14 +366,17 @@ fn normalise(s: &str) -> String {
             matches!(c, '•' | '▪' | '◦' | '·' | '*' | '>' | '–' | '—') || c.is_whitespace()
         })
         .trim();
-    // "w/ Artist - Title" is a mashup credit; the song after it is the one to
-    // look up.
-    let trimmed = trimmed
-        .strip_prefix("w/ ")
-        .or_else(|| trimmed.strip_prefix("W/ "))
-        .or_else(|| trimmed.strip_prefix("with "))
-        .unwrap_or(trimmed);
-    trimmed.trim().to_string()
+    strip_with_prefix(trimmed).trim().to_string()
+}
+
+/// `w/ Artist - Title` is a mashup credit; the song after it is the one to
+/// look up.
+fn strip_with_prefix(s: &str) -> &str {
+    s.strip_prefix("w/ ")
+        .or_else(|| s.strip_prefix("W/ "))
+        .or_else(|| s.strip_prefix("with "))
+        .unwrap_or(s)
+        .trim()
 }
 
 /// `Tracklist`, `Tracklist:`, `Tracklist - Deep Space`, `TRACKLIST (part 1)`.
@@ -935,6 +940,13 @@ mod tests {
         assert_eq!(l.title.as_deref(), Some("The Sun Can't Compare (Long Version)"));
         assert_eq!(l.catno_hint.as_deref(), Some("ALLV 001"));
         assert_eq!(l.label_hint, None);
+    }
+
+    #[test]
+    fn mashup_prefix_after_ordinal_is_dropped() {
+        let l = line("06. w/ Kerri Chandler - Rain");
+        assert_eq!(l.artist.as_deref(), Some("Kerri Chandler"));
+        assert_eq!(l.title.as_deref(), Some("Rain"));
     }
 
     #[test]
