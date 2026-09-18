@@ -158,7 +158,6 @@ impl App {
             liked_keys: HashSet::new(),
             liked_library: HashMap::new(),
             liked_library_dirty: true,
-            liked_only_to_get: false,
             tracklists: Vec::new(),
             tracklist_current: None,
             tracklist_entries: Vec::new(),
@@ -2419,7 +2418,20 @@ impl eframe::App for App {
                     let count_forms: Vec<String> = if shelf_counts.is_some() {
                         Vec::new()
                     } else {
-                        let mut counts = format!("{} tracks", self.rows.len());
+                        // The crate's rows are songs, not tracks, and its
+                        // table isn't `rows`: counted here through the same
+                        // filter its view applies.
+                        let mut counts = if self.view == LibraryView::Liked {
+                            let query = self.filter.trim().to_lowercase();
+                            let n = self
+                                .liked
+                                .iter()
+                                .filter(|s| crate::liked::liked_matches(s, &query))
+                                .count();
+                            if n == 1 { "1 song".to_string() } else { format!("{n} songs") }
+                        } else {
+                            format!("{} tracks", self.rows.len())
+                        };
                         let mut forms = vec![counts.clone()];
                         if !self.selection.is_empty() {
                             counts.push_str(&format!(" · {} selected", self.selection.len()));
@@ -3031,8 +3043,8 @@ impl eframe::App for App {
                         }
                         // The crate of liked songs, a slim row under the tile
                         // while there's something in it: the songs liked on
-                        // records, tracklists and the radio, and which of them
-                        // are still to get. An emptied crate leaves no row, and
+                        // records, tracklists and the radio. An emptied crate
+                        // leaves no row, and
                         // ejects the view so the user isn't parked on nothing.
                         if liked_count == 0 && *view == LibraryView::Liked {
                             *view = LibraryView::Library;
@@ -3048,7 +3060,7 @@ impl eframe::App for App {
                                 24.0,
                                 12.0,
                             )
-                            .on_hover_note("Songs you liked on records, tracklists and the radio, and which are still to get")
+                            .on_hover_note("Songs you liked on records, tracklists and the radio")
                             .clicked()
                             {
                                 *view = LibraryView::Liked;

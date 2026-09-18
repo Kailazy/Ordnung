@@ -289,11 +289,13 @@ impl<'o> Window<'o> {
         if let Some(m) = self.inner_margin {
             frame = frame.inner_margin(m);
         }
-        // The title bar is a row of the content (see `title_bar` below),
-        // set off from the rest by the gap egui's own bar kept.
+        // The title bar is a row of the content (see `title_bar` below):
+        // the title's line, centred in its strip by the frame's top margin
+        // repeated under it, the hairline, and the content's clearance
+        // from the hairline.
         let margin = frame.inner_margin;
         let title_gap = if self.title_bar {
-            margin.top + margin.bottom
+            margin.top + TITLE_CLEARANCE
         } else {
             0.0
         };
@@ -449,7 +451,7 @@ impl<'o> Window<'o> {
                 ui.min_rect().right()
             };
             if let Some(bar) = bar {
-                title_bar(ui, &title, bar, close, title_gap, left..=right, margin);
+                title_bar(ui, &title, bar, close, left..=right, margin);
             }
             if close {
                 let centre_y = match bar {
@@ -524,6 +526,12 @@ pub const CLOSE_SIDE: f32 = 24.0;
 /// title bar, a gap included; content on that row stops short of it.
 pub const CLOSE_W: f32 = CLOSE_SIDE + space::S3;
 
+/// Clearance the content keeps from the hairline under the title: the
+/// first line of a dialog is never flush against the rule. The title's
+/// own clearance from the rule is the frame's top margin, so the title
+/// sits centred in its strip, the same space above it and below.
+pub const TITLE_CLEARANCE: f32 = space::S4;
+
 /// The height of a push button, which is what the first row of a window's
 /// content is taken to hold: the close button is centred on it.
 fn control_row_h(ui: &egui::Ui) -> f32 {
@@ -545,7 +553,8 @@ fn title_clear(close: bool) -> f32 {
 
 /// Take the title's row from the top of the content, before the content:
 /// as tall as the title (never shorter than a control), the gap under it
-/// included, and as wide as the title with its clearance, up to the width
+/// (its clearance from the hairline and the content's from it) included,
+/// and as wide as the title with its clearance, up to the width
 /// on offer. The row can widen a window whose content is narrower than
 /// its title, up to the width egui was asked for (`default_width`, or
 /// egui's own), never past it: that's where the title gets cut instead.
@@ -575,14 +584,14 @@ fn title_row(ui: &mut egui::Ui, title: &egui::WidgetText, close: bool, gap: f32)
 /// Paint the title bar on its row, after the content: the title centred
 /// across the frame's width, cut with an ellipsis where it would reach the
 /// clearance at either side, and the hairline egui drew under its own bar,
-/// at the content's top (the `gap` under the row), across the frame from
-/// margin to margin.
+/// the frame's top margin under the row (so the title is centred between
+/// the frame's edge and the rule), across the frame from margin to margin.
+/// The content starts [`TITLE_CLEARANCE`] under the rule.
 fn title_bar(
     ui: &mut egui::Ui,
     title: &egui::WidgetText,
     row: egui::Rect,
     close: bool,
-    gap: f32,
     x: std::ops::RangeInclusive<f32>,
     margin: egui::Margin,
 ) {
@@ -605,7 +614,7 @@ fn title_bar(
         .galley(pos, galley, ui.visuals().text_color());
     ui.painter().hline(
         outer.shrink(0.1),
-        row.bottom() + gap,
+        row.bottom() + margin.top,
         ui.visuals().widgets.noninteractive.bg_stroke,
     );
     ui.set_clip_rect(clip);
@@ -860,6 +869,58 @@ mod tests {
             ui.label("tiny");
         });
         assert!(frame.width() >= 600.0 && frame.height() >= 400.0, "frame {frame:?}");
+    }
+
+    /// The title sits centred between the frame's top edge and the rule,
+    /// and the content starts a clearance under the rule, never flush.
+    #[test]
+    fn title_bar_keeps_its_margins() {
+        let ctx = egui::Context::default();
+        ctx.style_mut(|s| s.visuals.window_shadow = egui::epaint::Shadow::NONE);
+        let id = egui::Id::new("title-under-test");
+        let mut out = None;
+        for _ in 0..4 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                let mut open = true;
+                let mut content_top = 0.0;
+                let shown = Window::new("Under test")
+                    .id(id)
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        content_top = ui.cursor().top();
+                        ui.label("first line");
+                    })
+                    .expect("drawn");
+                let layer = egui::LayerId::new(egui::Order::Middle, id);
+                // The rule is the one horizontal line the window paints
+                // across its width: the widest 1-tall shape in the layer.
+                let rule_y = ctx.graphics(|g| {
+                    g.get(layer).and_then(|l| {
+                        l.all_entries()
+                            .map(|s| s.shape.visual_bounding_rect())
+                            .filter(|r| r.height() <= 2.0 && r.width() > 100.0)
+                            .map(|r| r.center().y)
+                            .next()
+                    })
+                });
+                out = Some((shown.response.rect, content_top, rule_y));
+            });
+        }
+        let (frame, content_top, rule_y) = out.unwrap();
+        let rule_y = rule_y.expect("a hairline under the title");
+        let margin = ctx.style().spacing.window_margin;
+        let strip = rule_y - frame.top();
+        let title_h = strip - 2.0 * margin.top;
+        assert!(title_h >= CLOSE_SIDE - 0.5, "title strip {strip} too short for a centred title");
+        let clearance = content_top - rule_y;
+        assert!(
+            (clearance - TITLE_CLEARANCE).abs() < 0.5,
+            "content starts {clearance} under the rule, wanted {TITLE_CLEARANCE}"
+        );
     }
 
     /// A fixed window still wraps its content rather than the offered rect.

@@ -5,9 +5,8 @@
 //! Clicking it puts the song in the crate; the mark turns into a heart
 //! wherever that song shows, so a record's sheet says at a glance which of
 //! its songs are liked. The crate is the Liked view in the sidebar: every
-//! liked song with the record it was liked on and whether a track in the
-//! library already is that song, which is what says which ones are still
-//! to be got digitally. Storage is the `liked_songs` catalog table, keyed
+//! liked song with the record it was liked on, marked where a track in the
+//! library already is that song. Storage is the `liked_songs` catalog table, keyed
 //! by [`song_key`] so a song liked twice, on two records, is one row.
 
 use super::*;
@@ -145,38 +144,19 @@ impl App {
             self.liked_library_dirty = false;
         }
         let in_library: Vec<Option<Id>> = self.liked.iter().map(|s| self.liked_local(s)).collect();
-        let to_get = in_library.iter().filter(|l| l.is_none()).count();
         let query = self.filter.trim().to_lowercase();
         let shown: Vec<usize> = self
             .liked
             .iter()
             .enumerate()
-            .filter(|(i, s)| !(self.liked_only_to_get && in_library[*i].is_some()) && liked_matches(s, &query))
+            .filter(|(_, s)| liked_matches(s, &query))
             .map(|(i, _)| i)
             .collect();
 
+        // The count is the top bar's (see the toolbar in `app`), where every
+        // view's count sits; the heading is the heading alone.
         ui.add_space(space::S3);
-        ui.horizontal(|ui| {
-            ui.add(egui::Label::new(egui::RichText::new("Liked songs").font(font::headline())).truncate());
-            let n = self.liked.len();
-            let songs = if n == 1 { "1 song".to_string() } else { format!("{n} songs") };
-            let words = match to_get {
-                0 => format!("{songs}, all in your library"),
-                m if m == n && n == 1 => format!("{songs}, not in your library yet"),
-                m if m == n => format!("{songs}, none in your library yet"),
-                m => format!("{songs}, {m} still to get"),
-            };
-            ui.add(egui::Label::new(egui::RichText::new(words).weak()).truncate());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let label = if self.liked_only_to_get { "✓ Still to get" } else { "Still to get" };
-                if crate::ui::button::button(ui, label)
-                    .on_hover_note("Only the songs no track in your library is: the ones to download")
-                    .clicked()
-                {
-                    self.liked_only_to_get = !self.liked_only_to_get;
-                }
-            });
-        });
+        ui.add(egui::Label::new(egui::RichText::new("Liked songs").font(font::headline())).truncate());
         ui.add_space(space::S2);
 
         if self.liked.is_empty() {
@@ -190,11 +170,7 @@ impl App {
         if shown.is_empty() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new(if self.liked_only_to_get {
-                    "Every liked song is in your library."
-                } else {
-                    "No liked song matches the filter."
-                }).weak());
+                ui.label(egui::RichText::new("No liked song matches the filter.").weak());
             });
             return;
         }
@@ -271,21 +247,20 @@ impl App {
                             }
                         });
                     });
-                    // Have it or not, and the heart at the row's edge.
+                    // The heart at the row's edge, and a FILE mark on the
+                    // songs a track in the library already is.
                     row.col(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let side = ui.spacing().interact_size.y;
                             if crate::ui::button::like_mark(ui, true, side).clicked() {
                                 act = Some(LikedAct::Unlike(i));
                             }
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                let (text, col, tip) = match local {
-                                    Some(_) => ("FILE", color::GREEN, "A track in your library is this song"),
-                                    None => ("TO GET", color::ORANGE, "No track in your library is this song yet"),
-                                };
-                                ui.add(egui::Label::new(egui::RichText::new(text).font(font::caption()).color(col).strong()))
-                                    .on_hover_note(tip);
-                            });
+                            if local.is_some() {
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    ui.add(egui::Label::new(egui::RichText::new("FILE").font(font::caption()).color(color::GREEN).strong()))
+                                        .on_hover_note("A track in your library is this song");
+                                });
+                            }
                         });
                     });
                     let resp = row.response();
@@ -383,7 +358,7 @@ fn spec_label(s: &LikeSpec) -> String {
 
 /// Whether the liked song has `query` (already lowercased) in any of its
 /// words. Blank matches everything.
-fn liked_matches(s: &LikedSong, query: &str) -> bool {
+pub(crate) fn liked_matches(s: &LikedSong, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }

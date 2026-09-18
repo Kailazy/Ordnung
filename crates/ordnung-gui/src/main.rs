@@ -1292,8 +1292,6 @@ struct App {
     /// are already here. Taken while the Liked view is up, once per reload.
     liked_library: HashMap<String, Id>,
     liked_library_dirty: bool,
-    /// The Liked view's filter: only the songs no library track is.
-    liked_only_to_get: bool,
     /// The Tracklists window (see `tracklists`), opened from the tiny ≡
     /// button in the top bar.
     tracklist_open: bool,
