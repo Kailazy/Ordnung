@@ -205,6 +205,7 @@ impl App {
             confirm_vinyl_edit: None,
             collect_wanted: None,
             vinyl_sheet: None,
+            sheet_frost: crate::ui::frost::Frost::new(),
             sheet_follows_dig: false,
             sheet_rx: None,
             sheet_price_rx: None,

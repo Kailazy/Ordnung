@@ -4,6 +4,7 @@
 //! [`theme`] pushes them into egui's global style. Bespoke component helpers will
 //! live alongside these in a later pass.
 
+pub mod frost;
 pub mod hover;
 pub mod icon;
 pub mod knob;

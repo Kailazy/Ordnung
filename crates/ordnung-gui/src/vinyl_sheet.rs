@@ -810,6 +810,14 @@ impl App {
     /// before it returns, so the caller just calls it once per frame.
     pub(crate) fn draw_vinyl_sheet(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         if self.vinyl_sheet.is_none() {
+            // Whichever way the sheet went, its next open is over a
+            // different screen and wants a fresh frost.
+            self.sheet_frost.clear();
+            return;
+        }
+        // The frost under the sheet is a snapshot of the app taken before the
+        // sheet is first drawn; the sheet waits the one frame that takes.
+        if !self.sheet_frost.ready(ctx) {
             return;
         }
         // A sheet is where videos get played from, so have the player built
@@ -1108,7 +1116,7 @@ impl App {
         let mut video_act: Option<VideoAct> = None;
         let mut open = true;
 
-        egui::Window::new(format!("{artist} — {title}"))
+        let shown = egui::Window::new(format!("{artist} — {title}"))
             .id(egui::Id::new(("vinyl-sheet", release_id)))
             .open(&mut open)
             .collapsible(false)
@@ -1117,15 +1125,13 @@ impl App {
             // it. Height still follows the tracklist.
             .resizable([false, true])
             .default_width(SHEET_W)
-            // A near-opaque take on the radio bar's see-through surface, so
-            // the two still read as one kind of thing laid on the app. The
-            // sheet is far larger than the bar and full of text, and at the
-            // bar's 0.96 whatever sat under it (graph labels, covers) ghosted
-            // through it; egui can't blur a backdrop, so the surface goes
-            // almost solid instead.
+            // A frosted surface: the app under the sheet shows through as a
+            // blur (painted beneath the window, see `sheet_frost`), and this
+            // tint over it keeps the sheet dark enough to read. The radio
+            // bar's plain see-through surface is its small cousin.
             .frame(
                 egui::Frame::window(&ctx.style())
-                    .fill(crate::ui::tokens::color::SURFACE.gamma_multiply(0.985)),
+                    .fill(crate::ui::tokens::color::SURFACE.gamma_multiply(0.9)),
             )
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.screen_rect().center())
@@ -1672,6 +1678,14 @@ impl App {
                     }
                 });
             });
+        if let Some(shown) = shown {
+            self.sheet_frost.paint(
+                ctx,
+                egui::Id::new("vinyl-sheet-frost"),
+                shown.response.rect,
+                ctx.style().visuals.window_rounding,
+            );
+        }
 
         // The transport talks straight to the panel — nothing here touches the
         // sheet's own state except the stop, which also clears the row marker.

@@ -1443,6 +1443,9 @@ struct App {
     /// position (a local file, a Discogs-listed YouTube video, or nothing).
     /// `None` when no record is open. See [`vinyl_sheet`].
     vinyl_sheet: Option<VinylSheet>,
+    /// The record sheet's frosted backdrop: a blurred snapshot of the app
+    /// taken as the sheet opened, painted under it. See [`ui::frost`].
+    sheet_frost: ui::frost::Frost,
     /// The open sheet is riding the dig: a thread was taken from the sheet's own
     /// branch buttons, so when the step lands the sheet re-points at the record
     /// the dig walked to instead of closing. Digging from the sheet is a chain
