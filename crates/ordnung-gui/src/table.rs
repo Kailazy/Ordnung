@@ -837,6 +837,7 @@ impl App {
             | LibraryView::RecentlyAdded
             | LibraryView::Duplicates
             | LibraryView::Missing
+            | LibraryView::Liked
             | LibraryView::Vinyl
             | LibraryView::Usb(..) => None,
         };
@@ -927,6 +928,7 @@ impl App {
             | LibraryView::RecentlyAdded
             | LibraryView::Duplicates
             | LibraryView::Missing
+            | LibraryView::Liked
             | LibraryView::Vinyl
             | LibraryView::Usb(..) => None,
         };
@@ -2743,6 +2745,7 @@ pub(crate) fn load_rows(
         // the flat track table.
         LibraryView::Duplicates
         | LibraryView::Missing
+        | LibraryView::Liked
         | LibraryView::Vinyl
         | LibraryView::Usb(..) => Ok(Vec::new()),
     }

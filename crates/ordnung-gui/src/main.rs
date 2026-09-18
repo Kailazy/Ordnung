@@ -17,6 +17,7 @@ mod graph;
 mod inspector;
 mod jobs;
 mod browse_page;
+mod liked;
 mod macos_drag;
 mod macos_menu;
 mod macos_pasteboard;
@@ -52,8 +53,8 @@ use ordnung_core::discogs;
 use ordnung_core::genredb;
 use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
-    Analysis, Cue, Format, Id, Playlist, SellerListing, SellerShop, Tags, Track, Tracklist,
-    TracklistEntry, TranscodeVerdict, VinylList, VinylRecord,
+    Analysis, Cue, Format, Id, LikedSong, Playlist, SellerListing, SellerShop, Tags, Track,
+    Tracklist, TracklistEntry, TranscodeVerdict, VinylList, VinylRecord,
 };
 use ordnung_core::search::{ScoredHit, SearchHit};
 use ordnung_core::{
@@ -252,6 +253,10 @@ enum LibraryView {
     Duplicates,
     /// Tracks whose source file is gone — rendered as a review list, not the table.
     Missing,
+    /// The crate of liked songs (see `liked`): songs liked on records,
+    /// tracklists and the radio, most of them not in the library. Rendered
+    /// as its own table, not the track table, since its rows aren't tracks.
+    Liked,
     /// The user's Discogs vinyl collection — rendered as a grid of cover art,
     /// not the flat track table. Backed by the local `vinyl_collection` cache.
     Vinyl,
@@ -1278,6 +1283,17 @@ struct App {
     /// is mined from the release-detail cache plus the user's own shelves; a
     /// listing missing here has unknown tags and drops out of a genre filter.
     seller_genres: HashMap<u64, Vec<String>>,
+    /// The crate of liked songs (see `liked`), from the `liked_songs`
+    /// table, newest like first; reloaded with the catalog.
+    liked: Vec<LikedSong>,
+    /// The song keys of `liked`, what every row's mark asks.
+    liked_keys: HashSet<String>,
+    /// Library tracks by song key, for the crate to say which liked songs
+    /// are already here. Taken while the Liked view is up, once per reload.
+    liked_library: HashMap<String, Id>,
+    liked_library_dirty: bool,
+    /// The Liked view's filter: only the songs no library track is.
+    liked_only_to_get: bool,
     /// The Tracklists window (see `tracklists`), opened from the tiny ≡
     /// button in the top bar.
     tracklist_open: bool,

@@ -112,3 +112,66 @@ pub fn glyph(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
     }
     resp
 }
+
+/// The like mark at the edge of a song row: a "+" in the weak label tone
+/// until the pointer is on it, a heart in the pink once the song is in the
+/// crate of liked songs (see `liked`). Square, `side` to a side, so it fits
+/// a row of any height: the sheet's 24 pt lines as well as the tracklist's
+/// 46 pt rows. Carries its own hover note.
+pub fn like_mark(ui: &mut egui::Ui, liked: bool, side: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+    paint_like_mark(ui, rect, &resp, liked);
+    like_note(resp, liked)
+}
+
+/// The like mark painted into a rect the caller laid out by hand (a
+/// painter-drawn row), interacting through `id`. Register it after the
+/// row's own interact, so the mark sits on top and takes the click.
+pub fn like_mark_at(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    id: egui::Id,
+    liked: bool,
+) -> egui::Response {
+    let resp = ui.interact(rect, id, egui::Sense::click());
+    paint_like_mark(ui, rect, &resp, liked);
+    like_note(resp, liked)
+}
+
+fn like_note(resp: egui::Response, liked: bool) -> egui::Response {
+    use super::hover::HoverNoteExt;
+    resp.on_hover_note(if liked {
+        "Liked. Click to take it out of Liked songs"
+    } else {
+        "Like this song: put it in Liked songs"
+    })
+}
+
+fn paint_like_mark(ui: &egui::Ui, rect: egui::Rect, resp: &egui::Response, liked: bool) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let visuals = ui.visuals();
+    if resp.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            visuals.widgets.hovered.rounding,
+            visuals.widgets.hovered.weak_bg_fill,
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let (glyph, ink) = match (liked, resp.hovered()) {
+        (true, true) => ("♥", color::PINK.gamma_multiply(0.8)),
+        (true, false) => ("♥", color::PINK),
+        (false, true) => ("+", visuals.strong_text_color()),
+        (false, false) => ("+", visuals.weak_text_color()),
+    };
+    let size = (rect.height() * 0.62).clamp(12.0, 16.0);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(size),
+        ink,
+    );
+}

@@ -7,9 +7,9 @@
 use crate::error::{Error, Result};
 use crate::model::key::{Key, Mode, PitchClass};
 use crate::model::{
-    Analysis, AudioProperties, Beat, Beatgrid, ChosenBy, Cue, DugRelease, Format, Id, Playlist,
-    SellerListing, SellerShop, Tags, Track, Tracklist, TracklistEntry, TranscodeVerdict,
-    VinylList, VinylRecord,
+    Analysis, AudioProperties, Beat, Beatgrid, ChosenBy, Cue, DugRelease, Format, Id, LikedSong,
+    Playlist, SellerListing, SellerShop, Tags, Track, Tracklist, TracklistEntry,
+    TranscodeVerdict, VinylList, VinylRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashMap;
@@ -354,7 +354,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 /// How long a master's cached pressing list is served before it's re-listed.
 /// New pressings appear rarely, and the list only feeds "other pressings" and
@@ -778,6 +778,28 @@ impl Catalog {
                 rel_track      TEXT,
                 candidates_json TEXT NOT NULL DEFAULT '[]',
                 PRIMARY KEY (tracklist_id, position)
+            );
+            -- The crate of liked songs (schema 19): songs liked where they
+            -- appeared without being library tracks (a tracklist line, a
+            -- sheet row, the radio). One row per song, keyed by `song_key`
+            -- (folded artist + title, see `song_key`), so the same song on
+            -- two records is liked once; the release fields pin the record
+            -- it was first liked on, like `dug_releases`.
+            CREATE TABLE IF NOT EXISTS liked_songs (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                song_key       TEXT NOT NULL UNIQUE,
+                artist         TEXT NOT NULL,
+                title          TEXT NOT NULL,
+                release_id     INTEGER,
+                position       TEXT,
+                rel_artist     TEXT,
+                rel_title      TEXT,
+                rel_label      TEXT,
+                rel_catno      TEXT,
+                rel_year       INTEGER,
+                rel_thumb      TEXT,
+                local_track_id INTEGER,
+                liked_at       INTEGER NOT NULL DEFAULT (unixepoch())
             );",
         )?;
         self.migrate()?;
@@ -4206,6 +4228,123 @@ impl Catalog {
         Ok(())
     }
 
+    // --- Liked songs ---------------------------------------------------------
+
+    /// Like a song: add it to the crate, or refresh the row that already
+    /// holds it. Idempotent on the song key: a song liked twice keeps its
+    /// first `liked_at` and its first record, and only fills in what the
+    /// first like didn't know (a library track, a cover). Returns the row id.
+    pub fn like_song(&self, s: &LikedSong) -> Result<Id> {
+        let key = song_key(&s.artist, &s.title, s.release_id, s.position.as_deref());
+        self.conn.execute(
+            "INSERT INTO liked_songs
+                (song_key, artist, title, release_id, position, rel_artist, rel_title,
+                 rel_label, rel_catno, rel_year, rel_thumb, local_track_id, liked_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(song_key) DO UPDATE SET
+                release_id     = COALESCE(release_id, excluded.release_id),
+                position       = COALESCE(position, excluded.position),
+                rel_artist     = COALESCE(rel_artist, excluded.rel_artist),
+                rel_title      = COALESCE(rel_title, excluded.rel_title),
+                rel_label      = COALESCE(rel_label, excluded.rel_label),
+                rel_catno      = COALESCE(rel_catno, excluded.rel_catno),
+                rel_year       = COALESCE(rel_year, excluded.rel_year),
+                rel_thumb      = COALESCE(rel_thumb, excluded.rel_thumb),
+                local_track_id = COALESCE(local_track_id, excluded.local_track_id)",
+            params![
+                key,
+                s.artist,
+                s.title,
+                s.release_id.map(|r| r as i64),
+                s.position,
+                s.rel_artist,
+                s.rel_title,
+                s.rel_label,
+                s.rel_catno,
+                s.rel_year.map(|y| y as i64),
+                s.rel_thumb,
+                s.local_track_id.map(|t| t as i64),
+                s.liked_at,
+            ],
+        )?;
+        let id: i64 = self.conn.query_row(
+            "SELECT id FROM liked_songs WHERE song_key = ?1",
+            params![key],
+            |r| r.get(0),
+        )?;
+        Ok(id as Id)
+    }
+
+    /// Take a song out of the crate, named the way it was liked (the record
+    /// and position matter only for a title that names nothing, see
+    /// [`song_key`]). Returns whether it was there.
+    pub fn unlike_song(
+        &self,
+        artist: &str,
+        title: &str,
+        release_id: Option<u64>,
+        position: Option<&str>,
+    ) -> Result<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM liked_songs WHERE song_key = ?1",
+            params![song_key(artist, title, release_id, position)],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Every liked song, newest like first. One row per like, so it loads
+    /// whole.
+    pub fn list_liked_songs(&self) -> Result<Vec<LikedSong>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, artist, title, release_id, position, rel_artist, rel_title,
+                    rel_label, rel_catno, rel_year, rel_thumb, local_track_id, liked_at
+             FROM liked_songs ORDER BY liked_at DESC, id DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(LikedSong {
+                    id: r.get::<_, i64>(0)? as Id,
+                    artist: r.get(1)?,
+                    title: r.get(2)?,
+                    release_id: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                    position: r.get(4)?,
+                    rel_artist: r.get(5)?,
+                    rel_title: r.get(6)?,
+                    rel_label: r.get(7)?,
+                    rel_catno: r.get(8)?,
+                    rel_year: r.get::<_, Option<i64>>(9)?.map(|v| v as u16),
+                    rel_thumb: r.get(10)?,
+                    local_track_id: r.get::<_, Option<i64>>(11)?.map(|v| v as Id),
+                    liked_at: r.get(12)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Every library track by its song key, so the crate can tell which of
+    /// its songs are already here. One pass over the tagged tracks; a track
+    /// missing an artist or a title can't be keyed and is left out. Where
+    /// two tracks share a key the lower id wins, which is stable.
+    pub fn library_song_keys(&self) -> Result<HashMap<String, Id>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, artist, title FROM tracks
+             WHERE artist IS NOT NULL AND title IS NOT NULL ORDER BY id DESC",
+        )?;
+        let mut out = HashMap::new();
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)? as Id, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
+        for row in rows {
+            let (id, artist, title) = row?;
+            let key = song_key(&artist, &title, None, None);
+            if !key.is_empty() {
+                out.insert(key, id);
+            }
+        }
+        Ok(out)
+    }
+
     // --- Record map pins -----------------------------------------------------
 
     /// Note a release the user dug to. Idempotent on the id: a record dug to
@@ -4695,6 +4834,52 @@ pub(crate) fn norm_match(s: &str) -> String {
         .map(canon_token)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The key a song is liked under: its artist and title, each normalized the
+/// way tracks are linked to records ([`norm_match`]), joined by a newline
+/// so an artist ending where a title begins can't collide. A title that
+/// names nothing ("Untitled", "Track 2", "B") is told apart by the record
+/// and position it was liked at, when known: a white label's four Untitled
+/// sides are four songs, not one. Empty when neither side has a word in
+/// it. Public because the front-end asks "is this song liked?" by key on
+/// every row it draws.
+pub fn song_key(
+    artist: &str,
+    title: &str,
+    release_id: Option<u64>,
+    position: Option<&str>,
+) -> String {
+    let (a, t) = (norm_match(artist), norm_match(title));
+    if a.is_empty() && t.is_empty() {
+        return String::new();
+    }
+    let mut key = format!("{a}\n{t}");
+    if generic_title(&t) {
+        if let Some(r) = release_id {
+            key.push_str(&format!("\n{r}:{}", position.map(norm_match).unwrap_or_default()));
+        }
+    }
+    key
+}
+
+/// Whether a normalized title says nothing about the song: blank,
+/// "untitled" (with or without a number or side), a bare side or track
+/// number. Such a title can't tell one song from the next on the same
+/// record, so [`song_key`] adds the position.
+fn generic_title(t: &str) -> bool {
+    if t.is_empty() || t.starts_with("untitled") {
+        return true;
+    }
+    let mut words = t.split(' ');
+    let (first, rest) = (words.next().unwrap_or(""), words.next());
+    let number = |w: &str| w.chars().all(|c| c.is_ascii_digit());
+    let side = |w: &str| w.len() <= 2 && w.starts_with(|c: char| c.is_ascii_alphabetic()) && w[1..].chars().all(|c| c.is_ascii_digit());
+    match (first, rest) {
+        (w, None) => side(w) || number(w),
+        ("track" | "side" | "pt", Some(w)) => side(w) || number(w),
+        _ => false,
+    }
 }
 
 /// Fold a string for search comparison: NFKD-decompose, drop the combining
@@ -6523,6 +6708,102 @@ mod tests {
         let mut viewed = cat.viewed_releases().unwrap();
         viewed.sort_unstable();
         assert_eq!(viewed, vec![7, 42]);
+    }
+
+    #[test]
+    fn liked_songs_key_by_song_and_keep_the_first_record() {
+        let path = temp_db_path("liked_songs");
+        let cat = Catalog::open(&path).unwrap();
+        let like = |artist: &str, title: &str, release: Option<u64>, at: i64| LikedSong {
+            id: 0,
+            artist: artist.into(),
+            title: title.into(),
+            release_id: release,
+            position: release.map(|_| "A1".to_string()),
+            rel_artist: release.map(|_| "Metro Area".to_string()),
+            rel_title: release.map(|r| format!("Record {r}")),
+            rel_label: None,
+            rel_catno: None,
+            rel_year: None,
+            rel_thumb: None,
+            local_track_id: None,
+            liked_at: at,
+        };
+        let first = cat.like_song(&like("Metro Area", "Miura", Some(42), 100)).unwrap();
+        // The same song, spelled and punctuated differently, from a comp:
+        // one row, the first record kept, and the label it now knows kept too.
+        let mut again = like("METRO AREA", "Miura!", Some(7), 200);
+        again.rel_label = Some("Environ".into());
+        let second = cat.like_song(&again).unwrap();
+        assert_eq!(first, second);
+        let rows = cat.list_liked_songs().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].release_id, Some(42));
+        assert_eq!(rows[0].rel_title.as_deref(), Some("Record 42"));
+        assert_eq!(rows[0].rel_label.as_deref(), Some("Environ"));
+        assert_eq!(rows[0].liked_at, 100);
+        // A second song lists first: newest like on top.
+        cat.like_song(&like("Theo Parrish", "Solitary Flight", None, 300)).unwrap();
+        let rows = cat.list_liked_songs().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].title, "Solitary Flight");
+        assert!(cat.unlike_song("metro area", "miura", None, None).unwrap());
+        assert!(!cat.unlike_song("metro area", "miura", None, None).unwrap());
+        assert_eq!(cat.list_liked_songs().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn untitled_songs_are_told_apart_by_record_and_position() {
+        let path = temp_db_path("liked_untitled");
+        let cat = Catalog::open(&path).unwrap();
+        let like = |pos: &str, release: u64| LikedSong {
+            id: 0,
+            artist: "(CN)²".into(),
+            title: "Untitled".into(),
+            release_id: Some(release),
+            position: Some(pos.into()),
+            rel_artist: None,
+            rel_title: None,
+            rel_label: None,
+            rel_catno: None,
+            rel_year: None,
+            rel_thumb: None,
+            local_track_id: None,
+            liked_at: 1,
+        };
+        let a1 = cat.like_song(&like("A1", 9)).unwrap();
+        let a2 = cat.like_song(&like("A2", 9)).unwrap();
+        let other = cat.like_song(&like("A1", 10)).unwrap();
+        assert_ne!(a1, a2);
+        assert_ne!(a1, other);
+        assert_eq!(cat.list_liked_songs().unwrap().len(), 3);
+        assert!(cat.unlike_song("(CN)²", "Untitled", Some(9), Some("A2")).unwrap());
+        assert!(!cat.unlike_song("(CN)²", "Untitled", Some(9), Some("B1")).unwrap());
+        // A real title keys by the song alone: the record is not in the key.
+        assert_eq!(
+            song_key("Metro Area", "Miura", Some(9), Some("A1")),
+            song_key("Metro Area", "Miura", None, None)
+        );
+        assert!(generic_title("untitled"));
+        assert!(generic_title("untitled 2"));
+        assert!(generic_title("track 3"));
+        assert!(generic_title("b2"));
+        assert!(generic_title("a"));
+        assert!(!generic_title("miura"));
+        assert!(!generic_title("side of the road"));
+    }
+
+    #[test]
+    fn library_song_keys_find_a_liked_song_in_the_library() {
+        let path = temp_db_path("liked_keys");
+        let cat = Catalog::open(&path).unwrap();
+        let mut t = scanned("/m/miura.flac", "Metro Area", "House", 1000);
+        t.tags.title = Some("Miura (Original)".into());
+        let (id, _) = cat.upsert_scanned(&t).unwrap();
+        let keys = cat.library_song_keys().unwrap();
+        assert_eq!(keys.get(&song_key("Metro Area", "miura original", None, None)), Some(&id));
+        assert_eq!(keys.get(&song_key("Metro Area", "Miura", None, None)), None);
+        assert!(song_key("", "", None, None).is_empty());
     }
 
     #[test]

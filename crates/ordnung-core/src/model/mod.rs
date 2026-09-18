@@ -555,6 +555,49 @@ impl ChosenBy {
     }
 }
 
+/// A song the user liked where it appeared without being a track in the
+/// library: a line of a mix tracklist, a row of a record's tracklist in the
+/// sheet, a song on the radio. Together these are the crate of liked songs
+/// (see the `liked_songs` catalog table): which songs on each record the
+/// user likes, and which of them are still to be got digitally. Keyed by
+/// the song ([`crate::catalog::song_key`]: folded artist and title), so the
+/// same song liked on a compilation and again on its original 12" is one
+/// row; the release fields pin the record it was first liked on, the way a
+/// dug release pins the map.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LikedSong {
+    pub id: Id,
+    pub artist: String,
+    pub title: String,
+    /// The Discogs release it was liked on, when there was one.
+    pub release_id: Option<u64>,
+    /// The song's position on that release (`A1`), when the record listed one.
+    pub position: Option<String>,
+    /// Display fields of that release.
+    pub rel_artist: Option<String>,
+    pub rel_title: Option<String>,
+    pub rel_label: Option<String>,
+    pub rel_catno: Option<String>,
+    pub rel_year: Option<u16>,
+    pub rel_thumb: Option<String>,
+    /// A track in the local library that is this song, when one was known
+    /// where it was liked. The crate looks the rest up by song key.
+    pub local_track_id: Option<Id>,
+    /// Unix seconds when it was liked.
+    pub liked_at: i64,
+}
+
+impl LikedSong {
+    /// `Artist - Title`, for status lines.
+    pub fn song_label(&self) -> String {
+        if self.artist.is_empty() {
+            self.title.clone()
+        } else {
+            format!("{} - {}", self.artist, self.title)
+        }
+    }
+}
+
 /// One song line of a saved [`Tracklist`], with whatever the matcher (or
 /// the user) has settled for it. The chosen release's display fields ride
 /// on the row — it is a pin, like a dug record, not a release cache — and

@@ -154,6 +154,11 @@ impl App {
             seller_listings_for: None,
             tracklist_open: false,
             tracklist_filter: String::new(),
+            liked: Vec::new(),
+            liked_keys: HashSet::new(),
+            liked_library: HashMap::new(),
+            liked_library_dirty: true,
+            liked_only_to_get: false,
             tracklists: Vec::new(),
             tracklist_current: None,
             tracklist_entries: Vec::new(),
@@ -876,6 +881,8 @@ impl App {
             self.sellers = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_sellers())
                 .unwrap_or_default();
+            // The crate of liked songs: one row per like, loads whole.
+            self.load_liked();
             // Saved tracklists likewise: a few rows each; their lines load
             // lazily in the Tracklists window.
             self.tracklists = Catalog::open(&self.db_path)
@@ -2276,6 +2283,7 @@ impl eframe::App for App {
                                 | LibraryView::RecentlyAdded
                                 | LibraryView::Duplicates
                                 | LibraryView::Missing
+                                | LibraryView::Liked
                                 | LibraryView::Vinyl
                                 | LibraryView::Usb(..) => None,
                             };
@@ -2739,8 +2747,11 @@ impl eframe::App for App {
         // The inspector describes one selected track, which the vinyl view has
         // no concept of — it's a grid of Discogs releases, not catalog rows. So
         // the drawer (and its tab) are digital-only: force it shut there rather
-        // than leaving an empty panel with nothing to inspect.
-        let inspector_applies = self.view != LibraryView::Vinyl;
+        // than leaving an empty panel with nothing to inspect. The crate of
+        // liked songs is rows of songs that mostly aren't tracks, so it has
+        // no inspector either.
+        let inspector_applies =
+            !matches!(self.view, LibraryView::Vinyl | LibraryView::Liked);
         let t = ctx.animate_bool_with_time(
             egui::Id::new("inspector_slide"),
             self.inspector_open && inspector_applies,
@@ -2908,6 +2919,7 @@ impl eframe::App for App {
                 // actually wrong; the tab under "Library" appears with the
                 // first missing file and vanishes once the catalog is clean.
                 let missing_count = self.missing_count;
+                let liked_count = self.liked.len();
                 // Mounted removable volumes, copied out for the same reason as
                 // the counts above: the source tabs and the USB group render
                 // inside closures that must not borrow `self`.
@@ -3015,6 +3027,31 @@ impl eframe::App for App {
                             .clicked()
                             {
                                 *sidebar_action = Some(SidebarAction::OpenHealth);
+                            }
+                        }
+                        // The crate of liked songs, a slim row under the tile
+                        // while there's something in it: the songs liked on
+                        // records, tracklists and the radio, and which of them
+                        // are still to get. An emptied crate leaves no row, and
+                        // ejects the view so the user isn't parked on nothing.
+                        if liked_count == 0 && *view == LibraryView::Liked {
+                            *view = LibraryView::Library;
+                        }
+                        if liked_count > 0 {
+                            ui.add_space(4.0);
+                            if nav_button_dense(
+                                ui,
+                                density,
+                                "♥",
+                                &format!("Liked  {liked_count}"),
+                                *view == LibraryView::Liked,
+                                24.0,
+                                12.0,
+                            )
+                            .on_hover_note("Songs you liked on records, tracklists and the radio, and which are still to get")
+                            .clicked()
+                            {
+                                *view = LibraryView::Liked;
                             }
                         }
                         ui.add_space(10.0);
@@ -3454,6 +3491,8 @@ impl eframe::App for App {
                     self.draw_duplicates(ui);
                 } else if self.view == LibraryView::Missing {
                     self.draw_missing(ui);
+                } else if self.view == LibraryView::Liked {
+                    self.draw_liked(ui, ctx);
                 } else if self.view == LibraryView::Vinyl {
                     self.draw_vinyl(ui, ctx);
                 } else if let LibraryView::Usb(vol, _) = self.view.clone() {

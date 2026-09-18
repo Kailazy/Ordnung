@@ -1465,6 +1465,10 @@ impl App {
         };
         const POS_W: f32 = 26.0;
         let mut pick: Option<usize> = None;
+        let mut like: Option<usize> = None;
+        // The like mark's square: the row less a hair, so it never paints
+        // over the row above or below.
+        let like_w = (row_h - 2.0).max(12.0);
         for (i, song) in n.songs.iter().enumerate() {
             let rect = egui::Rect::from_min_size(
                 egui::pos2(list.left(), list.top() + row_h * i as f32),
@@ -1494,7 +1498,12 @@ impl App {
             }
             let dur = p.layout_no_wrap(song.duration.clone(), font::caption(), color::LABEL_4);
             let dur_w = dur.size().x;
-            let right = rect.right() - space::S2;
+            // The like mark takes the row's edge; the length sits left of it.
+            let like_rect = egui::Rect::from_center_size(
+                egui::pos2(rect.right() - space::S2 - like_w * 0.5, cy),
+                egui::vec2(like_w, like_w),
+            );
+            let right = like_rect.left() - space::S2;
             p.galley(
                 egui::pos2(right - dur_w, cy - dur.size().y * 0.5),
                 dur,
@@ -1522,9 +1531,34 @@ impl App {
             if resp.clicked() && !on {
                 pick = Some(i);
             }
+            // Registered after the row, so the mark is on top and the click
+            // is its own, not the row's.
+            let artist = if song.artist.is_empty() { &n.artist } else { &song.artist };
+            let liked = self.is_liked(artist, &song.title, Some(n.release_id), Some(&song.position));
+            if crate::ui::button::like_mark_at(ui, like_rect, ui.id().with(("radio_like", i)), liked)
+                .clicked()
+            {
+                like = Some(i);
+            }
         }
         if pick.is_some() {
             self.radio.pick = pick;
+        }
+        if let Some(i) = like {
+            let song = &n.songs[i];
+            self.toggle_like(crate::liked::LikeSpec {
+                artist: if song.artist.is_empty() { n.artist.clone() } else { song.artist.clone() },
+                title: song.title.clone(),
+                release_id: Some(n.release_id),
+                position: Some(song.position.clone()),
+                rel_artist: Some(n.artist.clone()),
+                rel_title: Some(n.title.clone()),
+                rel_label: None,
+                rel_catno: None,
+                rel_year: None,
+                rel_thumb: n.thumb_url.clone(),
+                local_track_id: None,
+            });
         }
     }
 

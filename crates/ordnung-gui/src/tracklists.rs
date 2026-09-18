@@ -14,7 +14,8 @@
 //! looked up. Each row shows the song as pasted, the record it
 //! matched (cover, title, year, label and catalog number, format), a
 //! confidence pip and OWNED / WANT / IN LIBRARY badges; a click opens the
-//! ordinary record sheet, the ↻ at the row's edge looks that one line up
+//! ordinary record sheet, the + at the row's edge likes the song (see
+//! `liked`), the ↻ beside it looks that one line up
 //! again (a line Discogs rate-limited, say), and the context menu wants,
 //! digs, re-picks or rejects. Matched records join the record map. Parsing and scoring live
 //! in `ordnung_core::tracklist`; see `docs/design/tracklist-match.md`.
@@ -40,6 +41,8 @@ enum LineAct {
     PlayLocal(usize),
     /// Look this one line up again, whatever it holds.
     Retry(usize),
+    /// Put the song in the crate of liked songs, or take it out.
+    Like(usize),
 }
 
 /// Whole-list actions, from the header's ⋯ or a tab's menu in the left bar.
@@ -135,6 +138,23 @@ fn center_lines(ui: &mut egui::Ui, two: bool) {
         body
     };
     ui.add_space(((ui.available_height() - block) / 2.0).max(0.0));
+}
+
+/// The song a line names, for the crate of liked songs: the pasted artist
+/// (or the record's, when the paste had none) and the title as the record
+/// spells it. `None` for an ID or a line with no title to like.
+fn line_song(e: &TracklistEntry) -> Option<(String, String)> {
+    if e.kind != LineKind::Track {
+        return None;
+    }
+    let title = e.rel_track.clone().or_else(|| e.title.clone())?;
+    let artist = e
+        .artist
+        .clone()
+        .filter(|a| !a.trim().is_empty())
+        .or_else(|| e.rel_artist.clone())
+        .unwrap_or_default();
+    Some((artist, title))
 }
 
 /// The caption under a matched record: `2001 · Environ ENV 006 · Vinyl, 12"`.
@@ -737,6 +757,15 @@ impl App {
                                 if crate::ui::button::glyph(ui, "↻", !busy).on_hover_note(note).clicked() {
                                     line_act = Some(LineAct::Retry(i));
                                 }
+                                // The like mark, beside the ↻ and the same
+                                // square: the song goes in the crate of
+                                // liked songs whether or not it matched.
+                                if let Some((artist, title)) = line_song(&e) {
+                                    let side = ui.spacing().interact_size.y;
+                                    if crate::ui::button::like_mark(ui, self.is_liked(&artist, &title, e.release_id, None), side).clicked() {
+                                        line_act = Some(LineAct::Like(i));
+                                    }
+                                }
                             }
                             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                 let (c, words) = confidence_look(&e);
@@ -828,7 +857,8 @@ impl App {
         let Some(act) = line_act else { return };
         let Some(e) = self.tracklist_entries.get(match act {
             LineAct::Open(i) | LineAct::Want(i) | LineAct::Dig(i) | LineAct::Buy(i) | LineAct::Pick(i)
-            | LineAct::SearchDiscogs(i) | LineAct::NotThis(i) | LineAct::PlayLocal(i) | LineAct::Retry(i) => i,
+            | LineAct::SearchDiscogs(i) | LineAct::NotThis(i) | LineAct::PlayLocal(i) | LineAct::Retry(i)
+            | LineAct::Like(i) => i,
         }).cloned() else { return };
         let rel_artist = e.rel_artist.clone().unwrap_or_default();
         let rel_title = e.rel_title.clone().unwrap_or_default();
@@ -887,6 +917,23 @@ impl App {
                         Ok(t) => self.play_track(tid, PathBuf::from(t.source_path)),
                         Err(e) => self.fail(format!("Couldn't find that track: {e}")),
                     }
+                }
+            }
+            LineAct::Like(_) => {
+                if let Some((artist, title)) = line_song(&e) {
+                    self.toggle_like(crate::liked::LikeSpec {
+                        artist,
+                        title,
+                        release_id: e.release_id,
+                        position: None,
+                        rel_artist: e.rel_artist.clone(),
+                        rel_title: e.rel_title.clone(),
+                        rel_label: e.rel_label.clone(),
+                        rel_catno: e.rel_catno.clone(),
+                        rel_year: e.rel_year,
+                        rel_thumb: e.rel_thumb.clone(),
+                        local_track_id: e.local_track_id,
+                    });
                 }
             }
         }

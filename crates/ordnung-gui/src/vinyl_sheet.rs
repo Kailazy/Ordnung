@@ -1276,6 +1276,8 @@ impl App {
         /// borrow of `self`.
         enum Act {
             Play(usize),
+            /// Put this row's song in the crate of liked songs, or take it out.
+            Like(usize),
             /// Play the record, or pause/resume whatever of it is loaded.
             TogglePlay,
             PlayExtra(usize),
@@ -1849,9 +1851,16 @@ impl App {
                                 SheetSource::Video(_) => video_running,
                                 SheetSource::None => false,
                             };
-                            if sheet_row_ui(ui, sheet, row, i, playing, running, marked == Some(i))
-                            {
-                                act = Some(Act::Play(i));
+                            let liked = self.is_liked(
+                                row.artist.as_deref().unwrap_or(&sheet.artist),
+                                &row.title,
+                                Some(sheet.release_id),
+                                Some(&row.position),
+                            );
+                            match sheet_row_ui(ui, sheet, row, i, playing, running, marked == Some(i), liked) {
+                                Some(RowHit::Play) => act = Some(Act::Play(i)),
+                                Some(RowHit::Like) => act = Some(Act::Like(i)),
+                                None => {}
                             }
                         }
                         // Leftover videos: album rips, live sets, anything the
@@ -2092,6 +2101,35 @@ impl App {
                             s.playing_video = Some(v);
                         }
                     }
+                }
+            }
+            Some(Act::Like(i)) => {
+                let spec = self.vinyl_sheet.as_ref().and_then(|s| {
+                    let row = s.rows.get(i)?;
+                    let local = match row.source {
+                        SheetSource::Local(l) => s.local.get(l).map(|t| t.id),
+                        _ => None,
+                    };
+                    Some(crate::liked::LikeSpec {
+                        artist: row.artist.clone().unwrap_or_else(|| s.artist.clone()),
+                        title: row.title.clone(),
+                        release_id: Some(s.release_id),
+                        position: Some(row.position.clone()),
+                        rel_artist: Some(s.artist.clone()),
+                        rel_title: Some(s.title.clone()),
+                        rel_label: s
+                            .detail
+                            .as_ref()
+                            .and_then(|d| d.label.clone())
+                            .or_else(|| s.label.clone()),
+                        rel_catno: s.detail.as_ref().and_then(|d| d.catalog_number.clone()),
+                        rel_year: s.detail.as_ref().and_then(|d| d.year),
+                        rel_thumb: s.cover_url.clone(),
+                        local_track_id: local,
+                    })
+                });
+                if let Some(spec) = spec {
+                    self.toggle_like(spec);
                 }
             }
             Some(Act::Goto) => {
@@ -2348,9 +2386,19 @@ fn video_transport_ui(
     act
 }
 
-/// One tracklist row. Returns true when the user asked to play it.
+/// What a click on a tracklist row asked for.
+#[derive(Clone, Copy, PartialEq)]
+enum RowHit {
+    /// The row itself: play it.
+    Play,
+    /// The like mark at its edge.
+    Like,
+}
+
+/// One tracklist row. Returns what the user asked of it, if anything.
 /// `marked` paints the hover fill without the pointer (see
-/// [`VinylSheet::mark`]).
+/// [`VinylSheet::mark`]); `liked` shows the song's mark as a heart.
+#[allow(clippy::too_many_arguments)]
 fn sheet_row_ui(
     ui: &mut egui::Ui,
     sheet: &VinylSheet,
@@ -2359,10 +2407,17 @@ fn sheet_row_ui(
     playing: bool,
     running: bool,
     marked: bool,
-) -> bool {
+    liked: bool,
+) -> Option<RowHit> {
     const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
+    /// The like mark's square: the row's height.
+    const LIKE_W: f32 = 22.0;
     let playable = !matches!(row.source, SheetSource::None);
-    let mut clicked = false;
+    let mut hit_what = None;
+    // Where the like mark goes, taken while the row lays out and drawn
+    // once the row's own hit target is registered, so the mark sits on top
+    // of it and takes the click.
+    let mut like_rect = egui::Rect::NOTHING;
 
     // Reserve a slot underneath the row's content so the hover fill paints
     // behind the text instead of washing over it.
@@ -2436,6 +2491,11 @@ fn sheet_row_ui(
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // The like mark's slot, at the row's edge.
+                    like_rect = ui
+                        .allocate_exact_size(egui::vec2(LIKE_W, LIKE_W), egui::Sense::hover())
+                        .0;
+                    ui.add_space(4.0);
                     // Source chip: which of the two engines this row uses.
                     match row.source {
                         SheetSource::Local(l) => {
@@ -2511,7 +2571,8 @@ fn sheet_row_ui(
     // cursor would light up both.
     let id = ui.id().with(("sheet-row", index));
     let hit = ui.interact(rect, id, egui::Sense::click());
-    if marked || (playable && hit.hovered()) {
+    let like = crate::ui::button::like_mark_at(ui, like_rect, id.with("like"), liked);
+    if marked || like.hovered() || (playable && hit.hovered()) {
         ui.painter().set(
             bg,
             egui::epaint::RectShape::filled(
@@ -2521,17 +2582,20 @@ fn sheet_row_ui(
             ),
         );
     }
+    if like.clicked() {
+        hit_what = Some(RowHit::Like);
+    }
     if playable {
         if hit.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         if hit.clicked() {
-            clicked = true;
+            hit_what = Some(RowHit::Play);
         }
     } else {
         hit.on_hover_note("Not in your library, and Discogs lists no video for it");
     }
-    clicked
+    hit_what
 }
 
 /// The sounding row's mark, drawn over the glyph column where "▶" sits on the
