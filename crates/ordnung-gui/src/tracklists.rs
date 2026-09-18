@@ -80,6 +80,18 @@ fn fmt_clock(secs: u32) -> String {
     }
 }
 
+/// Pad a cell so its one- or two-line text block (body line, 1 pt, caption
+/// line) sits in the middle of the row rather than against its top.
+fn center_lines(ui: &mut egui::Ui, two: bool) {
+    let body = ui.text_style_height(&egui::TextStyle::Body);
+    let block = if two {
+        body + 1.0 + ui.fonts(|f| f.row_height(&font::caption()))
+    } else {
+        body
+    };
+    ui.add_space(((ui.available_height() - block) / 2.0).max(0.0));
+}
+
 /// The caption under a matched record: `2001 · Environ ENV 006 · Vinyl, 12"`.
 fn record_sub(e: &TracklistEntry) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -525,7 +537,6 @@ impl App {
                                 (_, Some(t)) => t.to_string(),
                                 _ => e.song_label(),
                             };
-                            ui.add(egui::Label::new(egui::RichText::new(label).color(color::LABEL)).truncate());
                             let mut sub = Vec::new();
                             if let Some(ts) = e.timestamp_s {
                                 sub.push(fmt_clock(ts));
@@ -536,6 +547,8 @@ impl App {
                             if let Some(c) = e.catno_hint.as_deref() {
                                 sub.push(c.to_string());
                             }
+                            center_lines(ui, !sub.is_empty());
+                            ui.add(egui::Label::new(egui::RichText::new(label).color(color::LABEL)).truncate());
                             if !sub.is_empty() {
                                 ui.add(egui::Label::new(egui::RichText::new(sub.join(" · ")).font(font::caption()).color(color::LABEL_3)).truncate());
                             }
@@ -552,6 +565,7 @@ impl App {
                                         (_, Some(t)) => t.to_string(),
                                         _ => String::new(),
                                     };
+                                    center_lines(ui, true);
                                     ui.add(egui::Label::new(egui::RichText::new(name).color(color::LABEL)).truncate());
                                     ui.add(egui::Label::new(egui::RichText::new(record_sub(&e)).font(font::caption()).color(color::LABEL_3)).truncate());
                                 }
@@ -567,11 +581,13 @@ impl App {
                                     };
                                     match e.artist.as_deref().filter(|a| !a.is_empty() && e.kind != LineKind::Id) {
                                         Some(a) => {
+                                            center_lines(ui, true);
                                             ui.add(egui::Label::new(egui::RichText::new(a).color(color::LABEL_2)).truncate());
                                             ui.add(egui::Label::new(egui::RichText::new(text).font(font::caption()).color(color::LABEL_3)).truncate())
                                                 .on_hover_note(words);
                                         }
                                         None => {
+                                            center_lines(ui, false);
                                             ui.label(egui::RichText::new(text).color(color::LABEL_3)).on_hover_note(words);
                                         }
                                     }
