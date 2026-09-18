@@ -2559,6 +2559,11 @@ fn extra_video_ui(
         .scope(|ui| {
             ui.horizontal(|ui| {
                 ui.set_min_height(22.0);
+                // The row is as wide as the sheet whatever it holds. Only a
+                // duration reached the right edge, so a video without one
+                // made a row (and its hover fill) as wide as its title while
+                // the row under it ran the full width.
+                ui.set_min_width(ui.available_width());
                 let (marker, _) =
                     ui.allocate_exact_size(egui::vec2(MARKER_W, 20.0), egui::Sense::hover());
                 if playing {
