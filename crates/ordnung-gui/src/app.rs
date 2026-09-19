@@ -275,6 +275,7 @@ impl App {
             col_filter_open: None,
             tex_graveyard,
             inspector_open: false,
+            inspector_applied: true,
             menu_installed: false,
             tour: None,
             settings_open: false,
@@ -2792,10 +2793,20 @@ impl eframe::App for App {
         // no inspector either.
         let inspector_applies =
             !matches!(self.view, LibraryView::Vinyl | LibraryView::Liked);
+        // The slide is for the pull tab. On a view switch the drawer snaps:
+        // the new view is laid out once, at its final width, rather than
+        // re-flowed every frame of the slide (the vinyl wall went from six
+        // columns to eight over the 120 ms, its covers resizing as it went,
+        // which read as the records jittering in from the top left). A zero
+        // animation time makes egui's incremental step non-finite, and it
+        // then stores the target outright, so the slide state is also up
+        // to date for the tab's next use.
+        let switched = self.inspector_applied != inspector_applies;
+        self.inspector_applied = inspector_applies;
         let t = ctx.animate_bool_with_time(
             egui::Id::new("inspector_slide"),
             self.inspector_open && inspector_applies,
-            0.12,
+            if switched { 0.0 } else { 0.12 },
         );
         let width = INSPECTOR_W * t;
         // The drawer is a sidebar (see `ui::sidebar`): the window's surface,

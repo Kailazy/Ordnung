@@ -1706,6 +1706,10 @@ struct App {
     /// the window's right edge — the panel is a fixed-width drawer that slides
     /// in and out rather than a splitter the user drags to size.
     inspector_open: bool,
+    /// Whether the view drawn last frame had an inspector at all (the Vinyl
+    /// and Liked views don't). A change here is a view switch, and the drawer
+    /// snaps for it rather than sliding; see `update`.
+    inspector_applied: bool,
     /// Whether the native macOS menu bar has been installed yet. It goes up on
     /// the first frame rather than at construction, because the `NSApplication`
     /// it attaches to doesn't exist until eframe has started (see `macos_menu`).
