@@ -104,6 +104,9 @@ impl Sidebar {
 /// the left, and `add_action` laid out right-to-left from the panel's
 /// inner edge, so a button there ends at the content's edge and the
 /// caption is cut before it reaches the button.
+// Part of the docked window's vocabulary even while no panel's head is a
+// caption: the inspector leads with the artwork now.
+#[allow(dead_code)]
 pub fn header(ui: &mut egui::Ui, title: &str, add_action: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(egui::Frame::window(ui.style()).inner_margin.top);
     caption_row(ui, title, add_action);
@@ -182,6 +185,7 @@ pub fn rule(ui: &mut egui::Ui) {
 
 /// A hairline across the whole panel, margin to margin, dividing one part
 /// of it from the next (a pinned head from what scrolls beneath it).
+#[allow(dead_code)]
 pub fn rule_full(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter().hline(

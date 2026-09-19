@@ -2191,10 +2191,13 @@ impl eframe::App for App {
                             // re-add (same size + mtime), so it's never a full re-read.
                             // Primary action: an accent fill marks it as the toolbar's
                             // main entry point (it's the only action that grows the library).
+                            // The fill is the frame; the theme's grey outline
+                            // around it only dulled the accent's edge.
                             let add_btn = egui::Button::new(
                                 egui::RichText::new("Add songs…").color(egui::Color32::WHITE),
                             )
-                            .fill(egui::Color32::from_rgb(64, 110, 180));
+                            .fill(egui::Color32::from_rgb(64, 110, 180))
+                            .stroke(egui::Stroke::NONE);
                             let add = egui::menu::menu_custom_button(ui, add_btn, |ui| {
                                 if ui
                                     .button("🎵  Choose files…")
@@ -2509,11 +2512,7 @@ impl eframe::App for App {
                             ui.separator();
                         }
                         // Settings stays reachable even while a job runs.
-                        if ui
-                            .button("⚙ Settings")
-                            .on_hover_note("Discogs token and app options")
-                            .clicked()
-                        {
+                        if ui.button("⚙ Settings").clicked() {
                             self.token_input = self.config.discogs_token.clone();
                             self.settings_open = true;
                         }

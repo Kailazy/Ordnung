@@ -134,6 +134,23 @@ pub struct ReleaseCandidate {
 }
 
 impl ReleaseCandidate {
+    /// How far this pressing is from "the record": 0 for a standard release,
+    /// higher for the variants a search turns up beside it. An automatic
+    /// match prefers the lowest rank present and only then applies its
+    /// popularity or age rule, so a promo, white label or limited run is
+    /// never picked over the ordinary pressing of the same record, but is
+    /// still picked when it is the only pressing there is. Read off the
+    /// format descriptors Discogs attaches (`Vinyl, 12", Promo, White Label`).
+    ///
+    /// * 0: no such descriptor (reissues and represses count as standard;
+    ///   the age rule is what tells an original from a repress).
+    /// * 1: limited or numbered editions.
+    /// * 2: promos, white labels, test pressings, advance copies.
+    /// * 3: unofficial releases, mispresses and misprints.
+    pub fn variant_rank(&self) -> u8 {
+        variant_rank(&self.format)
+    }
+
     /// The release's own title, without the `"Artist - "` prefix Discogs
     /// joins onto its search labels.
     pub fn release_title(&self) -> &str {
@@ -2118,6 +2135,39 @@ fn split_artist_title(combined: &str) -> (String, String) {
 
 /// One search hit as a [`ReleaseCandidate`]: the joined label kept whole
 /// for display, the artist split off it for matching.
+/// See [`ReleaseCandidate::variant_rank`]. Matched on the comma-separated
+/// descriptor list, case-insensitively, so `Ltd` and `Limited Edition` both
+/// count and `Promotional` does too.
+pub fn variant_rank(format: &str) -> u8 {
+    let mut rank = 0u8;
+    for part in format.split(',') {
+        let d = part.trim().to_ascii_lowercase();
+        if d.is_empty() {
+            continue;
+        }
+        let r = if d.contains("unofficial")
+            || d.contains("mispress")
+            || d.contains("misprint")
+            || d.contains("bootleg")
+        {
+            3
+        } else if d.starts_with("promo")
+            || d.contains("white label")
+            || d.contains("test pressing")
+            || d.contains("advance")
+            || d.contains("acetate")
+        {
+            2
+        } else if d.contains("limited") || d.starts_with("ltd") || d.contains("numbered") {
+            1
+        } else {
+            0
+        };
+        rank = rank.max(r);
+    }
+    rank
+}
+
 fn candidate_from_hit(h: SearchHit) -> ReleaseCandidate {
     let (artist, _) = split_artist_title(&h.title);
     ReleaseCandidate {
@@ -3517,6 +3567,22 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// The plain pressing ranks first; a variant descriptor anywhere in the
+    /// list raises the rank, and the worst descriptor wins.
+    #[test]
+    fn variant_rank_orders_standard_before_limited_promo_and_unofficial() {
+        assert_eq!(variant_rank(""), 0);
+        assert_eq!(variant_rank("Vinyl, 12\", 33 ⅓ RPM"), 0);
+        assert_eq!(variant_rank("Vinyl, 12\", Reissue, Repress"), 0);
+        assert_eq!(variant_rank("Vinyl, 12\", Limited Edition"), 1);
+        assert_eq!(variant_rank("Vinyl, LP, Ltd, Numbered"), 1);
+        assert_eq!(variant_rank("Vinyl, 12\", Promo"), 2);
+        assert_eq!(variant_rank("Vinyl, 12\", White Label, Promo"), 2);
+        assert_eq!(variant_rank("Vinyl, 12\", Test Pressing"), 2);
+        assert_eq!(variant_rank("Vinyl, 12\", Unofficial Release"), 3);
+        assert_eq!(variant_rank("CD, Album, Limited Edition, Unofficial Release"), 3);
     }
 
     #[test]

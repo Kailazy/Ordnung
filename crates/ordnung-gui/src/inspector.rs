@@ -296,32 +296,13 @@ impl App {
     ) -> Option<InspectorAction> {
         use crate::ui::tokens::{color, space};
 
-        // The panel's caption is a small one, set the way its sections'
-        // are: the track's own name below is what reads as the title.
-        // "View release" shares the caption's line: the button belongs to
-        // the track's identity block, and this is the one line up here with
-        // room to spare; the title and artist beneath it are truncating
-        // labels a trailing button would eat into. Only shown when the
-        // track has a matched release, the same signal the cover dot in
-        // the table reads: nothing to open otherwise, and a permanently
-        // disabled button would be noise.
+        // Only shown when the track has a matched release, the same signal
+        // the cover dot in the table reads: nothing to open otherwise, and a
+        // permanently disabled button would be noise.
         let has_release = self
             .selected_track
             .as_ref()
             .is_some_and(|t| self.track_releases.contains_key(&t.id));
-        let mut view_release = false;
-        crate::ui::sidebar::header(ui, "Track", |ui| {
-            if has_release {
-                view_release = ui
-                    .add(egui::Button::new(
-                        egui::RichText::new("View release")
-                            .font(crate::ui::tokens::font::caption())
-                            .color(color::LABEL_2),
-                    ))
-                    .on_hover_note("Show this record's tracklist")
-                    .clicked();
-            }
-        });
 
         // Copied out before borrowing `selected_track` so the button below can
         // act on them without holding an immutable borrow of `self`.
@@ -379,83 +360,13 @@ impl App {
         };
         let id = t.id;
         let source_path = PathBuf::from(t.source_path.clone());
-
-        // Title on its own line at heading weight, artist beneath it — the
-        // "A — B" run-together line read as one undifferentiated string.
-        // Three descending label colours (primary / secondary / tertiary) do
-        // the hierarchy here, so size alone isn't carrying it.
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(t.tags.title.as_deref().unwrap_or("Untitled"))
-                    .font(crate::ui::tokens::font::headline())
-                    .color(color::LABEL)
-                    .strong(),
-            )
-            .truncate(),
-        );
-        ui.add_space(space::S1);
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(t.tags.artist.as_deref().unwrap_or("Unknown"))
-                    .font(crate::ui::tokens::font::body())
-                    .color(color::LABEL_2),
-            )
-            .truncate(),
-        );
-        // The full path is long and rarely needed at a glance: show the file
-        // name, with the whole path on hover.
+        let title = t.tags.title.clone();
+        let artist = t.tags.artist.clone();
         let path_str = t.source_path.clone();
         let file_name = std::path::Path::new(&path_str)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path_str.clone());
-        ui.add_space(space::S1);
-        // Filename, with a folder button beside it that reveals the file in
-        // Finder. The icon sits on this line rather than in a section below
-        // because this *is* the line about where the file lives — the name is
-        // already here and the full path is already its tooltip, so the mark
-        // that opens it belongs in the same place. Drawn small and quiet: it's
-        // an affordance on a tertiary line, not a call to action.
-        ui.horizontal(|ui| {
-            // The icon trails the name, so it reads as belonging to *this*
-            // filename rather than floating at the panel edge. The label is
-            // capped to the row minus the button's own width so a long name
-            // truncates *before* it would push the icon out of the panel —
-            // which is exactly when reaching the file matters most.
-            const BTN_W: f32 = 14.0;
-            ui.set_max_width(ui.available_width());
-            let room = (ui.available_width() - BTN_W - space::S2).max(0.0);
-            ui.scope(|ui| {
-                ui.set_max_width(room);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(file_name)
-                            .font(crate::ui::tokens::font::footnote())
-                            .color(color::LABEL_4),
-                    )
-                    .truncate(),
-                )
-                .on_hover_note(&path_str);
-            });
-            if crate::ui::icon::folder_button(ui, "Reveal in Finder") {
-                crate::util::reveal_in_finder(&source_path);
-            }
-        });
-
-        // Cover art preview. Decoded off-thread (see `cover_full_texture`): once
-        // ready we show the high-quality image (embedded art wins, fetched
-        // Discogs art is the fallback), scaled to a square that fits the panel
-        // width. While the worker decodes, show a spinner so a large source
-        // image never makes the panel look empty or frozen.
-        // The identity above (eyebrow, title, artist, file name) is the panel's
-        // header and stays put; everything below it scrolls. Pinning the header
-        // is what keeps "which track am I looking at" answerable after the user
-        // has scrolled down into ReplayGain or MusicBrainz ids — the same split
-        // Finder's preview pane and Spotify's now-playing rail use. The cover
-        // deliberately sits on the scrolling side: at full panel width it would
-        // otherwise consume most of a short window.
-        ui.add_space(space::S4);
-        crate::ui::sidebar::rule_full(ui);
 
         // --- Editable Core tags ------------------------------------------
         // The fields a user most often fixes or fills (e.g. from Discogs), plus
@@ -465,22 +376,26 @@ impl App {
         // are disabled until something actually changes.
         // The user's requested action this frame, if any. Acted on by the caller
         // after this method's borrow of `self` ends. Declared outside the scroll
-        // area because the buttons that set it now live inside it.
-        // Seeded from the header's "View release", which is drawn (and clicked)
-        // well before this point.
-        let mut action: Option<InspectorAction> =
-            view_release.then_some(InspectorAction::ViewRelease(id));
+        // area because the buttons that set it live inside it.
+        let mut action: Option<InspectorAction> = None;
         let dirty = self.tag_edit != self.tag_edit_saved;
-        // One scroll area over the edit form *and* the read-only sections: with
-        // the form outside it, a tall inspector clipped the form instead of
-        // scrolling the column as a whole.
+        // One scroll area over the whole column, identity included: the
+        // artwork leads, the way a record sleeve does, and at full panel
+        // width a pinned cover plus title would eat most of a short window,
+        // so the head scrolls with the rest.
         egui::ScrollArea::vertical().show(ui, |ui| {
-            // Full panel width rather than a centred 240px square: artwork is the
-            // one thing here that benefits from size, and a media panel's hero
-            // image spans its column (Music, Spotify, Finder's preview all do
-            // this) instead of floating with gutters either side.
+            // Cover art first, where a window's title bar would be. Decoded
+            // off-thread (see `cover_full_texture`): once ready we show the
+            // high-quality image (embedded art wins, fetched Discogs art is
+            // the fallback), scaled to a square that spans the panel. Full
+            // panel width rather than a centred square: artwork is the one
+            // thing here that benefits from size, and a media panel's hero
+            // image spans its column (Music, Spotify, Finder's preview all
+            // do this). While the worker decodes, a spinner on the same
+            // square so a large source image never makes the panel look
+            // empty or frozen, and nothing below jumps once the decode lands.
+            ui.add_space(egui::Frame::window(ui.style()).inner_margin.top);
             if let Some(tex) = &cover_tex {
-                ui.add_space(space::S4);
                 let side = ui.available_width();
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
                 egui::Image::new(tex)
@@ -496,16 +411,71 @@ impl App {
                     crate::ui::tokens::radius::MD,
                     egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE),
                 );
-            } else if cover_loading {
                 ui.add_space(space::S4);
+            } else if cover_loading {
                 let side = ui.available_width();
-                // Reserve the same square the artwork will occupy so the panel
-                // below doesn't jump once the decode lands.
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
                 ui.painter()
                     .rect_filled(rect, crate::ui::tokens::radius::MD, color::FIELD);
                 ui.put(rect, egui::Spinner::new());
+                ui.add_space(space::S4);
             }
+
+            // Title at heading weight, artist right beneath it, set tight:
+            // the two lines are one name and read as one when nothing but
+            // their own leading parts them. Two descending label colours
+            // carry the hierarchy, so size alone isn't doing it.
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(title.as_deref().unwrap_or("Untitled"))
+                            .font(crate::ui::tokens::font::headline())
+                            .color(color::LABEL)
+                            .strong(),
+                    )
+                    .truncate(),
+                );
+                ui.add_space(space::S1);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(artist.as_deref().unwrap_or("Unknown"))
+                            .font(crate::ui::tokens::font::body())
+                            .color(color::LABEL_2),
+                    )
+                    .truncate(),
+                );
+            });
+
+            // The track's own actions on one line under its name: the
+            // record it is on at the left, and at the right the folder that
+            // reveals the file in Finder. The file's name is the folder's
+            // hover note rather than a line of its own: the panel is about
+            // the track, and the path is a detail wanted only on the way
+            // to the file.
+            ui.add_space(space::S2);
+            ui.horizontal(|ui| {
+                if has_release
+                    && ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("View release")
+                                    .font(crate::ui::tokens::font::caption())
+                                    .color(color::LABEL_2),
+                            )
+                            .stroke(egui::Stroke::NONE),
+                        )
+                        .on_hover_note("Show this record's tracklist")
+                        .clicked()
+                {
+                    action = Some(InspectorAction::ViewRelease(id));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::ui::icon::folder_button(ui, &format!("Reveal {file_name} in Finder")) {
+                        crate::util::reveal_in_finder(&source_path);
+                    }
+                });
+            });
 
             // Writeback action: imprint the fetched cover into the source file.
             // Mirrors the CLI's `tag --write --art` — explicit and source-mutating,
@@ -548,11 +518,14 @@ impl App {
                     // Set like the header's "View release": one size and
                     // weight for every action on a caption row.
                     let label = if editing { "Done" } else { "✏ Edit" };
-                    let btn = ui.add(egui::Button::new(
-                        egui::RichText::new(label)
-                            .font(crate::ui::tokens::font::caption())
-                            .color(color::LABEL_2),
-                    ));
+                    let btn = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(label)
+                                .font(crate::ui::tokens::font::caption())
+                                .color(color::LABEL_2),
+                        )
+                        .stroke(egui::Stroke::NONE),
+                    );
                     let btn = if editing && dirty {
                         btn.on_hover_note("Unsaved edits stay in the form until you save")
                     } else {

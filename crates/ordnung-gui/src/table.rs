@@ -689,11 +689,19 @@ impl App {
     /// (double-click a header) stack on top of it, and the toolbar's "Clear
     /// filters" clears both at once.
     pub(crate) fn draw_table_filter_bar(&mut self, ui: &mut egui::Ui) {
+        use crate::ui::tokens::{font, space};
         ui.horizontal(|ui| {
-            ui.add_space(crate::ui::tokens::space::S2);
+            ui.add_space(space::S2);
+            // A quiet, footnote-sized box: it narrows the rows beneath it
+            // and reads as part of that surface, not as a second search
+            // field competing with the toolbar's. Tighter inset than the
+            // standard field so the row above the table stays low.
             let field = ui.add(
                 crate::ui::field::Field::singleline(&mut self.filter)
-                    .width(220.0)
+                    .width(180.0)
+                    .font(font::footnote())
+                    .margin(egui::Margin::symmetric(space::S3, space::S2))
+                    .quiet()
                     .hint("Filter these tracks"),
             );
             field.clone().on_hover_note(
@@ -756,7 +764,8 @@ impl App {
                 );
             }
         });
-        ui.add_space(crate::ui::tokens::space::S2);
+        // A little more air between the box and the header row it sits on.
+        ui.add_space(space::S3);
     }
 
     pub(crate) fn draw_table(&mut self, ui: &mut egui::Ui) -> Option<Vec<PathBuf>> {

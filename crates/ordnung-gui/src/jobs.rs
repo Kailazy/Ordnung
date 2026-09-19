@@ -1797,28 +1797,36 @@ fn auto_match_tracks(
 
 /// The candidate the automatic match commits to, by the configured rule.
 /// Discogs orders hits by relevance, so ties go to the earlier candidate.
+///
+/// The rule only ever chooses among the most ordinary pressings on offer:
+/// candidates are tiered by [`discogs::ReleaseCandidate::variant_rank`] and
+/// the rule runs over the lowest tier present. A promo, white label or
+/// limited run can be the oldest hit, or the most wanted, and still not be
+/// the record anyone means; it is picked only when nothing plainer turned
+/// up.
 fn best_candidate(
     cands: &[discogs::ReleaseCandidate],
     by: config::ReleaseAutoMatch,
 ) -> Option<&discogs::ReleaseCandidate> {
     use config::ReleaseAutoMatch::*;
     use std::cmp::Reverse;
-    match by {
-        TopHit => cands.first(),
-        MostCollected => cands
+    let floor = cands.iter().map(|c| c.variant_rank()).min()?;
+    let tier = || {
+        cands
             .iter()
             .enumerate()
+            .filter(move |(_, c)| c.variant_rank() == floor)
+    };
+    match by {
+        TopHit => tier().next().map(|(_, c)| c),
+        MostCollected => tier()
             .max_by_key(|(i, c)| (c.in_collection, c.in_wantlist, Reverse(*i)))
             .map(|(_, c)| c),
-        MostWanted => cands
-            .iter()
-            .enumerate()
+        MostWanted => tier()
             .max_by_key(|(i, c)| (c.in_wantlist, c.in_collection, Reverse(*i)))
             .map(|(_, c)| c),
         // Unparsable/absent years sort last; popularity breaks year ties.
-        Oldest => cands
-            .iter()
-            .enumerate()
+        Oldest => tier()
             .min_by_key(|(i, c)| {
                 (
                     c.year.trim().parse::<u32>().unwrap_or(u32::MAX),
@@ -4032,6 +4040,54 @@ mod auto_match_tests {
         // A blank year sorts last, so 1998 is the oldest.
         assert_eq!(id(best_candidate(&cands, Oldest)), "1998-40-90");
         assert!(best_candidate(&[], MostCollected).is_none());
+    }
+
+    /// A promo, white label or limited pressing loses to any standard one
+    /// under every rule, however old or popular it is; among variants alone
+    /// the plainest tier is where the rule runs, so a limited run beats a
+    /// promo and a promo beats a bootleg.
+    #[test]
+    fn best_candidate_prefers_the_standard_pressing_under_every_rule() {
+        use config::ReleaseAutoMatch::*;
+        let variant = |year: &str, have: u32, want: u32, format: &str| {
+            let mut c = cand(year, have, want);
+            c.release_id = format!("{}-{}", c.release_id, format);
+            c.format = format.into();
+            c
+        };
+        let cands = vec![
+            variant("1995", 400, 300, "Vinyl, 12\", Promo, White Label"),
+            variant("1994", 900, 500, "Vinyl, 12\", Limited Edition"),
+            variant("2004", 50, 10, "Vinyl, 12\", Repress"),
+            variant("1999", 30, 20, "Vinyl, 12\""),
+            variant("1990", 999, 999, "Vinyl, 12\", Unofficial Release"),
+        ];
+        let id = |c: Option<&discogs::ReleaseCandidate>| c.unwrap().release_id.clone();
+        assert_eq!(id(best_candidate(&cands, TopHit)), "2004-50-10-Vinyl, 12\", Repress");
+        assert_eq!(id(best_candidate(&cands, MostCollected)), "2004-50-10-Vinyl, 12\", Repress");
+        assert_eq!(id(best_candidate(&cands, MostWanted)), "1999-30-20-Vinyl, 12\"");
+        assert_eq!(id(best_candidate(&cands, Oldest)), "1999-30-20-Vinyl, 12\"");
+
+        // Only variants: the limited run is the plainest, and wins.
+        let only_variants: Vec<_> = cands
+            .iter()
+            .filter(|c| c.variant_rank() > 0)
+            .cloned()
+            .collect();
+        assert_eq!(
+            id(best_candidate(&only_variants, Oldest)),
+            "1994-900-500-Vinyl, 12\", Limited Edition"
+        );
+        // Promo against a bootleg: the promo.
+        let promo_or_boot: Vec<_> = cands
+            .iter()
+            .filter(|c| c.variant_rank() >= 2)
+            .cloned()
+            .collect();
+        assert_eq!(
+            id(best_candidate(&promo_or_boot, MostCollected)),
+            "1995-400-300-Vinyl, 12\", Promo, White Label"
+        );
     }
 }
 

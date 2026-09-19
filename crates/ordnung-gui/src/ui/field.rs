@@ -45,6 +45,8 @@ pub struct FieldResponse {
 pub struct Field<'t> {
     edit: egui::TextEdit<'t>,
     outline: bool,
+    /// No frame stroke at rest or under the pointer either (see [`Field::quiet`]).
+    quiet: bool,
     trailing: Option<String>,
     margin: Margin,
     /// The text width asked for, kept so a trailing button can be taken
@@ -59,6 +61,7 @@ impl<'t> Field<'t> {
         Self {
             edit: egui::TextEdit::singleline(text).margin(MARGIN),
             outline: true,
+            quiet: false,
             trailing: None,
             margin: MARGIN,
             width: None,
@@ -70,6 +73,7 @@ impl<'t> Field<'t> {
         Self {
             edit: egui::TextEdit::multiline(text).margin(MARGIN),
             outline: true,
+            quiet: false,
             trailing: None,
             margin: MARGIN,
             width: None,
@@ -147,6 +151,16 @@ impl<'t> Field<'t> {
         self
     }
 
+    /// A field with no outline in any state, only its fill: for a filter
+    /// that sits over the thing it narrows and should read as part of that
+    /// surface rather than as a control on it. Focus still shows in the
+    /// caret and the selection. Implies `outline(false)`.
+    pub fn quiet(mut self) -> Self {
+        self.outline = false;
+        self.quiet = true;
+        self
+    }
+
     /// Anything the builder doesn't forward.
     pub fn edit(mut self, f: impl FnOnce(egui::TextEdit<'t>) -> egui::TextEdit<'t>) -> Self {
         self.edit = f(self.edit);
@@ -163,6 +177,7 @@ impl<'t> Field<'t> {
         let Field {
             mut edit,
             outline,
+            quiet,
             trailing,
             mut margin,
             width,
@@ -192,9 +207,16 @@ impl<'t> Field<'t> {
             edit.ui(ui)
         } else {
             // egui frames a focused field with the selection stroke; drop
-            // it for this widget alone.
+            // it for this widget alone. A quiet field drops the resting
+            // and hover strokes too, so nothing but the fill marks it.
             ui.scope(|ui| {
-                ui.visuals_mut().selection.stroke = Stroke::NONE;
+                let v = ui.visuals_mut();
+                v.selection.stroke = Stroke::NONE;
+                if quiet {
+                    v.widgets.inactive.bg_stroke = Stroke::NONE;
+                    v.widgets.hovered.bg_stroke = Stroke::NONE;
+                    v.widgets.active.bg_stroke = Stroke::NONE;
+                }
                 edit.ui(ui)
             })
             .inner
