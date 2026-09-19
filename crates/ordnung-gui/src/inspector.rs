@@ -362,6 +362,13 @@ impl App {
         let source_path = PathBuf::from(t.source_path.clone());
         let title = t.tags.title.clone();
         let artist = t.tags.artist.clone();
+        let album = t
+            .tags
+            .album
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(str::to_string);
         let path_str = t.source_path.clone();
         let file_name = std::path::Path::new(&path_str)
             .file_name()
@@ -421,10 +428,12 @@ impl App {
                 ui.add_space(space::S4);
             }
 
-            // Title at heading weight, artist right beneath it, set tight:
-            // the two lines are one name and read as one when nothing but
-            // their own leading parts them. Two descending label colours
-            // carry the hierarchy, so size alone isn't doing it.
+            // Title at heading weight, artist right beneath it, then the
+            // record's name, set tight: the lines are one name and read as
+            // one when nothing but their own leading parts them. Three
+            // descending label colours carry the hierarchy, so size alone
+            // isn't doing it. The album line only shows when the tag is
+            // set: a placeholder here would be a claim about the record.
             ui.scope(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.add(
@@ -445,6 +454,17 @@ impl App {
                     )
                     .truncate(),
                 );
+                if let Some(album) = &album {
+                    ui.add_space(space::S1);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(album)
+                                .font(crate::ui::tokens::font::callout())
+                                .color(color::LABEL_3),
+                        )
+                        .truncate(),
+                    );
+                }
             });
 
             // The track's own actions on one line under its name: the
