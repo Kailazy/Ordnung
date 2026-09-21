@@ -148,7 +148,13 @@ use std::path::Path;
 ///     sub sits on an offbeat bass note. The old "rekordbox stamps 45 ms
 ///     early" reading was an artifact of the v22 foot landing mid-bump —
 ///     rekordbox's line sits at the kick's attack, as ours now does.
-pub const ANALYZER_VERSION: u32 = 26;
+/// v27: hop-aligned beats — at 48 kHz a 125 BPM beat is exactly 360 flux hops,
+///     so the snap's folded beat profile only ever visited 360 of its 960
+///     half-millisecond bins; the foot walk-back read the first empty bin as
+///     the floor and parked every line at the bump's PEAK (~40 ms late) on
+///     48 kHz tracks at round tempos (120/125/150…). The fold now uses bins
+///     no narrower than a hop and interpolates any bin nothing landed in.
+pub const ANALYZER_VERSION: u32 = 27;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key

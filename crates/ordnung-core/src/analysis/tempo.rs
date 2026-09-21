@@ -485,7 +485,12 @@ impl FluxEnv {
 
     /// Fold an RMS envelope into one beat of `period_ms` over `n_bins` phase
     /// bins: the track's average beat as an energy profile. Bins are per-bin
-    /// means so sparse coverage can't tilt the profile.
+    /// means so sparse coverage can't tilt the profile, and any bin no block
+    /// ever landed in is filled by linear interpolation from its nearest
+    /// filled neighbours (circularly) — callers should also size `n_bins` with
+    /// [`FluxEnv::beat_bins`], because a beat that is a whole number of hops
+    /// long (48 kHz at 125 BPM is exactly 360) only ever visits that many
+    /// phases, and the walk-back foot refine reads an empty bin as a floor.
     fn folded(&self, env: &[f32], period_ms: f64, n_bins: usize) -> Vec<f32> {
         let mut sum = vec![0.0f64; n_bins];
         let mut cnt = vec![0u32; n_bins];
@@ -496,10 +501,50 @@ impl FluxEnv {
             sum[b] += v as f64;
             cnt[b] += 1;
         }
-        sum.iter()
+        let mut out: Vec<f32> = sum
+            .iter()
             .zip(&cnt)
-            .map(|(&s, &c)| if c == 0 { 0.0 } else { (s / c as f64) as f32 })
-            .collect()
+            .map(|(&s, &c)| if c == 0 { f32::NAN } else { (s / c as f64) as f32 })
+            .collect();
+        fill_gaps(&mut out);
+        out
+    }
+
+    /// Phase bins for a folded beat: [`SNAP_STEP_MS`] resolution, but never
+    /// finer than one hop of the envelope (see [`FluxEnv::folded`]).
+    fn beat_bins(&self, period_ms: f64) -> usize {
+        let step = (SNAP_STEP_MS as f64).max(self.ms_per);
+        (period_ms / step).round().max(8.0) as usize
+    }
+}
+
+/// Replace every NaN in the circular profile `p` by the linear interpolation
+/// between its nearest non-NaN neighbours. Leaves `p` untouched when nothing
+/// is finite.
+fn fill_gaps(p: &mut [f32]) {
+    let n = p.len();
+    if n == 0 || !p.iter().any(|v| v.is_finite()) {
+        return;
+    }
+    let src = p.to_vec();
+    for b in 0..n {
+        if src[b].is_finite() {
+            continue;
+        }
+        let mut lo = b;
+        let mut dl = 0;
+        while !src[lo].is_finite() {
+            lo = (lo + n - 1) % n;
+            dl += 1;
+        }
+        let mut hi = b;
+        let mut dh = 0;
+        while !src[hi].is_finite() {
+            hi = (hi + 1) % n;
+            dh += 1;
+        }
+        let t = dl as f32 / (dl + dh) as f32;
+        p[b] = src[lo] * (1.0 - t) + src[hi] * t;
     }
 }
 
@@ -548,6 +593,8 @@ struct SnapProfile {
     /// `None` when no edge was worth trusting (flat material).
     best_bin: Option<usize>,
     foot: usize,
+    /// Foot refine internals (diagnostics): floor, peak, threshold, peak bin.
+    foot_dbg: (f32, f32, f32, usize),
 }
 
 fn snap_anchor_env(env: &FluxEnv, bpm: f32, coarse_ms: u64) -> u64 {
@@ -575,7 +622,7 @@ fn snap_anchor_env(env: &FluxEnv, bpm: f32, coarse_ms: u64) -> u64 {
 /// (see the `EDGE_*` / `VOTE_*` constants).
 fn snap_profile(env: &FluxEnv, bpm: f32) -> SnapProfile {
     let period_ms = 60_000.0 / bpm as f64;
-    let n = (period_ms / SNAP_STEP_MS as f64).round().max(8.0) as usize;
+    let n = env.beat_bins(period_ms);
     let p_sub = env.folded(&env.sub_rms, period_ms, n);
     let p_hi = env.folded(&env.hi_rms, period_ms, n);
     let p_full = env.folded(&env.full_rms, period_ms, n);
@@ -613,6 +660,7 @@ fn snap_profile(env: &FluxEnv, bpm: f32) -> SnapProfile {
         cands: Vec::new(),
         best_bin: None,
         foot: 0,
+        foot_dbg: (0.0, 0.0, 0.0, 0),
     };
     if !(best_edge > mean_level * EDGE_MIN_STEP) {
         return prof;
@@ -700,6 +748,7 @@ fn snap_profile(env: &FluxEnv, bpm: f32) -> SnapProfile {
     let foot = foot % n;
     prof.best_bin = Some(best_bin);
     prof.foot = foot;
+    prof.foot_dbg = (floor, peak, thr, peak_at % n);
     prof
 }
 
@@ -978,8 +1027,11 @@ mod tests {
     fn debug_snap_on_real_track() {
         let path = std::env::var("SNAP_DEBUG_FILE").expect("SNAP_DEBUG_FILE");
         let rb_ms: Option<f64> = std::env::var("SNAP_DEBUG_RB_MS").ok().and_then(|s| s.parse().ok());
-        let audio = crate::analysis::decode_mono_capped(&path, Some(48_000 * 160)).unwrap();
-        let spec = spectrogram(&audio.samples, audio.sample_rate);
+        // Mirror production (`analyze_file`): the spectrogram covers the key
+        // window (first 150 s); the flux envelope covers the whole track.
+        let audio = crate::analysis::decode_mono_capped(&path, Some(48_000 * 20 * 60)).unwrap();
+        let key_cap = 150 * audio.sample_rate as usize;
+        let spec = spectrogram(&audio.samples[..audio.samples.len().min(key_cap)], audio.sample_rate);
         let t = detect(&spec);
         let env = FluxEnv::new(&audio.samples, audio.sample_rate).unwrap();
         let bpm = refine_period_env(&env, t.bpm);
@@ -1010,6 +1062,29 @@ mod tests {
             t.beat_offset_ms,
             rb_ms,
             period_ms / COLS as f64
+        );
+        // Where the track audibly starts (first ~1.5 ms block at 30% of the
+        // opening 10 s peak), the downbeat phase, and the grid's first bars.
+        let sr = audio.sample_rate as f64;
+        let peak10 = env.full_rms.iter().take((10_000.0 / env.ms_per) as usize).cloned().fold(0.0f32, f32::max);
+        let first_on = env.full_rms.iter().position(|&v| v >= 0.3 * peak10).map(|i| env.ms_0_energy + i as f64 * env.ms_per);
+        let dphase = crate::analysis::downbeat::detect_phase(&spec, bpm, snap);
+        let first_beat_number = ((4 - dphase % 4) % 4) + 1;
+        let _ = sr;
+        eprintln!(
+            "  first audible onset {:?} ms; downbeat phase {dphase} (first beat is number {first_beat_number}); grid: {}",
+            first_on.map(|v| v.round()),
+            (0..8).map(|k| format!("{:.0}{}", snap as f64 + k as f64 * period_ms, if (k as u32 + first_beat_number - 1) % 4 == 0 { "*" } else { "" })).collect::<Vec<_>>().join(" ")
+        );
+        eprintln!(
+            "  foot refine: best_bin {:?} floor {:.3} peak {:.3} thr {:.3} peak_at {} foot {}; p_full[0..12 step 8] {:?}",
+            prof.best_bin, prof.foot_dbg.0, prof.foot_dbg.1, prof.foot_dbg.2, prof.foot_dbg.3, prof.foot,
+            (0..96).step_by(8).map(|j| format!("{:.2}", prof.p_full[j])).collect::<Vec<_>>()
+        );
+        eprintln!(
+            "  sr {} p_full[70..100] {:?}",
+            audio.sample_rate,
+            (70..100).map(|j| format!("{:.2}", prof.p_full[j])).collect::<Vec<_>>()
         );
         sparow(&prof.p_sub, "sub");
         sparow(&prof.p_full, "full");

@@ -83,3 +83,45 @@ fn snap_keeps_the_coarse_anchor_when_there_are_no_transients() {
         .collect();
     assert_eq!(tempo::snap_anchor(&s, sr, 128.0, 350), 350);
 }
+
+/// Kicks whose attack ramps up over `attack_ms` (a soft, sidechained kick),
+/// first hit at `offset_ms`; the beat is where the ramp begins.
+fn ramped_kicks(sr: u32, bpm: f32, secs: u32, offset_ms: f32, attack_ms: f32) -> Vec<f32> {
+    let period = 60.0 / bpm * sr as f32;
+    let n = sr as usize * secs as usize;
+    let attack = (attack_ms / 1000.0 * sr as f32) as usize;
+    let mut s = vec![0.0f32; n];
+    let mut beat = offset_ms / 1000.0 * sr as f32;
+    while (beat as usize) < n {
+        let start = beat as usize;
+        for j in 0..(sr as usize / 4) {
+            if start + j >= n {
+                break;
+            }
+            let t = j as f32 / sr as f32;
+            let ramp = (j as f32 / attack as f32).min(1.0);
+            let decay = (-(j.saturating_sub(attack) as f32) / (sr as f32 * 0.06)).exp();
+            s[start + j] += (2.0 * std::f32::consts::PI * 55.0 * t).sin() * ramp * decay * 0.9;
+        }
+        beat += period;
+    }
+    s
+}
+
+#[test]
+fn hop_aligned_period_still_lands_on_the_attack() {
+    // 48 kHz at 125 BPM: a beat is exactly 360 envelope hops, so the folded
+    // beat profile only ever samples 360 phases. Before the fold filled its
+    // empty bins the foot walk-back stopped at the first empty bin, right at
+    // the bump's peak — 30–40 ms late on every soft kick at a round tempo.
+    let sr = 48_000;
+    let (bpm, offset, attack) = (125.0f32, 100.0f32, 35.0f32);
+    let s = ramped_kicks(sr, bpm, 40, offset, attack);
+    let (locked_bpm, anchor) = tempo::lock_grid(&s, sr, bpm, 0);
+    assert!((locked_bpm - bpm).abs() < 0.01, "bpm {locked_bpm}");
+    let err = phase_error(anchor, offset, bpm);
+    assert!(
+        err.abs() < 12.0,
+        "anchor {anchor}ms is {err:+.1}ms off the attack's start"
+    );
+}
