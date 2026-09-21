@@ -811,7 +811,12 @@ impl App {
                     ui.spacing_mut().item_spacing.x = GAP;
                     crate::ui::control_row(ui, |ui| {
                         let idx = self.loop_beats.min(LOOP_BEATS.len() - 1);
-                        if crate::ui::button::glyph(ui, "‹", idx > 0)
+                        // The loop, quantize and memory controls are deck keys
+                        // (see `ui::button::deck`), not the toolbar's push
+                        // buttons: this row plays the track, it doesn't manage
+                        // the library, and it should look like a different
+                        // instrument.
+                        if crate::ui::button::deck(ui, "‹", None, idx > 0)
                             .on_hover_note("Halve the loop")
                             .clicked()
                         {
@@ -821,7 +826,8 @@ impl App {
                             egui::vec2(30.0, crate::ui::control_h(ui)),
                             egui::Sense::hover(),
                         );
-                        ui.painter().rect_filled(lr, egui::Rounding::same(radius::SM), color::FIELD);
+                        // The beat count is a readout between its two keys.
+                        ui.painter().rect_filled(lr, egui::Rounding::same(radius::XS), color::FIELD);
                         ui.painter().text(
                             lr.center(),
                             egui::Align2::CENTER_CENTER,
@@ -829,23 +835,18 @@ impl App {
                             font::strong(13.0),
                             if active.is_some() { ACTIVE_LOOP_COLOR } else { color::LABEL },
                         );
-                        if crate::ui::button::glyph(ui, "›", idx + 1 < LOOP_BEATS.len())
+                        if crate::ui::button::deck(ui, "›", None, idx + 1 < LOOP_BEATS.len())
                             .on_hover_note("Double the loop")
                             .clicked()
                         {
                             loop_cmd = Some(LoopCmd::Beats(idx + 1));
                         }
                         let loop_label = if active.is_some() { "Exit" } else { "Loop" };
-                        let loop_btn = ui.add(
-                            egui::Button::new(
-                                egui::RichText::new(loop_label).color(if active.is_some() {
-                                    egui::Color32::from_gray(16)
-                                } else {
-                                    color::LABEL
-                                }),
-                            )
-                            .fill(if active.is_some() { ACTIVE_LOOP_COLOR } else { color::SURFACE_HI })
-                            .min_size(egui::vec2(48.0, 0.0)),
+                        let loop_btn = crate::ui::button::deck(
+                            ui,
+                            loop_label,
+                            active.is_some().then_some(ACTIVE_LOOP_COLOR),
+                            true,
                         );
                         if loop_btn
                             .on_hover_note(if active.is_some() {
@@ -857,14 +858,11 @@ impl App {
                         {
                             loop_cmd = Some(if active.is_some() { LoopCmd::Exit } else { LoopCmd::BeatLoop });
                         }
-                        let q = ui.add(
-                            egui::Button::new(
-                                egui::RichText::new("Q")
-                                    .font(font::strong(13.0))
-                                    .color(if quantize { egui::Color32::from_gray(16) } else { color::LABEL_2 }),
-                            )
-                            .fill(if quantize { color::ACCENT_HOVER } else { color::SURFACE_HI })
-                            .min_size(egui::vec2(30.0, 0.0)),
+                        let q = crate::ui::button::deck(
+                            ui,
+                            "Q",
+                            quantize.then_some(color::ACCENT_HOVER),
+                            true,
                         );
                         if q
                             .on_hover_note(if quantize {
@@ -901,7 +899,7 @@ impl App {
                         ui.spacing_mut().item_spacing.x = GAP;
                         crate::ui::control_row(ui, |ui| {
                             let full = memory.len() >= MAX_MEMORY_CUES;
-                            if crate::ui::button::button_enabled(ui, !full, if compact_add { "⟲" } else { "+ Loop" })
+                            if crate::ui::button::deck(ui, if compact_add { "⟲" } else { "+ Loop" }, None, !full)
                                 .on_hover_note(if active.is_some() {
                                     "Save the running loop as a memory loop"
                                 } else {
@@ -911,7 +909,7 @@ impl App {
                             {
                                 add_memory = Some(true);
                             }
-                            if crate::ui::button::button_enabled(ui, !full, if compact_add { "+" } else { "+ Cue" })
+                            if crate::ui::button::deck(ui, if compact_add { "+" } else { "+ Cue" }, None, !full)
                                 .on_hover_note("Memory cue at the playhead")
                                 .clicked()
                             {

@@ -2048,11 +2048,19 @@ pub(crate) fn segmented(
     cells: &[(GridGlyph, &str)],
 ) -> Option<Fire> {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, CELL_H), egui::Sense::hover());
-    let r = crate::ui::tokens::radius::SM;
+    // Sunken and square-cornered like the player's deck keys (see
+    // `ui::button::deck`), so the grid editor reads as part of the
+    // performance surface rather than as a row of toolbar buttons.
+    let r = crate::ui::tokens::radius::XS;
     ui.painter().rect_filled(
         rect,
         egui::Rounding::same(r),
-        crate::ui::tokens::color::SURFACE_HI,
+        crate::ui::tokens::color::FIELD,
+    );
+    ui.painter().rect_stroke(
+        rect,
+        egui::Rounding::same(r),
+        egui::Stroke::new(1.0, crate::ui::tokens::color::SURFACE_HI),
     );
 
     let mut hit = None;

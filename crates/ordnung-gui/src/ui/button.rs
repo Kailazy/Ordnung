@@ -139,6 +139,69 @@ pub fn segmented(ui: &mut egui::Ui, selected: Option<usize>, segments: &[Segment
     clicked
 }
 
+/// Horizontal inset of a [`deck`] key's label.
+const DECK_PAD_X: f32 = 10.0;
+
+/// A deck key: a control of the player's performance surface — loop, cue,
+/// quantize — as distinct from the app's push buttons. The library's chrome
+/// is an outlined, rounded grey button with a sentence-case label, the way a
+/// macOS toolbar button sits on its bar; that family is for *managing* the
+/// collection. A deck key is the other family, for *playing*: flat and
+/// sunken like a key on a player, squarer, its label small caps, and when
+/// engaged it lights — a colour fill with dark ink — rather than taking the
+/// selection blue. Keeping the two apart is what lets the eye tell the
+/// transport from the toolbar at a glance.
+///
+/// Takes the row's control height, so it lines up with a field or a readout
+/// beside it. `lit` is the colour the key shows while engaged (`None` at
+/// rest). Disabled, it fades and takes no click.
+pub fn deck(
+    ui: &mut egui::Ui,
+    label: &str,
+    lit: Option<egui::Color32>,
+    enabled: bool,
+) -> egui::Response {
+    let h = ui.spacing().interact_size.y;
+    // A single glyph (‹, ›, Q) sits at body size so it reads as a key cap;
+    // a word is small caps at footnote size.
+    let font_id = if label.chars().count() == 1 {
+        font::strong(font::body().size)
+    } else {
+        font::strong(font::footnote().size)
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_uppercase(), font_id, color::LABEL);
+    let w = (galley.size().x + 2.0 * DECK_PAD_X).max(h * 1.25).round();
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(w, h),
+        if enabled { egui::Sense::click() } else { egui::Sense::hover() },
+    );
+    if ui.is_rect_visible(rect) {
+        let rounding = egui::Rounding::same(radius::XS);
+        let hovered = enabled && resp.hovered();
+        let down = enabled && resp.is_pointer_button_down_on();
+        let (fill, ink, edge) = match lit {
+            Some(c) if enabled => (c, egui::Color32::from_gray(16), None),
+            _ if !enabled => (color::FIELD, color::LABEL_4, Some(color::SURFACE_HI)),
+            _ if down => (color::SURFACE_ACTIVE, color::LABEL, None),
+            _ if hovered => (color::SURFACE_HOVER, color::LABEL, None),
+            _ => (color::FIELD, color::LABEL_2, Some(color::SURFACE_HI)),
+        };
+        ui.painter().rect_filled(rect, rounding, fill);
+        if let Some(edge) = edge {
+            ui.painter()
+                .rect_stroke(rect, rounding, egui::Stroke::new(1.0, edge));
+        }
+        ui.painter()
+            .galley(rect.center() - galley.size() / 2.0, galley, ink);
+        if hovered {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+    }
+    resp
+}
+
 /// A control on a line of text: a footnote-sized word in the secondary label
 /// colour, with a faint pill behind it only while the pointer is on it. For
 /// an action that belongs to the fact beside it (the versions of the pressing
