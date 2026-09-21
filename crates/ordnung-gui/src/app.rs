@@ -676,9 +676,17 @@ impl App {
                 // stable since track ids don't change). Safe mid-frame: `Tex`
                 // defers the actual GPU frees to the next frame (see `tex.rs`).
                 let live: std::collections::BTreeSet<Id> = rows.iter().map(|r| r.id).collect();
-                self.cover_cache.retain(|id, _| live.contains(id));
-                self.cover_full_cache.retain(|id, _| live.contains(id));
-                self.cover_inflight.retain(|id| live.contains(id));
+                // The inspector keeps describing the primary row across a
+                // view switch (a playlist without it, the vinyl wall, the
+                // health tabs, all of which load no rows for it), so its
+                // covers stay cached with it. Evicting them here re-decoded
+                // and re-uploaded the same image on the very next frame, and
+                // the panel flickered through a spinner on every switch.
+                let primary = self.selected;
+                let keep = |id: &Id| live.contains(id) || primary == Some(*id);
+                self.cover_cache.retain(|id, _| keep(id));
+                self.cover_full_cache.retain(|id, _| keep(id));
+                self.cover_inflight.retain(|id| keep(id));
                 // Drop any selected/anchor ids that filtered out of the view so a
                 // drag-out never references a row the user can't see.
                 self.selection.retain(|id| live.contains(id));
