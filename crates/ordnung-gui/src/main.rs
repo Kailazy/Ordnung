@@ -127,7 +127,13 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Ordnung",
         opts,
-        Box::new(move |cc| Ok(Box::new(App::new(db_path, cc.egui_ctx.clone())))),
+        Box::new(move |cc| {
+            Ok(Box::new(App::new(
+                db_path,
+                cc.egui_ctx.clone(),
+                cc.wgpu_render_state.clone(),
+            )))
+        }),
     )
 }
 

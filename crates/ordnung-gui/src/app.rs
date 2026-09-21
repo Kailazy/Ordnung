@@ -34,14 +34,18 @@ impl App {
             .collect()
     }
 
-    pub(crate) fn new(db_path: PathBuf, egui_ctx: egui::Context) -> Self {
+    pub(crate) fn new(
+        db_path: PathBuf,
+        egui_ctx: egui::Context,
+        render_state: Option<eframe::egui_wgpu::RenderState>,
+    ) -> Self {
         // Install the Inter font stack and push the design tokens into egui's
         // global style before any text is laid out, so every stock widget already
         // matches the Ordnung visual language (see `ui::theme`). DejaVu Sans stays
         // in the fallback chain for the wide-Unicode glyphs Inter lacks.
         crate::ui::theme::install(&egui_ctx);
         let tex_graveyard = TexGraveyard::default();
-        crate::ui::glass::install(&egui_ctx, tex_graveyard.clone());
+        crate::ui::glass::install(&egui_ctx, render_state);
         // Dig cover downloads: many small CDN fetches, each answering on this
         // one channel (the dig is a single path, so there's no per-request
         // routing to do).
@@ -1828,6 +1832,15 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.update_inner(ctx, frame);
+        // Every surface has painted: make this frame's frosted backdrops
+        // from what lies under each, before egui draws the frame.
+        crate::ui::glass::render(ctx);
+    }
+}
+
+impl App {
+    fn update_inner(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Install the native menu bar on the first frame. It has to wait for a
         // frame rather than happen before `run_native`: the `NSApplication`
         // whose main menu we replace doesn't exist until eframe/winit has
@@ -1857,7 +1870,7 @@ impl eframe::App for App {
         // before anything paints or uploads — guarantees the frame that painted
         // them has already been submitted to the GPU (see `tex_graveyard`).
         self.tex_graveyard.clear();
-        // Closed windows and menus forget their backdrops; primed ones land.
+        // Closed windows and menus let their backdrop textures go.
         crate::ui::glass::sweep(ctx);
         // Both lanes drain every frame; either can change the rows.
         let worker_changed = self.poll_worker();

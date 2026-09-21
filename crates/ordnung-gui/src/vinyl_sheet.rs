@@ -987,35 +987,10 @@ impl App {
         }
     }
 
-    /// Whether a click here could open a record sheet, so a press is worth a
-    /// frost snapshot: the vinyl view (grid, map, sellers, dig) or one of the
-    /// record-listing windows over any view. Never while a popup is up: the
-    /// record search and the track menu open sheets too, but the popup would
-    /// be in the backdrop, so those take their snapshot on open instead.
-    fn sheet_can_open_from_press(&self, ctx: &egui::Context) -> bool {
-        if ctx.memory(|m| m.any_popup_open()) {
-            return false;
-        }
-        self.view == LibraryView::Vinyl
-            || self.browse_panel.is_some()
-            || self.versions.is_some()
-            || self.tracklist_open
-    }
-
     /// Draw the open record sheet. Returns nothing — every action is applied
     /// before it returns, so the caller just calls it once per frame.
     pub(crate) fn draw_vinyl_sheet(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         if self.vinyl_sheet.is_none() {
-            // The frost under the sheet is a snapshot of the app, and taking
-            // it stalls the frame; taken on the click that opens the sheet,
-            // that stall is the hitch the user sees. So it's taken on the
-            // press before the click, wherever a click can open a sheet
-            // (the vinyl view and the windows that list records), while
-            // nothing that would show in the backdrop, like a menu, is up.
-            let press = ctx.input(|i| i.pointer.primary_pressed());
-            if press && self.sheet_can_open_from_press(ctx) {
-                crate::ui::glass::prime(ctx, sheet_glass());
-            }
             return;
         }
         // A sheet is where videos get played from, so have the player built

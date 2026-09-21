@@ -288,11 +288,8 @@ impl App {
         // The bar is glass, like a window: the app blurred under a tint.
         // Nothing scrolls under a bar at the window's bottom, so it frosts
         // the strip of content just above it, the continuation of what it
-        // covers, and takes that snapshot again once a scroll settles, the
-        // view changes, or the window is resized.
+        // covers.
         let glass_id = egui::Id::new("player_glass");
-        crate::ui::glass::live(ctx, glass_id);
-        self.refresh_player_frost(ctx, glass_id);
         let avail = ctx.available_rect();
         let panel_rect = egui::Rect::from_min_max(
             egui::pos2(avail.left(), avail.bottom() - panel_h),
@@ -2503,57 +2500,6 @@ const MAX_ZOOM_SECS: f32 = 90.0;
 
 /// How long the cue bar takes to slide into or out of the player.
 const CUE_BAR_ANIM: f32 = 0.16;
-
-/// What the player's frost was last taken over, to know when to take it
-/// again. Kept in the context's memory.
-#[derive(Clone, Default)]
-struct FrostTrack {
-    scrolling: bool,
-    view: Option<LibraryView>,
-    screen: Option<egui::Rect>,
-    /// `ctx.input().time` of the last re-take, to keep them at least
-    /// [`FROST_MIN_GAP`] apart.
-    last: Option<f64>,
-}
-
-/// Least time between two snapshots of the player's backdrop, in seconds:
-/// each one stalls the frame for the readback.
-const FROST_MIN_GAP: f64 = 0.3;
-
-impl App {
-    /// Re-take the player's frost when what it frosts has changed: a scroll
-    /// that just came to rest, a switch of view, a resized window.
-    fn refresh_player_frost(&self, ctx: &egui::Context, glass_id: egui::Id) {
-        let now = ctx.input(|i| i.time);
-        let scrolling = ctx.input(|i| {
-            i.smooth_scroll_delta != egui::Vec2::ZERO || i.raw_scroll_delta != egui::Vec2::ZERO
-        });
-        let screen = ctx.screen_rect();
-        let view = self.view.clone();
-        let want = ctx.data_mut(|d| {
-            let t = d.get_temp_mut_or_default::<FrostTrack>(glass_id.with("track"));
-            let mut want = t.scrolling && !scrolling;
-            t.scrolling = scrolling;
-            if t.view.as_ref() != Some(&view) {
-                t.view = Some(view);
-                want = true;
-            }
-            if t.screen != Some(screen) {
-                t.screen = Some(screen);
-                want = true;
-            }
-            if want && t.last.map_or(true, |l| now - l >= FROST_MIN_GAP) {
-                t.last = Some(now);
-                true
-            } else {
-                false
-            }
-        });
-        if want {
-            crate::ui::glass::refresh(ctx, glass_id);
-        }
-    }
-}
 
 /// Default pixel height of the moving zoomed detail lane.
 pub(crate) const DEFAULT_LANE_H: f32 = 46.0;

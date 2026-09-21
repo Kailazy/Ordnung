@@ -134,8 +134,7 @@ impl<'o> Window<'o> {
     }
 
     /// Key the backdrop apart from the window id: for a window whose id
-    /// changes with its content but whose opening can be seen coming (see
-    /// `glass::prime`) before the content is known.
+    /// changes with its content, so its glass carries over between them.
     pub fn glass_id(mut self, id: egui::Id) -> Self {
         self.glass = Some(id);
         self
@@ -273,10 +272,6 @@ impl<'o> Window<'o> {
             .id
             .unwrap_or_else(|| egui::Id::new(self.title.text()));
         let glass_id = self.glass.unwrap_or(id);
-        if !glass::ready(ctx, glass_id) {
-            ctx.request_repaint();
-            return None;
-        }
         let opening = glass::opening(ctx, glass_id);
         let style = ctx.style();
         let rounding = style.visuals.window_rounding;

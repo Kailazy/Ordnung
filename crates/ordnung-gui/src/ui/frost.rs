@@ -1,285 +1,497 @@
-//! Frosted backdrop for a floating window.
+//! Live frosted backdrops for glass surfaces, made on the GPU every frame.
 //!
 //! egui paints every layer straight to one surface, so a see-through window
-//! can only tint what's under it: at any alpha that lets the app show, it shows
-//! in outline. What a frosted surface wants is the app *blurred*, and there is
-//! no backdrop blur to ask the GPU for. So the frost is made the long way round:
-//! the frame is snapshotted before the window is drawn, shrunk and box-blurred,
-//! and painted under the window from then on, mapped so the window sees the
-//! part of the snapshot it sits over.
+//! can only tint what's under it: at any alpha that lets the app show, it
+//! shows in outline. What a frosted surface wants is the app *blurred*, and
+//! there is no backdrop blur to ask the GPU for. So the frost is made the
+//! long way round, once a frame, for every glass surface that is up:
 //!
-//! The snapshot is the expensive part, and it can't be made cheap: reading the
-//! frame back stalls the main thread on the GPU and a full-resolution pixel
-//! copy (about 40 ms on a Retina display in a release build, ten times that in
-//! debug). Taken when the window opens, that stall lands on the click and the
-//! whole app hitches. So it is taken on the mouse *press* instead, while the
-//! window is still closed ([`Frost::prime`]): a press is a moment when nothing
-//! on screen is moving, the click that opens the window comes a frame or more
-//! later, and by then the snapshot is in hand. The blur runs on a worker
-//! thread so it never costs the frame anything. A window opened without a
-//! press (keyboard, a menu item) falls back to snapshotting on open, holding
-//! the window back for the one frame that takes.
+//! 1. the shapes egui painted this frame, up to the surface's own frost,
+//!    are drawn a second time through egui's own wgpu renderer into a small
+//!    offscreen texture (a quarter or so of the screen's pixels);
+//! 2. that is halved twice and gaussian-blurred, all on the GPU, into the
+//!    surface's own texture, which is registered with egui;
+//! 3. the surface paints that texture under its tint, mapped so it sees the
+//!    part of the screen it sits over.
 //!
-//! Whatever moves under the window after the snapshot is stale in it, but at
-//! this blur nothing under the window has a shape to be stale in, and taking
-//! it again would only capture the window itself.
+//! Nothing is read back from the GPU, so this costs the frame a fraction
+//! of a millisecond of GPU time and one extra tessellation of the shapes
+//! near the surface, and the frost follows whatever moves under it: a
+//! scroll, a hover, a playing waveform. It replaces an earlier design that
+//! screenshotted the frame once when a surface opened, which froze whatever
+//! was under the surface for as long as it stayed up.
+//!
+//! Surfaces are rendered in paint order, cumulatively: the second surface's
+//! backdrop is the first's plus everything painted between them, so a menu
+//! over a window frosts the window too, frost and all.
 
-use crate::tex::{Tex, TexGraveyard};
 use eframe::egui;
-use std::sync::mpsc::{self, Receiver};
-use std::time::{Duration, Instant};
+use eframe::egui_wgpu::{RenderState, ScreenDescriptor};
+use eframe::wgpu;
 
-/// How long to hold the window back for a snapshot that isn't coming (a
-/// backend without screenshots) before drawing it plain.
-const GIVE_UP: Duration = Duration::from_millis(300);
+/// Long side of the offscreen render, in pixels. Big enough that hairlines
+/// and small text still register before the blur eats them; small enough
+/// that drawing the whole screen into it is nothing.
+const OFF_LONG: u32 = 1280;
 
-/// How long a primed snapshot stays good for while the window is closed. The
-/// click a press is for follows it within this; a window opened later isn't
-/// the one the press was for, and what's on screen may have changed since.
-const PRIME_TTL: Duration = Duration::from_secs(1);
+/// Long side of the blurred texture, in texels. The two halvings from
+/// [`OFF_LONG`] land here; the blur runs at this size and bilinear
+/// magnification back up is itself most of the softness.
+const BLUR_LONG: u32 = 320;
 
-/// Long side of the blurred snapshot, in texels. Small enough that the blur
-/// is free; magnifying it back up with bilinear filtering is itself most of
-/// the softness.
-const TEXELS: usize = 320;
+/// How far, in points, a shape can be from a surface and still show in its
+/// frost: three sigmas of the blur at the screen sizes the app runs at.
+pub const REACH: f32 = 64.0;
 
-/// Box-blur radius in texels per pass; three passes each way approximates a
-/// Gaussian of about that many texels' sigma.
-const RADIUS: usize = 3;
-const PASSES: usize = 3;
+const SHADER: &str = r#"
+struct Params { step: vec2<f32>, _pad: vec2<f32> };
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var smp: sampler;
+@group(0) @binding(2) var<uniform> params: Params;
 
-enum State {
-    /// Nothing asked for yet.
-    Fresh,
-    /// The snapshot is in flight since then. The window must not draw: it
-    /// would end up in its own backdrop.
-    Asked(Instant),
-    /// The snapshot, taken then, is being blurred on a worker thread.
-    Blurring(Receiver<egui::ColorImage>, Instant),
-    /// The blurred snapshot, taken then, ready to paint.
-    Have(Tex, Instant),
-    /// No snapshot came; the window goes on plain.
-    Bare,
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+
+// One triangle over the whole target.
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {
+    var out: VOut;
+    let x = f32((i & 1u) * 4u) - 1.0;
+    let y = f32((i & 2u) * 2u) - 1.0;
+    out.pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5);
+    return out;
 }
 
-/// A window's frosted backdrop. Keep one per window across its open spell and
-/// [`Frost::clear`] it when the window closes, so the next open takes a fresh
-/// snapshot. `glass` keeps one per window and does this bookkeeping.
-pub struct Frost {
-    state: State,
-    /// The screen the snapshot covers, in points, to map a window rect onto it.
-    screen: egui::Rect,
-    /// The snapshot before the one in flight, with its screen: a surface
-    /// that re-takes its frost while up (the player) keeps showing this one
-    /// until the new one lands, so it never flashes plain between the two.
-    stale: Option<(Tex, egui::Rect)>,
+// Plain resample. Sampled at the centre of a texel of a target half the
+// size, bilinear filtering makes this an exact 2x2 average.
+@fragment fn fs_blit(in: VOut) -> @location(0) vec4<f32> {
+    return textureSample(tex, smp, in.uv);
 }
 
-impl Frost {
-    pub fn new() -> Self {
+// 13-tap gaussian, sigma 2.4 texels, along `params.step`. Run once each
+// way, twice over, for a sigma of about 3.4.
+fn tap(uv: vec2<f32>, k: f32) -> vec4<f32> {
+    let o = params.step * k;
+    return textureSample(tex, smp, uv + o) + textureSample(tex, smp, uv - o);
+}
+
+@fragment fn fs_blur(in: VOut) -> @location(0) vec4<f32> {
+    var acc = textureSample(tex, smp, in.uv) * 0.1673;
+    acc += tap(in.uv, 1.0) * 0.1534;
+    acc += tap(in.uv, 2.0) * 0.1182;
+    acc += tap(in.uv, 3.0) * 0.0766;
+    acc += tap(in.uv, 4.0) * 0.0417;
+    acc += tap(in.uv, 5.0) * 0.0191;
+    acc += tap(in.uv, 6.0) * 0.0073;
+    return acc;
+}
+"#;
+
+/// Format of every texture after the offscreen render. sRGB so egui, which
+/// samples it as a linear-light texture, shows the colours as they were.
+const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// A texture that is drawn into and sampled from.
+struct Target {
+    #[allow(dead_code)]
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: [u32; 2],
+}
+
+impl Target {
+    fn new(device: &wgpu::Device, label: &str, size: [u32; 2], format: wgpu::TextureFormat) -> Self {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: size[0].max(1),
+                height: size[1].max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&Default::default());
+        Self { tex, view, size }
+    }
+}
+
+/// The textures every surface's frost is made through, sized to the screen.
+struct Shared {
+    /// Screen size in pixels these were made for.
+    screen_px: [u32; 2],
+    /// The offscreen render, in the surface's own format (egui's pipeline
+    /// only draws to that).
+    off: Target,
+    half: Target,
+    ping: Target,
+    pong: Target,
+    /// Samples `off`, `half`, `ping` (horizontal blur), `pong` (vertical).
+    blit_off: wgpu::BindGroup,
+    blit_half: wgpu::BindGroup,
+    blur_h: wgpu::BindGroup,
+    blur_v: wgpu::BindGroup,
+    #[allow(dead_code)]
+    uniforms: [wgpu::Buffer; 3],
+}
+
+/// One surface's blurred backdrop: a texture egui can paint with.
+pub struct Backdrop {
+    target: Target,
+    id: egui::TextureId,
+}
+
+impl Backdrop {
+    /// The texture, for a shape's `fill_texture_id`.
+    pub fn id(&self) -> egui::TextureId {
+        self.id
+    }
+}
+
+/// The GPU side: pipelines, the shared textures, and the renderer they
+/// draw egui's shapes through.
+pub struct Engine {
+    state: RenderState,
+    blit: wgpu::RenderPipeline,
+    blur: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    shared: Option<Shared>,
+}
+
+/// A surface whose backdrop is to be made: everything painted before
+/// `position` in the frame's shape list goes into it.
+pub struct Cut<'a> {
+    pub position: usize,
+    pub backdrop: &'a mut Backdrop,
+}
+
+impl Engine {
+    pub fn new(state: RenderState) -> Self {
+        let device = &state.device;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("frost"),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("frost"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(16),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("frost"),
+            bind_group_layouts: &[&layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = |entry: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs",
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: entry,
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                multiview: None,
+                cache: None,
+            })
+        };
+        let blit = pipeline("fs_blit");
+        let blur = pipeline("fs_blur");
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("frost"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         Self {
-            state: State::Fresh,
-            screen: egui::Rect::NOTHING,
-            stale: None,
+            state,
+            blit,
+            blur,
+            layout,
+            sampler,
+            shared: None,
         }
     }
 
-    /// Take the snapshot now, ahead of the window opening. Call on a mouse
-    /// press while the window is closed (and nothing that shouldn't be in the
-    /// backdrop, like a menu, is up): the stall lands under the press, and
-    /// the click that follows finds the snapshot ready. A newer press
-    /// replaces an older snapshot; one already in flight is left to land.
-    pub fn prime(&mut self, ctx: &egui::Context) {
-        if matches!(self.state, State::Asked(_) | State::Blurring(..)) {
+    /// Screen size in pixels, and the size of a frost for it.
+    fn sizes(ctx: &egui::Context) -> ([u32; 2], [u32; 2]) {
+        let ppp = ctx.pixels_per_point();
+        let s = ctx.screen_rect().size() * ppp;
+        let px = [(s.x.round() as u32).max(1), (s.y.round() as u32).max(1)];
+        (px, scaled(px, BLUR_LONG))
+    }
+
+    /// A backdrop texture for a new surface, registered with egui.
+    pub fn backdrop(&mut self, ctx: &egui::Context) -> Backdrop {
+        let (_, size) = Self::sizes(ctx);
+        let target = Target::new(&self.state.device, "frost_surface", size, FORMAT);
+        let id = self.state.renderer.write().register_native_texture(
+            &self.state.device,
+            &target.view,
+            wgpu::FilterMode::Linear,
+        );
+        Backdrop { target, id }
+    }
+
+    /// Let a surface's backdrop go. Call at the top of a frame, before
+    /// anything that could still paint with it is encoded.
+    pub fn free(&mut self, backdrop: Backdrop) {
+        self.state.renderer.write().free_texture(&backdrop.id);
+    }
+
+    fn bind(&self, target: &Target, uniform: &wgpu::Buffer) -> wgpu::BindGroup {
+        self.state.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("frost"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&target.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    fn uniform(&self, step: [f32; 2]) -> wgpu::Buffer {
+        let buf = self.state.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("frost_params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&step[0].to_ne_bytes());
+        bytes[4..8].copy_from_slice(&step[1].to_ne_bytes());
+        self.state.queue.write_buffer(&buf, 0, &bytes);
+        buf
+    }
+
+    /// The shared textures for this screen size, made afresh when it changes.
+    fn shared(&mut self, screen_px: [u32; 2]) -> &Shared {
+        if self.shared.as_ref().map_or(true, |s| s.screen_px != screen_px) {
+            let device = &self.state.device;
+            let off = Target::new(device, "frost_off", scaled(screen_px, OFF_LONG), self.state.target_format);
+            let half = Target::new(device, "frost_half", scaled(screen_px, OFF_LONG / 2), FORMAT);
+            let blur = scaled(screen_px, BLUR_LONG);
+            let ping = Target::new(device, "frost_ping", blur, FORMAT);
+            let pong = Target::new(device, "frost_pong", blur, FORMAT);
+            let uniforms = [
+                self.uniform([0.0, 0.0]),
+                self.uniform([1.0 / blur[0] as f32, 0.0]),
+                self.uniform([0.0, 1.0 / blur[1] as f32]),
+            ];
+            let blit_off = self.bind(&off, &uniforms[0]);
+            let blit_half = self.bind(&half, &uniforms[0]);
+            let blur_h = self.bind(&ping, &uniforms[1]);
+            let blur_v = self.bind(&pong, &uniforms[2]);
+            self.shared = Some(Shared {
+                screen_px,
+                off,
+                half,
+                ping,
+                pong,
+                blit_off,
+                blit_half,
+                blur_h,
+                blur_v,
+                uniforms,
+            });
+        }
+        self.shared.as_ref().unwrap()
+    }
+
+    /// Make every cut's backdrop from `shapes`, the frame's shapes in paint
+    /// order, already trimmed to what can show in a frost. Cuts must be in
+    /// ascending `position`.
+    pub fn render(&mut self, ctx: &egui::Context, shapes: Vec<egui::epaint::ClippedShape>, cuts: Vec<Cut<'_>>) {
+        if cuts.is_empty() {
             return;
         }
-        self.ask(ctx);
-    }
-
-    /// Drop a primed snapshot nobody opened a window on within
-    /// [`PRIME_TTL`]. Call once a frame while the window is closed, never
-    /// while it's open: the snapshot under an open window stays as long as
-    /// the window does.
-    pub fn expire(&mut self) {
-        if let State::Have(_, taken) = &self.state {
-            if taken.elapsed() > PRIME_TTL {
-                self.state = State::Fresh;
+        let (screen_px, blur_size) = Self::sizes(ctx);
+        let ppp = ctx.pixels_per_point();
+        // A surface's texture is sized to the screen; re-make it when the
+        // window was resized, keeping egui's id for it.
+        let mut cuts = cuts;
+        for cut in cuts.iter_mut() {
+            if cut.backdrop.target.size != blur_size {
+                let target = Target::new(&self.state.device, "frost_surface", blur_size, FORMAT);
+                self.state.renderer.write().update_egui_texture_from_wgpu_texture(
+                    &self.state.device,
+                    &target.view,
+                    wgpu::FilterMode::Linear,
+                    cut.backdrop.id,
+                );
+                cut.backdrop.target = target;
             }
         }
-    }
-
-    /// Move a snapshot along: pick up the frame when it lands, the blur when
-    /// it's done. Call once a frame whether or not the window is open; the
-    /// frame arrives as an input event that is only there for one frame.
-    pub fn poll(&mut self, ctx: &egui::Context, graveyard: &TexGraveyard) {
-        match &self.state {
-            State::Asked(since) => {
-                let shot = ctx.input(|i| {
-                    i.events.iter().find_map(|e| match e {
-                        egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                        _ => None,
-                    })
-                });
-                if let Some(image) = shot {
-                    let (tx, rx) = mpsc::channel();
-                    let ctx = ctx.clone();
-                    std::thread::spawn(move || {
-                        if tx.send(blur(&image)).is_ok() {
-                            ctx.request_repaint();
-                        }
-                    });
-                    self.state = State::Blurring(rx, *since);
-                } else if since.elapsed() > GIVE_UP {
-                    self.state = State::Bare;
+        // Tessellate each segment between cuts on its own: the tessellator
+        // merges neighbouring shapes, so the cuts must be made before it runs.
+        let mut shapes = shapes;
+        let mut segments = Vec::with_capacity(cuts.len() + 1);
+        for cut in cuts.iter().rev() {
+            let tail = shapes.split_off(cut.position.min(shapes.len()));
+            segments.push(tail);
+        }
+        segments.push(shapes);
+        segments.reverse();
+        // Segment `i` is what lies between cut `i - 1` and cut `i`; the
+        // last, after the last cut, is never drawn: nothing frosts it.
+        segments.truncate(cuts.len());
+        let jobs: Vec<Vec<egui::epaint::ClippedPrimitive>> = segments
+            .into_iter()
+            .map(|seg| {
+                if seg.is_empty() {
+                    Vec::new()
                 } else {
-                    ctx.request_repaint();
+                    ctx.tessellate(seg, ppp)
+                }
+            })
+            .collect();
+
+        self.shared(screen_px);
+        let shared = self.shared.as_ref().unwrap();
+        let device = self.state.device.clone();
+        let queue = self.state.queue.clone();
+        let desc = ScreenDescriptor {
+            size_in_pixels: shared.off.size,
+            pixels_per_point: ppp * shared.off.size[0] as f32 / screen_px[0] as f32,
+        };
+        let mut renderer = self.state.renderer.write();
+        for (i, (cut, mut jobs)) in cuts.into_iter().zip(jobs).enumerate() {
+            // A texture egui has not uploaded yet (a cover that arrived this
+            // frame) is drawn next frame; a paint callback never.
+            jobs.retain(|j| match &j.primitive {
+                egui::epaint::Primitive::Mesh(m) => renderer.texture(&m.texture_id).is_some(),
+                egui::epaint::Primitive::Callback(_) => false,
+            });
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frost"),
+            });
+            let user = if jobs.is_empty() {
+                Vec::new()
+            } else {
+                renderer.update_buffers(&device, &queue, &mut encoder, &jobs, &desc)
+            };
+            {
+                let mut pass = encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("frost_egui"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &shared.off.view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: if i == 0 {
+                                    wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                                } else {
+                                    wgpu::LoadOp::Load
+                                },
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    })
+                    .forget_lifetime();
+                if !jobs.is_empty() {
+                    renderer.render(&mut pass, &jobs, &desc);
                 }
             }
-            State::Blurring(rx, taken) => {
-                if let Ok(blurred) = rx.try_recv() {
-                    let tex = ctx.load_texture("frost", blurred, egui::TextureOptions::LINEAR);
-                    self.state = State::Have(graveyard.wrap(tex), *taken);
-                }
+            let passes: [(&wgpu::RenderPipeline, &wgpu::BindGroup, &wgpu::TextureView); 6] = [
+                (&self.blit, &shared.blit_off, &shared.half.view),
+                (&self.blit, &shared.blit_half, &shared.ping.view),
+                (&self.blur, &shared.blur_h, &shared.pong.view),
+                (&self.blur, &shared.blur_v, &shared.ping.view),
+                (&self.blur, &shared.blur_h, &shared.pong.view),
+                (&self.blur, &shared.blur_v, &cut.backdrop.target.view),
+            ];
+            for (pipeline, bind, view) in passes {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("frost_blur"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, bind, &[]);
+                pass.draw(0..3, 0..1);
             }
-            State::Fresh | State::Have(..) | State::Bare => {}
+            // One submit per cut: the renderer's vertex buffers are shared
+            // with the next segment, and a write to them lands before the
+            // submit that follows it.
+            queue.submit(user.into_iter().chain(std::iter::once(encoder.finish())));
         }
-    }
-
-    /// Call once a frame before drawing the window. `false` means the window
-    /// must sit this frame out: the screen under it is being snapshotted, and
-    /// drawing it now would put it in its own backdrop (or the blur is a
-    /// frame from done, and the window shouldn't flash plain first).
-    pub fn ready(&mut self, ctx: &egui::Context, graveyard: &TexGraveyard) -> bool {
-        if matches!(self.state, State::Fresh) {
-            self.ask(ctx);
-            return false;
-        }
-        self.poll(ctx, graveyard);
-        match self.state {
-            State::Have(..) | State::Bare => true,
-            State::Blurring(..) => {
-                ctx.request_repaint();
-                false
-            }
-            State::Asked(_) | State::Fresh => false,
-        }
-    }
-
-    fn ask(&mut self, ctx: &egui::Context) {
-        if let State::Have(tex, _) = std::mem::replace(&mut self.state, State::Fresh) {
-            self.stale = Some((tex, self.screen));
-        }
-        self.screen = ctx.screen_rect();
-        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
-        self.state = State::Asked(Instant::now());
-        ctx.request_repaint();
-    }
-
-    /// The frost under a window occupying `rect`, as a shape for the caller
-    /// to place: under the window's tint, in the window's own layer (see
-    /// `glass`), so a window over another window blurs that one too. `None`
-    /// until a snapshot is in hand, or when none came.
-    pub fn shape(&self, rect: egui::Rect, rounding: egui::Rounding) -> Option<egui::Shape> {
-        self.shape_from(rect, rect, rounding)
-    }
-
-    /// The frost for a surface at `rect`, showing the screen under `src`
-    /// instead: for a surface nothing sits under (the player bar at the
-    /// window's bottom), which frosts the content just above it as the
-    /// continuation of what it covers. Falls back to the snapshot before a
-    /// re-take until the new one lands.
-    pub fn shape_from(
-        &self,
-        src: egui::Rect,
-        rect: egui::Rect,
-        rounding: egui::Rounding,
-    ) -> Option<egui::Shape> {
-        let (tex, s) = match (&self.state, &self.stale) {
-            (State::Have(tex, _), _) => (tex, self.screen),
-            (_, Some((tex, screen))) => (tex, *screen),
-            _ => return None,
-        };
-        if s.width() <= 0.0 || s.height() <= 0.0 {
-            return None;
-        }
-        let uv = |p: egui::Pos2| {
-            egui::pos2((p.x - s.min.x) / s.width(), (p.y - s.min.y) / s.height())
-        };
-        Some(egui::Shape::Rect(egui::epaint::RectShape {
-            rect,
-            rounding,
-            fill: egui::Color32::WHITE,
-            stroke: egui::Stroke::NONE,
-            blur_width: 0.0,
-            fill_texture_id: tex.id(),
-            uv: egui::Rect::from_min_max(uv(src.min), uv(src.max)),
-        }))
-    }
-
-    /// Forget the snapshot: the window closed, and its next open is over a
-    /// different screen.
-    pub fn clear(&mut self) {
-        self.state = State::Fresh;
-        self.stale = None;
     }
 }
 
-/// Shrink the frame to [`TEXELS`] on its long side, then box-blur it.
-fn blur(src: &egui::ColorImage) -> egui::ColorImage {
-    let [w, h] = src.size;
-    if w == 0 || h == 0 {
-        return egui::ColorImage::new([1, 1], egui::Color32::BLACK);
-    }
-    let f = (w.max(h) / TEXELS).max(1);
-    let (sw, sh) = ((w / f).max(1), (h / f).max(1));
-    let n = (f * f) as f32;
-    let mut px = vec![[0f32; 3]; sw * sh];
-    for y in 0..sh {
-        for x in 0..sw {
-            let mut acc = [0f32; 3];
-            for dy in 0..f {
-                let row = (y * f + dy) * w + x * f;
-                for c in &src.pixels[row..row + f] {
-                    acc[0] += c.r() as f32;
-                    acc[1] += c.g() as f32;
-                    acc[2] += c.b() as f32;
-                }
-            }
-            px[y * sw + x] = [acc[0] / n, acc[1] / n, acc[2] / n];
-        }
-    }
-    let mut tmp = px.clone();
-    for _ in 0..PASSES {
-        box_pass(&px, &mut tmp, sw, sh, true);
-        box_pass(&tmp, &mut px, sw, sh, false);
-    }
-    egui::ColorImage {
-        size: [sw, sh],
-        pixels: px
-            .iter()
-            .map(|c| egui::Color32::from_rgb(c[0] as u8, c[1] as u8, c[2] as u8))
-            .collect(),
-    }
-}
-
-/// One box-blur pass of `src` into `dst`, along rows when `horizontal`, else
-/// columns, with edges clamped.
-fn box_pass(src: &[[f32; 3]], dst: &mut [[f32; 3]], w: usize, h: usize, horizontal: bool) {
-    let (len, lines) = if horizontal { (w, h) } else { (h, w) };
-    let at = |line: usize, i: usize| if horizontal { line * w + i } else { i * w + line };
-    for line in 0..lines {
-        for i in 0..len {
-            let lo = i.saturating_sub(RADIUS);
-            let hi = (i + RADIUS).min(len - 1);
-            let mut acc = [0f32; 3];
-            for j in lo..=hi {
-                let c = src[at(line, j)];
-                acc[0] += c[0];
-                acc[1] += c[1];
-                acc[2] += c[2];
-            }
-            let n = (hi - lo + 1) as f32;
-            dst[at(line, i)] = [acc[0] / n, acc[1] / n, acc[2] / n];
-        }
-    }
+/// `px` scaled so its long side is `long` (never scaled up).
+fn scaled(px: [u32; 2], long: u32) -> [u32; 2] {
+    let s = (long as f32 / px[0].max(px[1]) as f32).min(1.0);
+    [
+        ((px[0] as f32 * s).round() as u32).max(1),
+        ((px[1] as f32 * s).round() as u32).max(1),
+    ]
 }

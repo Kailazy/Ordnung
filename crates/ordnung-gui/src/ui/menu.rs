@@ -61,11 +61,6 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
     let id = anchor.id.with("ord_dropdown");
     let mut open: bool = ctx.data(|d| d.get_temp(id).unwrap_or(false));
     let now = ctx.input(|i| i.time);
-    // The press on the anchor is the moment to snapshot the backdrop: the
-    // click that opens the menu follows it, and finds the frost in hand.
-    if !open && anchor.is_pointer_button_down_on() {
-        super::glass::prime(&ctx, id);
-    }
     if anchor.clicked() {
         open = !open;
         if open {
@@ -87,13 +82,6 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
         return;
     }
 
-    // The panel holds until its backdrop is snapshotted; the fade-in it's
-    // running hides the frame that takes.
-    if !super::glass::ready(&ctx, id) {
-        ctx.request_repaint();
-        ctx.data_mut(|d| d.insert_temp(id, open));
-        return;
-    }
     let opened_at: f64 = ctx.data(|d| d.get_temp(id.with("at")).unwrap_or(now));
     let since_open = (now - opened_at) as f32;
     // Dismissal context, sampled before the content draws so this frame's own

@@ -325,17 +325,7 @@ impl App {
         // reversing on close. Both are driven by the one `open_t` so the two
         // halves of the motion can never drift apart.
         let rise = POPUP_RISE * (1.0 - open_t);
-        // The popup's backdrop is snapshotted on the press into the field,
-        // ahead of the typing that opens it; failing that, on open, under
-        // the fade-in.
         let glass_id = egui::Id::new("search_suggestions");
-        if field.is_pointer_button_down_on() {
-            crate::ui::glass::prime(&ctx, glass_id);
-        }
-        if !crate::ui::glass::ready(&ctx, glass_id) {
-            ctx.request_repaint();
-            return;
-        }
         let mut slot = None;
         let popup = egui::Area::new(glass_id)
             .order(egui::Order::Foreground)

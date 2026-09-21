@@ -2,9 +2,9 @@
 //!
 //! egui's tooltip is a popup frame filled from the style, an opaque grey
 //! card beside every glass surface in the app. This puts the note on the
-//! same material as a window or a menu: the app blurred under it (a `frost`
-//! snapshot) and one tint over that, with the window's hairline as its
-//! edge. Everything else about the tooltip stays egui's: when it shows (the
+//! same material as a window or a menu: the app blurred under it (a live
+//! `frost` backdrop) and one tint over that, with the window's hairline as
+//! its edge. Everything else about the tooltip stays egui's: when it shows (the
 //! pointer resting for the delay, the grace between neighbours), where it
 //! goes, and that one with controls in it stays while the pointer is on it.
 //!
@@ -101,13 +101,6 @@ fn show(resp: egui::Response, trigger: Trigger, add: impl FnOnce(&mut egui::Ui))
 fn on_glass(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     let ctx = ui.ctx().clone();
     let id = glass_id();
-    // While the backdrop is being snapshotted the note is laid out but not
-    // painted, or it would end up in its own frost. Laying it out keeps
-    // egui's placement right for the pass it appears on.
-    if !glass::ready(&ctx, id) {
-        ui.set_invisible();
-        ctx.request_repaint();
-    }
     let slot = glass::begin(ui);
     add(ui);
     // The frame wraps the content's `min_rect` in the popup margin; the
