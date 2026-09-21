@@ -1542,8 +1542,16 @@ impl App {
         }
         if let Some(i) = like {
             let song = &n.songs[i];
+            let artist = if song.artist.is_empty() { n.artist.clone() } else { song.artist.clone() };
+            // The library track that is this song, if one is: the crate
+            // shows FILE from the like on, not only after a look-up.
+            self.ensure_library_index();
+            let local = self.library_index.track_for(
+                &ordnung_core::model::SongRef::new(artist.clone(), song.title.clone())
+                    .at(Some(n.release_id), Some(&song.position)),
+            );
             self.toggle_like(crate::liked::LikeSpec {
-                artist: if song.artist.is_empty() { n.artist.clone() } else { song.artist.clone() },
+                artist,
                 title: song.title.clone(),
                 release_id: Some(n.release_id),
                 position: Some(song.position.clone()),
@@ -1553,7 +1561,7 @@ impl App {
                 rel_catno: None,
                 rel_year: None,
                 rel_thumb: n.thumb_url.clone(),
-                local_track_id: None,
+                local_track_id: local,
             });
         }
     }

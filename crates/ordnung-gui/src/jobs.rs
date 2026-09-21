@@ -4428,6 +4428,9 @@ pub(crate) fn run_match_tracklist(
     let _ = tx.send(JobMsg::Progress { done: 0, total });
     ctx.request_repaint();
 
+    // The library by song, once for the run: every line asks it before
+    // Discogs, the same answer the Liked view and the sheet give.
+    let library = catalog.library_index().unwrap_or_default();
     let (mut sure, mut likely, mut unsure, mut none, mut errored) = (0u32, 0u32, 0u32, 0u32, 0u32);
     let mut fails: Vec<(String, String)> = Vec::new();
     let mut stopped = false;
@@ -4443,8 +4446,15 @@ pub(crate) fn run_match_tracklist(
         )));
         ctx.request_repaint();
 
-        // Free first: is this song already in the local library?
-        let local = local_track_for(&catalog, entry);
+        // Free first: is this song already in the local library? As the
+        // record spells it when one is chosen, else as pasted.
+        let local = library.track_for(&entry.song()).or_else(|| {
+            let pasted = ordnung_core::model::SongRef::new(
+                entry.artist.clone().unwrap_or_default(),
+                entry.title.clone().unwrap_or_default(),
+            );
+            library.track_for(&pasted)
+        });
         let _ = catalog.set_tracklist_local_track(tracklist_id, entry.position, local);
 
         let line = entry.as_line();
@@ -4648,39 +4658,6 @@ fn wait_unless_cancelled(cancel: &AtomicBool, wait: Duration) -> bool {
         thread::sleep(Duration::from_millis(250));
     }
     !cancel.load(Ordering::Relaxed)
-}
-
-/// The local library track that is this line's song, if exactly one
-/// matches on folded artist and title (title alone when the line has no
-/// artist, and then only when the title is unique in the library).
-fn local_track_for(catalog: &Catalog, entry: &TracklistEntry) -> Option<Id> {
-    use ordnung_core::tracklist::{fold_name, fold_title};
-    let title = entry.title.as_deref()?;
-    let want_title = fold_title(title);
-    if want_title.is_empty() {
-        return None;
-    }
-    let want_artist = entry.artist.as_deref().map(fold_name);
-    let query = match entry.artist.as_deref() {
-        Some(a) => format!("{a} {title}"),
-        None => title.to_string(),
-    };
-    let tracks = catalog.list_tracks(Some(&query), 40).ok()?;
-    let mut hits = tracks.iter().filter(|t| {
-        let t_title = t.tags.title.as_deref().map(fold_title).unwrap_or_default();
-        if t_title != want_title {
-            return false;
-        }
-        match &want_artist {
-            Some(a) => t.tags.artist.as_deref().map(fold_name).as_deref() == Some(a.as_str()),
-            None => true,
-        }
-    });
-    let first = hits.next()?;
-    if want_artist.is_none() && hits.next().is_some() {
-        return None;
-    }
-    Some(first.id)
 }
 
 #[cfg(test)]

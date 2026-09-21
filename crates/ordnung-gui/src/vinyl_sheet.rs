@@ -41,6 +41,24 @@ pub(crate) enum SheetSource {
     None,
 }
 
+/// A library track as the sheet plays it, read from the catalog. `None`
+/// when the track is gone or has no title to show.
+fn sheet_local(cat: &Catalog, id: Id) -> Option<SheetLocal> {
+    let t = cat.get_track(id).ok()?;
+    let analysis = cat.get_analysis(id).ok().flatten();
+    let title = t.tags.title.clone().filter(|s| !s.trim().is_empty())?;
+    Some(SheetLocal {
+        id,
+        title,
+        path: PathBuf::from(&t.source_path),
+        bpm: analysis.as_ref().and_then(|a| a.bpm),
+        camelot: analysis
+            .as_ref()
+            .and_then(|a| a.key)
+            .map(|k| k.camelot().label()),
+    })
+}
+
 /// The sheet's backdrop key in `glass`: shared by every record, so the
 /// press that opens a sheet can prime it before the record is known.
 fn sheet_glass() -> egui::Id {
@@ -593,23 +611,7 @@ impl App {
         let Ok(cat) = Catalog::open(&self.db_path) else {
             return Vec::new();
         };
-        ids.iter()
-            .filter_map(|id| {
-                let t = cat.get_track(*id).ok()?;
-                let analysis = cat.get_analysis(*id).ok().flatten();
-                let title = t.tags.title.clone().filter(|s| !s.trim().is_empty())?;
-                Some(SheetLocal {
-                    id: *id,
-                    title,
-                    path: PathBuf::from(&t.source_path),
-                    bpm: analysis.as_ref().and_then(|a| a.bpm),
-                    camelot: analysis
-                        .as_ref()
-                        .and_then(|a| a.key)
-                        .map(|k| k.camelot().label()),
-                })
-            })
-            .collect()
+        ids.iter().filter_map(|id| sheet_local(&cat, *id)).collect()
     }
 
     /// Look up the lowest marketplace listing for the open sheet's record, off
@@ -723,6 +725,7 @@ impl App {
         let Some(rx) = &self.sheet_rx else { return };
         let Ok(msg) = rx.try_recv() else { return };
         self.sheet_rx = None;
+        self.ensure_library_index();
         let Some(sheet) = self.vinyl_sheet.as_mut() else {
             return;
         };
@@ -779,6 +782,36 @@ impl App {
                         }
                     })
                     .collect();
+                // Rows no linked file claimed: a track in the library may
+                // still be the song under its own tags, never matched to
+                // this pressing. The same index every view asks, so the
+                // sheet says FILE where the crate does.
+                let release_artist = sheet.artist.clone();
+                let mut found: Vec<(usize, Id)> = Vec::new();
+                for (i, (row, t)) in sheet.rows.iter().zip(detail.tracklist.iter()).enumerate() {
+                    if matches!(row.source, SheetSource::Local(_)) {
+                        continue;
+                    }
+                    let song = t.song(&release_artist, sheet.release_id);
+                    if let Some(id) = self.library_index.track_for(&song) {
+                        if !sheet.local.iter().any(|l| l.id == id) && !found.iter().any(|(_, f)| *f == id) {
+                            found.push((i, id));
+                        }
+                    }
+                }
+                if !found.is_empty() {
+                    if let Ok(cat) = Catalog::open(&self.db_path) {
+                        for (i, id) in found {
+                            let Some(local) = sheet_local(&cat, id) else { continue };
+                            sheet.local.push(local);
+                            let row = &mut sheet.rows[i];
+                            if let SheetSource::Video(v) = row.source {
+                                row.also_video = Some(v);
+                            }
+                            row.source = SheetSource::Local(sheet.local.len() - 1);
+                        }
+                    }
+                }
                 sheet.extra_videos = videos.leftover;
                 // The detail knows the imprint even when the row that opened
                 // the sheet didn't; the shelf's own reading stands when set.

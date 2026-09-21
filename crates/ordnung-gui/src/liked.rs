@@ -13,7 +13,7 @@ use super::*;
 use crate::ui::hover::HoverNoteExt;
 use crate::ui::tokens::{color, font, space};
 use ordnung_core::catalog::song_key;
-use ordnung_core::model::LikedSong;
+use ordnung_core::model::{LikedSong, SongRef};
 
 /// What a like carries in from the row it was clicked on: the song, and
 /// the record it was met on when there was one.
@@ -122,41 +122,84 @@ impl App {
             .and_then(|c| c.list_liked_songs())
             .unwrap_or_default();
         self.liked_keys = self.liked.iter().map(liked_key).collect();
-        self.liked_library_dirty = true;
+        self.library_index_dirty = true;
     }
 
-    /// The library track that is liked song `s`, if any: the one known when
-    /// it was liked, else one found by song key.
-    fn liked_local(&self, s: &LikedSong) -> Option<Id> {
-        s.local_track_id
-            .or_else(|| self.liked_library.get(&song_key(&s.artist, &s.title, None, None)).copied())
+    /// Bring the library index up to date. One pass over the tracks
+    /// table, taken the first time a view asks after a reload; every
+    /// view that says FILE calls this before it draws.
+    pub(crate) fn ensure_library_index(&mut self) {
+        if !self.library_index_dirty {
+            return;
+        }
+        self.library_index = Catalog::open(&self.db_path)
+            .and_then(|c| c.library_index())
+            .unwrap_or_default();
+        self.library_index_dirty = false;
     }
 
-    /// The Liked view: the crate as a table.
+    /// The library track that is `song`, if any: the one a row already
+    /// knows (`known`) while it's still here, else one found by song.
+    /// Call [`Self::ensure_library_index`] first.
+    pub(crate) fn local_track(&self, song: &SongRef, known: Option<Id>) -> Option<Id> {
+        self.library_index.resolve(song, known)
+    }
+
+    /// The Liked view: the crate as a table, every song with the record
+    /// it was liked on and whether a file in the library is it.
     pub(crate) fn draw_liked(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         use egui_extras::{Column, TableBuilder};
-        // The library's song keys are one pass over the tracks table; taken
-        // once per reload, and only while the crate is on screen.
-        if self.liked_library_dirty {
-            self.liked_library = Catalog::open(&self.db_path)
-                .and_then(|c| c.library_song_keys())
-                .unwrap_or_default();
-            self.liked_library_dirty = false;
-        }
-        let in_library: Vec<Option<Id>> = self.liked.iter().map(|s| self.liked_local(s)).collect();
+        self.ensure_library_index();
+        let in_library: Vec<Option<Id>> = self
+            .liked
+            .iter()
+            .map(|s| self.local_track(&s.song(), s.local_track_id))
+            .collect();
         let query = self.filter.trim().to_lowercase();
+        let to_get_only = self.liked_to_get_only;
         let shown: Vec<usize> = self
             .liked
             .iter()
             .enumerate()
-            .filter(|(_, s)| liked_matches(s, &query))
+            .filter(|(i, s)| liked_matches(s, &query) && !(to_get_only && in_library[*i].is_some()))
             .map(|(i, _)| i)
             .collect();
+        let have = in_library.iter().filter(|l| l.is_some()).count();
+        let to_get = self.liked.len() - have;
 
         // The count is the top bar's (see the toolbar in `app`), where every
-        // view's count sits; the heading is the heading alone.
+        // view's count sits; the heading carries the one number the crate
+        // is for — how many of its songs are still to be got — and the
+        // switch that shows only those.
         ui.add_space(space::S3);
-        ui.add(egui::Label::new(egui::RichText::new("Liked songs").font(font::headline())).truncate());
+        ui.horizontal(|ui| {
+            ui.add(egui::Label::new(egui::RichText::new("Liked songs").font(font::headline())).truncate());
+            if !self.liked.is_empty() {
+                let words = match (have, to_get) {
+                    (_, 0) => "every song is a file in your library".to_string(),
+                    (0, n) => format!("{n} still to get"),
+                    (h, n) => format!("{h} as files, {n} still to get"),
+                };
+                ui.add_space(space::S2);
+                ui.label(egui::RichText::new(words).font(font::caption()).color(color::LABEL_3));
+                if to_get > 0 || self.liked_to_get_only {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        use crate::ui::button::{segmented, Segment};
+                        let picked = segmented(
+                            ui,
+                            Some(usize::from(self.liked_to_get_only)),
+                            &[
+                                Segment { label: "All", tip: "Every liked song" },
+                                Segment { label: "To get", tip: "Only the songs no file in your library is yet" },
+                            ],
+                        );
+                        if let Some(p) = picked {
+                            self.liked_to_get_only = p == 1;
+                        }
+                    });
+                }
+            }
+        });
         ui.add_space(space::S2);
 
         if self.liked.is_empty() {
@@ -170,7 +213,12 @@ impl App {
         if shown.is_empty() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("No liked song matches the filter.").weak());
+                let words = if to_get_only && query.is_empty() {
+                    "Every liked song is a file in your library."
+                } else {
+                    "No liked song matches the filter."
+                };
+                ui.label(egui::RichText::new(words).weak());
             });
             return;
         }
@@ -247,20 +295,23 @@ impl App {
                             }
                         });
                     });
-                    // The heart at the row's edge, and a FILE mark on the
-                    // songs a track in the library already is.
+                    // The heart at the row's edge, and the song's download
+                    // status: FILE when a track in the library is it, NO
+                    // FILE when it's still to be got.
                     row.col(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let side = ui.spacing().interact_size.y;
                             if crate::ui::button::like_mark(ui, true, side).clicked() {
                                 act = Some(LikedAct::Unlike(i));
                             }
-                            if local.is_some() {
-                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                    ui.add(egui::Label::new(egui::RichText::new("FILE").font(font::caption()).color(color::GREEN).strong()))
-                                        .on_hover_note("A track in your library is this song");
-                                });
-                            }
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                let (words, ink, note) = match local {
+                                    Some(_) => ("FILE", color::GREEN, "A track in your library is this song"),
+                                    None => ("NO FILE", color::LABEL_3, "No track in your library is this song yet"),
+                                };
+                                ui.add(egui::Label::new(egui::RichText::new(words).font(font::caption()).color(ink).strong()))
+                                    .on_hover_note(note);
+                            });
                         });
                     });
                     let resp = row.response();

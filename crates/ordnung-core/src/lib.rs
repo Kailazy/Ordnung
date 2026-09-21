@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod convert;
 pub mod discogs;
 pub mod genredb;
+pub mod library_index;
 pub mod error;
 pub mod model;
 pub mod scan;

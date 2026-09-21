@@ -354,7 +354,11 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 20;
+///
+/// Schema 21 re-keys `liked_songs`: `song_key` gained the `(Original Mix)`
+/// and `(2)` folding, so every stored key is recomputed (see
+/// [`Catalog::rekey_liked_songs`]).
+const SCHEMA_VERSION: i64 = 21;
 
 /// The columns of the two vinyl list tables (`vinyl_collection`,
 /// `vinyl_wantlist`), shared so both are created alike and so an older
@@ -1092,6 +1096,48 @@ impl Catalog {
             self.conn.execute_batch(
                 "UPDATE vinyl_collection SET cover_png = NULL;
                  UPDATE vinyl_wantlist SET cover_png = NULL;",
+            )?;
+        }
+
+        // Schema v21: `song_key` folds more than it did (the `(Original
+        // Mix)` marker, a Discogs `(2)`), so the keys the crate of liked
+        // songs is addressed by have to be recomputed or an old like can't
+        // be unliked.
+        if version < 21 {
+            self.rekey_liked_songs()?;
+        }
+        Ok(())
+    }
+
+    /// Recompute `song_key` for every liked song from its artist, title,
+    /// record and position. Two rows whose keys now agree are one song:
+    /// the earlier like stays, the later one goes. Runs inside the schema
+    /// upgrade's transaction; the keys are parked on a temporary form
+    /// first so no rewrite trips the UNIQUE index part-way.
+    fn rekey_liked_songs(&self) -> Result<()> {
+        let rows: Vec<(i64, String, String, Option<i64>, Option<String>)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, artist, title, release_id, position FROM liked_songs
+                 ORDER BY liked_at ASC, id ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        self.conn
+            .execute("UPDATE liked_songs SET song_key = 'rekey:' || id", [])?;
+        let mut seen = std::collections::HashSet::new();
+        for (id, artist, title, release_id, position) in rows {
+            let key = song_key(&artist, &title, release_id.map(|r| r as u64), position.as_deref());
+            if key.is_empty() || !seen.insert(key.clone()) {
+                self.conn
+                    .execute("DELETE FROM liked_songs WHERE id = ?1", params![id])?;
+                continue;
+            }
+            self.conn.execute(
+                "UPDATE liked_songs SET song_key = ?2 WHERE id = ?1",
+                params![id, key],
             )?;
         }
         Ok(())
@@ -4468,27 +4514,23 @@ impl Catalog {
         Ok(rows)
     }
 
-    /// Every library track by its song key, so the crate can tell which of
-    /// its songs are already here. One pass over the tagged tracks; a track
-    /// missing an artist or a title can't be keyed and is left out. Where
-    /// two tracks share a key the lower id wins, which is stable.
-    pub fn library_song_keys(&self) -> Result<HashMap<String, Id>> {
+    /// The library by song (see [`crate::library_index`]), so every view
+    /// can tell which songs a track here already is. One pass over the
+    /// tagged tracks; a track missing an artist or a title can't be keyed
+    /// and is left out.
+    pub fn library_index(&self) -> Result<crate::library_index::LibraryIndex> {
         let mut stmt = self.conn.prepare(
             "SELECT id, artist, title FROM tracks
-             WHERE artist IS NOT NULL AND title IS NOT NULL ORDER BY id DESC",
+             WHERE artist IS NOT NULL AND title IS NOT NULL",
         )?;
-        let mut out = HashMap::new();
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)? as Id, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-        })?;
-        for row in rows {
-            let (id, artist, title) = row?;
-            let key = song_key(&artist, &title, None, None);
-            if !key.is_empty() {
-                out.insert(key, id);
-            }
-        }
-        Ok(out)
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)? as Id, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(crate::library_index::LibraryIndex::build(
+            rows.iter().map(|(id, a, t)| (*id, a.as_str(), t.as_str())),
+        ))
     }
 
     // --- Record map pins -----------------------------------------------------
@@ -4982,9 +5024,12 @@ pub(crate) fn norm_match(s: &str) -> String {
         .join(" ")
 }
 
-/// The key a song is liked under: its artist and title, each normalized the
-/// way tracks are linked to records ([`norm_match`]), joined by a newline
-/// so an artist ending where a title begins can't collide. A title that
+/// The key a song is liked under, and the identity [`crate::model::SongRef`]
+/// compares by: its artist and title, each normalized the way tracks are
+/// linked to records ([`norm_match`]) — the artist without a Discogs `(2)`
+/// disambiguator, the title without an `(Original Mix)` marker, so a tag,
+/// a Discogs listing and a pasted line for one song agree — joined by a
+/// newline so an artist ending where a title begins can't collide. A title that
 /// names nothing ("Untitled", "Track 2", "B") is told apart by the record
 /// and position it was liked at, when known: a white label's four Untitled
 /// sides are four songs, not one. Empty when neither side has a word in
@@ -4996,7 +5041,8 @@ pub fn song_key(
     release_id: Option<u64>,
     position: Option<&str>,
 ) -> String {
-    let (a, t) = (norm_match(artist), norm_match(title));
+    let a = norm_match(strip_discogs_disambiguator(artist));
+    let t = norm_match(crate::discogs::strip_original_mix(title));
     if a.is_empty() && t.is_empty() {
         return String::new();
     }
@@ -5009,11 +5055,27 @@ pub fn song_key(
     key
 }
 
+/// An artist name without the ` (2)` Discogs appends to tell namesakes
+/// apart: it's a Discogs bookkeeping mark, never how a tag spells the name.
+fn strip_discogs_disambiguator(artist: &str) -> &str {
+    let s = artist.trim_end();
+    if let Some(open) = s.rfind(" (") {
+        let tail = &s[open + 2..];
+        if tail.len() > 1
+            && tail.ends_with(')')
+            && tail[..tail.len() - 1].bytes().all(|b| b.is_ascii_digit())
+        {
+            return s[..open].trim_end();
+        }
+    }
+    s
+}
+
 /// Whether a normalized title says nothing about the song: blank,
 /// "untitled" (with or without a number or side), a bare side or track
 /// number. Such a title can't tell one song from the next on the same
 /// record, so [`song_key`] adds the position.
-fn generic_title(t: &str) -> bool {
+pub(crate) fn generic_title(t: &str) -> bool {
     if t.is_empty() || t.starts_with("untitled") {
         return true;
     }
@@ -6940,16 +7002,50 @@ mod tests {
     }
 
     #[test]
-    fn library_song_keys_find_a_liked_song_in_the_library() {
+    fn library_index_finds_a_liked_song_in_the_library() {
         let path = temp_db_path("liked_keys");
         let cat = Catalog::open(&path).unwrap();
         let mut t = scanned("/m/miura.flac", "Metro Area", "House", 1000);
         t.tags.title = Some("Miura (Original)".into());
         let (id, _) = cat.upsert_scanned(&t).unwrap();
-        let keys = cat.library_song_keys().unwrap();
-        assert_eq!(keys.get(&song_key("Metro Area", "miura original", None, None)), Some(&id));
-        assert_eq!(keys.get(&song_key("Metro Area", "Miura", None, None)), None);
+        use crate::model::SongRef;
+        let index = cat.library_index().unwrap();
+        // The `(Original)` marker is not part of the song.
+        assert_eq!(index.track_for(&SongRef::new("Metro Area", "Miura")), Some(id));
+        assert_eq!(index.track_for(&SongRef::new("Metro Area (2)", "miura - original mix")), Some(id));
+        assert_eq!(index.track_for(&SongRef::new("Metro Area", "Miura (Remix)")), None);
+        assert_eq!(
+            song_key("Metro Area (2)", "Miura (Original Mix)", None, None),
+            song_key("metro area", "miura", None, None)
+        );
+        assert_eq!(strip_discogs_disambiguator("Nobody (Yet)"), "Nobody (Yet)");
+        assert_eq!(strip_discogs_disambiguator("Nobody ()"), "Nobody ()");
         assert!(song_key("", "", None, None).is_empty());
+    }
+
+    #[test]
+    fn schema_21_rekeys_liked_songs_and_folds_duplicates() {
+        let path = temp_db_path("liked_rekey");
+        let cat = Catalog::open(&path).unwrap();
+        // Two likes that were two rows under the old key, plus one with an
+        // artist a tag wouldn't spell that way.
+        cat.conn
+            .execute_batch(
+                "INSERT INTO liked_songs (song_key, artist, title, liked_at)
+                 VALUES ('old:1', 'Metro Area', 'Miura', 10),
+                        ('old:2', 'Metro Area', 'Miura (Original Mix)', 20),
+                        ('old:3', 'Pépé Bradock (2)', 'Deep Burnt', 30);
+                 PRAGMA user_version = 20;",
+            )
+            .unwrap();
+        drop(cat);
+        let cat = Catalog::open(&path).unwrap();
+        let liked = cat.list_liked_songs().unwrap();
+        assert_eq!(liked.len(), 2);
+        assert!(liked.iter().any(|s| s.title == "Miura" && s.liked_at == 10));
+        assert!(cat.unlike_song("Metro Area", "Miura (Original)", None, None).unwrap());
+        assert!(cat.unlike_song("Pepe Bradock", "Deep Burnt", None, None).unwrap());
+        assert!(cat.list_liked_songs().unwrap().is_empty());
     }
 
     #[test]

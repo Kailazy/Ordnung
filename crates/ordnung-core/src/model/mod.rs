@@ -4,8 +4,10 @@
 //! or `ordnung-rbdb`. See the `ordnung-architecture` skill.
 
 pub mod key;
+pub mod song;
 
 use key::Key;
+pub use song::SongRef;
 
 /// A unique identifier for a catalog entity. (Backed by SQLite rowids in Phase 1.)
 pub type Id = u64;
@@ -332,6 +334,17 @@ pub struct Track {
     pub cues: Vec<Cue>,
 }
 
+impl Track {
+    /// Which song this file is, as its tags say. Empty tags make an empty
+    /// song, which nothing matches.
+    pub fn song(&self) -> SongRef {
+        SongRef::new(
+            self.tags.artist.clone().unwrap_or_default(),
+            self.tags.title.clone().unwrap_or_default(),
+        )
+    }
+}
+
 /// An ordered playlist; playlists nest under playlist folders (`parent`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Playlist {
@@ -588,13 +601,15 @@ pub struct LikedSong {
 }
 
 impl LikedSong {
+    /// Which song was liked, on the record it was liked on.
+    pub fn song(&self) -> SongRef {
+        SongRef::new(self.artist.clone(), self.title.clone())
+            .at(self.release_id, self.position.as_deref())
+    }
+
     /// `Artist - Title`, for status lines.
     pub fn song_label(&self) -> String {
-        if self.artist.is_empty() {
-            self.title.clone()
-        } else {
-            format!("{} - {}", self.artist, self.title)
-        }
+        self.song().label()
     }
 }
 
@@ -650,6 +665,26 @@ impl TracklistEntry {
             catno_hint: self.catno_hint.clone(),
             kind: self.kind,
         }
+    }
+
+    /// Which song the line names, read the way the record spells it when
+    /// a record was chosen: the record's title for the song over the
+    /// paste's, the paste's artist over the record's (a compilation's
+    /// release artist is "Various", which names nobody). The position is
+    /// not carried: a line is matched to a record, not to a side of it.
+    /// Empty for a line that isn't a song (a comment, an ID).
+    pub fn song(&self) -> SongRef {
+        if self.kind != crate::tracklist::LineKind::Track {
+            return SongRef::default();
+        }
+        let title = self.rel_track.clone().or_else(|| self.title.clone());
+        let artist = self
+            .artist
+            .clone()
+            .filter(|a| !a.trim().is_empty())
+            .or_else(|| self.rel_artist.clone());
+        SongRef::new(artist.unwrap_or_default(), title.unwrap_or_default())
+            .at(self.release_id, None)
     }
 
     /// `Artist - Title` as the line reads, for status lines and searches.

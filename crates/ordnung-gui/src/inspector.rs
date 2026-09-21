@@ -374,6 +374,27 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path_str.clone());
+        // The like mark's state, and what a like from here carries: the
+        // song as the tags say it, on the record the track is matched to,
+        // with this very file as the track that is it. The same identity
+        // the sheet, the tracklists and the radio like by, so a song liked
+        // on a record shows its heart on the file too.
+        let song = t.song();
+        let can_like = !song.is_empty();
+        let liked = can_like && self.is_liked(&song.artist, &song.title, None, None);
+        let like_spec = crate::liked::LikeSpec {
+            artist: song.artist.clone(),
+            title: song.title.clone(),
+            release_id: self.track_releases.get(&id).copied(),
+            position: None,
+            rel_artist: t.tags.album_artist.clone().or_else(|| t.tags.artist.clone()),
+            rel_title: t.tags.album.clone(),
+            rel_label: t.tags.label.clone(),
+            rel_catno: t.tags.catalog_number.clone(),
+            rel_year: t.tags.year,
+            rel_thumb: None,
+            local_track_id: Some(id),
+        };
 
         // --- Editable Core tags ------------------------------------------
         // The fields a user most often fixes or fills (e.g. from Discogs), plus
@@ -493,6 +514,12 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if crate::ui::icon::folder_button(ui, &format!("Reveal {file_name} in Finder")) {
                         crate::util::reveal_in_finder(&source_path);
+                    }
+                    if can_like {
+                        let side = ui.spacing().interact_size.y;
+                        if crate::ui::button::like_mark(ui, liked, side).clicked() {
+                            action = Some(InspectorAction::Like(like_spec.clone()));
+                        }
                     }
                 });
             });

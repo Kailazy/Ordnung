@@ -380,6 +380,21 @@ pub struct ReleaseTrack {
     pub artist: Option<String>,
 }
 
+impl ReleaseTrack {
+    /// Which song this position is: its own credit when it has one, else
+    /// the release's `artist`, on `release_id` at this position.
+    pub fn song(&self, release_artist: &str, release_id: u64) -> crate::model::SongRef {
+        let artist = self
+            .artist
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .unwrap_or(release_artist);
+        crate::model::SongRef::new(artist, self.title.clone())
+            .at(Some(release_id), Some(&self.position))
+    }
+}
+
 /// A YouTube video attached to a Discogs release.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReleaseVideo {

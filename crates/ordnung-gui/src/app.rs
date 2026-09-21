@@ -165,8 +165,9 @@ impl App {
             tracklist_filter: String::new(),
             liked: Vec::new(),
             liked_keys: HashSet::new(),
-            liked_library: HashMap::new(),
-            liked_library_dirty: true,
+            library_index: LibraryIndex::default(),
+            library_index_dirty: true,
+            liked_to_get_only: false,
             tracklists: Vec::new(),
             tracklist_current: None,
             tracklist_entries: Vec::new(),
@@ -2873,6 +2874,7 @@ impl App {
             Some(InspectorAction::SaveToCatalog(id)) => self.save_tags(id, None),
             Some(InspectorAction::WriteToFile(id, path)) => self.save_tags(id, Some(path)),
             Some(InspectorAction::ViewRelease(id)) => self.open_track_release_sheet(id, ctx),
+            Some(InspectorAction::Like(spec)) => self.toggle_like(spec),
             None => {}
         }
 

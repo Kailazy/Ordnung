@@ -608,6 +608,7 @@ impl App {
     /// The current tracklist: its header actions and one row per line.
     fn draw_tracklist_rows(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, query: &str) {
         let Some(id) = self.tracklist_current else { return };
+        self.ensure_library_index();
         let Some(t) = self.tracklists.iter().find(|t| t.id == id).cloned() else { return };
         let busy = self.is_busy();
 
@@ -837,7 +838,7 @@ impl App {
                                         badge(ui, "WANT", color::ACCENT_HOVER, "On your wantlist");
                                     }
                                 }
-                                if e.local_track_id.is_some() {
+                                if self.local_track(&e.song(), e.local_track_id).is_some() {
                                     badge(ui, "FILE", color::LABEL_2, "A track in your library is this song");
                                 }
                             });
@@ -876,7 +877,9 @@ impl App {
                             }
                             ui.separator();
                         }
-                        if e.local_track_id.is_some() && ui.button("▶ Play my file").clicked() {
+                        if self.local_track(&e.song(), e.local_track_id).is_some()
+                            && ui.button("▶ Play my file").clicked()
+                        {
                             line_act = Some(LineAct::PlayLocal(i));
                             ui.close_menu();
                         }
@@ -964,7 +967,7 @@ impl App {
                 self.settle_tracklist_line(e.tracklist_id, e.position, None, &e.candidates);
             }
             LineAct::PlayLocal(_) => {
-                if let Some(tid) = e.local_track_id {
+                if let Some(tid) = self.local_track(&e.song(), e.local_track_id) {
                     match Catalog::open(&self.db_path).and_then(|c| c.get_track(tid)) {
                         Ok(t) => self.play_track(tid, PathBuf::from(t.source_path)),
                         Err(e) => self.fail(format!("Couldn't find that track: {e}")),
@@ -984,7 +987,7 @@ impl App {
                         rel_catno: e.rel_catno.clone(),
                         rel_year: e.rel_year,
                         rel_thumb: e.rel_thumb.clone(),
-                        local_track_id: e.local_track_id,
+                        local_track_id: self.local_track(&e.song(), e.local_track_id),
                     });
                 }
             }

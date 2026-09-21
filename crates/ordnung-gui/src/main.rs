@@ -52,6 +52,7 @@ use ordnung_core::analysis::{self, AnalysisParams, ANALYZER_VERSION, WAVEFORM_FU
 use ordnung_core::convert::{self, ConvertSpec};
 use ordnung_core::discogs;
 use ordnung_core::genredb;
+use ordnung_core::library_index::LibraryIndex;
 use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
     Analysis, Cue, Format, Id, LikedSong, Playlist, SellerListing, SellerShop, Tags, Track,
@@ -736,6 +737,8 @@ enum InspectorAction {
     /// so its full tracklist (and whether the record is in the collection or the
     /// wantlist) is one click from the track.
     ViewRelease(Id),
+    /// Put the track's song in the crate of liked songs, or take it out.
+    Like(liked::LikeSpec),
 }
 
 /// State for the conversion modal. Also lets the user rename the track
@@ -1305,10 +1308,14 @@ struct App {
     liked: Vec<LikedSong>,
     /// The song keys of `liked`, what every row's mark asks.
     liked_keys: HashSet<String>,
-    /// Library tracks by song key, for the crate to say which liked songs
-    /// are already here. Taken while the Liked view is up, once per reload.
-    liked_library: HashMap<String, Id>,
-    liked_library_dirty: bool,
+    /// The library by song (see `ordnung_core::library_index`): the one
+    /// answer to "is a track here already this song?" for the crate, the
+    /// tracklists, the sheet and the radio. Rebuilt lazily after a reload
+    /// (see `ensure_library_index`).
+    library_index: LibraryIndex,
+    library_index_dirty: bool,
+    /// The Liked view's switch: show only the songs no file is yet.
+    liked_to_get_only: bool,
     /// The Tracklists window (see `tracklists`), opened from the tiny ≡
     /// button in the top bar.
     tracklist_open: bool,
