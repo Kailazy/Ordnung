@@ -356,11 +356,10 @@ impl App {
             return;
         };
         let thread = panel.thread;
-        let (name, page, pages, items, loading, error) = (
+        let (name, page, pages, loading, error) = (
             panel.name.clone(),
             panel.page,
             panel.pages,
-            panel.items,
             panel.loading,
             panel.error.clone(),
         );
@@ -463,23 +462,6 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_min_width(PANEL_W);
                 ui.set_max_width(PANEL_W);
-                ui.add_space(2.0);
-                let whose = match thread {
-                    BrowseThread::Label => "The label's whole run",
-                    BrowseThread::Artist => "Everything the artist put out",
-                };
-                let blurb = if items > 0 {
-                    format!(
-                        "{whose}, as Discogs lists it — {items} releases, \
-                         records only shown. Your shelves are marked on every row."
-                    )
-                } else {
-                    format!(
-                        "{whose}, as Discogs lists it. Your shelves are marked on \
-                         every row."
-                    )
-                };
-                ui.label(egui::RichText::new(blurb).weak().small());
                 ui.add_space(6.0);
                 if let Some(e) = &error {
                     ui.label(egui::RichText::new(e).weak());
