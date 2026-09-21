@@ -713,6 +713,9 @@ pub fn shelf_chip(p: &egui::Painter, min: egui::Pos2, list: VinylList) -> egui::
 /// is on the shelf, outlined when it's an offer to put it there. An empty
 /// label makes it a square mark-only button. Disabled while `enabled` is
 /// false, drawn the way a disabled stock button is.
+///
+/// For a button whose label changes with the record's state, use
+/// [`shelf_button_reserving`] so its width doesn't.
 pub fn shelf_button(
     ui: &mut egui::Ui,
     list: VinylList,
@@ -720,14 +723,45 @@ pub fn shelf_button(
     label: &str,
     enabled: bool,
 ) -> egui::Response {
+    shelf_button_reserving(ui, list, present, label, [], enabled)
+}
+
+/// [`shelf_button`] sized for the widest of the labels it can ever show,
+/// whichever one it shows now. A button whose word changes with the
+/// record's state ("Wantlist" to "In wantlist", or "Adding…" while the edit
+/// is out) would otherwise change width with it, and the row it sits in,
+/// and the window around that, would move under the pointer on every click.
+/// `reserve` lists the other labels; the drawn one is always counted too.
+pub fn shelf_button_reserving<'a>(
+    ui: &mut egui::Ui,
+    list: VinylList,
+    present: bool,
+    label: &str,
+    reserve: impl IntoIterator<Item = &'a str>,
+    enabled: bool,
+) -> egui::Response {
     let text_font = font::body();
     let galley = (!label.is_empty()).then(|| {
         ui.painter()
-            .layout_no_wrap(label.to_string(), text_font, color::LABEL)
+            .layout_no_wrap(label.to_string(), text_font.clone(), color::LABEL)
     });
     let pad = ui.spacing().button_padding;
     let mark = SHELF_R * 2.0 + 2.0;
-    let text_w = galley.as_ref().map_or(0.0, |g| g.size().x + space::S2);
+    // The widest word wins the width; the drawn one is then left-aligned
+    // after the mark so it reads the same as its neighbours, only with the
+    // slack for its longer siblings after it.
+    let widest = reserve
+        .into_iter()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            ui.painter()
+                .layout_no_wrap(l.to_string(), text_font.clone(), color::LABEL)
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max);
+    let text_w = galley.as_ref().map_or(0.0, |g| g.size().x).max(widest);
+    let text_w = if text_w > 0.0 { text_w + space::S2 } else { 0.0 };
     let h = galley
         .as_ref()
         .map_or(mark, |g| g.size().y.max(mark))
@@ -824,4 +858,64 @@ pub fn shelf_count(ui: &mut egui::Ui, list: VinylList, n: usize) {
         galley,
         color::LABEL,
     );
+}
+
+#[cfg(test)]
+mod shelf_button_tests {
+    use super::*;
+
+    /// Lay `label` out as a shelf button reserving `reserve`, and hand back
+    /// the width it took.
+    fn width(label: &str, reserve: &[&str]) -> f32 {
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        // Fonts land on the second pass.
+        let _ = ctx.run(input(), |_| {});
+        let mut w = 0.0;
+        let _ = ctx.run(input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                w = shelf_button_reserving(
+                    ui,
+                    VinylList::Wantlist,
+                    false,
+                    label,
+                    reserve.iter().copied(),
+                    true,
+                )
+                .rect
+                .width();
+            });
+        });
+        w
+    }
+
+    /// A button that can say "Wantlist", "In wantlist" or "Adding…" is one
+    /// width whichever it says: the widest of them, and no wider.
+    #[test]
+    fn reserving_holds_one_width_across_labels() {
+        let labels = ["Wantlist", "In wantlist", "Adding…", "Removing…"];
+        let widths: Vec<f32> = labels.iter().map(|l| width(l, &labels)).collect();
+        assert!(
+            widths.windows(2).all(|p| (p[0] - p[1]).abs() < 0.01),
+            "widths differ across labels: {widths:?}"
+        );
+        let widest = labels.iter().map(|l| width(l, &[])).fold(0.0_f32, f32::max);
+        assert!((widths[0] - widest).abs() < 0.01, "{} != widest {widest}", widths[0]);
+        let bare = width("Wantlist", &[]);
+        assert!(bare < widths[0], "reserving must widen the short label ({bare} vs {})", widths[0]);
+    }
+
+    /// With nothing reserved, the button is exactly as wide as its own word.
+    #[test]
+    fn plain_button_fits_its_label() {
+        assert!(width("Wantlist", &[]) < width("In wantlist", &[]));
+        assert!((width("Wantlist", &["Wantlist"]) - width("Wantlist", &[])).abs() < 0.01);
+    }
 }

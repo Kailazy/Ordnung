@@ -1597,11 +1597,18 @@ impl App {
                                     "Add this record to your Discogs collection",
                                 ),
                             };
-                            if crate::ui::icon::shelf_button(
+                            // Each button is as wide as the widest word it
+                            // can show, so a click that flips its word (or
+                            // parks it on "Adding…") moves nothing: the row,
+                            // and the sheet sized from it, stay put.
+                            if crate::ui::icon::shelf_button_reserving(
                                 ui,
                                 VinylList::Collection,
                                 in_collection,
                                 col_label,
+                                ["Collection", "In collection"]
+                                    .into_iter()
+                                    .chain(Self::VINYL_PENDING_LABELS),
                                 col_pending.is_none(),
                             )
                             .on_hover_note(col_tip)
@@ -1617,11 +1624,14 @@ impl App {
                                 ),
                                 None => ("Wantlist", "Add this record to your Discogs wantlist"),
                             };
-                            if crate::ui::icon::shelf_button(
+                            if crate::ui::icon::shelf_button_reserving(
                                 ui,
                                 VinylList::Wantlist,
                                 in_wantlist,
                                 want_label,
+                                ["Wantlist", "In wantlist"]
+                                    .into_iter()
+                                    .chain(Self::VINYL_PENDING_LABELS),
                                 want_pending.is_none(),
                             )
                             .on_hover_note(want_tip)
@@ -2718,3 +2728,4 @@ mod tests {
         assert!(stocked_rows(&stocked, None).len() == 4);
     }
 }
+

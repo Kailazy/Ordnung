@@ -780,6 +780,13 @@ impl App {
         self.vinyl_edit_rx.is_some()
     }
 
+    /// Every word [`Self::vinyl_pending`] can put on a shelf button. A
+    /// button that can show one reserves the width of the widest (see
+    /// `ui::icon::shelf_button_reserving`), so the row it sits in doesn't
+    /// move while the edit is out.
+    pub(crate) const VINYL_PENDING_LABELS: [&'static str; 4] =
+        ["Adding…", "Removing…", "Moving…", "Swapping…"];
+
     /// What's happening to `release_id` on `list`, if anything: the edit in
     /// flight or one waiting its turn. The label a list button shows in place
     /// of its state, so the record the user just clicked answers on the spot
@@ -792,17 +799,17 @@ impl App {
             .find_map(|edit| match edit {
                 VinylEdit::Want { release_ids, .. } => {
                     (list == VinylList::Wantlist && release_ids.contains(&release_id))
-                        .then_some("Adding…")
+                        .then_some(Self::VINYL_PENDING_LABELS[0])
                 }
                 VinylEdit::Collect { release_id: id, .. } => {
-                    (list == VinylList::Collection && *id == release_id).then_some("Adding…")
+                    (list == VinylList::Collection && *id == release_id).then_some(Self::VINYL_PENDING_LABELS[0])
                 }
                 VinylEdit::Remove { list: l, record } => {
-                    (*l == list && record.release_id == release_id).then_some("Removing…")
+                    (*l == list && record.release_id == release_id).then_some(Self::VINYL_PENDING_LABELS[1])
                 }
                 // A move touches both shelves.
                 VinylEdit::Move { record, .. } => {
-                    (record.release_id == release_id).then_some("Moving…")
+                    (record.release_id == release_id).then_some(Self::VINYL_PENDING_LABELS[2])
                 }
                 VinylEdit::Swap {
                     list: l,
@@ -811,7 +818,7 @@ impl App {
                     ..
                 } => (*l == list
                     && (record.release_id == release_id || *to_release == release_id))
-                    .then_some("Swapping…"),
+                    .then_some(Self::VINYL_PENDING_LABELS[3]),
             })
     }
 
