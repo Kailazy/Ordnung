@@ -278,14 +278,30 @@ impl App {
     /// Import paths dropped onto the window from Finder (folders are walked,
     /// individual audio files taken as-is). Behaves exactly like "Add songs…".
     pub(crate) fn spawn_import(&mut self, ctx: egui::Context, paths: Vec<PathBuf>) {
+        self.spawn_import_into(ctx, paths, None);
+    }
+
+    /// `spawn_import`, optionally gathering every imported track (including
+    /// ones already in the library) into playlist `into_playlist` afterwards —
+    /// the "drop files onto a playlist" gesture.
+    pub(crate) fn spawn_import_into(
+        &mut self,
+        ctx: egui::Context,
+        paths: Vec<PathBuf>,
+        into_playlist: Option<Id>,
+    ) {
         let (tx, rx) = mpsc::channel();
         self.job_rx = Some(rx);
         let cancel = Arc::new(AtomicBool::new(false));
         self.job_cancel = Some(cancel.clone());
-        self.status = format!("Importing {} dropped item(s)…", paths.len());
+        let target = into_playlist
+            .and_then(|pid| self.playlists.iter().find(|p| p.id == pid))
+            .map(|p| format!(" into \u{201C}{}\u{201D}", p.name))
+            .unwrap_or_default();
+        self.status = format!("Importing {} dropped item(s){target}…", paths.len());
         let db = self.db_path.clone();
         let follow = self.import_follow_ups();
-        thread::spawn(move || run_import(db, paths, cancel, tx, ctx, follow));
+        thread::spawn(move || run_import(db, paths, into_playlist, cancel, tx, ctx, follow));
     }
 
     /// Drop-to-import: shade the window while files hover over it, and scan
@@ -307,6 +323,22 @@ impl App {
         let pointer_pos =
             macos_drag::pointer_pos(frame).or_else(|| ctx.input(|i| i.pointer.latest_pos()));
         let row_under_cursor = pointer_pos.and_then(|p| self.row_at(p));
+        // The catalog playlist row under the cursor, if any: a drop there
+        // imports the files AND adds them to that playlist.
+        let playlist_under_cursor = pointer_pos.and_then(|p| {
+            self.playlist_screen_rects
+                .iter()
+                .find(|(_, rect)| rect.contains(p))
+                .map(|(id, _)| *id)
+        });
+        // Whether the cursor is over the library's own track table (not a
+        // device's): the landing zone for a plain "add to library" drop. A
+        // device view's table shows files that live on the stick, so a drop
+        // there still imports but isn't outlined as the library.
+        let over_table = !matches!(self.view, LibraryView::Usb(..))
+            && pointer_pos
+                .zip(self.table_screen_rect)
+                .is_some_and(|(p, rect)| rect.contains(p));
 
         // Paths in `hovered_files` aren't always populated until the drop lands,
         // so any hovering file shows a hint. When the pointer is over a track row
@@ -332,6 +364,7 @@ impl App {
                 egui::Order::Foreground,
                 egui::Id::new("drop-overlay"),
             ));
+            use crate::ui::tokens::{color, radius, stroke};
             // Highlight the targeted row so it's obvious which track gets the cover.
             if cover_target {
                 if let Some((_, rect)) = self
@@ -359,6 +392,52 @@ impl App {
                         egui::Color32::from_rgb(120, 170, 240),
                     );
                 }
+            } else if let Some((_, rect)) = playlist_under_cursor.and_then(|pid| {
+                self.playlist_screen_rects
+                    .iter()
+                    .find(|(id, _)| *id == pid)
+            }) {
+                // Over a playlist row: the same landing-zone outline the row
+                // shows for an in-app track drag, so the two gestures read
+                // alike, plus a soft fill so it carries against the sidebar.
+                let rect = rect.shrink(1.0);
+                painter.rect_filled(
+                    rect,
+                    egui::Rounding::same(radius::SM),
+                    color::ACCENT.gamma_multiply(0.18),
+                );
+                painter.rect_stroke(
+                    rect,
+                    egui::Rounding::same(radius::SM),
+                    egui::Stroke::new(stroke::OUTLINE, color::ACCENT),
+                );
+            } else if let Some(rect) = over_table.then_some(self.table_screen_rect).flatten() {
+                // Over the library table: outline just the table as the
+                // landing zone instead of shading the whole window, with a
+                // small caption in its top-right corner naming the action.
+                let rect = rect.shrink(2.0);
+                painter.rect_filled(
+                    rect,
+                    egui::Rounding::same(radius::MD),
+                    color::ACCENT.gamma_multiply(0.08),
+                );
+                painter.rect_stroke(
+                    rect,
+                    egui::Rounding::same(radius::MD),
+                    egui::Stroke::new(stroke::OUTLINE, color::ACCENT),
+                );
+                let galley = painter.layout_no_wrap(
+                    "Drop to add to your library".into(),
+                    crate::ui::tokens::font::callout(),
+                    color::LABEL,
+                );
+                let pad = egui::vec2(10.0, 5.0);
+                let pill = egui::Rect::from_min_size(
+                    rect.right_top() + egui::vec2(-(galley.size().x + pad.x * 2.0 + 10.0), 10.0),
+                    galley.size() + pad * 2.0,
+                );
+                painter.rect_filled(pill, egui::Rounding::same(radius::SM), color::ACCENT);
+                painter.galley(pill.min + pad, galley, color::LABEL);
             } else {
                 painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
                 painter.text(
@@ -400,7 +479,9 @@ impl App {
                 return;
             }
         }
-        self.spawn_import(ctx.clone(), dropped);
+        // Dropped on a playlist row: import as usual, then add every dropped
+        // track to that playlist as well.
+        self.spawn_import_into(ctx.clone(), dropped, playlist_under_cursor);
     }
 
     /// The track id of the visible row at `pos`. Reads the row rects recorded by
@@ -1310,6 +1391,7 @@ fn unique_destination(dst: &Path) -> PathBuf {
 pub(crate) fn run_import(
     db: PathBuf,
     paths: Vec<PathBuf>,
+    into_playlist: Option<Id>,
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
@@ -1341,6 +1423,44 @@ pub(crate) fn run_import(
         return;
     }
     let outcome = import_files(&catalog, &files, &cancel, &tx, &ctx);
+    // Dropped onto a playlist: every dropped file goes into it, in the scan's
+    // (path-sorted) order. Files already in the library resolve through the
+    // same path lookup, so the playlist gains them even when nothing needed
+    // scanning.
+    // Runs before the analysis chain so the playlist fills the moment the
+    // import lands. `add_tracks` skips tracks the playlist already holds.
+    if let Some(pid) = into_playlist {
+        if !outcome.cancelled {
+            let ids: Vec<Id> = files
+                .iter()
+                .filter_map(|p| {
+                    catalog
+                        .track_id_by_path(&p.to_string_lossy())
+                        .ok()
+                        .flatten()
+                })
+                .collect();
+            if !ids.is_empty() {
+                match catalog.add_tracks(pid, &ids) {
+                    Ok(n) => {
+                        let _ = tx.send(JobMsg::Status(format!(
+                            "Added {n} track(s) to the playlist."
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(JobMsg::Failures {
+                            title: "Add to playlist".into(),
+                            items: vec![(
+                                "Playlist".into(),
+                                format!("Couldn't add the imported tracks: {e}"),
+                            )],
+                        });
+                    }
+                }
+                ctx.request_repaint();
+            }
+        }
+    }
     finish_import(&catalog, outcome, &follow, &cancel, &tx, &ctx);
 }
 
@@ -4547,4 +4667,94 @@ fn local_track_for(catalog: &Catalog, entry: &TracklistEntry) -> Option<Id> {
         return None;
     }
     Some(first.id)
+}
+
+#[cfg(test)]
+mod drop_import_tests {
+    use super::*;
+
+    /// Files dropped onto a playlist row land in the library AND in that
+    /// playlist, in the importer's path order, whether or not they were
+    /// already in the library. A plain drop (no playlist) touches no playlist.
+    #[test]
+    fn dropped_files_join_the_target_playlist() {
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/seeker-sample/Rezzett-Doyce.mp3");
+        if !sample.is_file() {
+            eprintln!("skipping: local sample {} not present", sample.display());
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ordnung-drop-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.mp3");
+        let b = dir.join("b.mp3");
+        std::fs::copy(&sample, &a).unwrap();
+        std::fs::copy(&sample, &b).unwrap();
+        let db = dir.join("catalog.db");
+        let (first, second) = {
+            let cat = Catalog::open(&db).unwrap();
+            (
+                cat.create_playlist("First", None, false).unwrap(),
+                cat.create_playlist("Second", None, false).unwrap(),
+            )
+        };
+        let run = |paths: Vec<PathBuf>, into: Option<Id>| {
+            let (tx, rx) = mpsc::channel();
+            run_import(
+                db.clone(),
+                paths,
+                into,
+                Arc::new(AtomicBool::new(false)),
+                tx,
+                egui::Context::default(),
+                FollowUps {
+                    auto_convert: None,
+                    auto_analyze: false,
+                    auto_match: None,
+                },
+            );
+            let msgs: Vec<JobMsg> = rx.try_iter().collect();
+            assert!(
+                msgs.iter().any(|m| matches!(m, JobMsg::Done(_))),
+                "import must finish with Done"
+            );
+            assert!(
+                !msgs.iter().any(|m| matches!(m, JobMsg::Failed(_) | JobMsg::Failures { .. })),
+                "import must not fail"
+            );
+        };
+        let paths_in = |pid: Id| -> Vec<String> {
+            Catalog::open(&db)
+                .unwrap()
+                .list_playlist_tracks(pid, None)
+                .unwrap()
+                .into_iter()
+                .map(|t| t.source_path)
+                .collect()
+        };
+
+        // A plain drop imports without touching any playlist.
+        run(vec![a.clone()], None);
+        assert!(paths_in(first).is_empty());
+        assert!(paths_in(second).is_empty());
+
+        // Dropped onto "First": the already-imported `a` (skipped as unchanged
+        // by the scan) and the new `b` both join it, in the scan's path order.
+        run(vec![b.clone(), a.clone()], Some(first));
+        assert_eq!(
+            paths_in(first),
+            vec![a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned()]
+        );
+        assert!(paths_in(second).is_empty());
+
+        // Dropping again onto the same playlist doesn't duplicate; dropping
+        // onto another playlist adds there too.
+        run(vec![a.clone()], Some(first));
+        assert_eq!(paths_in(first).len(), 2);
+        run(vec![a.clone()], Some(second));
+        assert_eq!(paths_in(second), vec![a.to_string_lossy().into_owned()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

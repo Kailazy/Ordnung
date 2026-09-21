@@ -232,7 +232,9 @@ pub(crate) fn nav_tile_badge(
 /// Render the children of `parent` in the sidebar tree, recursing into folders.
 /// Folders are collapsible; playlists are selectable rows that double as
 /// drag-and-drop targets for table rows. Plain-field state (`view`, `renaming`)
-/// is mutated in place; catalog edits are funneled through `action`.
+/// is mutated in place; catalog edits are funneled through `action`. Every
+/// visible playlist row's screen rect is pushed to `drop_rects` so a Finder
+/// file drag can target it too (see `handle_file_drop`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_playlist_nodes(
     ui: &mut egui::Ui,
@@ -243,6 +245,7 @@ pub(crate) fn draw_playlist_nodes(
     view: &mut LibraryView,
     renaming: &mut Option<Renaming>,
     action: &mut Option<SidebarAction>,
+    drop_rects: &mut Vec<(Id, egui::Rect)>,
 ) {
     for p in all.iter().filter(|p| p.parent == parent) {
         // While this entry is being (re)named, show the inline editor in place
@@ -265,6 +268,7 @@ pub(crate) fn draw_playlist_nodes(
                     view,
                     renaming,
                     action,
+                    drop_rects,
                 );
                 continue;
             }
@@ -313,13 +317,14 @@ pub(crate) fn draw_playlist_nodes(
                     view,
                     renaming,
                     action,
+                    drop_rects,
                 );
             })
             .header_response
             .context_menu(|ui| folder_context_menu(ui, p, volumes, renaming, action));
             playlist_row_gap(ui, density);
         } else {
-            draw_playlist_leaf(ui, density, p, volumes, view, renaming, action);
+            draw_playlist_leaf(ui, density, p, volumes, view, renaming, action, drop_rects);
         }
     }
 }
@@ -648,6 +653,9 @@ fn playlist_row_gap(ui: &mut egui::Ui, density: NavDensity) {
 
 /// One playlist row: inline-rename when active, otherwise a selectable label
 /// that highlights on drag-hover and adds the dragged tracks when dropped on.
+/// Its on-screen rect is recorded in `drop_rects` (only while actually visible
+/// inside the scrolling tree) so files dragged in from Finder can land on it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_playlist_leaf(
     ui: &mut egui::Ui,
     density: NavDensity,
@@ -656,6 +664,7 @@ pub(crate) fn draw_playlist_leaf(
     view: &mut LibraryView,
     renaming: &mut Option<Renaming>,
     action: &mut Option<SidebarAction>,
+    drop_rects: &mut Vec<(Id, egui::Rect)>,
 ) {
     let selected = *view == LibraryView::Playlist(p.id);
     let resp = playlist_row(
@@ -666,6 +675,12 @@ pub(crate) fn draw_playlist_leaf(
         selected,
         p.track_ids.len(),
     );
+    if ui.is_rect_visible(resp.rect) {
+        let visible = resp.rect.intersect(ui.clip_rect());
+        if visible.is_positive() {
+            drop_rects.push((p.id, visible));
+        }
+    }
     if resp.dnd_hover_payload::<DraggedTracks>().is_some() {
         // Inset the highlight so the stroke sits inside the tile's rounded box
         // (drawn on the edge, not floating outside it) and the corners stay round.

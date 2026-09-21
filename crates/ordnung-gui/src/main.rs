@@ -1582,6 +1582,17 @@ struct App {
     /// Filled in `draw_table` and read by `handle_file_drop` to map a dropped
     /// image onto the row under the cursor. Rebuilt every frame.
     row_screen_rects: Vec<(Id, egui::Rect)>,
+    /// Screen-space rect of the track table's viewport this frame, when a
+    /// track table was drawn. Read by `handle_file_drop` to outline the table
+    /// as the landing zone while files from Finder hover over it. Cleared at
+    /// the top of every frame so a view without the table never keeps a stale
+    /// rect.
+    table_screen_rect: Option<egui::Rect>,
+    /// Screen-space rect of each visible catalog playlist row in the sidebar
+    /// this frame, with its playlist id. Read by `handle_file_drop` to
+    /// highlight the playlist under a hovering Finder drag and, on drop, to
+    /// add the imported tracks to it. Cleared at the top of every frame.
+    playlist_screen_rects: Vec<(Id, egui::Rect)>,
     /// An image dropped onto a track row, awaiting confirmation to set it as that
     /// track's cover. `Some` shows the cover-drop modal. See [`CoverDrop`].
     cover_drop: Option<CoverDrop>,

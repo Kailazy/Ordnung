@@ -2157,8 +2157,10 @@ impl App {
                     });
             });
 
-        // Publish this frame's visible row rects for the dropped-cover hit-test.
+        // Publish this frame's visible row rects for the dropped-cover hit-test,
+        // and the table's viewport as the Finder-drop landing zone.
         self.row_screen_rects = row_rects;
+        self.table_screen_rect = Some(scroll_out.inner_rect);
 
         // Reconcile the columns' rendered widths with the saved set. egui_extras
         // owns the live width (so a drag updates smoothly within the session under

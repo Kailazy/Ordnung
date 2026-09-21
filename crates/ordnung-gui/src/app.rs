@@ -240,6 +240,8 @@ impl App {
             dig_strip_h: None,
             scroll_to_track: None,
             row_screen_rects: Vec::new(),
+            table_screen_rect: None,
+            playlist_screen_rects: Vec::new(),
             cover_drop: None,
             tags_editing: false,
             job_cancel: None,
@@ -1833,6 +1835,10 @@ impl eframe::App for App {
             self.menu_installed = true;
             crate::macos_menu::install();
         }
+        // The file-drop landing zones are re-recorded by whatever draws them
+        // this frame; a view that draws neither must not inherit last frame's.
+        self.table_screen_rect = None;
+        self.playlist_screen_rects.clear();
         // Keep the global UI zoom (Cmd +/-, applied by egui at the start of
         // the pass) inside a usable band. egui's own bounds are 0.2x..5x, which
         // lets one held keystroke shrink the table to a smear or blow a single
@@ -3334,6 +3340,7 @@ impl eframe::App for App {
                                 } else {
                                     let all = self.playlists.clone();
                                     let volumes = self.usb_volumes.clone();
+                                    let mut drop_rects = Vec::new();
                                     draw_playlist_nodes(
                                         ui,
                                         density,
@@ -3343,7 +3350,9 @@ impl eframe::App for App {
                                         &mut self.view,
                                         &mut self.renaming,
                                         &mut sidebar_action,
+                                        &mut drop_rects,
                                     );
+                                    self.playlist_screen_rects = drop_rects;
                                 }
                             });
                     });
