@@ -1999,6 +1999,11 @@ struct App {
     /// actual seek fires on release so we rebuild the audio sink once, not per
     /// frame; `None` when not scrubbing.
     scrub: Option<f32>,
+    /// A grab on the zoom lane in progress: the pointer x where the record was
+    /// taken hold of, and the track fraction under the playhead then. The scrub
+    /// position is that fraction offset by how far the hand has moved since.
+    /// `None` between gestures. See [`player`].
+    wave_grab: Option<(f32, f32)>,
     /// Set while the volume knob is being dragged, so the config is written once
     /// on release rather than on every frame of the gesture.
     volume_dirty: bool,

@@ -124,7 +124,41 @@ struct BufferSource {
     chunk_start: usize,
     sample_rate: u32,
     channels: u16,
+    /// The engine's scrub target, read every frame while a scrub is active
+    /// (see [`ScrubTarget`]).
+    scrub: Arc<ScrubTarget>,
+    /// A scrub is in progress: `fpos` is the cursor, not `pos`.
+    scrubbing: bool,
+    /// Fractional frame position of the scrub cursor.
+    fpos: f64,
+    /// The interpolated frame being emitted, one sample per channel, and how
+    /// many of its samples have gone out.
+    frame: Vec<f32>,
+    frame_idx: usize,
 }
+
+/// Where the user is holding the record, shared between the engine (set from
+/// the zoom lane every frame of a drag) and the playing [`BufferSource`] (which
+/// chases it on the audio thread). While `active`, the source stops advancing
+/// on its own and instead plays toward `target` at a speed proportional to the
+/// gap, in either direction: a quick pull is a chirp, a slow one a growl, a
+/// still hand silence, the way a platter in vinyl mode behaves. `target` is an
+/// interleaved sample index, frame-aligned.
+#[derive(Default)]
+pub struct ScrubTarget {
+    active: AtomicBool,
+    target: AtomicUsize,
+}
+
+/// How long the scrub cursor takes to close most of the gap to the hand. Shorter
+/// is snappier; longer smooths a jittery pointer into a steadier pitch.
+const SCRUB_FOLLOW_SECS: f64 = 0.04;
+/// Fastest the scrub plays, as a multiple of normal speed. Caps a flick across
+/// the lane at a chirp rather than a burst of noise.
+const SCRUB_MAX_RATE: f64 = 6.0;
+/// Below this speed a scrub is sub-bass rumble; play silence instead, the
+/// record is as good as held still.
+const SCRUB_MIN_AUDIBLE_RATE: f64 = 0.05;
 
 /// The active loop, shared between the engine (which sets it from the cue
 /// panel) and the playing [`BufferSource`] (which honours it on the audio
@@ -159,6 +193,7 @@ impl BufferSource {
     fn new(
         pcm: Arc<StreamingPcm>,
         looping: Arc<LoopRegion>,
+        scrub: Arc<ScrubTarget>,
         pos: usize,
         sample_rate: u32,
         channels: u16,
@@ -171,6 +206,82 @@ impl BufferSource {
             chunk_start: pos,
             sample_rate,
             channels,
+            scrub,
+            scrubbing: false,
+            fpos: 0.0,
+            frame: Vec::new(),
+            frame_idx: 0,
+        }
+    }
+
+    /// One sample of scrub audio: the next channel of the current interpolated
+    /// frame, computing a fresh frame at each frame boundary.
+    fn scrub_sample(&mut self) -> f32 {
+        let ch = self.channels.max(1) as usize;
+        if !self.scrubbing {
+            // Grabbed: the scrub cursor picks up where normal playback was.
+            self.scrubbing = true;
+            self.fpos = (self.pos / ch) as f64;
+            self.frame_idx = ch;
+        }
+        if self.frame_idx >= ch {
+            self.fill_scrub_frame();
+            self.frame_idx = 0;
+        }
+        let s = self.frame.get(self.frame_idx).copied().unwrap_or(0.0);
+        self.frame_idx += 1;
+        s
+    }
+
+    /// Advance the scrub cursor one output frame toward the target and fill
+    /// `frame` with the linearly interpolated samples there (silence when the
+    /// cursor is still or barely moving).
+    fn fill_scrub_frame(&mut self) {
+        let ch = self.channels.max(1) as usize;
+        self.frame.clear();
+        self.frame.resize(ch, 0.0);
+        let target = (self.scrub.target.load(Ordering::Acquire) / ch) as f64;
+        let dist = target - self.fpos;
+        if dist.abs() < 1.0 {
+            self.fpos = target;
+            return;
+        }
+        let follow = (self.sample_rate.max(1) as f64 * SCRUB_FOLLOW_SECS).max(1.0);
+        let rate = (dist / follow).clamp(-SCRUB_MAX_RATE, SCRUB_MAX_RATE);
+        self.fpos += rate;
+        if rate.abs() < SCRUB_MIN_AUDIBLE_RATE {
+            return;
+        }
+        let published = self.pcm.published_len() / ch * ch;
+        if published < 2 * ch {
+            return;
+        }
+        let max_frame = (published / ch - 2) as f64;
+        let fpos = self.fpos.clamp(0.0, max_frame);
+        let i = fpos as usize;
+        let t = (fpos - i as f64) as f32;
+        let (need0, need1) = (i * ch, (i + 2) * ch);
+        let chunk_end = self.chunk_start + self.chunk.len();
+        if need0 < self.chunk_start || need1 > chunk_end {
+            // Refill a window centred on the cursor, so a scrub in either
+            // direction reads locally for a while before locking again.
+            let start = need0.saturating_sub(REFILL_SAMPLES / 2) / ch * ch;
+            let data = self.pcm.data.read().unwrap();
+            let end = (start + REFILL_SAMPLES).max(need1).min(published).min(data.len());
+            self.chunk_start = start;
+            self.chunk.clear();
+            self.chunk.extend_from_slice(&data[start..end]);
+        }
+        for c in 0..ch {
+            let at = |idx: usize| {
+                idx.checked_sub(self.chunk_start)
+                    .and_then(|k| self.chunk.get(k))
+                    .copied()
+                    .unwrap_or(0.0)
+            };
+            let a = at(need0 + c);
+            let b = at(need0 + ch + c);
+            self.frame[c] = a + (b - a) * t;
         }
     }
 }
@@ -178,6 +289,17 @@ impl BufferSource {
 impl Iterator for BufferSource {
     type Item = f32;
     fn next(&mut self) -> Option<f32> {
+        if self.scrub.active.load(Ordering::Acquire) {
+            return Some(self.scrub_sample());
+        }
+        if self.scrubbing {
+            // Released: the plain cursor carries on from where the scrub got
+            // to. The engine rebuilds the sink at the exact release point
+            // anyway; this only covers the frames until it does.
+            self.scrubbing = false;
+            let ch = self.channels.max(1) as usize;
+            self.pos = (self.fpos.max(0.0) as usize) * ch;
+        }
         loop {
             let chunk_end = self.chunk_start + self.chunk.len();
             if self.pos >= self.chunk_start && self.pos < chunk_end {
@@ -275,6 +397,14 @@ pub struct AudioEngine {
     /// The active loop in seconds, `(start, end)`, for the wall-clock
     /// position and the UI. `None` when playback runs straight through.
     loop_secs: Option<(f32, f32)>,
+    /// The scrub target as the audio thread sees it, shared with every
+    /// `BufferSource` the engine builds.
+    scrub: Arc<ScrubTarget>,
+    /// `Some` while the user holds the waveform: whether playback resumes on
+    /// release (it was playing at the grab, and no pause toggled since). The
+    /// sink runs throughout to voice the scrub, so this, not the sink, is the
+    /// play state the UI and the OS panel see meanwhile.
+    scrub_resume: Option<bool>,
     sample_rate: u32,
     /// Channel count of the loaded track (interleaved in `samples`).
     channels: u16,
@@ -333,6 +463,8 @@ impl AudioEngine {
             load_cancel: None,
             loop_region: Arc::new(LoopRegion::default()),
             loop_secs: None,
+            scrub: Arc::new(ScrubTarget::default()),
+            scrub_resume: None,
             sample_rate: 0,
             channels: 1,
             duration: 0.0,
@@ -373,8 +505,13 @@ impl AudioEngine {
         self.loading.is_some() || self.is_playing()
     }
 
-    /// True when a sink exists and is running (not paused, not finished).
+    /// True when a sink exists and is running (not paused, not finished). While
+    /// the waveform is held, the sink runs to voice the scrub whatever the play
+    /// state, so this reports the state playback returns to on release instead.
     fn is_playing(&self) -> bool {
+        if let Some(resume) = self.scrub_resume {
+            return resume;
+        }
         self.started_at.is_some()
             && self
                 .sink
@@ -389,13 +526,88 @@ impl AudioEngine {
             None => self.base_secs,
         };
         // The audio thread wraps at the loop end; fold the wall clock the
-        // same way so the playhead circles the loop with it.
-        if let Some((a, b)) = self.loop_secs {
+        // same way so the playhead circles the loop with it. Not while the
+        // record is held: a scrub can be dragged straight out of the loop.
+        if let (Some((a, b)), None) = (self.loop_secs, self.scrub_resume) {
             if b > a && p >= b {
                 p = a + (p - a) % (b - a);
             }
         }
         p.clamp(0.0, self.duration)
+    }
+
+    /// Grab the record at the current position. Playback stops advancing on
+    /// its own; until [`end_scrub`], the audio thread instead plays toward
+    /// wherever [`scrub_to`] points, at the speed the hand moves, so a drag is
+    /// heard as the waveform passing under the playhead. The play/pause state
+    /// at the grab is remembered and restored on release.
+    pub fn begin_scrub(&mut self) {
+        if self.current.is_none() || self.pcm_buf.is_none() || self.scrub_resume.is_some() {
+            return;
+        }
+        let was_playing = self.is_playing();
+        let now = self.position();
+        self.scrub_resume = Some(was_playing);
+        self.scrub.target.store(self.sample_index(now), Ordering::Release);
+        self.scrub.active.store(true, Ordering::Release);
+        // The source needs a running sink to voice the scrub; a paused or
+        // finished one is rebuilt at the grab point.
+        let running = self
+            .sink
+            .as_ref()
+            .map_or(false, |s| !s.is_paused() && !s.empty());
+        if !running {
+            self.start_sink_at(now);
+        }
+        // The clock freezes: the position is wherever the hand puts it.
+        self.base_secs = now;
+        self.started_at = None;
+        self.status_dirty = true;
+    }
+
+    /// Move the held record to `secs`. The reported position follows at once;
+    /// the audio chases it within a few tens of milliseconds.
+    pub fn scrub_to(&mut self, secs: f32) {
+        if self.scrub_resume.is_none() {
+            return;
+        }
+        let secs = secs.clamp(0.0, self.decoded_secs());
+        self.base_secs = secs;
+        self.scrub.target.store(self.sample_index(secs), Ordering::Release);
+    }
+
+    /// Let go of the record at `secs`. Playback resumes from there if it was
+    /// playing at the grab, or sits there paused if it wasn't.
+    pub fn end_scrub(&mut self, secs: f32) {
+        let Some(resume) = self.scrub_resume.take() else {
+            return;
+        };
+        self.scrub.active.store(false, Ordering::Release);
+        // `seek` keeps the play state it finds, so restore it first: the sink
+        // has been running for the scrub whatever the state was.
+        self.started_at = resume.then(Instant::now);
+        self.seek(secs);
+    }
+
+    /// Seconds of audio playable right now: the whole track once decoded, else
+    /// what the decoder has published so far.
+    fn decoded_secs(&self) -> f32 {
+        let mut max = self.duration;
+        if !self.decode_done {
+            if let Some(pcm) = &self.pcm_buf {
+                let per_sec = (self.sample_rate.max(1) as usize) * self.channels.max(1) as usize;
+                max = max.min(pcm.published_len() as f32 / per_sec as f32);
+            }
+        }
+        max
+    }
+
+    /// `secs` as a frame-aligned interleaved sample index into the loaded PCM.
+    fn sample_index(&self, secs: f32) -> usize {
+        let ch = self.channels.max(1) as usize;
+        let frame = (secs.max(0.0) * self.sample_rate as f32) as usize;
+        let published = self.pcm_buf.as_ref().map_or(0, |p| p.published_len());
+        (frame * ch).min(published / ch * ch)
     }
 
     /// The active loop `(start, end)` in seconds, if playback is looping.
@@ -555,6 +767,13 @@ impl AudioEngine {
     /// Pause if playing, resume if paused. Resuming from the very end restarts the
     /// track from the top.
     pub fn toggle_pause(&mut self) {
+        if let Some(resume) = self.scrub_resume.as_mut() {
+            // Pausing mid-scrub decides what happens on release; the sink
+            // keeps running to voice the hand until then.
+            *resume = !*resume;
+            self.status_dirty = true;
+            return;
+        }
         if self.is_playing() {
             // Freeze the clock at the current position and pause the sink.
             self.base_secs = self.position();
@@ -584,15 +803,12 @@ impl AudioEngine {
         if self.current.is_none() {
             return;
         }
-        let mut max = self.duration;
-        if !self.decode_done {
-            if let Some(pcm) = &self.pcm_buf {
-                let per_sec = (self.sample_rate.max(1) as usize) * self.channels.max(1) as usize;
-                max = max.min(pcm.published_len() as f32 / per_sec as f32);
-            }
+        if self.scrub_resume.is_some() {
+            self.scrub_to(secs);
+            return;
         }
         let was_playing = self.is_playing();
-        let target = secs.clamp(0.0, max);
+        let target = secs.clamp(0.0, self.decoded_secs());
         if let Some((a, b)) = self.loop_secs {
             if target < a || target >= b {
                 self.loop_secs = None;
@@ -627,6 +843,7 @@ impl AudioEngine {
                 sink.append(BufferSource::new(
                     pcm,
                     self.loop_region.clone(),
+                    self.scrub.clone(),
                     pos,
                     self.sample_rate,
                     self.channels.max(1),
@@ -670,6 +887,8 @@ impl AudioEngine {
         self.duration = 0.0;
         self.loop_secs = None;
         self.loop_region.set(None);
+        self.scrub.active.store(false, Ordering::Release);
+        self.scrub_resume = None;
         self.np_meta = None;
         self.status_dirty = true;
     }
@@ -805,6 +1024,8 @@ impl AudioEngine {
                     self.base_secs = 0.0;
                     self.loop_secs = None;
                     self.loop_region.set(None);
+                    self.scrub.active.store(false, Ordering::Release);
+                    self.scrub_resume = None;
                     self.start_sink_at(0.0);
                     // A provisional duration is known now — refresh the OS
                     // panel so its scrubber shows the track length.
@@ -923,14 +1144,14 @@ mod tests {
 
     #[test]
     fn buffer_source_reports_duration_and_drains() {
-        let src = BufferSource::new(finished_pcm(vec![0.0; 100]), Arc::new(LoopRegion::default()), 0, 50, 1);
+        let src = BufferSource::new(finished_pcm(vec![0.0; 100]), Arc::new(LoopRegion::default()), Arc::new(ScrubTarget::default()), 0, 50, 1);
         assert_eq!(src.sample_rate(), 50);
         assert_eq!(src.channels(), 1);
         assert_eq!(src.total_duration(), Some(Duration::from_secs_f32(2.0)));
         assert_eq!(src.count(), 100);
 
         // Stereo: 100 interleaved samples = 50 frames at 50 Hz = 1 s.
-        let stereo = BufferSource::new(finished_pcm(vec![0.0; 100]), Arc::new(LoopRegion::default()), 0, 50, 2);
+        let stereo = BufferSource::new(finished_pcm(vec![0.0; 100]), Arc::new(LoopRegion::default()), Arc::new(ScrubTarget::default()), 0, 50, 2);
         assert_eq!(stereo.channels(), 2);
         assert_eq!(stereo.total_duration(), Some(Duration::from_secs_f32(1.0)));
     }
@@ -943,7 +1164,14 @@ mod tests {
     fn buffer_source_starves_with_silence_and_resumes_without_skipping() {
         let pcm = Arc::new(StreamingPcm::default());
         pcm.append(&[1.0, 2.0]);
-        let mut src = BufferSource::new(pcm.clone(), Arc::new(LoopRegion::default()), 0, 50, 1);
+        let mut src = BufferSource::new(
+            pcm.clone(),
+            Arc::new(LoopRegion::default()),
+            Arc::new(ScrubTarget::default()),
+            0,
+            50,
+            1,
+        );
         assert_eq!(src.next(), Some(1.0));
         assert_eq!(src.next(), Some(2.0));
         // Starved: silence, but the cursor must not advance…
@@ -968,11 +1196,91 @@ mod tests {
         let pcm = finished_pcm((0..10).map(|i| i as f32).collect());
         let region = Arc::new(LoopRegion::default());
         region.set(Some((2, 5)));
-        let mut src = BufferSource::new(pcm, region.clone(), 0, 50, 1);
+        let mut src = BufferSource::new(pcm, region.clone(), Arc::new(ScrubTarget::default()), 0, 50, 1);
         let first: Vec<f32> = (0..9).map(|_| src.next().unwrap()).collect();
         assert_eq!(first, vec![0.0, 1.0, 2.0, 3.0, 4.0, 2.0, 3.0, 4.0, 2.0]);
         region.set(None);
         let rest: Vec<f32> = src.by_ref().collect();
         assert_eq!(rest, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+    }
+
+    /// Grabbing the record stops it: with the target where the cursor is, the
+    /// source emits silence and stays put, so a held hand is heard as a hold.
+    #[test]
+    fn scrub_holds_still_in_silence() {
+        let pcm = finished_pcm((0..100).map(|i| 1.0 + i as f32).collect());
+        let scrub = Arc::new(ScrubTarget::default());
+        let mut src = BufferSource::new(pcm, Arc::new(LoopRegion::default()), scrub.clone(), 10, 50, 1);
+        scrub.target.store(10, Ordering::Release);
+        scrub.active.store(true, Ordering::Release);
+        for _ in 0..200 {
+            assert_eq!(src.next(), Some(0.0));
+        }
+        // Released without moving: playback carries on from the grab point.
+        scrub.active.store(false, Ordering::Release);
+        assert_eq!(src.next(), Some(11.0));
+        assert_eq!(src.next(), Some(12.0));
+    }
+
+    /// Pulling the target ahead plays forward through the audio toward it,
+    /// pulling it back plays the same audio in reverse, and the cursor settles
+    /// at the target on release. Samples are the ramp `i`, so the emitted
+    /// values are the positions passed through.
+    #[test]
+    fn scrub_plays_toward_the_target_in_either_direction() {
+        let pcm = finished_pcm((0..20_000).map(|i| i as f32).collect());
+        let scrub = Arc::new(ScrubTarget::default());
+        let mut src = BufferSource::new(
+            pcm,
+            Arc::new(LoopRegion::default()),
+            scrub.clone(),
+            1_000,
+            48_000,
+            1,
+        );
+        scrub.active.store(true, Ordering::Release);
+        scrub.target.store(10_000, Ordering::Release);
+        let fwd: Vec<f32> = (0..4_000).filter_map(|_| src.next()).filter(|s| *s != 0.0).collect();
+        assert!(fwd.len() > 100, "a pull forward is audible");
+        assert!(fwd.windows(2).all(|w| w[1] > w[0]), "forward means rising positions");
+        assert!(*fwd.first().unwrap() > 1_000.0 && *fwd.last().unwrap() < 10_000.0);
+        assert!(fwd.windows(2).all(|w| w[1] - w[0] <= SCRUB_MAX_RATE as f32 + 1e-3), "rate is capped");
+
+        // Now pull back past where we started.
+        scrub.target.store(500, Ordering::Release);
+        let back: Vec<f32> = (0..20_000).filter_map(|_| src.next()).filter(|s| *s != 0.0).collect();
+        assert!(back.len() > 100, "a pull back is audible");
+        assert!(back.windows(2).all(|w| w[1] < w[0]), "reverse means falling positions");
+        // The audible tail ends where the crawl drops under the audible floor
+        // (`SCRUB_MIN_AUDIBLE_RATE` × the follow window); the cursor then
+        // settles the rest of the way in silence.
+        let floor = SCRUB_MIN_AUDIBLE_RATE * 48_000.0 * SCRUB_FOLLOW_SECS;
+        let last = *back.last().unwrap();
+        assert!(last > 500.0 && last - 500.0 < floor as f32 + 2.0, "fades out just short of the target: {last}");
+
+        scrub.active.store(false, Ordering::Release);
+        let resumed = src.next().unwrap();
+        assert!((resumed - 500.0).abs() < 2.0, "plain playback resumes where the scrub settled: {resumed}");
+    }
+
+    /// Scrubbing an interleaved stereo buffer keeps channels aligned: each
+    /// emitted frame is a left sample followed by the matching right one.
+    #[test]
+    fn scrub_keeps_stereo_frames_aligned() {
+        // L = frame index, R = frame index + 0.5.
+        let mut data = Vec::new();
+        for i in 0..5_000 {
+            data.push(i as f32);
+            data.push(i as f32 + 0.5);
+        }
+        let pcm = finished_pcm(data);
+        let scrub = Arc::new(ScrubTarget::default());
+        let mut src = BufferSource::new(pcm, Arc::new(LoopRegion::default()), scrub.clone(), 0, 48_000, 2);
+        scrub.active.store(true, Ordering::Release);
+        scrub.target.store(4_000 * 2, Ordering::Release);
+        let out: Vec<f32> = (0..2_000).filter_map(|_| src.next()).collect();
+        for pair in out.chunks(2).filter(|p| p[0] != 0.0) {
+            assert!((pair[1] - pair[0] - 0.5).abs() < 1e-3, "frame {pair:?} is misaligned");
+        }
     }
 }

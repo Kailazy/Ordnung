@@ -312,7 +312,7 @@ impl App {
 
                 // Zoomed detail lane — a window of `wave_zoom_secs` centered on the
                 // playhead, scrolling under it during playback. Wheel to zoom,
-                // click/drag to seek. Skipped for unanalyzed tracks (no waveform).
+                // grab and drag to scrub. Skipped for unanalyzed tracks (no waveform).
                 if !waveform.is_empty() {
                     if cue_t > 0.0 {
                         // The strip grows with the reveal; the bar sits at its
@@ -1036,7 +1036,9 @@ impl App {
     /// centered on the playhead and scrolling under it during playback. The window
     /// is clamped to the track bounds, so near the ends the playhead drifts off
     /// center rather than the lane showing empty runway. Wheel over the lane zooms;
-    /// click/drag seeks (writing `seek_to` on release, like the overview strip).
+    /// press-and-drag grabs the record and scrubs it under the playhead (see the
+    /// engine's `begin_scrub`). `seek_to` is only written by the grid editor's
+    /// click-to-seek.
     fn draw_zoom_lane(
         &mut self,
         ui: &mut egui::Ui,
@@ -1064,8 +1066,16 @@ impl App {
 
         ui.horizontal(|ui| {
             ui.add_space(MARGIN);
-            let (rect, resp) =
-                ui.allocate_exact_size(egui::vec2(lane_w, lane_h), egui::Sense::click_and_drag());
+            // Drag-only outside the grid editor: the press itself grabs the
+            // record (a click must never jump the playhead), so egui's
+            // click-vs-drag arbitration would only delay the hold. The editor
+            // keeps click-to-seek for placing the playhead before a nudge.
+            let sense = if self.grid_edit_open {
+                egui::Sense::click_and_drag()
+            } else {
+                egui::Sense::drag()
+            };
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(lane_w, lane_h), sense);
 
             // Visible window in track-fraction, width `zoom` seconds, slid to stay
             // inside `[0, 1]`.
@@ -1187,7 +1197,6 @@ impl App {
                         (zoom * (-scroll * 0.004).exp()).clamp(MIN_ZOOM_SECS, MAX_ZOOM_SECS);
                     ui.ctx().request_repaint();
                 }
-                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
 
             // Grid editor: a tab on the lane's top-right corner, and — while it's
@@ -1201,13 +1210,18 @@ impl App {
             // Cues: the CUES tab beside GRID toggles the cue bar above the lane.
             self.draw_cue_tab(ui, rect);
 
-            // Click/drag to seek — map pointer x back through the window.
-            let frac_at = |p: egui::Pos2| {
-                (w0 + ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * span).clamp(0.0, 1.0)
-            };
+            // Grab and scrub: pressing holds the record where it is, dragging
+            // pulls the waveform under the fixed playhead by exactly the hand's
+            // movement (heard through the engine's scrub mode), and releasing
+            // leaves it there, playing or paused as it was at the grab. Never a
+            // jump to the pointer: that's what the overview strip is for.
+            //
             // ...except in grid-edit mode, where dragging the lane slides the grid
             // under the waveform instead — the direct-manipulation version of the
             // nudge buttons, and the reason the editor is anchored to this lane.
+            let frac_at = |p: egui::Pos2| {
+                (w0 + ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * span).clamp(0.0, 1.0)
+            };
             if editing {
                 if resp.hovered() || resp.dragged() {
                     ui.ctx().set_cursor_icon(if resp.dragged() {
@@ -1232,21 +1246,48 @@ impl App {
                 if resp.drag_stopped() {
                     self.commit_grid_edit();
                 }
-            } else if (resp.dragged() || resp.drag_started()) && dur > 0.0 {
-                if let Some(p) = resp.interact_pointer_pos() {
-                    self.scrub = Some(frac_at(p));
+                if resp.clicked() && dur > 0.0 {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        *seek_to = Some(frac_at(p) * dur);
+                    }
+                    self.scrub = None;
                 }
-            }
-            if resp.drag_stopped() {
-                if let Some(f) = self.scrub.take() {
-                    *seek_to = Some(f * dur);
+            } else if dur > 0.0 {
+                if resp.hovered() || resp.dragged() {
+                    ui.ctx().set_cursor_icon(if resp.dragged() {
+                        egui::CursorIcon::Grabbing
+                    } else {
+                        egui::CursorIcon::Grab
+                    });
                 }
-            }
-            if resp.clicked() && dur > 0.0 {
-                if let Some(p) = resp.interact_pointer_pos() {
-                    *seek_to = Some(frac_at(p) * dur);
+                if resp.drag_started() {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        self.wave_grab = Some((p.x, shown_frac));
+                        self.scrub = Some(shown_frac);
+                        if let Some(a) = self.audio.as_mut() {
+                            a.begin_scrub();
+                        }
+                    }
                 }
-                self.scrub = None;
+                if resp.dragged() {
+                    if let (Some((gx, gf)), Some(p)) = (self.wave_grab, resp.interact_pointer_pos())
+                    {
+                        // Pointer right moves the waveform right, i.e. earlier
+                        // in the track: one lane width is one window span.
+                        let f = (gf - (p.x - gx) / rect.width().max(1.0) * span).clamp(0.0, 1.0);
+                        self.scrub = Some(f);
+                        if let Some(a) = self.audio.as_mut() {
+                            a.scrub_to(f * dur);
+                        }
+                    }
+                }
+                if resp.drag_stopped() {
+                    self.wave_grab = None;
+                    let f = self.scrub.take().unwrap_or(shown_frac);
+                    if let Some(a) = self.audio.as_mut() {
+                        a.end_scrub(f * dur);
+                    }
+                }
             }
         });
     }

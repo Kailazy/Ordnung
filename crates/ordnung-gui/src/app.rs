@@ -355,6 +355,7 @@ impl App {
             native_drag_spent: false,
             native_drag_paths: Vec::new(),
             scrub: None,
+            wave_grab: None,
             volume_dirty: false,
             wave_zoom_secs: crate::player::DEFAULT_ZOOM_SECS,
             wave_lane_h: crate::player::DEFAULT_LANE_H,
