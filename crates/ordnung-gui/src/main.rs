@@ -641,6 +641,25 @@ impl TableColumn {
         }
     }
 
+    /// The spec for the last visible column. It takes whatever width is left,
+    /// so the table's right edge is the viewport's and a panel opening beside
+    /// the table squeezes this column first, and never less than the user's
+    /// width for it (or its default), past which the table scrolls instead.
+    /// Not resizable: egui_extras freezes a resizable column at its stored
+    /// width, and only a non-resizable remainder is recomputed every frame as
+    /// the viewport changes.
+    fn spec_last(self, cover_px: f32, width: Option<f32>) -> Column {
+        let floor = if self == TableColumn::Cover {
+            cover_px + 6.0
+        } else {
+            width.unwrap_or_else(|| self.default_width(cover_px))
+        };
+        Column::remainder()
+            .at_least(floor)
+            .resizable(false)
+            .clip(self.clips())
+    }
+
     /// Whether this column clips its content rather than forcing itself wider.
     /// The free-text columns clip; the short numeric ones don't. Waveform stays
     /// unclipped because when it leads the row its paint stretches left across the
@@ -1091,19 +1110,6 @@ impl SettingsTab {
             SettingsTab::Advanced => "Advanced",
         }
     }
-}
-
-/// A sidebar resize in progress. The panel stays locked to `NavDensity` while
-/// the edge is held; this is only what the ghost line draws and what the drop
-/// will commit.
-#[derive(Clone, Copy)]
-struct NavDrag {
-    /// Live pointer x, in screen space — where the ghost line is painted.
-    x: f32,
-    /// The tier this drag would land on, run through the same hysteresis the
-    /// commit uses so the ghost previews the real outcome rather than a plain
-    /// nearest-match the drop would then disagree with.
-    target: NavDensity,
 }
 
 struct App {
@@ -1749,8 +1755,8 @@ struct App {
     /// double-clicked); mirrors `column_menu`.
     col_filter_open: Option<ColFilterPopup>,
     /// Whether the inspector side panel is showing. Toggled by the pull tab at
-    /// the window's right edge — the panel is a fixed-width drawer that slides
-    /// in and out rather than a splitter the user drags to size.
+    /// the window's right edge: the drawer slides in and out, and once out its
+    /// edge snaps between the tiers in `inspector_nav`.
     inspector_open: bool,
     /// Whether the view drawn last frame had an inspector at all (the Vinyl
     /// and Liked views don't). A change here is a view switch, and the drawer
@@ -1960,17 +1966,14 @@ struct App {
     usb_analysis_progress: (usize, usize),
     /// Cancels the in-flight USB auto-analysis (volume pulled, new scan).
     usb_analysis_cancel: Option<Arc<AtomicBool>>,
-    /// Which of the sidebar's three width tiers is in force. The panel snaps
-    /// between designed layouts instead of resizing freely, so this — not a
-    /// pixel width — is the resize state, and it persists via
-    /// `Config::nav_density`.
-    nav_density: NavDensity,
-    /// Where the resize pointer is while the sidebar edge is held, and the tier
-    /// it would land on. `Some` only during a drag. The panel itself does *not*
-    /// follow this — committing a tier mid-drag is what made labels wrap and
-    /// unwrap under the pointer — so the live position is drawn as a ghost line
-    /// instead and the tier is applied once, on release.
-    nav_drag: Option<NavDrag>,
+    /// The sidebar's nav state: which of its width tiers is in force, and the
+    /// edge drag while one is held. The panel snaps between designed layouts
+    /// instead of resizing freely, so the tier, not a pixel width, is the
+    /// resize state, and it persists via `Config::nav_density`.
+    nav: ui::nav::NavState<NavDensity>,
+    /// The inspector drawer's nav state, the same way: its tier persists via
+    /// `Config::inspector_density`. Open/closed is `inspector_open`.
+    inspector_nav: ui::nav::NavState<inspector::InspectorDensity>,
     /// Which track set the table shows — the whole library or one playlist.
     view: LibraryView,
     /// Inline rename in progress for a sidebar entry, or `None` when no row is

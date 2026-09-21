@@ -3,14 +3,17 @@
 //! of surface: the same tint (the glass's, laid over the app's ground; a
 //! docked panel has nothing under it to frost), the same hairline for an
 //! edge, the same content margin, and one heading style for the panel's
-//! own title and for the sections inside it. A sidebar slides rather than
-//! opens: the caller eases its width, and at zero it is not shown at all.
+//! own title and for the sections inside it. A sidebar is a nav (see
+//! [`super::nav`]): its edge snaps between its designed widths. It slides
+//! rather than opens: the caller eases a factor on that width, and at zero
+//! it is not shown at all.
 //!
 //! [`header`] is the panel's title line, where a window's title bar is:
 //! the caption at the left and room at the right for one action, a button
 //! the edge never cuts. [`section`] opens each titled block below it with
 //! the same caption over a hairline; [`rule`] is that hairline on its own.
 
+use super::nav::{Nav, NavResponse, NavState, Tier};
 use super::tokens::{color, font, space};
 use super::window;
 use eframe::egui;
@@ -47,57 +50,55 @@ fn content_margin(ctx: &egui::Context) -> egui::Margin {
 /// A sidebar docked to the right edge.
 pub struct Sidebar {
     id: egui::Id,
-    width: f32,
 }
 
 impl Sidebar {
     pub fn right(id: impl Into<egui::Id>) -> Self {
-        Self {
-            id: id.into(),
-            width: 0.0,
-        }
+        Self { id: id.into() }
     }
 
-    /// The width this frame; ease it to slide the panel. Under half a
-    /// point it is not shown.
-    pub fn width(mut self, width: f32) -> Self {
-        self.width = width;
-        self
-    }
-
-    pub fn show<R>(
+    /// Show the sidebar at the tier in `state`, its edge snapping between
+    /// the tiers on a drag, with `slide` the 0..=1 factor the caller eases
+    /// to slide it in and out; under half a point it is not shown.
+    pub fn show<T: Tier, R>(
         self,
         ctx: &egui::Context,
+        state: &mut NavState<T>,
+        slide: f32,
         add: impl FnOnce(&mut egui::Ui) -> R,
-    ) -> Option<egui::InnerResponse<R>> {
-        if self.width < 0.5 {
-            return None;
-        }
+    ) -> NavResponse<R> {
         let margin = content_margin(ctx);
-        let shown = egui::SidePanel::right(self.id)
-            .resizable(false)
-            .exact_width(self.width)
-            // The edge is the window's hairline, painted below: egui's own
-            // divider is a different line.
-            .show_separator_line(false)
-            .frame(egui::Frame::none().fill(fill()).inner_margin(margin))
-            .show(ctx, |ui| {
-                let inner = ui.max_rect();
-                let outer = egui::Rect::from_min_max(
-                    inner.min - egui::vec2(margin.left, margin.top),
-                    inner.max + egui::vec2(margin.right, margin.bottom),
-                );
-                ui.painter()
-                    .vline(outer.left(), outer.y_range(), window::edge());
-                // The content is laid out at its natural width, and a label
-                // wider than the panel would otherwise widen it and paint
-                // over what is beside it. The panel is the clip.
-                ui.set_clip_rect(outer.intersect(ui.clip_rect()));
-                ui.set_max_width(ui.available_width());
-                add(ui)
-            });
-        Some(shown)
+        Nav::right(self.id, state).slide(slide).show(
+            ctx,
+            // The edge is the window's hairline, painted in the chrome:
+            // egui's own divider is a different line.
+            |panel| panel.show_separator_line(false).frame(frame(margin)),
+            |ui| chrome(ui, margin, add),
+        )
     }
+}
+
+/// The panel's frame: the surface, with the window's content margin.
+fn frame(margin: egui::Margin) -> egui::Frame {
+    egui::Frame::none().fill(fill()).inner_margin(margin)
+}
+
+/// The chrome inside the panel: the hairline on its inner edge and the
+/// clip, around the caller's content.
+fn chrome<R>(ui: &mut egui::Ui, margin: egui::Margin, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let inner = ui.max_rect();
+    let outer = egui::Rect::from_min_max(
+        inner.min - egui::vec2(margin.left, margin.top),
+        inner.max + egui::vec2(margin.right, margin.bottom),
+    );
+    ui.painter()
+        .vline(outer.left(), outer.y_range(), window::edge());
+    // The content is laid out at its natural width, and a label wider
+    // than the panel would otherwise widen it and paint over what is
+    // beside it. The panel is the clip.
+    ui.set_clip_rect(outer.intersect(ui.clip_rect()));
+    ui.set_max_width(ui.available_width());
+    add(ui)
 }
 
 /// The panel's title line, where a window's title bar is: the caption at
@@ -199,6 +200,16 @@ pub fn rule_full(ui: &mut egui::Ui) {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct One;
+
+    impl Tier for One {
+        const ALL: &'static [Self] = &[One];
+        fn width(self) -> f32 {
+            320.0
+        }
+    }
+
     /// The header's action ends at the content's edge, inside the panel,
     /// and the caption stops short of it.
     #[test]
@@ -207,8 +218,9 @@ mod tests {
         super::super::theme::install(&ctx);
         let mut button = None;
         let mut content_right = 0.0;
+        let mut state = NavState::new(One);
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            Sidebar::right("side").width(320.0).show(ctx, |ui| {
+            Sidebar::right("side").show(ctx, &mut state, 1.0, |ui| {
                 content_right = ui.max_rect().right();
                 header(ui, "Track", |ui| {
                     button = Some(ui.button("View release").rect);

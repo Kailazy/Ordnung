@@ -5,7 +5,8 @@
 //! them: [`button`] is the one push button, [`field`] the one text box,
 //! [`chip`] the avatar pill, [`menu`] the dropdown a button anchors,
 //! [`window`] the one floating window, [`sidebar`] the window docked to an
-//! edge, [`tooltip`] the hover note, [`glass`] the surface they all sit on,
+//! edge, [`nav`] the docked panel that snaps between designed widths,
+//! [`tooltip`] the hover note, [`glass`] the surface they all sit on,
 //! [`control_row`] the rule that a row of controls shares one height.
 
 pub mod button;
@@ -17,6 +18,7 @@ pub mod hover;
 pub mod icon;
 pub mod knob;
 pub mod menu;
+pub mod nav;
 pub mod phosphor_icons;
 pub mod sheet;
 pub mod sidebar;

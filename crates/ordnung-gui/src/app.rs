@@ -346,8 +346,10 @@ impl App {
             usb_analysis_rx: None,
             usb_analysis_progress: (0, 0),
             usb_analysis_cancel: None,
-            nav_density: NavDensity::Narrow,
-            nav_drag: None,
+            nav: crate::ui::nav::NavState::new(NavDensity::Narrow),
+            inspector_nav: crate::ui::nav::NavState::new(
+                crate::inspector::InspectorDensity::Compact,
+            ),
             view: LibraryView::Library,
             renaming: None,
             sort: None,
@@ -394,7 +396,9 @@ impl App {
             StartupView::Recent => LibraryView::RecentlyAdded,
         };
         // Restore the sidebar to the width tier it was left at.
-        app.nav_density = NavDensity::from_key(&app.config.nav_density);
+        app.nav.tier = NavDensity::from_key(&app.config.nav_density);
+        app.inspector_nav.tier =
+            crate::inspector::InspectorDensity::from_key(&app.config.inspector_density);
         // And the inspector drawer to the open/closed state it was left in.
         app.inspector_open = app.config.inspector_open;
         app.load_column_layout();
@@ -2819,12 +2823,10 @@ impl App {
         // editing (the convert dialog no longer duplicates name editing), so it
         // is always present rather than behind a toolbar toggle.
         let mut inspector_action: Option<InspectorAction> = None;
-        // A fixed-width drawer, not a splitter: the inspector is either open at
-        // its designed width or fully out of the way, the way Spotify's right
-        // sidebar behaves. Dragging an edge to some in-between width only ever
-        // produced a cramped, half-truncated panel, so that affordance is gone
-        // and the pull tab below is the single way to show/hide it.
-        const INSPECTOR_W: f32 = 320.0;
+        // The drawer slides in and out on the pull tab, and once out its
+        // edge snaps between the two layouts in `InspectorDensity` the way
+        // the library nav does (see `ui::nav`): a drag to some in-between
+        // width only ever produced a cramped, half-truncated panel.
         // Animate the drawer's width instead of snapping it: egui eases this
         // 0→1 over the given duration and repaints until it settles, so the
         // panel slides out and the table reflows with it. Short enough to feel
@@ -2852,15 +2854,24 @@ impl App {
             self.inspector_open && inspector_applies,
             if switched { 0.0 } else { 0.12 },
         );
-        let width = INSPECTOR_W * t;
         // The drawer is a sidebar (see `ui::sidebar`): the window's surface,
-        // edge and margins, docked to the right.
-        if let Some(shown) =
-            crate::ui::sidebar::Sidebar::right("inspector")
-                .width(width)
-                .show(ctx, |ui| self.draw_inspector(ui, ctx))
-        {
-            inspector_action = shown.inner;
+        // edge and margins, docked to the right. Its nav state is copied out
+        // for the frame, since the body borrows the rest of `self`.
+        let mut inspector_nav = self.inspector_nav;
+        let shown = crate::ui::sidebar::Sidebar::right("inspector").show(
+            ctx,
+            &mut inspector_nav,
+            t,
+            |ui| self.draw_inspector(ui, ctx),
+        );
+        self.inspector_nav = inspector_nav;
+        if shown.committed {
+            self.config.inspector_density = self.inspector_nav.tier.key().to_string();
+            let _ = self.config.save();
+        }
+        let width = shown.width;
+        if let Some(inner) = shown.inner {
+            inspector_action = inner.inner;
         }
         // Pull tab: a slim half-rounded handle pinned to the inner edge of the
         // drawer, vertically centred over whatever is beside it. It rides along
@@ -2885,65 +2896,26 @@ impl App {
         // reload so the table follows the sidebar.
         let prev_view = self.view.clone();
         let mut sidebar_action: Option<SidebarAction> = None;
-        // The sidebar snaps between three designed layouts (see `NavDensity`)
-        // rather than resizing freely, and the layout it shows is *frozen* for
-        // the whole of a drag. Committing the tier live meant the labels
-        // rewrapped under the pointer on the way past every boundary — the
-        // sidebar flickering through layouts you were only travelling over, not
-        // choosing. So the edge drag no longer moves the panel at all: a ghost
-        // line follows the pointer, and the tier it implies is applied once, on
-        // release. One layout change per drag, at the moment you commit to it.
-        let drag_id = egui::Id::new("library_nav").with("__resize");
-        if ctx.is_being_dragged(drag_id) {
-            if let Some(pos) = ctx.pointer_interact_pos() {
-                let w = pos.x - ctx.screen_rect().left();
-                // Hysteresis is applied against the tier in force (see
-                // `NavDensity::dragged_to`), which is the tier the panel is
-                // still showing — so the ghost snaps to the same tier the drop
-                // will pick, and never previews a landing the release refuses.
-                self.nav_drag = Some(crate::NavDrag {
-                    x: pos.x,
-                    target: self.nav_density.dragged_to(w),
-                });
-                // The panel is frozen for the duration, so nothing else is
-                // asking for frames — without this the ghost would only advance
-                // when some other part of the UI happened to repaint, and the
-                // line would visibly lag the cursor.
-                ctx.request_repaint();
-            }
-        } else if let Some(drag) = self.nav_drag.take() {
-            // Released: this is the only place the tier changes.
-            if drag.target != self.nav_density {
-                self.nav_density = drag.target;
-                self.config.nav_density = drag.target.key().to_string();
-                let _ = self.config.save();
-            }
-        }
+        // The sidebar is a nav (see `ui::nav`): it snaps between the designed
+        // layouts in `NavDensity` rather than resizing freely, and the layout
+        // is frozen for the whole of an edge drag, the tier applied once, on
+        // release. Its nav state is copied out for the frame, since the body
+        // borrows the rest of `self`.
+        let mut nav_state = self.nav;
         // Naming a playlist needs a text field, and the rail has no room for
         // one — a new playlist created there would open an editor you cannot
         // read or type into. So a rename temporarily promotes the sidebar out
         // of the rail; it drops back the moment the edit resolves. The stored
         // tier is untouched, so this borrows the width rather than changing the
         // user's choice.
-        let density = if self.renaming.is_some() && self.nav_density.icons_only() {
+        let density = if self.renaming.is_some() && nav_state.tier.icons_only() {
             NavDensity::Narrow
         } else {
-            self.nav_density
+            nav_state.tier
         };
-        let target = density.width();
-        // Ease between tiers so the change of layout reads as a deliberate
-        // lock-into-place rather than a hard cut. `animate_value` repaints until
-        // it settles; the width it produces is only ever *travelling between*
-        // two tiers, never a width the user can hold it at.
-        let settled = ctx.animate_value_with_time(egui::Id::new("nav_snap"), target, 0.13);
-        let nav_panel = egui::SidePanel::left("library_nav")
-            .resizable(true)
-            .default_width(target)
-            // Pinned to the snapped width at all times — a collapsed range is
-            // what stops egui's own resize from writing an arbitrary width back
-            // into the panel. The drag above is the only thing that changes it.
-            .width_range(settled..=settled)
-            .show(ctx, |ui| {
+        let nav_panel = crate::ui::nav::Nav::left("library_nav", &mut nav_state)
+            .shown(density)
+            .show(ctx, |panel| panel, |ui| {
                 // Header for a section: a small dimmed all-caps caption that sets
                 // the playlist / collection groups apart without competing with
                 // the big nav tiles below it.
@@ -3397,7 +3369,12 @@ impl App {
                             });
                     });
             });
-        self.nav_screen_rect = Some(nav_panel.response.rect);
+        self.nav = nav_state;
+        if nav_panel.committed {
+            self.config.nav_density = self.nav.tier.key().to_string();
+            let _ = self.config.save();
+        }
+        self.nav_screen_rect = nav_panel.inner.as_ref().map(|p| p.response.rect);
         match sidebar_action {
             Some(SidebarAction::ImportUsbTracks(ids)) => {
                 self.usb_add_to_library(ctx.clone(), ids);
@@ -3665,55 +3642,6 @@ impl App {
                     }
                 }
             });
-
-        // The resize ghost. While the edge is held the panel itself does not
-        // move, so this line is the entire feedback for the drag: it tracks the
-        // pointer freely, and a wider marker sits at the tier the drop would
-        // land on. Painted in a foreground layer after the panel so it reads on
-        // top of the sidebar's own content rather than being clipped by it.
-        // The panel is pinned to a single width (`settled..=settled`), so egui
-        // reads it as already at its minimum and offers a one-way "resize east"
-        // cursor — implying the sidebar can only be widened. It snaps both ways,
-        // so say so, on hover as well as mid-drag.
-        if self.nav_drag.is_some()
-            || ctx.is_pointer_over_area() && {
-                let r = ctx.read_response(drag_id);
-                r.map(|r| r.hovered()).unwrap_or(false)
-            }
-        {
-            ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        }
-        if let Some(drag) = self.nav_drag {
-            let screen = ctx.screen_rect();
-            let painter = ctx.layer_painter(egui::LayerId::new(
-                egui::Order::Foreground,
-                egui::Id::new("nav_resize_ghost"),
-            ));
-            // Where the panel would settle if released now. Drawn solid, in the
-            // nav accent, so the eye reads the landing rather than the pointer.
-            let snap_x = screen.left() + drag.target.width();
-            painter.rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(snap_x - 1.5, screen.top()),
-                    egui::pos2(snap_x + 1.5, screen.bottom()),
-                ),
-                egui::Rounding::ZERO,
-                crate::sidebar::NAV_ACCENT,
-            );
-            // The pointer's own position, dimmer and hairline: it explains why
-            // the snap marker sits where it does while the two are apart, and
-            // is redundant (so unobtrusive) once the drag settles onto a tier.
-            if (drag.x - snap_x).abs() > 2.0 {
-                painter.rect_filled(
-                    egui::Rect::from_min_max(
-                        egui::pos2(drag.x - 0.5, screen.top()),
-                        egui::pos2(drag.x + 0.5, screen.bottom()),
-                    ),
-                    egui::Rounding::ZERO,
-                    egui::Color32::from_white_alpha(60),
-                );
-            }
-        }
 
         // Native drag-out to rekordbox/Finder. A ⌥-drag in the table (any
         // dragged frame — `draw_table` returned its files) starts an

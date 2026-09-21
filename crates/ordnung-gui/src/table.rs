@@ -999,6 +999,17 @@ impl App {
         // content width, not the viewport). Used to cap how far right a column
         // may be dragged — see `col_max` below.
         let viewport_w = ui.available_width();
+        // Whether the viewport lost width since last frame (see the reset
+        // in the builder below). Remembered in egui's own memory, not on
+        // `self`: it is a fact about this frame's layout, nothing more.
+        let viewport_id = ui.id().with("songs_table_viewport_w");
+        let viewport_narrowed = ui
+            .data_mut(|d| d.get_temp::<f32>(viewport_id))
+            .is_some_and(|prev| prev > viewport_w + 0.5);
+        ui.data_mut(|d| d.insert_temp(viewport_id, viewport_w));
+        // The last visible column is laid out as the remainder (see the
+        // builder below); its width is the viewport's doing, not the user's.
+        let last_col = order.last().copied();
         // Spacing and scrollbar metrics for that cap, read here because inside the
         // table builder `ui` is mutably borrowed.
         let col_spacing_x = ui.spacing().item_spacing.x;
@@ -1056,21 +1067,28 @@ impl App {
                 let mut x = index_w + col_spacing_x;
                 for &col in &order {
                     let w = self.column_widths.get(&col).copied();
+                    // The last column reaches the viewport's right edge: it
+                    // takes the slack a spacer used to, so its divider is the
+                    // table's edge, and it is the column that gives when the
+                    // inspector opens beside the table.
+                    if Some(col) == last_col {
+                        builder = builder.column(col.spec_last(COVER_PX, w));
+                        continue;
+                    }
                     let max = (viewport_w - right_pad - x).max(0.0);
                     column_caps.insert(col, max.max(col.min_width(COVER_PX)));
                     builder = builder.column(col.spec(COVER_PX, w, Some(max)));
                     x += w.unwrap_or_else(|| col.default_width(COVER_PX)) + col_spacing_x;
                 }
-                // Explicitly non-resizable: egui_extras freezes a *resizable*
-                // column at its stored width, so a resizable remainder spacer
-                // kept the width it was born with and rows stopped short of
-                // the right edge whenever the viewport later widened (window
-                // resize, inspector drawer closing). Only a non-resizable
-                // remainder is recomputed every frame to absorb the slack.
-                builder = builder.column(Column::remainder().resizable(false));
                 // After "Reset to default", drop egui_extras' own stored widths so
                 // the columns fall back to the (now-cleared) defaults this frame.
-                if reset_widths {
+                // Also whenever the viewport narrows: egui_extras never lets a
+                // remainder column shrink below the width its cells used last
+                // frame, and the last column's cells fill it, so without this
+                // the column kept its stretched width and the table scrolled
+                // sideways instead of giving way to the inspector. The reset is
+                // lossless, since every width lives in `column_widths` too.
+                if reset_widths || viewport_narrowed {
                     builder.reset();
                 }
                 builder
@@ -1097,7 +1115,9 @@ impl App {
                                 // Record the column's actual width (egui_extras
                                 // sizes each header cell to its column) so a
                                 // resize can be captured and persisted globally.
-                                if col != TableColumn::Cover {
+                                // The last column's width is the slack the
+                                // viewport left, never a resize to remember.
+                                if col != TableColumn::Cover && Some(col) != last_col {
                                     observed_widths.push((col, ui.max_rect().width()));
                                 }
                                 let resp = if col == TableColumn::Waveform {

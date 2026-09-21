@@ -129,6 +129,11 @@ pub struct Config {
     /// not a pixel width. Unknown values fall back to `"wide"`. See `NavDensity`.
     #[serde(default = "default_nav_density")]
     pub nav_density: String,
+    /// Which of the inspector drawer's two width tiers is in force:
+    /// `"compact"` (the default) or `"expanded"`. Like `nav_density`, a tier
+    /// rather than a pixel width. See `InspectorDensity`.
+    #[serde(default = "default_inspector_density")]
+    pub inspector_density: String,
     /// Whether the right-hand track inspector drawer is showing. Mirrors the
     /// pull tab's toggle so the drawer comes back the way it was left. Off by
     /// default (and for older configs that predate the field): a fresh install
@@ -338,6 +343,10 @@ fn default_radio_dock() -> String {
 
 fn default_nav_density() -> String {
     "wide".into()
+}
+
+fn default_inspector_density() -> String {
+    "compact".into()
 }
 
 fn default_nav_primary() -> String {
@@ -707,6 +716,7 @@ impl Default for Config {
             nav_primary: default_nav_primary(),
             export_convert_for_older_players: false,
             nav_density: default_nav_density(),
+            inspector_density: default_inspector_density(),
             inspector_open: false,
             startup_view: default_startup_view(),
             auto_analyze: true,

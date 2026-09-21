@@ -1180,3 +1180,48 @@ pub(crate) fn edit_row_multiline(ui: &mut egui::Ui, label: &str, value: &mut Str
     );
     ui.end_row();
 }
+
+/// The inspector's two layouts, the tiers its edge snaps between (see
+/// `ui::nav`). Compact is the drawer as first designed: 320pt, the label
+/// column plus a value that fits "Original release" without truncating.
+/// Expanded gives the artwork and the values 120pt more, for long titles
+/// and a sleeve you can actually look at.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum InspectorDensity {
+    Compact,
+    Expanded,
+}
+
+impl InspectorDensity {
+    /// Snapped panel width for this tier, in points.
+    pub(crate) fn width(self) -> f32 {
+        match self {
+            InspectorDensity::Compact => 320.0,
+            InspectorDensity::Expanded => 440.0,
+        }
+    }
+
+    /// Parse the persisted `Config::inspector_density` key; anything
+    /// unrecognised falls back to the designed default.
+    pub(crate) fn from_key(key: &str) -> Self {
+        match key {
+            "expanded" => InspectorDensity::Expanded,
+            _ => InspectorDensity::Compact,
+        }
+    }
+
+    /// The config key for this tier.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            InspectorDensity::Compact => "compact",
+            InspectorDensity::Expanded => "expanded",
+        }
+    }
+}
+
+impl crate::ui::nav::Tier for InspectorDensity {
+    const ALL: &'static [Self] = &[InspectorDensity::Compact, InspectorDensity::Expanded];
+    fn width(self) -> f32 {
+        InspectorDensity::width(self)
+    }
+}
