@@ -811,8 +811,7 @@ impl App {
                     return;
                 };
                 let (id, path) = (local.id, local.path.clone());
-                // Never leave a video playing under the local track.
-                self.stop_sheet_video();
+                // `play_track` claims the floor: a video under it goes off.
                 self.play_track(id, path);
             }
             SheetSource::Video(_) => {
@@ -870,11 +869,7 @@ impl App {
             return;
         }
         // One sound at a time: the video takes over from the player bar.
-        if let Some(a) = self.audio.as_mut() {
-            if a.is_active() {
-                a.toggle_pause();
-            }
-        }
+        self.claim_sound(Sound::Video);
         if webview::play(frame, &ids, &title) {
             if let Some(sheet) = self.vinyl_sheet.as_mut() {
                 sheet.playing_video = video;
@@ -1884,6 +1879,7 @@ impl App {
             Some(VideoAct::TogglePause) if video_open => webview::toggle_pause(),
             Some(VideoAct::Seek(secs)) if video_open => webview::seek(secs),
             Some(VideoAct::TogglePause) => {
+                self.claim_sound(Sound::Player);
                 if let Some(a) = self.audio.as_mut() {
                     a.toggle_pause();
                 }
@@ -2028,6 +2024,7 @@ impl App {
                     | RecordPlay::Paused(PlayEngine::Video) => webview::toggle_pause(),
                     RecordPlay::Playing(PlayEngine::Audio)
                     | RecordPlay::Paused(PlayEngine::Audio) => {
+                        self.claim_sound(Sound::Player);
                         if let Some(a) = self.audio.as_mut() {
                             a.toggle_pause();
                         }
@@ -2059,11 +2056,7 @@ impl App {
                         open_url(&uri);
                     }
                 } else {
-                    if let Some(a) = self.audio.as_mut() {
-                        if a.is_active() {
-                            a.toggle_pause();
-                        }
-                    }
+                    self.claim_sound(Sound::Video);
                     if webview::play(frame, &ids, &title) {
                         if let Some(s) = self.vinyl_sheet.as_mut() {
                             s.playing_video = Some(v);

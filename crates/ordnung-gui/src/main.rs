@@ -23,6 +23,7 @@ mod macos_menu;
 mod macos_pasteboard;
 mod modals;
 mod onboarding;
+mod playback;
 mod player;
 mod radio;
 mod records;
@@ -60,6 +61,7 @@ use ordnung_core::search::{ScoredHit, SearchHit};
 use ordnung_core::{
     best_copy_index, scan, tag, Catalog, DuplicateGroup, DuplicateKind, PlaylistStats, ScannedTrack,
 };
+use playback::Sound;
 use player::*;
 use rayon::prelude::*;
 use records::{RecordFetched, RecordSearch, SearchScope, RECORD_DEBOUNCE, SCOPE_TOGGLE_W};

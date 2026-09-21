@@ -34,6 +34,9 @@ impl App {
                 ))
             })
             .filter(|(artist, title, _)| !(artist.is_empty() && title.is_empty()));
+        // One sound at a time: whatever video is rolling goes off before the
+        // player starts, wherever this click came from.
+        self.claim_sound(Sound::Player);
         if let Some(a) = self.audio.as_mut() {
             a.play_or_toggle(id, path.clone());
         }
@@ -703,6 +706,9 @@ impl App {
             }
         }
         if toggle {
+            // Resuming from the bar is a start too: a video that paused this
+            // track must not keep playing under it.
+            self.claim_sound(Sound::Player);
             if let Some(a) = self.audio.as_mut() {
                 a.toggle_pause();
             }

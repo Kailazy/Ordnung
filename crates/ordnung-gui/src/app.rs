@@ -1788,15 +1788,14 @@ impl App {
     /// Play/pause whatever is currently sounding. Shared by the space bar and
     /// the Playback menu.
     ///
-    /// A record's video answers first while one is loaded: it's the sound the
-    /// user is hearing, and its own window is parked off screen, so this is the
-    /// only way to reach it without the pointer. Without that branch the
-    /// request would fall through and start an unrelated local track *over* the
-    /// video.
+    /// A record's video answers first while one is loaded (see
+    /// [`App::sounding`]): without that the request would fall through and
+    /// start an unrelated local track *over* the video.
     pub(crate) fn toggle_play_pause(&mut self) {
-        if webview::is_open() {
+        if self.sounding() == Some(Sound::Video) {
             webview::toggle_pause();
         } else if self.now_playing.is_some() {
+            self.claim_sound(Sound::Player);
             if let Some(a) = &mut self.audio {
                 a.toggle_pause();
             }

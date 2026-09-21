@@ -961,11 +961,7 @@ impl App {
             None => "Radio".to_string(),
         };
         // One sound at a time: the radio takes over from the player bar.
-        if let Some(a) = self.audio.as_mut() {
-            if a.is_active() {
-                a.toggle_pause();
-            }
-        }
+        self.claim_sound(Sound::Video);
         if !webview::play(frame, &[video], &title) {
             self.radio_stop("The radio needs the video player, which isn't available here.");
             return;
