@@ -83,6 +83,16 @@ use vinyl_sheet::{SheetFetched, VinylSheet};
 /// leaves rekordbox drag-and-drop as the way to the players.
 pub(crate) const USB_EXPORT: bool = cfg!(feature = "usb-export");
 
+/// Smallest the main window can be resized to, in points. The layout is
+/// designed for a desktop-sized window and does not reflow below this: the
+/// toolbar keeps every control on one row, the sidebar rail, track table and
+/// inspector keep their widths, and the player and waveform strips keep their
+/// height. Capping the size here is what lets the views assume that instead of
+/// each growing a small-window mode. Sits below the 1100 x 680 default so a
+/// fresh launch is not already at the floor.
+const MIN_WINDOW_W: f32 = 1000.0;
+const MIN_WINDOW_H: f32 = 640.0;
+
 /// [`ordnung_core::usb::detect_volumes`], but always empty when the USB
 /// export is compiled out. Every device entry point keys off the mounted
 /// volume list, so "no volumes, ever" erases the Devices section, the device
@@ -105,7 +115,7 @@ fn main() -> eframe::Result<()> {
     let db_path = default_db_path().unwrap_or_else(|| PathBuf::from("ordnung.db"));
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1100.0, 680.0])
-        .with_min_inner_size([720.0, 420.0])
+        .with_min_inner_size([MIN_WINDOW_W, MIN_WINDOW_H])
         .with_title("Ordnung");
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(icon);
