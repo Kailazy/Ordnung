@@ -243,6 +243,8 @@ impl App {
             dig_start_keys: HashMap::new(),
             dig_strip_h: None,
             scroll_to_track: None,
+            table_scroll: HashMap::new(),
+            table_scroll_view: None,
             row_screen_rects: Vec::new(),
             table_screen_rect: None,
             playlist_screen_rects: Vec::new(),
@@ -683,7 +685,20 @@ impl App {
                 // and re-uploaded the same image on the very next frame, and
                 // the panel flickered through a spinner on every switch.
                 let primary = self.selected;
-                let keep = |id: &Id| live.contains(id) || primary == Some(*id);
+                // A plain view switch (no catalog write) keeps every catalog
+                // thumbnail: evicting the ones the new view doesn't show
+                // meant re-decoding them on the way back, and the covers
+                // popped in a frame or two after the rows — the list read as
+                // rebuilt on every click. They're trimmed to the live set
+                // only when the catalog changed (every in-app cover edit
+                // also drops its own entry, so kept textures never go
+                // stale). USB rows keep the per-view rule: their ids are
+                // reused across sticks.
+                let keep = |id: &Id| {
+                    live.contains(id)
+                        || primary == Some(*id)
+                        || (!changed && usb_track_index(*id).is_none())
+                };
                 self.cover_cache.retain(|id, _| keep(id));
                 self.cover_full_cache.retain(|id, _| keep(id));
                 self.cover_inflight.retain(|id| keep(id));

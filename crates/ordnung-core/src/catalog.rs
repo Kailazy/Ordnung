@@ -354,7 +354,35 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Historical note: values 0 and 1 predate this stamp — 1 marked the one-time
 /// Discogs "decide once at add time" backfill in `migrate`, which still keys off
 /// `user_version < 1` and so remains correctly skipped at any later generation.
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
+
+/// The columns of the two vinyl list tables (`vinyl_collection`,
+/// `vinyl_wantlist`), shared so both are created alike and so an older
+/// catalog can be rebuilt to this layout (see `Catalog::move_cover_blob_last`).
+///
+/// `cover_png` is deliberately the **last** column. SQLite lays a row's
+/// columns out in order and reaches a later one by walking past the earlier
+/// ones, so with the cover blob in the middle every read of `genres` or
+/// `price` paged through every cached cover — tens of milliseconds per shelf
+/// listing, paid on every open of the vinyl view after a catalog write.
+const VINYL_LIST_DDL: &str = "instance_id    INTEGER PRIMARY KEY,
+                release_id     INTEGER NOT NULL,
+                title          TEXT NOT NULL,
+                artist         TEXT NOT NULL,
+                year           INTEGER,
+                label          TEXT,
+                catalog_number TEXT,
+                format         TEXT,
+                thumb_url      TEXT,
+                cover_url      TEXT,
+                added          TEXT,
+                folder_id      INTEGER,
+                genres         TEXT,
+                fetched_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+                price          REAL,
+                price_currency TEXT,
+                price_checked_at INTEGER,
+                cover_png      BLOB";
 
 /// How long a master's cached pressing list is served before it's re-listed.
 /// New pressings appear rarely, and the list only feeds "other pressings" and
@@ -410,18 +438,45 @@ impl Catalog {
     /// The version is stamped only after both steps succeed, so a migration that
     /// fails part-way is retried on the next open rather than being skipped.
     fn ensure_schema(&self) -> Result<()> {
-        let version: i64 = self
-            .conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let read_version = || -> Result<i64> {
+            Ok(self
+                .conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))?)
+        };
         // `>=`, not `==`: a catalog written by a *newer* build must not be stamped
         // back down to this build's generation, or that build would redo its own
         // migrations on the next open. The DDL is idempotent either way.
-        if version >= SCHEMA_VERSION {
+        if read_version()? >= SCHEMA_VERSION {
             return Ok(());
         }
-        self.init_schema()?;
-        self.conn
-            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        // The GUI opens the catalog from several threads at once on launch
+        // (the UI thread, the cover loader, the startup jobs), and all of
+        // them can find the stamp behind at the same moment. Only one may
+        // run the upgrade; the rest must wait for it and then find the work
+        // done. Without this they interleaved: one connection saw a table
+        // the other had just dropped for a rebuild, re-created it empty, and
+        // the other's rename of the rebuilt table failed — the rows were
+        // stranded in the temporary table. An immediate transaction takes
+        // the write lock up front (the busy timeout above does the waiting),
+        // the version is read again under it, and a failed upgrade rolls
+        // back whole instead of leaving half a migration behind.
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let upgrade = || -> Result<()> {
+            if read_version()? >= SCHEMA_VERSION {
+                return Ok(());
+            }
+            self.init_schema()?;
+            self.conn
+                .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            Ok(())
+        };
+        match upgrade() {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
         Ok(())
     }
 
@@ -610,23 +665,7 @@ impl Catalog {
             -- across refreshes). cover_png is the downscaled grid image, NULL until
             -- fetched. This is reference data about physical records the user owns,
             -- entirely separate from the tracks pool (digital files).
-            CREATE TABLE IF NOT EXISTS vinyl_collection (
-                instance_id    INTEGER PRIMARY KEY,
-                release_id     INTEGER NOT NULL,
-                title          TEXT NOT NULL,
-                artist         TEXT NOT NULL,
-                year           INTEGER,
-                label          TEXT,
-                catalog_number TEXT,
-                format         TEXT,
-                thumb_url      TEXT,
-                cover_url      TEXT,
-                cover_png      BLOB,
-                added          TEXT,
-                folder_id      INTEGER,
-                genres         TEXT,
-                fetched_at     INTEGER NOT NULL DEFAULT (unixepoch())
-            );
+            -- (Created after this batch, from `VINYL_LIST_DDL`.)
 
             -- The user's Discogs wantlist, cached exactly like the collection
             -- above and rendered by the same grid (its own section in the vinyl
@@ -635,23 +674,7 @@ impl Catalog {
             -- lists share one set of cache queries (see `vinyl_table`). A separate
             -- table (rather than a flag column) keeps the two id spaces from
             -- colliding on the primary key.
-            CREATE TABLE IF NOT EXISTS vinyl_wantlist (
-                instance_id    INTEGER PRIMARY KEY,
-                release_id     INTEGER NOT NULL,
-                title          TEXT NOT NULL,
-                artist         TEXT NOT NULL,
-                year           INTEGER,
-                label          TEXT,
-                catalog_number TEXT,
-                format         TEXT,
-                thumb_url      TEXT,
-                cover_url      TEXT,
-                cover_png      BLOB,
-                added          TEXT,
-                folder_id      INTEGER,
-                genres         TEXT,
-                fetched_at     INTEGER NOT NULL DEFAULT (unixepoch())
-            );
+            -- (Created after this batch, from `VINYL_LIST_DDL`.)
 
             -- Parsed Discogs release detail (GET /releases/{id}), cached so song-data
             -- enrichment never re-fetches (and re-parses) a release it already pulled.
@@ -713,6 +736,10 @@ impl Catalog {
                 ON seller_listings(seller);
             CREATE INDEX IF NOT EXISTS idx_seller_listings_release
                 ON seller_listings(release_id);
+            -- Covers `seller_shipping_floor` (MIN shipping per seller, with its
+            -- currency) so it walks this index instead of every wide listing row.
+            CREATE INDEX IF NOT EXISTS idx_seller_listings_shipping
+                ON seller_listings(seller, shipping_price, shipping_currency, currency);
 
             -- The retired crate of interest (a local set-records-aside shelf,
             -- removed as redundant with the wantlist). Dropped so upgraded
@@ -802,6 +829,10 @@ impl Catalog {
                 liked_at       INTEGER NOT NULL DEFAULT (unixepoch())
             );",
         )?;
+        self.conn.execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS vinyl_collection ({VINYL_LIST_DDL});
+             CREATE TABLE IF NOT EXISTS vinyl_wantlist ({VINYL_LIST_DDL});"
+        ))?;
         self.migrate()?;
         Ok(())
     }
@@ -966,6 +997,12 @@ impl Catalog {
         for table in ["vinyl_collection", "vinyl_wantlist"] {
             self.add_column_if_missing(table, "genres", "TEXT")?;
         }
+        // Schema 20: the cover blob moves to the end of both vinyl tables (see
+        // `VINYL_LIST_DDL` for why). SQLite can't reorder columns, so an older
+        // table is rebuilt in place; a no-op once the blob is already last.
+        for table in ["vinyl_collection", "vinyl_wantlist"] {
+            self.move_cover_blob_last(table)?;
+        }
 
         // Which ReleaseDetail shape a cached release was stored under. Rows
         // written before this column existed default to 1 — i.e. no tracklist
@@ -1057,6 +1094,28 @@ impl Catalog {
                  UPDATE vinyl_wantlist SET cover_png = NULL;",
             )?;
         }
+        Ok(())
+    }
+
+    /// Rebuild one vinyl list table to `VINYL_LIST_DDL`, keeping every row,
+    /// when its `cover_png` column isn't the last one. Every column the old
+    /// table has is carried over by name, so the earlier `add_column_if_missing`
+    /// steps must have run first.
+    fn move_cover_blob_last(&self, table: &str) -> Result<()> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<_>>()?;
+        if names.last().map(String::as_str) == Some("cover_png") {
+            return Ok(());
+        }
+        let cols = names.join(", ");
+        self.conn.execute_batch(&format!(
+            "CREATE TABLE {table}_reordered ({VINYL_LIST_DDL});
+             INSERT INTO {table}_reordered ({cols}) SELECT {cols} FROM {table};
+             DROP TABLE {table};
+             ALTER TABLE {table}_reordered RENAME TO {table};"
+        ))?;
         Ok(())
     }
 
@@ -1535,6 +1594,21 @@ impl Catalog {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
+        // Both matches are exact on the record's title, so index the catalog
+        // by album and by title once and look each record up, rather than
+        // walking every track for every record (a 1300-track library against
+        // a 200-record shelf is a quarter-million comparisons, done three
+        // times per reload).
+        let mut by_album: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut by_title: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, row) in rows.iter().enumerate() {
+            if !row.album.is_empty() {
+                by_album.entry(row.album.as_str()).or_default().push(i);
+            }
+            if !row.title.is_empty() {
+                by_title.entry(row.title.as_str()).or_default().push(i);
+            }
+        }
         let mut out = id_links;
         for rec in records {
             let rtitle = norm_match(&rec.title);
@@ -1543,12 +1617,17 @@ impl Catalog {
             }
             let rartist = norm_match(&rec.artist);
             let various = rartist == "various" || rartist == "various artists";
-            for row in &rows {
-                let same_artist = artist_overlaps(&row.artist, &rartist);
-                let album_hit =
-                    !row.album.is_empty() && row.album == rtitle && (same_artist || various);
-                let title_hit = row.title == rtitle && same_artist;
-                if album_hit || title_hit {
+            let album_rows = by_album.get(rtitle.as_str()).into_iter().flatten();
+            let title_rows = by_title.get(rtitle.as_str()).into_iter().flatten();
+            for &i in album_rows {
+                let row = &rows[i];
+                if various || artist_overlaps(&row.artist, &rartist) {
+                    out.push((rec.release_id, row.id));
+                }
+            }
+            for &i in title_rows {
+                let row = &rows[i];
+                if artist_overlaps(&row.artist, &rartist) {
                     out.push((rec.release_id, row.id));
                 }
             }
@@ -1804,9 +1883,12 @@ impl Catalog {
     /// row (non-NULL bytes). Used by the GUI to decide whether to render a
     /// thumbnail for a track without an embedded cover.
     pub fn external_artwork_ids(&self) -> Result<Vec<Id>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT track_id FROM track_external_artwork WHERE png_bytes IS NOT NULL")?;
+        // `typeof`, not `IS NOT NULL`: SQLite answers `typeof` from the row
+        // header, whereas a NULL test on a blob column loads the blob first.
+        // This runs on every table refresh, over every fetched cover.
+        let mut stmt = self.conn.prepare(
+            "SELECT track_id FROM track_external_artwork WHERE typeof(png_bytes) = 'blob'",
+        )?;
         let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
         let mut out = Vec::new();
         for r in rows {
@@ -2853,6 +2935,60 @@ impl Catalog {
             .map_err(Into::into)
     }
 
+    /// Every track's analysis *without* its blobs (`waveform_preview` and
+    /// `waveform_bands` come back empty, `audio_fingerprint` `None`), paired
+    /// with the row's `analyzed_at` stamp. The scalar half of the table's
+    /// data, cheap enough to re-read after any catalog write; the envelopes
+    /// change only when a track is re-analyzed, which restamps `analyzed_at`,
+    /// so a caller keeps its cached envelopes for every row whose stamp is
+    /// unchanged and fetches the rest with [`Self::analysis_envelopes`].
+    pub fn analyses_light(&self) -> Result<Vec<(Id, i64, Analysis)>> {
+        let cols = Self::ANALYSIS_COLS
+            .replace("waveform_bands", "NULL AS waveform_bands")
+            .replace("audio_fingerprint", "NULL AS audio_fingerprint")
+            .replace(" waveform,", " NULL AS waveform,");
+        let sql = format!("SELECT track_id, analyzed_at, {cols} FROM analysis");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)? as Id,
+                r.get::<_, i64>(1)?,
+                analysis_from_row(r, 2)?,
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The waveform envelopes (`waveform`, `waveform_bands`) of the given
+    /// tracks, for rows that have an analysis. Companion to
+    /// [`Self::analyses_light`].
+    pub fn analysis_envelopes(&self, ids: &[Id]) -> Result<HashMap<Id, (Vec<u8>, Vec<u8>)>> {
+        let mut out = HashMap::with_capacity(ids.len());
+        // Bound the placeholder count per statement (SQLite's default limit is
+        // 32 766); a few hundred per query is plenty.
+        for chunk in ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT track_id, waveform, waveform_bands FROM analysis
+                  WHERE track_id IN ({marks})"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let params: Vec<i64> = chunk.iter().map(|id| *id as i64).collect();
+            let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as Id,
+                    r.get::<_, Option<Vec<u8>>>(1)?.unwrap_or_default(),
+                    r.get::<_, Option<Vec<u8>>>(2)?.unwrap_or_default(),
+                ))
+            })?;
+            for row in rows {
+                let (id, wave, bands) = row?;
+                out.insert(id, (wave, bands));
+            }
+        }
+        Ok(out)
+    }
+
     /// Resolve what a USB export should contain.
     ///
     /// Empty `playlist_ids` = the whole catalog and every playlist node.
@@ -3238,10 +3374,13 @@ impl Catalog {
     /// marketplace lookup (see [`Catalog::set_vinyl_price`]).
     pub fn list_vinyl(&self, list: VinylList) -> Result<Vec<VinylRecord>> {
         let table = vinyl_table(list);
+        // The cover flag is `typeof`, not `IS NOT NULL`: a NULL test loads
+        // the blob, `typeof` reads the row header, and this listing must not
+        // page through every cached cover (see `VINYL_LIST_DDL`).
         let mut stmt = self.conn.prepare(&format!(
             "SELECT instance_id, release_id, title, artist, year, label,
                     catalog_number, format, thumb_url, cover_url, added, folder_id,
-                    cover_png IS NOT NULL, price, price_currency, genres
+                    typeof(cover_png) = 'blob', price, price_currency, genres
              FROM {table}
              ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE, instance_id"
         ))?;
@@ -3383,7 +3522,7 @@ impl Catalog {
         let table = vinyl_table(list);
         let mut stmt = self.conn.prepare(&format!(
             "SELECT instance_id, cover_url FROM {table}
-             WHERE cover_png IS NULL AND cover_url IS NOT NULL AND cover_url <> ''"
+             WHERE typeof(cover_png) = 'null' AND cover_url IS NOT NULL AND cover_url <> ''"
         ))?;
         let rows = stmt
             .query_map([], |r| {
@@ -7524,5 +7663,109 @@ mod tests {
             cat.cached_release("7").unwrap().is_none(),
             "failures aren't cached"
         );
+    }
+
+    /// Schema 20 rebuilds a vinyl table created with the cover blob in the
+    /// middle so the blob is last, without losing a row, a cover or a tag.
+    /// Exercised on a file catalog stamped at the previous generation, since a
+    /// fresh `:memory:` catalog is born with the new layout and would never
+    /// take the rebuild path.
+    #[test]
+    fn upgrade_moves_the_vinyl_cover_blob_to_the_last_column() {
+        let path = std::env::temp_dir().join(format!(
+            "ordnung-vinyl-reorder-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE vinyl_collection (
+                    instance_id INTEGER PRIMARY KEY, release_id INTEGER NOT NULL,
+                    title TEXT NOT NULL, artist TEXT NOT NULL, year INTEGER,
+                    label TEXT, catalog_number TEXT, format TEXT, thumb_url TEXT,
+                    cover_url TEXT, cover_png BLOB, added TEXT, folder_id INTEGER,
+                    genres TEXT, fetched_at INTEGER NOT NULL DEFAULT (unixepoch()));
+                 INSERT INTO vinyl_collection
+                    (instance_id, release_id, title, artist, cover_png, genres)
+                    VALUES (1, 9001, 'Sheet One', 'Plastikman', X'89504E47', 'Techno');
+                 PRAGMA user_version = 19;",
+            )
+            .unwrap();
+        }
+        let cat = Catalog::open(&path).unwrap();
+        for table in ["vinyl_collection", "vinyl_wantlist"] {
+            let mut stmt = cat
+                .conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let names: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(names.last().map(String::as_str), Some("cover_png"), "{table}");
+            assert!(names.iter().any(|n| n == "price_currency"), "{table}");
+        }
+        let own = VinylList::Collection;
+        let rows = cat.list_vinyl(own).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].artist, "Plastikman");
+        assert!(rows[0].has_cover);
+        assert_eq!(rows[0].genres, vec!["Techno".to_string()]);
+        assert_eq!(
+            cat.vinyl_cover(own, 1).unwrap().as_deref(),
+            Some(&b"\x89PNG"[..])
+        );
+        // A second open takes the no-op path and leaves the data alone.
+        drop(cat);
+        let cat = Catalog::open(&path).unwrap();
+        assert_eq!(cat.list_vinyl(own).unwrap().len(), 1);
+        drop(cat);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The light analysis read carries every scalar and no blob, and the
+    /// envelope read fills in exactly the rows asked for.
+    #[test]
+    fn light_analyses_and_envelopes_round_trip() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let a = cat
+            .upsert_scanned(&scanned("/a.flac", "A", "Techno", 1000))
+            .unwrap()
+            .0;
+        let b = cat
+            .upsert_scanned(&scanned("/b.flac", "B", "Techno", 1000))
+            .unwrap()
+            .0;
+        let mut an = Analysis {
+            bpm: Some(128.0),
+            waveform_preview: vec![1, 2, 3],
+            waveform_bands: vec![4, 5, 6, 7],
+            audio_fingerprint: Some(vec![9]),
+            analyzer_version: 27,
+            ..Analysis::default()
+        };
+        cat.save_analysis(a, &an, 1, 1).unwrap();
+        an.bpm = Some(90.0);
+        cat.save_analysis(b, &an, 1, 1).unwrap();
+
+        let light = cat.analyses_light().unwrap();
+        assert_eq!(light.len(), 2);
+        let (_, stamp, la) = light.iter().find(|(id, _, _)| *id == a).unwrap();
+        assert!(*stamp > 0);
+        assert_eq!(la.bpm, Some(128.0));
+        assert_eq!(la.analyzer_version, 27);
+        assert!(la.waveform_preview.is_empty());
+        assert!(la.waveform_bands.is_empty());
+        assert!(la.audio_fingerprint.is_none());
+
+        let env = cat.analysis_envelopes(&[b]).unwrap();
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[&b], (vec![1, 2, 3], vec![4, 5, 6, 7]));
+        assert!(cat.analysis_envelopes(&[]).unwrap().is_empty());
     }
 }

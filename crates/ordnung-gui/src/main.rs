@@ -258,7 +258,7 @@ enum ThumbState {
 /// Which set of tracks the main table shows: the whole catalog ("Library"), the
 /// members of one playlist, or the duplicate-finder report. Selected from the
 /// left sidebar.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum LibraryView {
     Library,
     /// The "recently added" view — every track added within the last day,
@@ -1586,6 +1586,12 @@ struct App {
     /// A track the table should scroll to and reveal on the next frame, set when
     /// jumping into the catalog from the vinyl grid. Cleared once honoured.
     scroll_to_track: Option<Id>,
+    /// Where each view's table was scrolled to when last shown, so a switch
+    /// comes back to the same place (see `draw_table`).
+    table_scroll: HashMap<LibraryView, f32>,
+    /// The view the table was drawn for last frame; a different `view` means
+    /// this frame is the first of a switch and restores that view's offset.
+    table_scroll_view: Option<LibraryView>,
     /// Screen-space rect of each visible table row this frame, with its track id.
     /// Filled in `draw_table` and read by `handle_file_drop` to map a dropped
     /// image onto the row under the cursor. Rebuilt every frame.

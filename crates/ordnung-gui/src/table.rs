@@ -780,6 +780,15 @@ impl App {
             .scroll_to_track
             .take()
             .and_then(|id| self.rows.iter().position(|r| r.id == id));
+        // Each view keeps its own scroll position. egui keys the table's
+        // scroll state by widget id, and the table has one id in every view
+        // (its column widths must be shared), so without this a switch landed
+        // the new view at the old view's offset and coming back lost your
+        // place — the list read as rebuilt on every click. On the first frame
+        // of a view, hand egui the offset it had when last shown (the top,
+        // for a view never shown); every frame, remember where it is now.
+        let restore_scroll = (self.table_scroll_view.as_ref() != Some(&self.view))
+            .then(|| self.table_scroll.get(&self.view).copied().unwrap_or(0.0));
         // The row that received a plain (non-drag) click this frame. Selection is
         // resolved after the table with modifiers; a drag sets a DnD payload
         // instead (consumed by the playlist sidebar or the native drag-out).
@@ -1026,6 +1035,8 @@ impl App {
                 // closure never runs, so an in-row `scroll_to_me` couldn't reach it.
                 if let Some(idx) = scroll_to_index {
                     builder = builder.scroll_to_row(idx, Some(egui::Align::Center));
+                } else if let Some(y) = restore_scroll {
+                    builder = builder.vertical_scroll_offset(y);
                 }
                 // One column per visible entry, in the user's chosen order, then a
                 // trailing remainder spacer so the striped rows span the full width.
@@ -2154,8 +2165,11 @@ impl App {
                                 }
                             }
                         });
-                    });
+                    })
             });
+        self.table_scroll
+            .insert(self.view.clone(), scroll_out.inner.state.offset.y);
+        self.table_scroll_view = Some(self.view.clone());
 
         // Publish this frame's visible row rects for the dropped-cover hit-test,
         // and the table's viewport as the Finder-drop landing zone.
@@ -2672,6 +2686,9 @@ pub(crate) struct RowSources {
 /// two envelopes moved out into buffers a row can hold without copying.
 struct RowAnalysis {
     analysis: Analysis,
+    /// The row's `analyzed_at` when its envelopes were read. Re-analysis
+    /// restamps it; nothing else changes the envelopes.
+    stamp: i64,
     waveform: Arc<Vec<u8>>,
     waveform_bands: Arc<Vec<u8>>,
 }
@@ -2713,26 +2730,47 @@ impl RowSources {
             .map_err(|e| e.to_string())?
             .into_iter()
             .collect();
-        // Every track's analysis in one query rather than one query per row.
-        // The envelopes (~31 KB apiece) are *moved* out of each `Analysis`
-        // into their shared buffers, never cloned.
-        self.analyses = catalog
-            .analyses_by_track()
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|(id, mut a)| {
-                let waveform = std::mem::take(&mut a.waveform_preview);
-                let waveform_bands = std::mem::take(&mut a.waveform_bands);
-                (
-                    id,
-                    RowAnalysis {
-                        analysis: a,
-                        waveform: Arc::new(waveform),
-                        waveform_bands: Arc::new(waveform_bands),
-                    },
-                )
-            })
-            .collect();
+        // Every track's analysis in one query rather than one query per row —
+        // but only the scalar half. The envelopes (~62 KB per track, tens of
+        // megabytes across a library) were what made this refresh cost
+        // 30-60 ms after every catalog write, and they only change when a
+        // track is re-analyzed, which restamps `analyzed_at`. So each row
+        // keeps the buffers it already holds while its stamp is unchanged,
+        // and only new or restamped rows fetch theirs.
+        let light = catalog.analyses_light().map_err(|e| e.to_string())?;
+        let mut old = std::mem::take(&mut self.analyses);
+        let mut need: Vec<Id> = Vec::new();
+        let mut fresh: HashMap<Id, RowAnalysis> = HashMap::with_capacity(light.len());
+        for (id, stamp, analysis) in light {
+            let (waveform, waveform_bands) = match old.remove(&id) {
+                Some(prev) if prev.stamp == stamp => (prev.waveform, prev.waveform_bands),
+                _ => {
+                    need.push(id);
+                    (Arc::new(Vec::new()), Arc::new(Vec::new()))
+                }
+            };
+            fresh.insert(
+                id,
+                RowAnalysis {
+                    analysis,
+                    stamp,
+                    waveform,
+                    waveform_bands,
+                },
+            );
+        }
+        if !need.is_empty() {
+            let envelopes = catalog
+                .analysis_envelopes(&need)
+                .map_err(|e| e.to_string())?;
+            for (id, (waveform, waveform_bands)) in envelopes {
+                if let Some(row) = fresh.get_mut(&id) {
+                    row.waveform = Arc::new(waveform);
+                    row.waveform_bands = Arc::new(waveform_bands);
+                }
+            }
+        }
+        self.analyses = fresh;
         self.stale = false;
         Ok(())
     }
