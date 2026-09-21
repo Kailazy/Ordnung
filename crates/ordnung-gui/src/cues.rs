@@ -1,7 +1,7 @@
 //! Hot cues, memory cues and the loop on the now-playing bar: markers over
 //! both waveform lanes, and the cue bar, a strip across the top of the zoom
 //! lane laid out the way a player's pad section is. Eight pads (A–H, each
-//! its own colour), the beat loop with its length, Loop/Exit and quantize,
+//! its own colour), the beat loop with its length, the loop key and quantize,
 //! and the memory cue list. Every edit is written straight to the catalog
 //! (`Catalog::set_cues`), so it survives a reload and rides the next USB
 //! export as PCOB/PCO2 entries. The active loop itself lives in the audio
@@ -40,6 +40,26 @@ const MEMORY_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 159, 10);
 
 /// The active loop draws in white over the lanes and on the pad that holds it.
 const ACTIVE_LOOP_COLOR: egui::Color32 = egui::Color32::from_rgb(245, 245, 250);
+/// The loop key's lit colour. A CDJ's loop keys blink amber while a loop is
+/// engaged, and the key's label stays put: the blink is the signal, not the
+/// word on the cap.
+const LOOP_KEY_ON: egui::Color32 = crate::ui::tokens::color::YELLOW;
+/// The blink's off phase. Dim amber rather than the sunken field so the key
+/// still reads as engaged between flashes.
+const LOOP_KEY_OFF: egui::Color32 = egui::Color32::from_rgb(118, 98, 8);
+/// One full on/off cycle of the loop key blink, in seconds.
+const LOOP_BLINK_PERIOD: f64 = 0.5;
+
+/// The loop key's fill for this frame while a loop is engaged, and a repaint
+/// booked for the next edge so it keeps blinking on a paused deck.
+fn loop_key_blink(ctx: &egui::Context) -> egui::Color32 {
+    let phase = (ctx.input(|i| i.time) / LOOP_BLINK_PERIOD).fract();
+    let to_edge = if phase < 0.5 { 0.5 - phase } else { 1.0 - phase };
+    ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+        to_edge * LOOP_BLINK_PERIOD + 0.005,
+    ));
+    if phase < 0.5 { LOOP_KEY_ON } else { LOOP_KEY_OFF }
+}
 
 /// rekordbox keeps at most ten memory cues on a track; the export follows.
 pub(crate) const MAX_MEMORY_CUES: usize = 10;
@@ -833,7 +853,7 @@ impl App {
                             egui::Align2::CENTER_CENTER,
                             beats.to_string(),
                             font::strong(13.0),
-                            if active.is_some() { ACTIVE_LOOP_COLOR } else { color::LABEL },
+                            if active.is_some() { LOOP_KEY_ON } else { color::LABEL },
                         );
                         if crate::ui::button::deck(ui, "›", None, idx + 1 < LOOP_BEATS.len())
                             .on_hover_note("Double the loop")
@@ -841,11 +861,12 @@ impl App {
                         {
                             loop_cmd = Some(LoopCmd::Beats(idx + 1));
                         }
-                        let loop_label = if active.is_some() { "Exit" } else { "Loop" };
+                        // Engaged, the key blinks like a CDJ's instead of
+                        // switching its label to a white "Exit".
                         let loop_btn = crate::ui::button::deck(
                             ui,
-                            loop_label,
-                            active.is_some().then_some(ACTIVE_LOOP_COLOR),
+                            "Loop",
+                            active.is_some().then(|| loop_key_blink(ui.ctx())),
                             true,
                         );
                         if loop_btn
