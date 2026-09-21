@@ -295,23 +295,21 @@ impl App {
                             }
                         });
                     });
-                    // The heart at the row's edge, and the song's download
-                    // status: FILE when a track in the library is it, NO
-                    // FILE when it's still to be got.
+                    // The heart at the row's edge, and a green FILE mark on
+                    // the songs a track in the library already is. A song
+                    // still to be got carries no mark: the absence says it.
                     row.col(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let side = ui.spacing().interact_size.y;
                             if crate::ui::button::like_mark(ui, true, side).clicked() {
                                 act = Some(LikedAct::Unlike(i));
                             }
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                let (words, ink, note) = match local {
-                                    Some(_) => ("FILE", color::GREEN, "A track in your library is this song"),
-                                    None => ("NO FILE", color::LABEL_3, "No track in your library is this song yet"),
-                                };
-                                ui.add(egui::Label::new(egui::RichText::new(words).font(font::caption()).color(ink).strong()))
-                                    .on_hover_note(note);
-                            });
+                            if local.is_some() {
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    ui.add(egui::Label::new(egui::RichText::new("FILE").font(font::caption()).color(color::GREEN).strong()))
+                                        .on_hover_note("A track in your library is this song");
+                                });
+                            }
                         });
                     });
                     let resp = row.response();
