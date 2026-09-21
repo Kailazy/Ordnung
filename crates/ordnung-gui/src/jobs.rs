@@ -339,6 +339,14 @@ impl App {
             && pointer_pos
                 .zip(self.table_screen_rect)
                 .is_some_and(|(p, rect)| rect.contains(p));
+        // Over the navigation panel but not on a playlist row (its tiles, the
+        // gaps between playlists, the empty space below them): nothing to
+        // land on. No hint is shown and a drop there is ignored, so moving
+        // between playlists doesn't flash the whole window in and out.
+        let over_nav = playlist_under_cursor.is_none()
+            && pointer_pos
+                .zip(self.nav_screen_rect)
+                .is_some_and(|(p, rect)| rect.contains(p));
 
         // Paths in `hovered_files` aren't always populated until the drop lands,
         // so any hovering file shows a hint. When the pointer is over a track row
@@ -365,8 +373,10 @@ impl App {
                 egui::Id::new("drop-overlay"),
             ));
             use crate::ui::tokens::{color, radius, stroke};
-            // Highlight the targeted row so it's obvious which track gets the cover.
-            if cover_target {
+            if over_nav {
+                // Nothing here takes a drop: show nothing.
+            } else if cover_target {
+                // Highlight the targeted row so it's obvious which track gets the cover.
                 if let Some((_, rect)) = self
                     .row_screen_rects
                     .iter()
@@ -466,6 +476,10 @@ impl App {
         // (i.e. genuinely from Finder) still imports normally.
         if self_drag && dropped.iter().all(|p| self.native_drag_paths.contains(p)) {
             self.native_drag_paths.clear();
+            return;
+        }
+        // Let go over the navigation panel off any playlist row: not a target.
+        if over_nav {
             return;
         }
         // A single image dropped onto a track row → offer to set it as that

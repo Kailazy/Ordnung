@@ -1593,6 +1593,10 @@ struct App {
     /// highlight the playlist under a hovering Finder drag and, on drop, to
     /// add the imported tracks to it. Cleared at the top of every frame.
     playlist_screen_rects: Vec<(Id, egui::Rect)>,
+    /// Screen-space rect of the left navigation panel this frame. A Finder
+    /// drag over it shows nothing and a drop there is ignored, except on a
+    /// playlist row (see `playlist_screen_rects`). Cleared every frame.
+    nav_screen_rect: Option<egui::Rect>,
     /// An image dropped onto a track row, awaiting confirmation to set it as that
     /// track's cover. `Some` shows the cover-drop modal. See [`CoverDrop`].
     cover_drop: Option<CoverDrop>,

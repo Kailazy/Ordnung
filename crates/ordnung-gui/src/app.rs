@@ -242,6 +242,7 @@ impl App {
             row_screen_rects: Vec::new(),
             table_screen_rect: None,
             playlist_screen_rects: Vec::new(),
+            nav_screen_rect: None,
             cover_drop: None,
             tags_editing: false,
             job_cancel: None,
@@ -1839,6 +1840,7 @@ impl eframe::App for App {
         // this frame; a view that draws neither must not inherit last frame's.
         self.table_screen_rect = None;
         self.playlist_screen_rects.clear();
+        self.nav_screen_rect = None;
         // Keep the global UI zoom (Cmd +/-, applied by egui at the start of
         // the pass) inside a usable band. egui's own bounds are 0.2x..5x, which
         // lets one held keystroke shrink the table to a smear or blow a single
@@ -2896,7 +2898,7 @@ impl eframe::App for App {
         // it settles; the width it produces is only ever *travelling between*
         // two tiers, never a width the user can hold it at.
         let settled = ctx.animate_value_with_time(egui::Id::new("nav_snap"), target, 0.13);
-        egui::SidePanel::left("library_nav")
+        let nav_panel = egui::SidePanel::left("library_nav")
             .resizable(true)
             .default_width(target)
             // Pinned to the snapped width at all times — a collapsed range is
@@ -3357,6 +3359,7 @@ impl eframe::App for App {
                             });
                     });
             });
+        self.nav_screen_rect = Some(nav_panel.response.rect);
         match sidebar_action {
             Some(SidebarAction::ImportUsbTracks(ids)) => {
                 self.usb_add_to_library(ctx.clone(), ids);
