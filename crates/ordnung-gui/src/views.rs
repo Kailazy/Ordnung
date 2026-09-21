@@ -1316,6 +1316,33 @@ impl App {
     /// `import_genredb` is handed back to the caller because the download job
     /// must start after the toolbar releases its borrows.
     #[allow(clippy::too_many_arguments)]
+    /// The grid/list toggle for the record shelves. One segmented button, not
+    /// two: the pair is a single choice, and in one frame it takes less of the
+    /// row than two buttons and a gap. Writes the choice straight to config;
+    /// the toolbar saves it with the sort when either changed.
+    fn vinyl_view_toggle(&mut self, ui: &mut egui::Ui) {
+        let list_mode = self.config.vinyl_view == "list";
+        let pick = crate::ui::button::segmented(
+            ui,
+            Some(if list_mode { 1 } else { 0 }),
+            &[
+                crate::ui::button::Segment {
+                    label: "⊞",
+                    tip: "Show records as a wall of covers",
+                },
+                crate::ui::button::Segment {
+                    label: "☰",
+                    tip: "Show records as compact rows",
+                },
+            ],
+        );
+        match pick {
+            Some(0) => self.config.vinyl_view = "grid".to_string(),
+            Some(1) => self.config.vinyl_view = "list".to_string(),
+            _ => {}
+        }
+    }
+
     fn vinyl_filter_popup(
         &mut self,
         m: &mut crate::ui::menu::MenuUi,
@@ -1824,33 +1851,15 @@ impl App {
                     );
                 });
             }
-            // Grid vs list: one layout choice for all three tabs, so it sits
-            // with the shared controls rather than the shelf-only ones. A wall
-            // of covers browses; rows compare — price, year and format line up.
-            // One segmented button, not two: the pair is a single choice, and
-            // in one frame it takes less of the row than two buttons and a gap.
-            ui.add_space(6.0);
-            let list_mode = self.config.vinyl_view == "list";
-            let pick = crate::ui::button::segmented(
-                ui,
-                Some(if list_mode { 1 } else { 0 }),
-                &[
-                    crate::ui::button::Segment {
-                        label: "⊞",
-                        tip: "Show records as a wall of covers",
-                    },
-                    crate::ui::button::Segment {
-                        label: "☰",
-                        tip: "Show records as compact rows",
-                    },
-                ],
-            );
-            match pick {
-                Some(0) => self.config.vinyl_view = "grid".to_string(),
-                Some(1) => self.config.vinyl_view = "list".to_string(),
-                _ => {}
-            }
+            // Grid vs list: one layout choice for all three tabs. A wall of
+            // covers browses; rows compare — price, year and format line up.
+            // It sits at the right, beside the sort: both say how the records
+            // are laid out, so they read as one group. The sellers tab has no
+            // right-hand group of its own, so the toggle makes one there.
             if seller_mode {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.vinyl_view_toggle(ui);
+                });
                 return;
             }
             // The right-hand group is laid from the right edge in, so in a
@@ -1912,6 +1921,7 @@ impl App {
                         m.close();
                     }
                 });
+                self.vinyl_view_toggle(ui);
                 // The wantlist watch: which wants your swept sellers stock
                 // right now. Lives on the wantlist tab — it's a view of that
                 // shelf — and wears the count of records in stock.
