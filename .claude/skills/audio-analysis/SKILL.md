@@ -37,7 +37,11 @@ key, waveform, and loudness**.
    **Ground truth is local:** `testdata/rekordbox-grids/*.tsv` are rekordbox
    7's own PQTZ grids for 17 `testdata/seeker-sample` tracks; run
    `cargo test -p ordnung-core --test grid_eval --release -- --ignored --nocapture`
-   (v26: BPM 17/17, in phase 12/17; v25 had 4/17). For a miss, run
+   (v26: dev set BPM 17/17, in phase 12/17 — v25 had 4/17; the 50-track
+   random holdout in `testdata/rekordbox-grids-holdout`, untouched by tuning,
+   scores BPM 50/50, in phase 44/50). The audio for both sets lives in the
+   gitignored `testdata/seeker-sample`; the holdout tracks were copied out of
+   the user's library on their explicit request. For a miss, run
    `SNAP_DEBUG_FILE=<audio> SNAP_DEBUG_RB_MS=<rb first beat> SNAP_DEBUG_RB_BPM=<rb bpm>
    cargo test -p ordnung-core --release --lib debug_snap_on_real_track -- --ignored --nocapture`:
    it prints the folded profiles the snap voted on, every candidate's scores,

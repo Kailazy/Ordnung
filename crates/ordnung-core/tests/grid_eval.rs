@@ -2,8 +2,11 @@
 //!
 //! `testdata/rekordbox-grids/*.tsv` hold rekordbox 7's own PQTZ beatgrids
 //! (position, BPM, bar number per beat) for the tracks in
-//! `testdata/seeker-sample` that also live on the EYEBAGS reference export.
-//! For each of them this runs the production grid pipeline (`tempo::detect` →
+//! `testdata/seeker-sample` that also live on the EYEBAGS reference export —
+//! the 17-track *dev* set the v26 fixes were tuned on. `rekordbox-grids-holdout`
+//! is a further 50 drawn at random (2026-09-21) that no tuning has seen; it is
+//! graded separately so a change that only fits the dev set shows. For each
+//! track this runs the production grid pipeline (`tempo::detect` →
 //! `lock_grid` → `downbeat::detect_phase`) and grades:
 //!
 //!   * **BPM** — ours vs rekordbox's (within 0.5%).
@@ -30,9 +33,8 @@ const BAR: u32 = 4;
 
 /// In-phase tolerance, in beats (~70 ms at club tempo).
 const PHASE_TOL_BT: f64 = 0.15;
-/// Calibrated floors (tracks in phase, tracks with the right BPM).
-const MIN_IN_PHASE: u32 = 12;
-const MIN_BPM_OK: u32 = 17;
+/// Calibrated floors per set: (fixture dir, tracks in phase, right BPM).
+const SETS: &[(&str, u32, u32)] = &[("rekordbox-grids", 12, 17), ("rekordbox-grids-holdout", 44, 50)];
 
 struct RbBeat {
     position_ms: u64,
@@ -63,20 +65,42 @@ fn audio_for(stem: &str, sample_dir: &Path) -> Option<PathBuf> {
 }
 
 #[test]
-#[ignore = "decodes 17 real tracks; run in release"]
+#[ignore = "decodes 67 real tracks; run in release"]
 fn grid_matches_rekordbox() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+    let only: Vec<String> = std::env::var("GRID_EVAL_TRACKS")
+        .map(|s| s.split(',').map(|s| s.trim().to_lowercase()).collect())
+        .unwrap_or_default();
+    let mut failures = Vec::new();
+    for &(set, min_in_phase, min_bpm_ok) in SETS {
+        let Some((n_bpm_ok, n_in_phase)) = eval_set(&root, set, &only) else { continue };
+        if only.is_empty() {
+            if n_bpm_ok < min_bpm_ok {
+                failures.push(format!("{set}: BPM regressed: {n_bpm_ok} < {min_bpm_ok}"));
+            }
+            if n_in_phase < min_in_phase {
+                failures.push(format!("{set}: phase regressed: {n_in_phase} < {min_in_phase}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Grade one fixture set; returns `(bpm ok, in phase)`, or `None` when the
+/// set has no gradable tracks.
+fn eval_set(root: &Path, set: &str, only: &[String]) -> Option<(u32, u32)> {
     let sample_dir = root.join("seeker-sample");
-    let mut grids: Vec<PathBuf> = std::fs::read_dir(root.join("rekordbox-grids"))
-        .expect("testdata/rekordbox-grids")
+    let Ok(dir) = std::fs::read_dir(root.join(set)) else {
+        eprintln!("no fixture dir testdata/{set}");
+        return None;
+    };
+    let mut grids: Vec<PathBuf> = dir
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "tsv"))
         .collect();
     grids.sort();
-    let only: Vec<String> = std::env::var("GRID_EVAL_TRACKS")
-        .map(|s| s.split(',').map(|s| s.trim().to_lowercase()).collect())
-        .unwrap_or_default();
+    println!("\n--- {set} ({} grids) ---", grids.len());
 
     let mut n_tracks = 0u32;
     let mut n_bpm_ok = 0u32;
@@ -161,14 +185,15 @@ fn grid_matches_rekordbox() {
     }
 
     println!(
-        "\n=== {n_tracks} tracks: bpm ok {n_bpm_ok}, in phase {n_in_phase}/{n_bpm_ok}, \
+        "=== {set}: {n_tracks} tracks: bpm ok {n_bpm_ok}, in phase {n_in_phase}/{n_bpm_ok}, \
          downbeat ok {n_downbeat_ok}/{n_in_phase} ==="
     );
     if !misses.is_empty() {
         println!("misses:\n  {}", misses.join("\n  "));
     }
-    if only.is_empty() {
-        assert!(n_bpm_ok >= MIN_BPM_OK, "BPM regressed: {n_bpm_ok} < {MIN_BPM_OK}");
-        assert!(n_in_phase >= MIN_IN_PHASE, "phase regressed: {n_in_phase} < {MIN_IN_PHASE}");
+    if n_tracks == 0 {
+        None
+    } else {
+        Some((n_bpm_ok, n_in_phase))
     }
 }
