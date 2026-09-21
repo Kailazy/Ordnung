@@ -624,6 +624,7 @@ impl App {
                         self.dig_take(
                             DigThread::Artist,
                             DigQuery::Browse(BrowseThread::Artist, id),
+                            None,
                         );
                     }
                     _ => self.dig_step(thread),

@@ -15,6 +15,7 @@
 use crate::error::{Error, Result};
 use crate::model::{SellerListing, Tags, VinylRecord};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -355,6 +356,76 @@ pub struct ReleaseDetail {
     /// record with no digital copy in the library can still be listened to.
     #[serde(default)]
     pub videos: Vec<ReleaseVideo>,
+    /// Everyone credited on the record besides its artists — remixers,
+    /// producers, engineers, the mastering house — gathered from the release
+    /// and from every track, deduplicated by artist and role. A remixer on
+    /// the B side is the best sideways step a crate dig can take, and
+    /// Discogs credits them per track far more often than per release.
+    /// `#[serde(default)]` for rows cached before the field existed;
+    /// [`DETAIL_SCHEMA_VERSION`](crate::catalog::DETAIL_SCHEMA_VERSION)
+    /// re-fetches those.
+    #[serde(default)]
+    pub credits: Vec<ReleaseCredit>,
+    /// The companies on the record — who distributed it, pressed it, cut
+    /// the lacquer, published it. Discogs files companies in the label
+    /// namespace, so each id browses with [`BrowseThread::Label`]: a
+    /// one-release label's distributor is the door to its whole scene.
+    #[serde(default)]
+    pub companies: Vec<ReleaseCompany>,
+}
+
+/// One credit on a release beyond the main artists: who, and as what.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReleaseCredit {
+    /// Discogs artist id, browsable with [`BrowseThread::Artist`].
+    pub artist_id: u64,
+    pub name: String,
+    /// The role as Discogs writes it: `Remix`, `Producer`, `Mastered By`,
+    /// `Written-By`, sometimes with a qualifier (`Remix [Dub Version]`).
+    pub role: String,
+}
+
+/// One company on a release: a distributor, pressing plant, studio.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReleaseCompany {
+    /// Discogs label-namespace id, browsable with [`BrowseThread::Label`].
+    pub label_id: u64,
+    pub name: String,
+    /// The relation as Discogs writes it: `Distributed By`, `Pressed By`,
+    /// `Mastered At`, `Lacquer Cut At`, `Published By`.
+    pub role: String,
+}
+
+/// Another Discogs entity named by an artist or label page: an alias, a
+/// group, a member, a parent label, a sublabel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NamedRef {
+    pub id: u64,
+    pub name: String,
+}
+
+/// What an artist page (`GET /artists/{id}`) says about who else this artist
+/// is. The point of it for a dig: an artist with one release is usually a
+/// person with forty under other names, and this is where those names are.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ArtistDetail {
+    pub id: u64,
+    pub name: String,
+    /// Other names the same person records under.
+    pub aliases: Vec<NamedRef>,
+    /// Groups this artist is a member of.
+    pub groups: Vec<NamedRef>,
+    /// The members, when this artist is a group.
+    pub members: Vec<NamedRef>,
+}
+
+/// What a label page (`GET /labels/{id}`) says about the label's family.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LabelDetail {
+    pub id: u64,
+    pub name: String,
+    pub parent: Option<NamedRef>,
+    pub sublabels: Vec<NamedRef>,
 }
 
 /// One entry from a release's track listing.
@@ -1971,14 +2042,90 @@ impl Client {
         if style.is_empty() {
             return Ok(BrowsePage::default());
         }
-        let page = page.max(1).to_string();
+        self.search_page(&[("style", style)], page)
+    }
+
+    /// Browse records carrying one style tag pressed in one year — the
+    /// dig's era thread. Where [`Client::search_by_style`] ANDs every tag a
+    /// record carries and lands in the same well-known corner every time,
+    /// this takes one tag and pins the year: "Deep House, 1997" is the
+    /// itch a record actually scratches, and the year is what keeps a
+    /// broad tag from answering with the famous records of every decade.
+    /// The search facet takes a single year, so the caller rolls one near
+    /// the record's own. Vinyl only, one paced request.
+    pub fn search_style_year(&self, style: &str, year: u16, page: u32) -> Result<BrowsePage> {
+        let style = style.trim();
+        if style.is_empty() || year == 0 {
+            return Ok(BrowsePage::default());
+        }
+        let year = year.to_string();
+        self.search_page(&[("style", style), ("year", &year)], page)
+    }
+
+    /// The kin of an artist: aliases, groups, members. One paced request.
+    pub fn fetch_artist(&self, id: u64) -> Result<ArtistDetail> {
+        let url = format!("{ARTISTS_URL}/{id}");
         let resp = self.call_with_retry(|| {
             self.agent
-                .get(SEARCH_URL)
+                .get(&url)
                 .set("User-Agent", &self.user_agent)
                 .set("Authorization", &format!("Discogs token={}", self.token))
-                .query("style", style)
-                .query("format", "Vinyl")
+        })?;
+        let body: ArtistResponse = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs artist response: {e}")))?;
+        let refs = |v: Vec<RefEntry>| -> Vec<NamedRef> {
+            v.into_iter().filter_map(RefEntry::into_ref).collect()
+        };
+        Ok(ArtistDetail {
+            id: body.id,
+            name: strip_discogs_number(&body.name),
+            aliases: refs(body.aliases),
+            groups: refs(body.groups),
+            members: refs(body.members),
+        })
+    }
+
+    /// The family of a label: its parent and its sublabels. One paced
+    /// request.
+    pub fn fetch_label(&self, id: u64) -> Result<LabelDetail> {
+        let url = format!("{LABELS_URL}/{id}");
+        let resp = self.call_with_retry(|| {
+            self.agent
+                .get(&url)
+                .set("User-Agent", &self.user_agent)
+                .set("Authorization", &format!("Discogs token={}", self.token))
+        })?;
+        let body: LabelResponse = resp
+            .into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs label response: {e}")))?;
+        Ok(LabelDetail {
+            id: body.id,
+            name: strip_discogs_number(&body.name),
+            parent: body.parent_label.and_then(RefEntry::into_ref),
+            sublabels: body
+                .sublabels
+                .into_iter()
+                .filter_map(RefEntry::into_ref)
+                .collect(),
+        })
+    }
+
+    /// One page of the search endpoint as a [`BrowsePage`]: vinyl releases
+    /// matching `facets`, a hundred to the page, shaped like an artist or
+    /// label browse so a dig can spend it the same way.
+    fn search_page(&self, facets: &[(&str, &str)], page: u32) -> Result<BrowsePage> {
+        let page = page.max(1).to_string();
+        let resp = self.call_with_retry(|| {
+            let mut req = self
+                .agent
+                .get(SEARCH_URL)
+                .set("User-Agent", &self.user_agent)
+                .set("Authorization", &format!("Discogs token={}", self.token));
+            for (k, v) in facets {
+                req = req.query(k, v);
+            }
+            req.query("format", "Vinyl")
                 .query("type", "release")
                 .query("per_page", "100")
                 .query("page", &page)
@@ -3059,6 +3206,81 @@ struct ReleaseResponse {
     tracklist: Vec<TracklistEntry>,
     #[serde(default, deserialize_with = "null_as_default")]
     videos: Vec<VideoEntry>,
+    /// Release-level credits beyond the artists (a producer, the mastering
+    /// engineer). Track-level ones ride on each [`TracklistEntry`].
+    #[serde(default, deserialize_with = "null_as_default")]
+    extraartists: Vec<CreditEntry>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    companies: Vec<CompanyEntry>,
+}
+
+/// One `extraartists` credit, on a release or on a track.
+#[derive(Debug, Deserialize)]
+struct CreditEntry {
+    #[serde(default, deserialize_with = "null_as_default")]
+    id: u64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    name: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    role: String,
+}
+
+/// One `companies` entry. `entity_type_name` is the relation
+/// ("Distributed By"); the id is in the label namespace.
+#[derive(Debug, Deserialize)]
+struct CompanyEntry {
+    #[serde(default, deserialize_with = "null_as_default")]
+    id: u64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    name: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    entity_type_name: String,
+}
+
+/// `GET /artists/{id}`: only the kin fields a dig follows are read.
+#[derive(Debug, Deserialize)]
+struct ArtistResponse {
+    #[serde(default, deserialize_with = "null_as_default")]
+    id: u64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    name: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    aliases: Vec<RefEntry>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    groups: Vec<RefEntry>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    members: Vec<RefEntry>,
+}
+
+/// `GET /labels/{id}`: the family fields only.
+#[derive(Debug, Deserialize)]
+struct LabelResponse {
+    #[serde(default, deserialize_with = "null_as_default")]
+    id: u64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    name: String,
+    #[serde(default)]
+    parent_label: Option<RefEntry>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    sublabels: Vec<RefEntry>,
+}
+
+/// An `{id, name}` reference as artist and label pages list their kin.
+#[derive(Debug, Deserialize)]
+struct RefEntry {
+    #[serde(default, deserialize_with = "null_as_default")]
+    id: u64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    name: String,
+}
+
+impl RefEntry {
+    fn into_ref(self) -> Option<NamedRef> {
+        (self.id > 0 && !self.name.trim().is_empty()).then(|| NamedRef {
+            id: self.id,
+            name: strip_discogs_number(&self.name),
+        })
+    }
 }
 
 /// One entry of a release's image gallery. Discogs marks the cover
@@ -3119,6 +3341,9 @@ struct TracklistEntry {
     /// already covers every track.
     #[serde(default, deserialize_with = "null_as_default")]
     artists: Vec<ReleaseArtist>,
+    /// This track's own credits — where Discogs puts remixers.
+    #[serde(default, deserialize_with = "null_as_default")]
+    extraartists: Vec<CreditEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3262,7 +3487,46 @@ impl ReleaseResponse {
             .filter(|a| a.id > 0 && !a.name.eq_ignore_ascii_case("various"))
             .map(|a| a.id)
             .collect();
+        // Release credits first, then each track's, in listing order; the
+        // same person in the same role on four tracks is one credit. A
+        // credit that names one of the record's own artists (they produced
+        // it themselves) is no step anywhere and is dropped.
+        let mut credits: Vec<ReleaseCredit> = Vec::new();
+        let mut seen_credit: HashSet<(u64, String)> = HashSet::new();
+        for c in self
+            .extraartists
+            .iter()
+            .chain(self.tracklist.iter().flat_map(|t| t.extraartists.iter()))
+        {
+            let role = c.role.trim().to_string();
+            if c.id == 0 || c.name.trim().is_empty() || role.is_empty() {
+                continue;
+            }
+            if artist_ids.contains(&c.id) || !seen_credit.insert((c.id, role.to_lowercase())) {
+                continue;
+            }
+            credits.push(ReleaseCredit {
+                artist_id: c.id,
+                name: strip_discogs_number(&c.name),
+                role,
+            });
+        }
+        let mut seen_company: HashSet<(u64, String)> = HashSet::new();
+        let companies: Vec<ReleaseCompany> = self
+            .companies
+            .iter()
+            .filter(|c| c.id > 0 && !c.name.trim().is_empty())
+            .filter(|c| !label_ids.contains(&c.id))
+            .filter(|c| seen_company.insert((c.id, c.entity_type_name.trim().to_lowercase())))
+            .map(|c| ReleaseCompany {
+                label_id: c.id,
+                name: strip_discogs_number(&c.name),
+                role: c.entity_type_name.trim().to_string(),
+            })
+            .collect();
         ReleaseDetail {
+            credits,
+            companies,
             release_id: self.id.to_string(),
             format,
             title: self.title,
@@ -3667,6 +3931,8 @@ mod tests {
             format: String::new(),
             tracklist: Vec::new(),
             videos: Vec::new(),
+            credits: Vec::new(),
+            companies: Vec::new(),
         }
     }
 
@@ -3793,6 +4059,92 @@ mod tests {
         assert_eq!(detail.videos[0].duration_secs, None);
         // A null `embed` is silence from the uploader, not a block.
         assert!(detail.videos[0].embeddable);
+    }
+
+    /// Credits are gathered from the release and from every track, one per
+    /// person and role; the record's own artists never count as a credit,
+    /// and companies that are the record's own label are dropped too.
+    #[test]
+    fn release_gathers_credits_and_companies_from_release_and_tracks() {
+        let json = r#"{
+            "id": 1,
+            "title": "Quadrant Dub",
+            "artists": [{"id": 10, "name": "Quadrant"}],
+            "labels": [{"id": 500, "name": "Basic Channel", "catno": "BC 01"}],
+            "extraartists": [
+                {"id": 20, "name": "Mark Ernestus", "role": "Producer"},
+                {"id": 10, "name": "Quadrant", "role": "Written-By"},
+                {"id": 0, "name": "Nobody", "role": "Design"}
+            ],
+            "companies": [
+                {"id": 600, "name": "Hard Wax (2)", "entity_type_name": "Distributed By"},
+                {"id": 500, "name": "Basic Channel", "entity_type_name": "Phonographic Copyright (p)"},
+                {"id": 600, "name": "Hard Wax (2)", "entity_type_name": "Distributed By"},
+                {"id": 700, "name": "Dubplates & Mastering", "entity_type_name": "Mastered At"}
+            ],
+            "tracklist": [
+                {"position": "A", "title": "Quadrant Dub I",
+                 "extraartists": [{"id": 30, "name": "Maurizio", "role": "Remix"}]},
+                {"position": "B", "title": "Quadrant Dub II",
+                 "extraartists": [{"id": 30, "name": "Maurizio", "role": "remix"},
+                                  {"id": 20, "name": "Mark Ernestus", "role": "Mixed By"}]}
+            ]
+        }"#;
+        let detail: ReleaseDetail = serde_json::from_str::<ReleaseResponse>(json)
+            .unwrap()
+            .into_detail();
+        let credits: Vec<(u64, &str, &str)> = detail
+            .credits
+            .iter()
+            .map(|c| (c.artist_id, c.name.as_str(), c.role.as_str()))
+            .collect();
+        assert_eq!(
+            credits,
+            vec![
+                (20, "Mark Ernestus", "Producer"),
+                (30, "Maurizio", "Remix"),
+                (20, "Mark Ernestus", "Mixed By"),
+            ]
+        );
+        let companies: Vec<(u64, &str, &str)> = detail
+            .companies
+            .iter()
+            .map(|c| (c.label_id, c.name.as_str(), c.role.as_str()))
+            .collect();
+        assert_eq!(
+            companies,
+            vec![
+                (600, "Hard Wax", "Distributed By"),
+                (700, "Dubplates & Mastering", "Mastered At"),
+            ]
+        );
+    }
+
+    /// Artist and label pages decode to just their kin; a member with no
+    /// id (Discogs lists a few) is dropped rather than failing the page.
+    #[test]
+    fn artist_and_label_pages_decode_to_kin() {
+        let a: ArtistResponse = serde_json::from_str(
+            r#"{"id": 30, "name": "Maurizio", "profile": "…",
+                "aliases": [{"id": 31, "name": "Moritz Von Oswald"}, {"id": 0, "name": "?"}],
+                "groups": [{"id": 32, "name": "Basic Channel", "active": true}],
+                "members": null}"#,
+        )
+        .unwrap();
+        assert_eq!(a.aliases.len(), 2);
+        let l: LabelResponse = serde_json::from_str(
+            r#"{"id": 500, "name": "Basic Channel", "parent_label": null,
+                "sublabels": [{"id": 501, "name": "Chain Reaction (2)"}]}"#,
+        )
+        .unwrap();
+        assert!(l.parent_label.is_none());
+        assert_eq!(
+            l.sublabels.into_iter().filter_map(RefEntry::into_ref).collect::<Vec<_>>(),
+            vec![NamedRef {
+                id: 501,
+                name: "Chain Reaction".to_string()
+            }]
+        );
     }
 
     #[test]

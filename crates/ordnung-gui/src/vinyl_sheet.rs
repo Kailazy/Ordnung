@@ -12,7 +12,6 @@
 //! catalog's `release_cache` — so a record opened once needs no network again.
 
 use super::*;
-use crate::dig::strip_disambiguator;
 
 /// One release detail fetched for the sheet: which record it was for, and either
 /// the detail or the error to show in its place.
@@ -1214,15 +1213,15 @@ impl App {
         let branch = {
             let head = self.dig.as_ref().map(|d| d.head());
             match head {
-                Some(h) if h.release_id == release_id => Some((
-                    strip_disambiguator(&h.artist).to_string(),
-                    h.label.clone(),
-                    !h.artist_ids.is_empty(),
-                    !h.label_ids.is_empty(),
-                    h.styles.clone(),
-                    h.detail_resolved,
-                    self.dig.as_ref().is_some_and(|d| d.pending.is_some()),
-                )),
+                Some(h) if h.release_id == release_id => {
+                    let dig = self.dig.as_ref().expect("head came from it");
+                    Some((
+                        h.hops(dig.wander_seed()),
+                        h.detail_resolved,
+                        h.kin_resolved,
+                        dig.pending.is_some(),
+                    ))
+                }
                 _ => None,
             }
         };
@@ -1295,9 +1294,9 @@ impl App {
             PlayExtra(usize),
             Goto,
             Dig,
-            /// Take a thread out of the record on screen — the strip's
-            /// branch buttons, mirrored here.
-            Branch(crate::dig::DigThread),
+            /// Move the dig on from the record on screen — the strip's
+            /// controls, mirrored here.
+            Branch(crate::dig::DigAct),
             /// Add this record to that list, or take it off if it's there.
             ToggleList(VinylList),
             /// Open the label page — this record's imprint, front to back.
@@ -1641,7 +1640,12 @@ impl App {
                             }
                             // Dig from here: search Discogs outward from this
                             // record for pressings you don't already have.
+                            // Not for the record a dig already stands on:
+                            // its own controls follow, and a second dig
+                            // button beside them would read as a second
+                            // way to do the same thing.
                             if can_dig
+                                && branch.is_none()
                                 && crate::ui::button::button(ui, "🔍  Dig")
                                     .on_hover_note(
                                         "Find records like this one on Discogs that aren't \
@@ -1651,20 +1655,11 @@ impl App {
                             {
                                 act = Some(Act::Dig);
                             }
-                            // The dig's two threads, for the record the dig is
-                            // standing on. Same gating and wording as the strip
-                            // (see `draw_dig`): both always shown, a disabled
-                            // one explaining itself rather than vanishing.
-                            if let Some((
-                                head_artist,
-                                head_label,
-                                has_artist_id,
-                                has_label_id,
-                                head_styles,
-                                head_resolved,
-                                busy,
-                            )) = &branch
-                            {
+                            // The dig's controls, for the record the dig is
+                            // standing on: the same two as the strip (see
+                            // `dig_controls`), so the sheet can keep moving
+                            // without going back to the strip.
+                            if let Some((hops, resolved, kin, busy)) = &branch {
                                 // Set apart from the four buttons before them:
                                 // those record what you already decided, these
                                 // are how you keep moving. A separator breaks
@@ -1674,93 +1669,10 @@ impl App {
                                 ui.add_space(crate::ui::tokens::space::S2);
                                 ui.separator();
                                 ui.add_space(crate::ui::tokens::space::S2);
-                                // A disabled button keeps whatever fill it was
-                                // given, so an accent one still looks pressable
-                                // while the ids resolve. Drop to the muted
-                                // surface when it can't be clicked, so the
-                                // colour only ever means "this works now".
-                                let dig_fill = |on: bool| {
-                                    if on {
-                                        crate::ui::tokens::color::ACCENT
-                                    } else {
-                                        crate::ui::tokens::color::SURFACE_HI
-                                    }
-                                };
-                                let dig_text = |on: bool| {
-                                    if on {
-                                        egui::Color32::WHITE
-                                    } else {
-                                        crate::ui::tokens::color::LABEL_4
-                                    }
-                                };
-                                let artist_tip = if *has_artist_id {
-                                    format!(
-                                        "Find another vinyl release by {head_artist} that you \
-                                         don't own"
-                                    )
-                                } else if head_artist.trim().is_empty() {
-                                    "Discogs lists no artist for this record".to_string()
-                                } else {
-                                    format!("Looking up {head_artist} on Discogs…")
-                                };
-                                if ui
-                                    .add_enabled(
-                                        *has_artist_id && !busy,
-                                        egui::Button::new(
-                                            egui::RichText::new("♪  Dig the artist")
-                                                .color(dig_text(*has_artist_id && !busy)),
-                                        )
-                                        .fill(dig_fill(*has_artist_id && !busy)),
-                                    )
-                                    .on_hover_note(artist_tip.clone())
-                                    .on_disabled_hover_note(artist_tip)
-                                    .clicked()
+                                if let Some(a) =
+                                    crate::dig::dig_controls(ui, hops, *resolved, *kin, *busy, true)
                                 {
-                                    act = Some(Act::Branch(crate::dig::DigThread::Artist));
-                                }
-                                let label_tip = match head_label {
-                                    Some(l) if *has_label_id => {
-                                        format!(
-                                            "Find another vinyl release on {l} that you don't own"
-                                        )
-                                    }
-                                    Some(l) => format!("Looking up {l} on Discogs…"),
-                                    None => "Discogs lists no label for this record".to_string(),
-                                };
-                                if ui
-                                    .add_enabled(
-                                        *has_label_id && !busy,
-                                        egui::Button::new(
-                                            egui::RichText::new("⌂  Dig the label")
-                                                .color(dig_text(*has_label_id && !busy)),
-                                        )
-                                        .fill(dig_fill(*has_label_id && !busy)),
-                                    )
-                                    .on_hover_note(label_tip.clone())
-                                    .on_disabled_hover_note(label_tip)
-                                    .clicked()
-                                {
-                                    act = Some(Act::Branch(crate::dig::DigThread::Label));
-                                }
-                                // The style thread, same gating as the strip:
-                                // one click searches on every tag the record
-                                // carries, so the find shares the whole set.
-                                let can_style = !head_styles.is_empty();
-                                let style_tip = crate::dig::style_tip(head_styles, *head_resolved);
-                                if ui
-                                    .add_enabled(
-                                        can_style && !busy,
-                                        egui::Button::new(
-                                            egui::RichText::new("◈  Dig the style")
-                                                .color(dig_text(can_style && !busy)),
-                                        )
-                                        .fill(dig_fill(can_style && !busy)),
-                                    )
-                                    .on_hover_note(style_tip.clone())
-                                    .on_disabled_hover_note(style_tip)
-                                    .clicked()
-                                {
-                                    act = Some(Act::Branch(crate::dig::DigThread::Style));
+                                    act = Some(Act::Branch(a));
                                 }
                             }
                         });
@@ -2050,10 +1962,13 @@ impl App {
             // old record's playback stops here — what's on screen is about to
             // be a different record. See `sheet_follows_dig`, spent in
             // `apply_page`.
-            Some(Act::Branch(thread)) => {
+            Some(Act::Branch(act)) => {
                 self.stop_sheet_video();
                 self.sheet_follows_dig = true;
-                self.dig_step(thread);
+                match act {
+                    crate::dig::DigAct::Wander => self.dig_wander(),
+                    crate::dig::DigAct::Hop(hop) => self.dig_hop(hop),
+                }
                 return;
             }
             Some(Act::Play(row)) => {

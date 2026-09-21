@@ -1554,16 +1554,14 @@ struct App {
     /// draws, so taking the same branch twice from one record lands somewhere
     /// else rather than repeating.
     dig_seed: u64,
-    /// Receives a dug release's Discogs artist/label ids and style tags,
-    /// which are what its own branches query by.
-    /// `(release_id, (artist_ids, label_ids, label, styles))`.
+    /// Receives a dug release's resolution: its release detail (ids, style
+    /// tags, credits, companies), then its kin off the artist and label
+    /// pages — everything its own hops query by. See [`dig::DigResolved`].
     ///
     /// A persistent channel rather than a one-shot slot: a step landing while
     /// the previous step's ids are still resolving must not lose either.
-    #[allow(clippy::type_complexity)]
-    dig_ids_tx: Sender<(u64, (Vec<u64>, Vec<u64>, Option<String>, Vec<String>))>,
-    #[allow(clippy::type_complexity)]
-    dig_ids_rx: Receiver<(u64, (Vec<u64>, Vec<u64>, Option<String>, Vec<String>))>,
+    dig_ids_tx: Sender<dig::DigResolved>,
+    dig_ids_rx: Receiver<dig::DigResolved>,
     /// Receives the finished Discogs browse for the step being dug.
     dig_rx: Option<Receiver<dig::DigFetched>>,
     /// Releases whose detail a hover has already asked to warm this session,

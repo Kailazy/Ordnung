@@ -451,6 +451,8 @@ mod tests {
                 artist: None,
             }],
             videos: Vec::new(),
+            credits: Vec::new(),
+            companies: Vec::new(),
         })
         .unwrap();
 

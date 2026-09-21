@@ -255,6 +255,13 @@ pub(crate) fn thread_tint(t: DigThread) -> egui::Color32 {
         DigThread::Artist => color::TEAL,
         DigThread::Label => color::YELLOW,
         DigThread::Style => color::PURPLE,
+        // The sideways threads take the hue of the name thread they browse
+        // by — an alias is still an artist, a company still a label, an
+        // era still a style — a shade off, so a trail reads as kin.
+        DigThread::Alias => color::MINT,
+        DigThread::Credit => color::ORANGE,
+        DigThread::Company => color::BROWN,
+        DigThread::Era => color::INDIGO,
     }
 }
 
@@ -281,6 +288,9 @@ fn knob_glyph(p: &egui::Painter, k: Knob, c: egui::Pos2, ink: egui::Color32, r: 
         Knob::Thread(DigThread::Artist) => crate::ui::icon::artist(p, c, ink, r),
         Knob::Thread(DigThread::Label) => crate::ui::icon::house(p, c, ink, r),
         Knob::Thread(DigThread::Style) => crate::ui::icon::style(p, c, ink, r),
+        // Never bloomed on the map (see `knobs_of`); drawn as the style
+        // glyph should one ever be.
+        Knob::Thread(_) => crate::ui::icon::style(p, c, ink, r),
         Knob::Radio => crate::ui::icon::broadcast(p, c, ink, r),
     }
 }
@@ -2378,6 +2388,7 @@ impl App {
                         DigThread::Artist => "Discogs lists no artist for this record",
                         DigThread::Label => "Discogs lists no label for this record",
                         DigThread::Style => "Discogs lists no style for this record",
+                        _ => "Nothing to follow out of this record",
                     }
                     .to_string();
                     g.awaiting = None;
@@ -2461,6 +2472,9 @@ impl App {
                         .to_string(),
                 }
             }
+            // The map blooms only the three name threads; the sideways
+            // ones are taken from the strip and the sheet.
+            (_, _) => "Follow this thread to a record you don't own".to_string(),
         }
     }
 

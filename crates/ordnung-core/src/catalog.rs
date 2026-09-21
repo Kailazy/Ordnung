@@ -22,8 +22,10 @@ use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 /// cache miss and are re-fetched. Version 2 added the tracklist and the release's
 /// YouTube videos, which the vinyl record sheet plays from. Version 5 added
 /// each track's own artist credit, which is what names the performers on a
-/// "Various" compilation.
-pub const DETAIL_SCHEMA_VERSION: i64 = 5;
+/// "Various" compilation. Version 6 added the record's credits (remixers,
+/// producers, engineers) and companies (distributor, pressing plant), which
+/// the crate dig follows sideways.
+pub const DETAIL_SCHEMA_VERSION: i64 = 6;
 
 /// Which table backs a vinyl list. The two caches share an identical schema and
 /// every query below, so the list only ever picks the table name — never its own
@@ -7573,6 +7575,8 @@ mod tests {
             format: String::new(),
             tracklist: Vec::new(),
             videos: Vec::new(),
+            credits: Vec::new(),
+            companies: Vec::new(),
         }
     }
 
