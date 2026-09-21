@@ -113,10 +113,9 @@ fn downbeat_matches_rekordbox() {
         let agree_pct = agree as f32 * 100.0 / total as f32;
         fracs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let med_frac = fracs[fracs.len() / 2];
-        // rekordbox stamps lines ~45 ms before the kick's energy foot, where
-        // our anchor sits (see tempo::RB_GRID_LEAD_MS); compare around that.
-        let expected = -ordnung_core::analysis::tempo::RB_GRID_LEAD_MS / period;
-        let anchor_ok = (med_frac - expected).abs() < 0.15;
+        // rekordbox stamps its line at the kick's attack, where the snap's
+        // foot lands (analyzer v26); in phase = within 0.15 beat of it.
+        let anchor_ok = med_frac.abs() <= 0.15;
         let modal_off = offs
             .iter()
             .enumerate()

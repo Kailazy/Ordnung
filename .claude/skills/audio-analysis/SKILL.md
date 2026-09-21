@@ -10,31 +10,46 @@ stateless and parallelizable with `rayon`. Every result is cached.
 
 ## Pipeline per track
 
-The live pipeline (analyzer **v22**) emits **BPM, a static beatgrid with downbeats,
+The live pipeline (analyzer **v26**) emits **BPM, a static beatgrid with downbeats,
 key, waveform, and loudness**.
 
 1. **Decode** to mono f32 PCM at a known rate (e.g. downmix; 44.1 kHz) via symphonia.
 2. **BPM / tempo** (`tempo::detect`, re-enabled v16) — spectral-flux onset envelope →
    autocorrelation + harmonic comb with a log-Gaussian club-tempo prior (70–185 BPM,
-   octave and 3:2/5:4 metrical correction), then `tempo::lock_grid` refines the
-   period to sub-0.001 BPM against every beat of the full track at sample
-   resolution.
+   octave and 3:2/5:4 metrical correction). `tempo::lock_grid` then refines the
+   period against the *full* track with a **drift fit** (v26): the ~1.5 ms kick
+   flux is folded into one beat per 20 s chunk, consecutive chunks are aligned
+   by circular cross-correlation, and a line through the accumulated shift is
+   the period error (two passes; distrusted when the residual exceeds 0.04
+   beat or the correction 0.1%). On the reference set every BPM matches
+   rekordbox to 0.01. Do NOT go back to a comb score pivoted on the anchor:
+   with the anchor off the transient it slopes to its search boundary and
+   extrapolates up to 70 ms of creep over a track (that was v21–v25).
 3. **Beatgrid** — a constant-tempo (static) grid anchored by the beat-aware snap
-   (v22): sub/high/full-band RMS envelopes folded into one average beat; strong
-   rising edges become candidate feet; a percussive-sharpness vote (sub-weighted
-   short-window slope, with a sustain penalty so ringing offbeat chord stabs lose
-   to narrow kick bumps) picks the beat; the anchor lands on the winning bump's
-   foot. `downbeat::detect_phase` (v17) then picks which of the four beats is the
-   bar's "1" (backbeat + harmonic-novelty cues). Ground truth: rekordbox 7's own
-   PQTZ grids on the EYEBAGS reference USB — run
-   `cargo test -p ordnung-rbdb --test downbeat_eval --release -- --ignored --nocapture`
-   (121 tracks: v22 gets 64 grids in phase, 52 with the downbeat right; the
-   flux-max snap managed 28/22). `phase_probe` in the same crate prints per-band
-   beat profiles on the rekordbox grid for diagnosing a flagged track. Note:
-   rekordbox stamps lines ~45 ms before the kick's energy foot
-   (`tempo::RB_GRID_LEAD_MS`); Ordnung anchors at the audible foot and the eval
-   compensates. Known miss class: dub-techno tracks whose offbeat chord stab
-   out-guns a clicky, sub-light kick can still grid half a beat off.
+   (v22, reworked v26): sub/high/full-band RMS envelopes folded into one average
+   beat; strong rising edges become candidate feet; each candidate is scored
+   by its **bump height in the sub and full bands over 0.15 beat** (peak after
+   the foot minus the floor before it). The high band gets no vote and there
+   is no sustain penalty — both let offbeat hats beat a soft kick. The line
+   lands at the winning bump's foot: walk back down the full-band slope from
+   the peak (up to 0.2 beat) to the 15% crossing, i.e. the kick's attack/click.
+   `downbeat::detect_phase` (v17/v24) then picks the bar's "1" (kick entrance).
+   **Ground truth is local:** `testdata/rekordbox-grids/*.tsv` are rekordbox
+   7's own PQTZ grids for 17 `testdata/seeker-sample` tracks; run
+   `cargo test -p ordnung-core --test grid_eval --release -- --ignored --nocapture`
+   (v26: BPM 17/17, in phase 12/17; v25 had 4/17). For a miss, run
+   `SNAP_DEBUG_FILE=<audio> SNAP_DEBUG_RB_MS=<rb first beat> SNAP_DEBUG_RB_BPM=<rb bpm>
+   cargo test -p ordnung-core --release --lib debug_snap_on_real_track -- --ignored --nocapture`:
+   it prints the folded profiles the snap voted on, every candidate's scores,
+   and a per-chunk phase-drift row for ours vs rekordbox's BPM. The larger
+   USB eval (`ordnung-rbdb`'s `downbeat_eval`, 121 tracks) needs the EYEBAGS
+   stick mounted. rekordbox's line sits AT the kick's attack (the old "45 ms
+   early" reading was an artifact of the v22 foot landing mid-bump). Known
+   miss class: dub/click-kick tracks where rekordbox grids a click while the
+   sub sits on an offbeat bass note or chord stab (domina, Monolense,
+   metapattern, RB208 in the local set) — the folded average beat cannot tell
+   those apart; the GUI grid lane's "Put the downbeat on the playhead" is the
+   fallback.
 4. **Key** — HPCP-style chromagram correlated against EDM-tuned profiles → best
    `(PitchClass, Mode)`. See "Key detection" below; the naive version is a trap.
 5. **Waveform** — preview (low-res, for CDJ overview) + detailed/color bins. Spans the

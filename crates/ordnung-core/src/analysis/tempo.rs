@@ -380,17 +380,19 @@ const SNAP_BROADBAND_WEIGHT: f32 = 0.35;
 /// Phase search step, in milliseconds.
 const SNAP_STEP_MS: f32 = 0.5;
 
-/// Fine period search around the comb's BPM, as a fraction of the period, and
-/// its step count. ±0.05% covers the frame-grid refine's quantization (~0.03 BPM
-/// at club tempo) with margin, while staying far inside the one-beat-slip alias
-/// (±1 beat over the track ≈ ±0.13% on a six-minute track); 120 steps land the
-/// residual under 0.001 BPM — sub-2 ms of creep over six minutes.
-const PERIOD_FRAC: f64 = 0.0005;
-const PERIOD_STEPS: i32 = 120;
-
-/// How far the winning period must stand above the
-/// average candidate before the refine is trusted over the comb's answer.
-const PERIOD_MIN_LIFT: f32 = 1.05;
+/// Full-track period refine (see [`refine_period_env`]): the flux is folded
+/// into one beat per [`DRIFT_CHUNK_MS`] chunk at [`DRIFT_BINS`] bins, each
+/// chunk's fold is aligned to the previous one by circular cross-correlation,
+/// and a line through the accumulated shifts gives the period error. Needs
+/// [`DRIFT_MIN_CHUNKS`] chunks; a fit whose residual exceeds
+/// [`DRIFT_MAX_RESIDUAL_BT`] of a beat, or whose correction exceeds
+/// [`DRIFT_MAX_FRAC`] of the period (a whole-beat slip over the track is
+/// ~0.13%), is distrusted and the comb's BPM kept.
+const DRIFT_CHUNK_MS: f64 = 20_000.0;
+const DRIFT_BINS: usize = 256;
+const DRIFT_MIN_CHUNKS: usize = 4;
+const DRIFT_MAX_RESIDUAL_BT: f64 = 0.04;
+const DRIFT_MAX_FRAC: f64 = 0.001;
 
 /// Beat-phase edge detection: rekordbox-style grids sit where the kick's
 /// energy bump *begins*, not where onset flux is loudest. A bare flux comb
@@ -419,19 +421,26 @@ const EDGE_KEEP: f32 = 0.15;
 /// Sub-band low-pass for the kick-vs-stab vote: cutoff (Hz) and pole count.
 const SUB_HZ: f32 = 60.0;
 const SUB_POLES: u32 = 2;
-/// High band (one-pole high-pass) for the beat-vs-offbeat vote: the kick's
-/// click and on-beat hats live here as sharp transients.
+/// High band (one-pole high-pass) for the beat-vs-offbeat vote: hats and
+/// claps live here, and so does the kick's click.
 const CLAP_HZ: f32 = 2_000.0;
-/// Sub-band weight in the percussive vote: a kick's thump outranks an equally
-/// sharp offbeat hat, but a bare hi click still beats a bare bass swell.
-const VOTE_SUB_WEIGHT: f32 = 2.0;
-/// Documented convention difference, not applied to the grid: rekordbox
-/// stamps its lines ~45–55 ms *before* the kick's energy foot (measured
-/// against 121 rekordbox-7-analyzed tracks, where the correct-phase cluster
-/// sat at a consistent −0.1 beat). Ordnung anchors at the audible foot
-/// instead; the rekordbox ground-truth eval compensates by this constant.
-pub const RB_GRID_LEAD_MS: f64 = 45.0;
-
+/// The vote reads each candidate's *bump height* in the sub and full bands:
+/// the peak within [`RISE_BT`] of a beat after the foot minus the floor just
+/// before it. The window is as long as a kick's sub energy takes to develop
+/// (~70 ms at club tempo) and no longer — a wider one let a weak edge
+/// sitting just before the kick claim the kick's own bump. Offbeat hats
+/// raise only the high band, which deliberately gets NO vote: any weight on
+/// it lets an open hat outvote a soft kick (measured on the rekordbox
+/// reference set). The sub band decides for anything with a kick in it; the
+/// full band carries clicky, sub-light kicks and breaks the tie against an
+/// offbeat bass note that matches the kick's sub.
+const RISE_BT: f64 = 0.15;
+const VOTE_SUB_WEIGHT: f32 = 1.0;
+const VOTE_FULL_WEIGHT: f32 = 1.0;
+/// How far before the winning edge the foot refine may walk back, in beats:
+/// a soft kick's sub swell (which wins the edge) can trail its own click by
+/// ~50 ms, and the line belongs on the click.
+const FOOT_BACK_BT: f64 = 0.20;
 /// The sample-level envelopes shared by the anchor snap and period refine:
 /// kick-weighted onset flux plus the low- and full-band RMS it derives from,
 /// all at [`SNAP_HOP`] resolution, addressed in milliseconds.
@@ -474,44 +483,6 @@ impl FluxEnv {
         self.flux.len() as f64 * self.ms_per + self.ms_0
     }
 
-    fn at(&self, ms: f64) -> f32 {
-        let x = (ms - self.ms_0) / self.ms_per;
-        if x < 0.0 {
-            return 0.0;
-        }
-        let i = x as usize;
-        if i + 1 >= self.flux.len() {
-            return 0.0;
-        }
-        let f = (x - i as f64) as f32;
-        self.flux[i] * (1.0 - f) + self.flux[i + 1] * f
-    }
-
-    /// Mean flux under a beat comb: taps every `period_ms` from `offset_ms`,
-    /// starting at the first beat at/after zero so a negative candidate still
-    /// scores the same beats as its positive neighbours. Tap times come from
-    /// `k * period` in f64 — accumulating in f32 drifts milliseconds by minute
-    /// six, exactly the error being measured.
-    fn comb(&self, period_ms: f64, offset_ms: f64) -> f32 {
-        let span = self.span_ms();
-        let first = offset_ms - (offset_ms / period_ms).floor() * period_ms;
-        let mut sum = 0.0f32;
-        let mut k = 0u32;
-        loop {
-            let t = first + k as f64 * period_ms;
-            if t >= span {
-                break;
-            }
-            sum += self.at(t);
-            k += 1;
-        }
-        if k == 0 {
-            0.0
-        } else {
-            sum / k as f32
-        }
-    }
-
     /// Fold an RMS envelope into one beat of `period_ms` over `n_bins` phase
     /// bins: the track's average beat as an energy profile. Bins are per-bin
     /// means so sparse coverage can't tilt the profile.
@@ -547,7 +518,62 @@ pub fn snap_anchor(samples: &[f32], sample_rate: u32, bpm: f32, coarse_ms: u64) 
     }
 }
 
+/// One candidate foot from the snap's vote, with the numbers that ranked it
+/// (read by the diagnostic test only).
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct SnapCandidate {
+    /// Phase bin of the rising edge (of `SnapProfile::n` per beat).
+    bin: usize,
+    edge: f32,
+    sub_rise: f32,
+    full_rise: f32,
+    hi_rise: f32,
+    score: f32,
+}
+
+/// The snap's folded beat profiles and its decision, kept together so the
+/// diagnostic test (`debug_snap_on_real_track`) can print exactly what the
+/// production snap saw.
+#[cfg_attr(not(test), allow(dead_code))]
+struct SnapProfile {
+    /// Phase bins per beat; bin `b` covers phase `b / n` of a beat, counted
+    /// from track time 0 modulo the period.
+    n: usize,
+    p_sub: Vec<f32>,
+    p_hi: Vec<f32>,
+    p_full: Vec<f32>,
+    p_edge: Vec<f32>,
+    cands: Vec<SnapCandidate>,
+    /// `None` when no edge was worth trusting (flat material).
+    best_bin: Option<usize>,
+    foot: usize,
+}
+
 fn snap_anchor_env(env: &FluxEnv, bpm: f32, coarse_ms: u64) -> u64 {
+    let period_ms = 60_000.0 / bpm as f64;
+    let prof = snap_profile(env, bpm);
+    if prof.best_bin.is_none() {
+        // No edge worth trusting (flat / transient-free): keep the coarse
+        // phase, but still pull it into the first period so the grid spans
+        // the whole track.
+        let ms = coarse_ms as f64;
+        return (ms - (ms / period_ms).floor() * period_ms).round() as u64;
+    }
+    // Anchor at the winning phase's FIRST instance in the track: the grid
+    // extrapolates forward only, so an anchor even one beat in leaves the
+    // track's real first beat with no grid line (and shifts every bar
+    // number). rekordbox does the same — its grids start within the first
+    // period (a line may land in intro silence; that's what a static grid
+    // over the whole track means).
+    let phase_ms = prof.foot as f64 / prof.n as f64 * period_ms;
+    let ms = phase_ms - (phase_ms / period_ms).floor() * period_ms;
+    ms.round().max(0.0) as u64
+}
+
+/// Fold the envelopes into one beat at `bpm`, find the candidate feet and vote
+/// (see the `EDGE_*` / `VOTE_*` constants).
+fn snap_profile(env: &FluxEnv, bpm: f32) -> SnapProfile {
     let period_ms = 60_000.0 / bpm as f64;
     let n = (period_ms / SNAP_STEP_MS as f64).round().max(8.0) as usize;
     let p_sub = env.folded(&env.sub_rms, period_ms, n);
@@ -578,12 +604,18 @@ fn snap_anchor_env(env: &FluxEnv, bpm: f32, coarse_ms: u64) -> u64 {
     let edges: Vec<f32> = (0..n).map(edge_at).collect();
     let best_edge = edges.iter().cloned().fold(f32::MIN, f32::max);
     let mean_level = win_mean(&cum_edge, 0, n).max(f32::EPSILON);
+    let mut prof = SnapProfile {
+        n,
+        p_sub,
+        p_hi,
+        p_full,
+        p_edge,
+        cands: Vec::new(),
+        best_bin: None,
+        foot: 0,
+    };
     if !(best_edge > mean_level * EDGE_MIN_STEP) {
-        // No edge worth trusting (flat / transient-free): keep the coarse
-        // phase, but still pull it into the first period so the grid spans
-        // the whole track.
-        let ms = coarse_ms as f64;
-        return (ms - (ms / period_ms).floor() * period_ms).round() as u64;
+        return prof;
     }
 
     // Candidate feet: strong edges, greedily kept with ≥ 0.15-beat separation.
@@ -604,102 +636,183 @@ fn snap_anchor_env(env: &FluxEnv, bpm: f32, coarse_ms: u64) -> u64 {
         }
     }
 
-    // Beat-vs-offbeat vote: the beat is marked by *percussive* onsets — a
-    // kick's sub thump and/or its click / an on-beat hat — while the competing
-    // edges are syncopated bass swells (sub-band but SLOW: 100+ ms rise) and
-    // offbeat hats (hi-only). Score each candidate by its steepest short-window
-    // rise: swells score near zero, transients score their full height. The
-    // sub band gets [`VOTE_SUB_WEIGHT`]× — a kick's thump outranks an equally
-    // sharp offbeat hat, but a bare hi click still beats a bare swell.
-    let small = ((n as f64 * 0.05) as usize).max(1);
-    let short_edge = |p: &[f32], c: usize| {
-        (c + n - small..c + n + 2 * half)
-            .map(|j| p[(j + small) % n] - p[j % n])
-            .fold(f32::MIN, f32::max)
-            .max(0.0)
+    // Beat-vs-offbeat vote: the beat is where the kick's energy arrives, so
+    // each candidate is scored by the bump it starts in every band — the
+    // peak inside a window after the foot minus the floor just before it.
+    // Offbeat hats have no sub bump and barely dent the full band; bass
+    // swells and chord stabs raise the sub or mid bands slowly and without a
+    // broadband attack. See the `VOTE_*` constants for the weights.
+    let rise = |p: &[f32], c: usize, ahead: usize| {
+        let peak = (c..=c + ahead).map(|j| p[j % n]).fold(f32::MIN, f32::max);
+        let base = (c + n - half..=c + n).map(|j| p[j % n]).fold(f32::MAX, f32::min);
+        (peak - base).max(0.0)
     };
-    // Sustain penalty: a kick's bump decays within a fraction of a beat, while
-    // an offbeat chord stab rings (reverb/delay) — its folded bump stays above
-    // half its height for much longer. Width is measured on the combined
-    // profile from the candidate's foot, in beats.
-    let width_bt = |c: usize| {
-        let peak = (c..c + n / 2).map(|j| p_edge[j % n]).fold(f32::MIN, f32::max);
-        let base = (c + n - half..c + n).map(|j| p_edge[j % n]).fold(f32::MAX, f32::min);
-        let thr = base + 0.5 * (peak - base);
-        let over = (c..c + n / 2).filter(|&j| p_edge[j % n] >= thr).count();
-        over as f32 / n as f32
-    };
-    let best_bin = cands
+    let ahead = ((n as f64 * RISE_BT) as usize).max(1);
+    prof.cands = cands
         .iter()
-        .cloned()
-        .max_by(|&a, &b| {
-            let score = |c: usize| {
-                (VOTE_SUB_WEIGHT * short_edge(&p_sub, c) + short_edge(&p_hi, c))
-                    / (1.0 + 6.0 * width_bt(c))
-            };
-            score(a).partial_cmp(&score(b)).unwrap()
+        .map(|&c| {
+            let sub_rise = rise(&prof.p_sub, c, ahead);
+            let full_rise = rise(&prof.p_full, c, ahead);
+            let hi_rise = rise(&prof.p_hi, c, ahead);
+            SnapCandidate {
+                bin: c,
+                edge: edges[c],
+                sub_rise,
+                full_rise,
+                hi_rise,
+                score: VOTE_SUB_WEIGHT * sub_rise + VOTE_FULL_WEIGHT * full_rise,
+            }
         })
+        .collect();
+    let best_bin = prof
+        .cands
+        .iter()
+        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap())
+        .map(|c| c.bin)
         .unwrap_or(0);
 
     // The big edge window plateaus over any placement that fully covers the
-    // bump, so refine to the *foot*: walk back up to a window, then forward to
-    // the first crossing of base + 15% of the local rise. The crossing is read
-    // off the FULL-band profile — that is the amplitude envelope the waveform
-    // view draws, so the line lands where the visible slope begins. The
-    // sub-weighted profile would read the kick's sub swell, which develops
-    // tens of ms after the attack and parks the line mid-bump on soft kicks.
-    let mut cum_full = Vec::with_capacity(2 * n + 1);
-    cum_full.push(0.0f64);
-    for i in 0..2 * n {
-        cum_full.push(cum_full[i] + p_full[i % n] as f64);
-    }
-    let base = win_mean(&cum_full, best_bin + n - half, half);
-    let peak = (best_bin..best_bin + half)
+    // bump, so refine to the *foot*: find the bump's peak within a window
+    // after the winning edge, then walk back down its slope to the last
+    // point still above base + 15% of the rise. Walking back from the peak
+    // (rather than forward from the window's start) is what keeps a noisy
+    // pre-bump floor from producing a spurious early crossing. The crossing
+    // is read off the FULL-band profile — that is the amplitude envelope the
+    // waveform view draws, so the line lands where the visible slope begins.
+    // The sub-weighted profile would read the kick's sub swell, which
+    // develops tens of ms after the attack and parks the line mid-bump on
+    // soft kicks.
+    let p_full = &prof.p_full;
+    let back = ((n as f64 * FOOT_BACK_BT) as usize).max(half);
+    let floor = (best_bin + n - back..=best_bin + n)
         .map(|j| p_full[j % n])
-        .fold(f32::MIN, f32::max);
-    let thr = base + 0.15 * (peak - base);
-    let mut foot = best_bin;
-    for step in 0..2 * half {
-        let j = (best_bin + n - half + step) % n;
-        if p_full[j] >= thr {
-            foot = j;
-            break;
-        }
+        .fold(f32::MAX, f32::min);
+    // Indices run in the doubled range `[n, 2n)` so the walk back can cross
+    // the profile's wrap-around.
+    let (peak_at, peak) = (best_bin + n..=best_bin + n + half)
+        .map(|j| (j, p_full[j % n]))
+        .fold((best_bin + n, f32::MIN), |acc, (j, v)| if v > acc.1 { (j, v) } else { acc });
+    let thr = floor + 0.15 * (peak - floor);
+    let mut foot = peak_at;
+    while foot > best_bin + n - back && p_full[(foot - 1) % n] >= thr {
+        foot -= 1;
     }
-
-    // Anchor at the winning phase's FIRST instance in the track: the grid
-    // extrapolates forward only, so an anchor even one beat in leaves the
-    // track's real first beat with no grid line (and shifts every bar
-    // number). rekordbox does the same — its grids start within the first
-    // period (a line may land in intro silence; that's what a static grid
-    // over the whole track means).
-    let phase_ms = foot as f64 / n as f64 * period_ms;
-    let ms = phase_ms - (phase_ms / period_ms).floor() * period_ms;
-    ms.round().max(0.0) as u64
+    let foot = foot % n;
+    prof.best_bin = Some(best_bin);
+    prof.foot = foot;
+    prof
 }
 
-/// Fine-search the period against every beat of the envelope, pivoting at
-/// `anchor_ms` (a phase error shifts all taps together, so it can't bias the
-/// period). Returns the comb's `bpm` unchanged when the score curve is too flat
-/// to trust — transient-free material has no peak, only noise.
-fn refine_period_env(env: &FluxEnv, bpm: f32, anchor_ms: u64) -> f32 {
-    let mut best = bpm as f64;
-    let mut best_score = f32::MIN;
-    let mut total = 0.0f32;
-    for k in -PERIOD_STEPS / 2..=PERIOD_STEPS / 2 {
-        let cand = bpm as f64 * (1.0 + 2.0 * PERIOD_FRAC * k as f64 / PERIOD_STEPS as f64);
-        let s = env.comb(60_000.0 / cand, anchor_ms as f64);
-        total += s;
-        if s > best_score {
-            best_score = s;
-            best = cand;
+/// Refine the comb's `bpm` against the whole track by measuring the grid's
+/// *drift*: fold the flux into one beat per chunk, align consecutive chunks
+/// by cross-correlation, and fit a line through the accumulated phase shift.
+/// A period that is slightly long makes every chunk's beat pattern arrive a
+/// little later than the last; the slope of that walk is the period error.
+/// Aligning whole patterns (not peaks) makes this indifferent to which bump
+/// is loudest in a given chunk, and to where the anchor sits — the comb
+/// score it replaces pivoted on the anchor and, with the anchor off the
+/// transient, sloped to its search boundary instead of peaking. Two passes:
+/// the second folds at the corrected period, so its chunks are unsmeared.
+/// Returns `bpm` unchanged when the fit is distrusted (see the `DRIFT_*`
+/// constants).
+fn refine_period_env(env: &FluxEnv, bpm: f32) -> f32 {
+    let mut period = 60_000.0 / bpm as f64;
+    for _ in 0..2 {
+        match drift_fit(env, period) {
+            Some(p) => period = p,
+            None => return bpm,
         }
     }
-    let mean = total / (PERIOD_STEPS + 1) as f32;
-    if !(best_score > mean * PERIOD_MIN_LIFT) {
-        return bpm;
+    (60_000.0 / period) as f32
+}
+
+/// One drift-fit pass at `period` (ms): the corrected period, or `None` when
+/// the track is too short or the fit too noisy to trust.
+fn drift_fit(env: &FluxEnv, period: f64) -> Option<f64> {
+    let n = DRIFT_BINS;
+    let span = env.span_ms();
+    let n_chunks = (span / DRIFT_CHUNK_MS).floor() as usize;
+    if n_chunks < DRIFT_MIN_CHUNKS {
+        return None;
     }
-    best as f32
+    let mut profiles: Vec<Vec<f32>> = Vec::with_capacity(n_chunks);
+    let mut centres: Vec<f64> = Vec::with_capacity(n_chunks);
+    for c in 0..n_chunks {
+        let t0 = c as f64 * DRIFT_CHUNK_MS;
+        let t1 = t0 + DRIFT_CHUNK_MS;
+        let i0 = ((t0 - env.ms_0) / env.ms_per).max(0.0) as usize;
+        let i1 = (((t1 - env.ms_0) / env.ms_per).max(0.0) as usize).min(env.flux.len());
+        let mut acc = vec![0.0f32; n];
+        for i in i0..i1 {
+            let ms = env.ms_0 + i as f64 * env.ms_per;
+            let b = ((ms / period).rem_euclid(1.0) * n as f64) as usize % n;
+            acc[b] += env.flux[i];
+        }
+        // Shape only: a level difference between chunks must not drive the fit.
+        let mean = acc.iter().sum::<f32>() / n as f32;
+        acc.iter_mut().for_each(|v| *v -= mean);
+        profiles.push(acc);
+        centres.push((t0 + t1) / 2.0);
+    }
+
+    // Accumulated shift of each chunk's pattern relative to the first, in
+    // bins (positive = later), from a circular cross-correlation with the
+    // previous chunk and a parabolic sub-bin peak.
+    let mut shifts = vec![0.0f64; n_chunks];
+    for c in 1..n_chunks {
+        let (a, b) = (&profiles[c - 1], &profiles[c]);
+        let xc: Vec<f32> = (0..n)
+            .map(|s| (0..n).map(|i| a[i] * b[(i + s) % n]).sum())
+            .collect();
+        let best = (0..n)
+            .max_by(|&x, &y| xc[x].partial_cmp(&xc[y]).unwrap())
+            .unwrap_or(0);
+        let (sm1, s0, sp1) = (xc[(best + n - 1) % n], xc[best], xc[(best + 1) % n]);
+        let denom = sm1 - 2.0 * s0 + sp1;
+        let delta = if denom.abs() < f32::EPSILON {
+            0.0
+        } else {
+            (0.5 * (sm1 - sp1) / denom).clamp(-1.0, 1.0)
+        };
+        let mut shift = best as f64 + delta as f64;
+        if shift > n as f64 / 2.0 {
+            shift -= n as f64;
+        }
+        shifts[c] = shifts[c - 1] + shift;
+    }
+
+    // Least-squares line through (centre, shift).
+    let m = n_chunks as f64;
+    let mx = centres.iter().sum::<f64>() / m;
+    let my = shifts.iter().sum::<f64>() / m;
+    let sxx: f64 = centres.iter().map(|x| (x - mx) * (x - mx)).sum();
+    let sxy: f64 = centres.iter().zip(&shifts).map(|(x, y)| (x - mx) * (y - my)).sum();
+    if sxx <= 0.0 {
+        return None;
+    }
+    let slope = sxy / sxx; // bins per ms
+    let intercept = my - slope * mx;
+    let residual = (centres
+        .iter()
+        .zip(&shifts)
+        .map(|(x, y)| {
+            let e = y - (intercept + slope * x);
+            e * e
+        })
+        .sum::<f64>()
+        / m)
+        .sqrt()
+        / n as f64;
+    if residual > DRIFT_MAX_RESIDUAL_BT {
+        return None;
+    }
+    // Phase walks by `d` beats per ms when the true period is `period·(1 + d·period)`.
+    let d = slope / n as f64;
+    let frac = d * period;
+    if frac.abs() > DRIFT_MAX_FRAC {
+        return None;
+    }
+    Some(period * (1.0 + frac))
 }
 
 /// Lock the grid against the full track's samples: refine the comb's `bpm` to
@@ -713,7 +826,7 @@ pub fn lock_grid(samples: &[f32], sample_rate: u32, bpm: f32, coarse_ms: u64) ->
     let Some(env) = FluxEnv::new(samples, sample_rate) else {
         return (bpm, coarse_ms);
     };
-    let bpm = refine_period_env(&env, bpm, coarse_ms);
+    let bpm = refine_period_env(&env, bpm);
     (bpm, snap_anchor_env(&env, bpm, coarse_ms))
 }
 
@@ -853,37 +966,112 @@ mod tests {
         detect(&spec).bpm
     }
 
+    /// Diagnostic: what the snap saw on a real track. `SNAP_DEBUG_FILE=<audio>`
+    /// picks the track, `SNAP_DEBUG_RB_MS=<ms>` (optional) marks rekordbox's
+    /// first beat so the rows can be read against the reference grid. Each
+    /// row is the folded average beat (64 bins, phase 0 = track time 0 mod the
+    /// period), levels 0–9 per band; the marker row shows rekordbox's line
+    /// (`R`), the coarse comb phase (`C`), every candidate (`c`), the winning
+    /// bump (`B`) and the final foot (`O`).
     #[test]
-    #[ignore = "diagnostic against the EYEBAGS USB"]
+    #[ignore = "diagnostic; SNAP_DEBUG_FILE=<audio> [SNAP_DEBUG_RB_MS=<ms>]"]
     fn debug_snap_on_real_track() {
-        let path = std::env::var("SNAP_DEBUG_FILE")
-            .unwrap_or_else(|_| "/Volumes/EYEBAGS/Contents/01 Two Chords Deep.aif".into());
+        let path = std::env::var("SNAP_DEBUG_FILE").expect("SNAP_DEBUG_FILE");
+        let rb_ms: Option<f64> = std::env::var("SNAP_DEBUG_RB_MS").ok().and_then(|s| s.parse().ok());
         let audio = crate::analysis::decode_mono_capped(&path, Some(48_000 * 160)).unwrap();
         let spec = spectrogram(&audio.samples, audio.sample_rate);
         let t = detect(&spec);
         let env = FluxEnv::new(&audio.samples, audio.sample_rate).unwrap();
-        let bpm = refine_period_env(&env, t.bpm, t.beat_offset_ms);
+        let bpm = refine_period_env(&env, t.bpm);
         let period_ms = 60_000.0 / bpm as f64;
-        let n = (period_ms / SNAP_STEP_MS as f64).round().max(8.0) as usize;
-        let p_sub = env.folded(&env.sub_rms, period_ms, n);
-        let p_full = env.folded(&env.full_rms, period_ms, n);
-        let p_hi2 = env.folded(&env.hi_rms, period_ms, n);
+        let prof = snap_profile(&env, bpm);
+        let snap = snap_anchor_env(&env, bpm, t.beat_offset_ms);
+        const COLS: usize = 64;
+        let n = prof.n;
+        let col = |bin: usize| bin * COLS / n;
+        let col_ms = |ms: f64| col(((ms / period_ms).rem_euclid(1.0) * n as f64) as usize % n);
         let sparow = |p: &[f32], label: &str| {
-            let k = p.len() / 32;
-            let bins: Vec<f32> = (0..32)
-                .map(|i| p[i * k..(i + 1) * k].iter().sum::<f32>() / k as f32)
+            let bins: Vec<f32> = (0..COLS)
+                .map(|i| {
+                    let (a, b) = (i * n / COLS, ((i + 1) * n / COLS).max(i * n / COLS + 1));
+                    p[a..b.min(n)].iter().sum::<f32>() / (b.min(n) - a) as f32
+                })
                 .collect();
             let (lo, hi) = bins.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
             let row: String = bins
                 .iter()
                 .map(|&v| char::from_digit((((v - lo) / (hi - lo).max(1e-9)) * 9.0) as u32, 10).unwrap())
                 .collect();
-            eprintln!("{label:<8} |{row}|");
+            eprintln!("  {label:<6} |{row}|");
         };
-        eprintln!("bpm {bpm:.2} coarse {}ms snap {}ms", t.beat_offset_ms, snap_anchor_env(&env, bpm, t.beat_offset_ms));
-        sparow(&p_sub, "sub");
-        sparow(&p_full, "full");
-        sparow(&p_hi2, "hi");
+        eprintln!(
+            "{}\n  bpm {bpm:.3} coarse {}ms snap {snap}ms rb {:?}ms  ({n} bins/beat, {COLS} cols, {:.1} ms/col)",
+            path.rsplit('/').next().unwrap_or(&path),
+            t.beat_offset_ms,
+            rb_ms,
+            period_ms / COLS as f64
+        );
+        sparow(&prof.p_sub, "sub");
+        sparow(&prof.p_full, "full");
+        sparow(&prof.p_hi, "hi");
+        sparow(&prof.p_edge, "edge");
+        let mut marks = vec![' '; COLS];
+        for c in &prof.cands {
+            marks[col(c.bin)] = 'c';
+        }
+        if let Some(b) = prof.best_bin {
+            marks[col(b)] = 'B';
+        }
+        marks[col(prof.foot)] = 'O';
+        marks[col_ms(t.beat_offset_ms as f64)] = 'C';
+        if let Some(rb) = rb_ms {
+            marks[col_ms(rb)] = 'R';
+        }
+        eprintln!("  marks  |{}|", marks.iter().collect::<String>());
+        // Period check: fold the kick flux per 20 s chunk at a given BPM and
+        // print the chunk's peak phase (ms into the beat). A steady column
+        // means the period is right; a walk means it's off.
+        let drift = |bpm: f32, label: &str| {
+            let period = 60_000.0 / bpm as f64;
+            let span = env.span_ms();
+            let chunk = 20_000.0;
+            let mut cols = Vec::new();
+            let mut t0 = 0.0;
+            while t0 + chunk <= span {
+                let nb = 64usize;
+                let mut acc = vec![0.0f64; nb];
+                let i0 = ((t0 - env.ms_0) / env.ms_per).max(0.0) as usize;
+                let i1 = (((t0 + chunk) - env.ms_0) / env.ms_per) as usize;
+                for i in i0..i1.min(env.flux.len()) {
+                    let ms = env.ms_0 + i as f64 * env.ms_per;
+                    let b = (((ms / period).fract()) * nb as f64) as usize % nb;
+                    acc[b] += env.flux[i] as f64;
+                }
+                let best = (0..nb).max_by(|&a, &b| acc[a].partial_cmp(&acc[b]).unwrap()).unwrap();
+                cols.push(format!("{:>4.0}", best as f64 / nb as f64 * period));
+                t0 += chunk;
+            }
+            eprintln!("  drift @{label} {bpm:.3}: peak phase per 20s [{}] ms", cols.join(" "));
+        };
+        drift(bpm, "ours");
+        drift(t.bpm, "comb");
+        if let Ok(rb_bpm) = std::env::var("SNAP_DEBUG_RB_BPM") {
+            if let Ok(v) = rb_bpm.parse::<f32>() {
+                drift(v, "rb  ");
+            }
+        }
+        for c in &prof.cands {
+            eprintln!(
+                "  cand bin {:>4} ({:>+6.1}ms from rb) edge {:.3} sub_rise {:.3} full_rise {:.3} hi_rise {:.3} score {:.3}{}",
+                c.bin,
+                rb_ms.map(|rb| {
+                    let d = c.bin as f64 / n as f64 * period_ms - rb.rem_euclid(period_ms);
+                    d - (d / period_ms).round() * period_ms
+                }).unwrap_or(f64::NAN),
+                c.edge, c.sub_rise, c.full_rise, c.hi_rise, c.score,
+                if Some(c.bin) == prof.best_bin { "  <-- winner" } else { "" }
+            );
+        }
     }
 
     #[test]

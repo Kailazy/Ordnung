@@ -128,7 +128,27 @@ use std::path::Path;
 ///     active-run rule (25% of median, two beats, preceded by an inactive
 ///     beat): filtered intro kicks no longer push the "1" a bar in, and the
 ///     brittle relative-jump test that could reject every beat is gone.
-pub const ANALYZER_VERSION: u32 = 25;
+/// v26: reliable grids — graded fully locally against rekordbox 7's own grids
+///     for 17 `testdata/seeker-sample` tracks (`tests/grid_eval.rs`, fixtures
+///     in `testdata/rekordbox-grids`), v25 had only 4 of 17 in phase and every
+///     refined BPM off by up to 0.06. Three fixes: (1) the full-track period
+///     refine is now a *drift fit* (fold the flux per 20 s chunk, align
+///     chunks by cross-correlation, fit a line through the walk) — the old
+///     comb score pivoted on the coarse anchor and, with that off the
+///     transient, ran to its search boundary, extrapolating up to 70 ms of
+///     creep over a track; every BPM now matches rekordbox to 0.01. (2) The
+///     beat-vs-offbeat vote scores candidates by their sub- and full-band
+///     bump height over 0.15 beat, with no high-band vote and no sustain
+///     penalty — the penalty punished the kick's own sub tail and let a
+///     narrow offbeat hat win the beat on a third of the tracks. (3) The
+///     foot walks back down the full-band slope from the bump's peak (up to
+///     0.2 beat, so a soft kick's line lands on its click), instead of
+///     taking the first noisy crossing before it. 12 of 17 in phase; the
+///     rest are dub/click-kick tracks where rekordbox grids a click while the
+///     sub sits on an offbeat bass note. The old "rekordbox stamps 45 ms
+///     early" reading was an artifact of the v22 foot landing mid-bump —
+///     rekordbox's line sits at the kick's attack, as ours now does.
+pub const ANALYZER_VERSION: u32 = 26;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key
