@@ -747,9 +747,10 @@ pub fn shelf_button_reserving<'a>(
     });
     let pad = ui.spacing().button_padding;
     let mark = SHELF_R * 2.0 + 2.0;
-    // The widest word wins the width; the drawn one is then left-aligned
-    // after the mark so it reads the same as its neighbours, only with the
-    // slack for its longer siblings after it.
+    // The widest word wins the width; the mark and the drawn word are then
+    // centred in it as one, the way a stock button centres its label, so a
+    // short word sits in the middle of its box instead of leaving the slack
+    // for its longer siblings hanging after it.
     let widest = reserve
         .into_iter()
         .filter(|l| !l.is_empty())
@@ -791,7 +792,9 @@ pub fn shelf_button_reserving<'a>(
     } else {
         visuals.text_color().gamma_multiply(0.5)
     };
-    let c = egui::pos2(rect.left() + pad.x + mark * 0.5, rect.center().y);
+    let content_w = mark + galley.as_ref().map_or(0.0, |g| g.size().x + space::S2);
+    let left = rect.center().x - content_w * 0.5;
+    let c = egui::pos2(left + mark * 0.5, rect.center().y);
     shelf(ui.painter(), c, SHELF_R, ink, present, list);
     if let Some(g) = galley {
         let pos = egui::pos2(c.x + mark * 0.5 + space::S2, rect.center().y - g.size().y * 0.5);
