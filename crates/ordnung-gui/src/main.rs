@@ -2134,8 +2134,12 @@ struct UsbPdbInfo {
     /// waveform; empty when the stick carries no `.EXT`.
     waveform_bands: Vec<u8>,
     /// The track's `ANLZ0000.DAT`, absolute on the mounted volume — read
-    /// lazily for the pieces only playback needs (the beatgrid lane).
+    /// lazily for the pieces only playback needs (the beatgrid lane), and
+    /// rewritten in place when a cue or the grid is edited.
     anlz_path: Option<PathBuf>,
+    /// The track's id in the stick's `export.pdb` — what a grid edit patches
+    /// the row's tempo through.
+    pdb_id: Option<u32>,
 }
 
 /// One device file's BPM/key as analyzed by Ordnung's own engine — the

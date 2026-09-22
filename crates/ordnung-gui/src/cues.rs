@@ -232,12 +232,9 @@ impl App {
     /// stick's ANLZ lists for a device track.
     pub(crate) fn load_cues(&self, id: Id) -> Vec<Cue> {
         if id >= USB_ID_BASE {
-            let i = (id - USB_ID_BASE) as usize;
             return self
-                .usb_pdb_info
-                .get(&i)
-                .and_then(|info| info.anlz_path.as_ref())
-                .map(|dat| ordnung_rbdb::anlz::read_cues(dat))
+                .usb_anlz_dat(id)
+                .map(|dat| ordnung_rbdb::anlz::read_cues(&dat))
                 .unwrap_or_default();
         }
         Catalog::open(&self.db_path)
@@ -245,23 +242,37 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Write the loaded track's cue set to the catalog. Hot cues that never
-    /// got a colour are given their slot's on the way, so the export shows
-    /// the same eight colours the pads do. Device tracks are read-only here
-    /// (their cues live on the stick), so this is a no-op for them.
+    /// Whether cues and the grid of `id` can be edited: always for a library
+    /// track; for a device track only when the stick carries its rekordbox
+    /// analysis files, which is where the edit is written.
+    pub(crate) fn cues_editable(&self, id: Id) -> bool {
+        id < USB_ID_BASE || self.usb_anlz_dat(id).is_some()
+    }
+
+    /// Write the loaded track's cue set: to the catalog for a library track,
+    /// straight into the stick's ANLZ files for a device track — the way
+    /// rekordbox's device view saves a cue the moment it's set. Hot cues that
+    /// never got a colour are given their slot's on the way, so the export
+    /// shows the same eight colours the pads do.
     fn commit_cues(&mut self) {
         let Some(np) = self.now_playing.as_mut() else {
             return;
         };
-        if np.id >= USB_ID_BASE {
-            return;
-        }
         for c in np.cues.iter_mut() {
             if let (Some(slot), None) = (c.hot_slot, c.color) {
                 c.color = Some(slot_rgb(slot));
             }
         }
         let (id, cues) = (np.id, np.cues.clone());
+        if id >= USB_ID_BASE {
+            let Some(dat) = self.usb_anlz_dat(id) else {
+                return;
+            };
+            if let Err(e) = ordnung_rbdb::edit::write_stick_cues(&dat, &cues) {
+                self.status = format!("Couldn't write cues to the stick: {e}");
+            }
+            return;
+        }
         match Catalog::open(&self.db_path).and_then(|c| c.set_cues(id, &cues)) {
             Ok(()) => {}
             Err(e) => self.status = format!("Couldn't save cues: {e}"),
@@ -363,12 +374,12 @@ impl App {
     /// Press a hot cue pad: jump to it when set (a loop pad starts its
     /// loop), plant it at the playhead when empty. With a loop running, an
     /// empty pad stores that loop instead, as a player does. Also the
-    /// keyboard's 1–8. Device tracks only jump.
+    /// keyboard's 1–8. A device track's pad lands on the stick itself.
     pub(crate) fn trigger_hot_cue(&mut self, slot: u8) {
         let Some(np) = self.now_playing.as_ref() else {
             return;
         };
-        let editable = np.id < USB_ID_BASE;
+        let editable = self.cues_editable(np.id);
         let found = np
             .cues
             .iter()
@@ -413,10 +424,14 @@ impl App {
                 (p, as_loop.then(|| p + self.loop_len_ms()))
             }
         };
+        let editable = self
+            .now_playing
+            .as_ref()
+            .is_some_and(|np| self.cues_editable(np.id));
+        if !editable {
+            return;
+        }
         if let Some(np) = self.now_playing.as_mut() {
-            if np.id >= USB_ID_BASE {
-                return;
-            }
             // One memory cue per instant; a second press is a no-op.
             if np
                 .cues
@@ -539,13 +554,14 @@ impl App {
 
     /// The cue bar: a strip the lane's width, above the zoom lane. Left to
     /// right: the eight hot cue pads, the loop section, the memory cues.
-    /// Seeks and loops go straight to the engine; edits to the catalog.
+    /// Seeks and loops go straight to the engine; edits to the catalog (or,
+    /// for a device track, onto the stick).
     pub(crate) fn draw_cue_bar(&mut self, ui: &mut egui::Ui) {
         use crate::ui::tokens::{color, font, radius, space};
         let Some((editable, cues)) = self
             .now_playing
             .as_ref()
-            .map(|n| (n.id < USB_ID_BASE, n.cues.clone()))
+            .map(|n| (self.cues_editable(n.id), n.cues.clone()))
         else {
             return;
         };

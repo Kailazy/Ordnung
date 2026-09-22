@@ -779,6 +779,148 @@ fn pwvc() -> Vec<u8> {
     section(b"PWVC", 0x0E, &body)
 }
 
+// ---------------------------------------------------------------------------
+// In-place edits — rewrite one track's cue lists or beatgrid on a stick
+// ---------------------------------------------------------------------------
+
+/// Rebuild an existing ANLZ file with every section tagged one of `drop`
+/// removed and `insert` spliced in at the first dropped section's position
+/// (or, when none was present, just before the first `before` section, else
+/// at the end). Every other section is copied byte for byte and the `PMAI`
+/// header keeps its original words, only the total length changes — so a
+/// rekordbox-made file keeps rekordbox's waveforms, path and VBR index
+/// exactly. `None` for a file that isn't a well-formed ANLZ.
+pub(crate) fn splice_sections(
+    data: &[u8],
+    drop: &[&[u8; 4]],
+    insert: &[Vec<u8>],
+    before: Option<&[u8; 4]>,
+) -> Option<Vec<u8>> {
+    if data.len() < 0x1C || &data[0..4] != b"PMAI" {
+        return None;
+    }
+    let head_len = u32::from_be_bytes(data[4..8].try_into().ok()?) as usize;
+    if head_len < 0x1C || head_len > data.len() {
+        return None;
+    }
+    // (offset, len) of each section, in file order.
+    let mut secs: Vec<(usize, usize)> = Vec::new();
+    let mut off = head_len;
+    while off + 12 <= data.len() {
+        let len = u32::from_be_bytes(data[off + 8..off + 12].try_into().ok()?) as usize;
+        if len < 12 || off + len > data.len() {
+            return None;
+        }
+        secs.push((off, len));
+        off += len;
+    }
+    if off != data.len() {
+        return None;
+    }
+    let tag = |o: usize| &data[o..o + 4];
+    let at = secs
+        .iter()
+        .position(|&(o, _)| drop.iter().any(|d| tag(o) == *d))
+        .or_else(|| {
+            let b = before?;
+            secs.iter().position(|&(o, _)| tag(o) == b)
+        })
+        .unwrap_or(secs.len());
+    let mut out = Vec::with_capacity(data.len() + insert.iter().map(Vec::len).sum::<usize>());
+    out.extend_from_slice(&data[..head_len]);
+    let mut spliced = false;
+    for (i, &(o, len)) in secs.iter().enumerate() {
+        if i == at {
+            for s in insert {
+                out.extend_from_slice(s);
+            }
+            spliced = true;
+        }
+        if drop.iter().any(|d| tag(o) == *d) {
+            continue;
+        }
+        out.extend_from_slice(&data[o..o + len]);
+    }
+    if !spliced {
+        for s in insert {
+            out.extend_from_slice(s);
+        }
+    }
+    let total = out.len() as u32;
+    out[8..12].copy_from_slice(&be32(total));
+    Some(out)
+}
+
+/// Header-only extended beatgrid carrying the grid's first and last beat
+/// (count 0, no payload) — the form rekordbox itself emits, and what
+/// replaces a stick's full `PQT2` once its `PQTZ` has been re-gridded, so no
+/// player reads a stale extended grid.
+fn pqt2_for(beats: &[Beat]) -> Vec<u8> {
+    let mut body = vec![0u8; 0x38 - 0x0C];
+    body[4..8].copy_from_slice(&be32(0x0100_0002));
+    if let (Some(first), Some(last)) = (beats.first(), beats.last()) {
+        for (i, b) in [(12usize, first), (20usize, last)] {
+            body[i..i + 2].copy_from_slice(&be16(b.number.clamp(1, 4) as u16));
+            body[i + 2..i + 4].copy_from_slice(&be16((b.bpm * 100.0).round() as u16));
+            body[i + 4..i + 8].copy_from_slice(&be32(b.position_ms as u32));
+        }
+    }
+    section(b"PQT2", 0x38, &body)
+}
+
+fn rewrite_file(
+    path: &std::path::Path,
+    edit: impl FnOnce(&[u8]) -> Option<Vec<u8>>,
+) -> std::io::Result<()> {
+    let data = std::fs::read(path)?;
+    let out = edit(&data).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} is not a well-formed ANLZ file", path.display()),
+        )
+    })?;
+    crate::export::write_atomic(path, &out)
+}
+
+/// Replace the cue lists of a track already on a stick: the classic `PCOB`
+/// pair in its `ANLZ0000.DAT` and, when the `.EXT` sibling exists, its
+/// `PCOB` + nxs2 `PCO2` pairs. Waveforms, grid and path stay byte-identical;
+/// each file is replaced atomically.
+pub fn write_cues(dat_path: &std::path::Path, cues: &[Cue]) -> std::io::Result<()> {
+    rewrite_file(dat_path, |d| {
+        splice_sections(d, &[b"PCOB"], &[pcob(1, cues), pcob(0, cues)], None)
+    })?;
+    let ext = dat_path.with_extension("EXT");
+    if ext.is_file() {
+        rewrite_file(&ext, |d| {
+            splice_sections(
+                d,
+                &[b"PCOB", b"PCO2"],
+                &[pcob(1, cues), pcob(0, cues), pco2(1, cues), pco2(0, cues)],
+                Some(b"PQT2"),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Replace the beatgrid of a track already on a stick: the `PQTZ` in its
+/// `ANLZ0000.DAT`, and the `.EXT`'s extended `PQT2` (reduced to the
+/// header-only form so it can't disagree with the new grid). Everything
+/// else stays byte-identical; each file is replaced atomically.
+pub fn write_beatgrid(dat_path: &std::path::Path, beats: &[Beat]) -> std::io::Result<()> {
+    rewrite_file(dat_path, |d| {
+        splice_sections(d, &[b"PQTZ"], &[pqtz(beats)], Some(b"PWAV"))
+    })?;
+    let ext = dat_path.with_extension("EXT");
+    if ext.is_file() {
+        rewrite_file(&ext, |d| {
+            splice_sections(d, &[b"PQT2"], &[pqt2_for(beats)], Some(b"PWV5"))
+        })?;
+    }
+    Ok(())
+}
+
 /// Build the `.DAT` — the classic set every CDJ generation requires.
 /// Section order is rekordbox's, and rigid.
 pub(crate) fn build_dat(inp: &AnlzInput) -> Vec<u8> {
@@ -1070,5 +1212,141 @@ mod tests {
         walk(&build_dat(&inp));
         walk(&build_ext(&inp));
         walk(&build_2ex(&inp));
+    }
+
+    fn temp_dat(tag: &str, dat: &[u8], ext: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ordnung-anlz-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dat_path = dir.join("ANLZ0000.DAT");
+        std::fs::write(&dat_path, dat).unwrap();
+        std::fs::write(dat_path.with_extension("EXT"), ext).unwrap();
+        dat_path
+    }
+
+    #[test]
+    fn rewriting_cues_keeps_every_other_section_byte_identical() {
+        let b = beats();
+        let old = vec![Cue {
+            hot_slot: Some(0),
+            position_ms: 100,
+            loop_end_ms: None,
+            label: None,
+            color: None,
+        }];
+        let inp = AnlzInput {
+            usb_path: "/Contents/x.mp3",
+            beats: &b,
+            duration_ms: 4_100,
+            preview: &[128; 400],
+            bands: &vec![64; 4 * 82],
+            scroll: &[],
+            cues: &old,
+        };
+        let dat_path = temp_dat("cues", &build_dat(&inp), &build_ext(&inp));
+        let before_dat = std::fs::read(&dat_path).unwrap();
+        let before_ext = std::fs::read(dat_path.with_extension("EXT")).unwrap();
+
+        let new = vec![
+            Cue {
+                hot_slot: Some(2),
+                position_ms: 600,
+                loop_end_ms: Some(1_600),
+                label: Some("drop".into()),
+                color: Some([0, 255, 0]),
+            },
+            Cue {
+                hot_slot: None,
+                position_ms: 1_100,
+                loop_end_ms: None,
+                label: None,
+                color: None,
+            },
+        ];
+        write_cues(&dat_path, &new).unwrap();
+        let mut got = read_cues(&dat_path);
+        got.sort_by_key(|c| c.position_ms);
+        assert_eq!(got, new);
+
+        // Section order is unchanged and only the cue lists differ.
+        let after_dat = std::fs::read(&dat_path).unwrap();
+        let after_ext = std::fs::read(dat_path.with_extension("EXT")).unwrap();
+        let tags = |d: &[u8]| walk(d).into_iter().map(|(t, _, _)| t).collect::<Vec<_>>();
+        assert_eq!(tags(&before_dat), tags(&after_dat));
+        assert_eq!(tags(&before_ext), tags(&after_ext));
+        for (before, after, cue_tags) in [
+            (&before_dat, &after_dat, &[b"PCOB"][..]),
+            (&before_ext, &after_ext, &[b"PCOB", b"PCO2"][..]),
+        ] {
+            for tag in ["PPTH", "PVBR", "PQTZ", "PWAV", "PWV2", "PWV3", "PQT2", "PWV5", "PWV4"] {
+                let t: &[u8; 4] = tag.as_bytes().try_into().unwrap();
+                if cue_tags.contains(&t) {
+                    continue;
+                }
+                assert_eq!(find_section(before, t), find_section(after, t), "{tag} changed");
+            }
+            assert_eq!(&before[0x0C..0x1C], &after[0x0C..0x1C], "PMAI words changed");
+        }
+    }
+
+    #[test]
+    fn rewriting_the_grid_replaces_pqtz_and_empties_pqt2() {
+        let b = beats();
+        let inp = AnlzInput {
+            usb_path: "/Contents/x.mp3",
+            beats: &b,
+            duration_ms: 4_100,
+            preview: &[128; 400],
+            bands: &vec![64; 4 * 82],
+            scroll: &[],
+            cues: &[],
+        };
+        let dat_path = temp_dat("grid", &build_dat(&inp), &build_ext(&inp));
+        let before_dat = std::fs::read(&dat_path).unwrap();
+        let shifted: Vec<Beat> = b
+            .iter()
+            .map(|x| Beat {
+                number: x.number,
+                position_ms: x.position_ms + 37,
+                bpm: 121.5,
+            })
+            .collect();
+        write_beatgrid(&dat_path, &shifted).unwrap();
+        let got = read_beatgrid(&dat_path);
+        assert_eq!(got.len(), shifted.len());
+        assert_eq!(got[0].position_ms, 137);
+        assert!((got[0].bpm - 121.5).abs() < 0.001);
+        let after_dat = std::fs::read(&dat_path).unwrap();
+        assert_eq!(find_section(&before_dat, b"PWAV"), find_section(&after_dat, b"PWAV"));
+        assert_eq!(find_section(&before_dat, b"PPTH"), find_section(&after_dat, b"PPTH"));
+        let ext = std::fs::read(dat_path.with_extension("EXT")).unwrap();
+        let secs = walk(&ext);
+        let pqt2 = secs.iter().find(|(t, _, _)| t == "PQT2").unwrap();
+        assert_eq!((pqt2.1, pqt2.2), (0x38, 0x38));
+        let body = find_section(&ext, b"PQT2").unwrap();
+        // first beat entry at body+12, last at body+20
+        assert_eq!(u32::from_be_bytes(body[16..20].try_into().unwrap()), 137);
+        assert_eq!(u16::from_be_bytes(body[22..24].try_into().unwrap()), 12150);
+    }
+
+    #[test]
+    fn splice_appends_when_the_tag_is_missing() {
+        let inp = AnlzInput {
+            usb_path: "/Contents/x.wav",
+            beats: &[],
+            duration_ms: 0,
+            preview: &[],
+            bands: &[],
+            scroll: &[],
+            cues: &[],
+        };
+        let ex2 = build_2ex(&inp);
+        let out = splice_sections(&ex2, &[b"PQTZ"], &[pqtz(&beats())], Some(b"PWV6")).unwrap();
+        let tags: Vec<String> = walk(&out).into_iter().map(|(t, _, _)| t).collect();
+        assert_eq!(tags, ["PPTH", "PWV7", "PQTZ", "PWV6", "PWVC"]);
+        let out = splice_sections(&ex2, &[b"PQTZ"], &[pqtz(&beats())], None).unwrap();
+        let tags: Vec<String> = walk(&out).into_iter().map(|(t, _, _)| t).collect();
+        assert_eq!(tags, ["PPTH", "PWV7", "PWV6", "PWVC", "PQTZ"]);
+        assert!(splice_sections(b"nope", &[], &[], None).is_none());
     }
 }

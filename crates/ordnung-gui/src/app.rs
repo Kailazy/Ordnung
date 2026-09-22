@@ -4000,6 +4000,7 @@ pub(crate) fn read_usb_pdb(vol: &Path) -> Option<UsbScan> {
                     .analyze_path
                     .as_ref()
                     .map(|p| vol.join(p.trim_start_matches('/'))),
+                pdb_id: Some(id),
             },
         );
         tracks.push(ScannedTrack {
@@ -4101,7 +4102,7 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
             // it off each scanned file so the table can show the same numbers
             // the player would — resolved by the same case-insensitive
             // relative path the playlists use.
-            for t in export.tracks.values() {
+            for (&id, t) in &export.tracks {
                 let rel = t.file_path.trim_start_matches('/').to_lowercase();
                 if let Some(&i) = by_rel_path.get(&rel) {
                     let (waveform, waveform_bands) = usb_anlz_waveforms(&vol, t);
@@ -4118,6 +4119,7 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
                             .analyze_path
                             .as_ref()
                             .map(|p| vol.join(p.trim_start_matches('/'))),
+                        pdb_id: Some(id),
                     };
                     if info.bpm.is_some()
                         || info.key.is_some()

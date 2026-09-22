@@ -1257,22 +1257,6 @@ impl App {
                                 }
                             });
                         }
-                        // Trailing spacer header: right-click the empty area past the
-                        // last column to open the reorder menu too.
-                        header.col(|ui| {
-                            let resp = ui.interact(
-                                ui.max_rect(),
-                                ui.id().with("hdr-spacer"),
-                                egui::Sense::click(),
-                            );
-                            if resp.secondary_clicked() {
-                                open_col_menu = Some(
-                                    ui.ctx()
-                                        .pointer_interact_pos()
-                                        .unwrap_or_else(|| resp.rect.left_bottom()),
-                                );
-                            }
-                        });
                     })
                     .body(|body| {
                         body.rows(ROW_H, self.rows.len(), |mut row| {
@@ -2123,41 +2107,6 @@ impl App {
                                     });
                                 });
                             }
-                            // Trailing spacer so the row fills the full table width when
-                            // the columns don't. Not just a visual filler: it senses the
-                            // same click/double-click/drag as the data cells, so the row
-                            // behaves as one full-width surface — clicking the blank run
-                            // right of the last column selects the row instead of falling
-                            // through to nothing.
-                            row.col(|ui| {
-                                let resp = ui.interact(
-                                    ui.max_rect(),
-                                    ui.id().with(("cell-drag", r.id, "tail")),
-                                    egui::Sense::click_and_drag(),
-                                );
-                                if resp.clicked() {
-                                    clicked = true;
-                                }
-                                if resp.double_clicked() {
-                                    dbl = true;
-                                }
-                                if resp.drag_started() {
-                                    drag = true;
-                                }
-                                if alt_drag && !cancelled && (resp.drag_started() || resp.dragged())
-                                {
-                                    native_drag_ids = Some(drag_ids.clone());
-                                }
-                                if resp.dragged() && !alt_drag && !cancelled {
-                                    if is_usb {
-                                        resp.dnd_set_drag_payload(DraggedUsbTracks(
-                                            drag_ids.clone(),
-                                        ));
-                                    } else {
-                                        resp.dnd_set_drag_payload(DraggedTracks(drag_ids.clone()));
-                                    }
-                                }
-                            });
                             // Record the whole row's screen rect (union of its cells)
                             // for the dropped-cover hit-test after the table.
                             row_rects.push((r.id, row.response().rect));

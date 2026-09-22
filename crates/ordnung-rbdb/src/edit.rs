@@ -1,8 +1,12 @@
-//! Playlist editing on an existing rekordbox stick.
+//! Editing an existing rekordbox stick in place.
 //!
 //! The export command rebuilds a whole stick; this module instead applies one
-//! user gesture — create, rename, delete a playlist, or add tracks to one —
-//! to whatever export is already mounted, touching *only* the playlist data:
+//! user gesture to whatever export is already mounted. Playlist edits —
+//! create, rename, delete a playlist, or add tracks to one — touch *only*
+//! the playlist data; per-track edits ([`write_stick_cues`],
+//! [`write_stick_beatgrid`]) touch only that track's ANLZ files (plus its
+//! tempo in the databases for a grid change), the way rekordbox's own device
+//! view saves a cue or a grid nudge straight onto the stick.
 //!
 //! * `export.pdb` — the PlaylistTree and PlaylistEntries tables are rewritten
 //!   in place (surgically: every other table's pages are left byte-identical).
@@ -14,13 +18,15 @@
 //!   `playlist_content` tables are replaced to mirror the same tree, joining
 //!   pdb track ids onto DLP content ids by file path (the only shared key).
 //!
-//! Audio files, ANLZ analysis, and every non-playlist table are never
-//! touched. Before the first edit ever made to a stick, the pristine
-//! databases are copied to `*.orig` alongside themselves, so the pre-Ordnung
-//! state is always recoverable.
+//! Audio files and every other table are never touched. Before the first
+//! edit ever made to a stick (or to a track's analysis), the pristine files
+//! are copied to `*.orig` alongside themselves, so the pre-Ordnung state is
+//! always recoverable.
 
 use std::collections::HashMap;
 use std::path::Path;
+
+use ordnung_core::model::{Beat, Cue};
 
 use crate::pdb::{RbExport, RbPlaylist, ReadError};
 use crate::pdbw;
@@ -158,6 +164,176 @@ fn apply_op(export: &mut RbExport, op: &PlaylistOp) -> Result<Option<u32>, ReadE
             Ok(None)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-track edits — cues and beatgrid, straight onto the stick
+// ---------------------------------------------------------------------------
+
+/// Write a track's cue set onto the stick it lives on, the way rekordbox's
+/// own device view does: its `ANLZ0000.DAT` / `.EXT` cue lists are replaced
+/// in place, nothing else on the stick changes. `dat_path` is the absolute
+/// path of the track's `ANLZ0000.DAT` on the mounted volume. The pristine
+/// analysis files are kept as `*.orig` siblings from the first edit on.
+pub fn write_stick_cues(dat_path: &Path, cues: &[Cue]) -> Result<(), ReadError> {
+    backup_anlz(dat_path);
+    crate::anlz::write_cues(dat_path, cues).map_err(|e| ReadError::Io {
+        path: dat_path.to_path_buf(),
+        source: e,
+    })
+}
+
+/// Write a track's beatgrid onto the stick it lives on: the ANLZ `PQTZ`
+/// (and the `.EXT`'s extended grid, emptied) are replaced in place, the
+/// tempo of the track's `export.pdb` row is patched to the grid's BPM, and
+/// the Device Library Plus row follows suit. `track_id` is the pdb track id.
+/// The pristine analysis files and databases are kept as `*.orig` siblings
+/// from the first edit on.
+pub fn write_stick_beatgrid(
+    volume_root: &Path,
+    track_id: u32,
+    dat_path: &Path,
+    beats: &[Beat],
+) -> Result<(), ReadError> {
+    backup_anlz(dat_path);
+    crate::anlz::write_beatgrid(dat_path, beats).map_err(|e| ReadError::Io {
+        path: dat_path.to_path_buf(),
+        source: e,
+    })?;
+    let Some(bpm) = beats.first().map(|b| b.bpm).filter(|b| *b > 0.0) else {
+        return Ok(());
+    };
+    let centi = (bpm * 100.0).round().clamp(0.0, u32::MAX as f32) as u32;
+    let dir = volume_root.join("PIONEER").join("rekordbox");
+    let pdb_path = dir.join("export.pdb");
+    backup_once(&pdb_path);
+    let file_path = patch_track_tempo(&pdb_path, track_id, centi)?;
+    let dlp_path = dir.join("exportLibrary.db");
+    if dlp_path.is_file() {
+        backup_once(&dlp_path);
+        with_local_dlp(&dlp_path, |conn| {
+            let key = file_path.trim_start_matches('/').to_lowercase();
+            let mut stmt = conn.prepare("SELECT content_id, path FROM content")?;
+            let ids: Vec<i64> = stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+                .flatten()
+                .filter(|(_, p)| p.trim_start_matches('/').to_lowercase() == key)
+                .map(|(id, _)| id)
+                .collect();
+            for id in ids {
+                conn.execute(
+                    "UPDATE content SET bpmx100 = ?1 WHERE content_id = ?2",
+                    rusqlite::params![centi as i64, id],
+                )?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// The beatgrid a track had before Ordnung first edited it on this stick —
+/// read from the `ANLZ0000.DAT.orig` backup. `None` when the track was
+/// never edited here (no backup) or the backup carries no grid.
+pub fn original_stick_beatgrid(dat_path: &Path) -> Option<Vec<Beat>> {
+    let orig = orig_path(dat_path);
+    let beats = crate::anlz::read_beatgrid(&orig);
+    (!beats.is_empty()).then_some(beats)
+}
+
+fn orig_path(path: &Path) -> std::path::PathBuf {
+    let mut orig = path.as_os_str().to_owned();
+    orig.push(".orig");
+    std::path::PathBuf::from(orig)
+}
+
+/// Keep the pristine `.DAT` and `.EXT` beside themselves before the first
+/// edit to a track's analysis (the `.2EX` carries no cues or grid).
+fn backup_anlz(dat_path: &Path) {
+    backup_once(dat_path);
+    let ext = dat_path.with_extension("EXT");
+    if ext.is_file() {
+        backup_once(&ext);
+    }
+}
+
+/// Patch the `tempo` field (BPM × 100, u32 at row offset 0x38) of one track
+/// row of the DeviceSQL database, in place — the row keeps its size, so no
+/// page bookkeeping changes. Returns the row's file path (the key the DLP
+/// shares). Atomic (temp file + rename) like every database write here.
+fn patch_track_tempo(pdb_path: &Path, track_id: u32, centi_bpm: u32) -> Result<String, ReadError> {
+    use crate::pdb::{dsql_string, page_rows, table_pages, u16_at, u32_at, TYPE_TRACKS};
+    let mut data = std::fs::read(pdb_path).map_err(|e| ReadError::Io {
+        path: pdb_path.to_path_buf(),
+        source: e,
+    })?;
+    let page_size = u32_at(&data, 4).ok_or(ReadError::Format("truncated header"))? as usize;
+    let num_tables = u32_at(&data, 8).ok_or(ReadError::Format("truncated header"))? as usize;
+    if !(512..=65536).contains(&page_size) || num_tables > 64 {
+        return Err(ReadError::Format("implausible header"));
+    }
+    let mut hit: Option<(usize, String)> = None;
+    for t in 0..num_tables {
+        let base = 0x1C + t * 16;
+        if u32_at(&data, base) != Some(TYPE_TRACKS) {
+            continue;
+        }
+        let (Some(first), Some(last)) = (u32_at(&data, base + 8), u32_at(&data, base + 12)) else {
+            break;
+        };
+        for page_off in table_pages(&data, page_size, first, last) {
+            for row in page_rows(&data, page_size, page_off, TYPE_TRACKS) {
+                if u32_at(&data, row + 0x48) != Some(track_id) {
+                    continue;
+                }
+                let path = u16_at(&data, row + 0x86)
+                    .and_then(|rel| dsql_string(&data, row + rel as usize))
+                    .unwrap_or_default();
+                hit = Some((row, path));
+            }
+        }
+    }
+    let Some((row, path)) = hit else {
+        return Err(ReadError::Format("no such track row"));
+    };
+    data[row + 0x38..row + 0x3C].copy_from_slice(&centi_bpm.to_le_bytes());
+    crate::export::write_atomic(pdb_path, &data).map_err(|e| ReadError::Io {
+        path: pdb_path.to_path_buf(),
+        source: e,
+    })?;
+    Ok(path)
+}
+
+/// Run `f` against a local copy of the stick's Device Library Plus database
+/// and copy the result back whole — SQLite cannot write in place on macOS's
+/// msdos (FAT32) driver (see [`crate::dlp::write_library`]).
+fn with_local_dlp(
+    db_path: &Path,
+    f: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<()>,
+) -> Result<(), ReadError> {
+    let err_io = |e: std::io::Error| ReadError::Dlp(e.to_string());
+    let err = |e: rusqlite::Error| ReadError::Dlp(e.to_string());
+    let tmp = crate::dlp::scratch_db_path("ordnung-dlp-edit");
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::copy(db_path, &tmp).map_err(err_io)?;
+    let result = (|| {
+        let conn = rusqlite::Connection::open(&tmp).map_err(err)?;
+        conn.execute_batch(&format!(
+            "PRAGMA key = '{}'; PRAGMA cipher_compatibility = 4;",
+            crate::dlp::DLP_KEY
+        ))
+        .map_err(err)?;
+        conn.execute_batch("BEGIN").map_err(err)?;
+        f(&conn).map_err(err)?;
+        conn.execute_batch("COMMIT").map_err(err)?;
+        Ok(())
+    })();
+    if result.is_ok() {
+        std::fs::copy(&tmp, db_path).map_err(err_io)?;
+        crate::export::sync_existing(db_path).map_err(err_io)?;
+    }
+    let _ = std::fs::remove_file(&tmp);
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -469,4 +645,114 @@ fn sync_dlp_playlists_at(db_path: &Path, export: &RbExport) -> Result<(), ReadEr
     }
     conn.execute_batch("COMMIT").map_err(err)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::anlz::AnlzInput;
+    use crate::pdb::read_export;
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("ordnung-edit-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("PIONEER").join("rekordbox")).unwrap();
+        root
+    }
+
+    fn beats(bpm: f32) -> Vec<Beat> {
+        (0..8)
+            .map(|i| Beat {
+                number: (i % 4) + 1,
+                position_ms: 100 + i as u64 * 500,
+                bpm,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn grid_edit_patches_only_that_row_s_tempo() {
+        let root = temp_root("grid");
+        let pdb = root.join("PIONEER/rekordbox/export.pdb");
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/demo_tracks_export.pdb"),
+            &pdb,
+        )
+        .unwrap();
+        let before = read_export(&pdb).unwrap();
+        let (&id, _) = before.tracks.iter().next().unwrap();
+
+        let old = beats(120.0);
+        let inp = AnlzInput {
+            usb_path: "/Contents/x.mp3",
+            beats: &old,
+            duration_ms: 4_100,
+            preview: &[128; 400],
+            bands: &vec![64; 4 * 82],
+            scroll: &[],
+            cues: &[],
+        };
+        let dat = root.join("PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT");
+        std::fs::create_dir_all(dat.parent().unwrap()).unwrap();
+        std::fs::write(&dat, crate::anlz::build_dat(&inp)).unwrap();
+        std::fs::write(dat.with_extension("EXT"), crate::anlz::build_ext(&inp)).unwrap();
+
+        write_stick_beatgrid(&root, id, &dat, &beats(133.37)).unwrap();
+
+        let after = read_export(&pdb).unwrap();
+        assert_eq!(after.tracks[&id].tempo_centi_bpm, 13337);
+        for (tid, t) in &before.tracks {
+            if *tid != id {
+                assert_eq!(&after.tracks[tid], t, "other rows must not change");
+            }
+        }
+        assert_eq!(after.playlists, before.playlists);
+        // Pristine copies exist, and the original grid reads back from them.
+        assert!(pdb.with_extension("pdb.orig").is_file());
+        assert!(dat.with_extension("DAT.orig").is_file());
+        assert!(dat.with_extension("EXT.orig").is_file());
+        assert_eq!(original_stick_beatgrid(&dat).unwrap(), old);
+        assert_eq!(crate::anlz::read_beatgrid(&dat)[0].bpm, 133.37);
+
+        // A second edit keeps the first backup.
+        write_stick_beatgrid(&root, id, &dat, &beats(140.0)).unwrap();
+        assert_eq!(original_stick_beatgrid(&dat).unwrap(), old);
+        assert_eq!(read_export(&pdb).unwrap().tracks[&id].tempo_centi_bpm, 14000);
+
+        assert!(matches!(
+            write_stick_beatgrid(&root, 999_999, &dat, &beats(1.0)),
+            Err(ReadError::Format("no such track row"))
+        ));
+    }
+
+    #[test]
+    fn cue_edit_lands_in_both_files_and_backs_up_once() {
+        let root = temp_root("cues");
+        let inp = AnlzInput {
+            usb_path: "/Contents/x.mp3",
+            beats: &[],
+            duration_ms: 4_100,
+            preview: &[],
+            bands: &[],
+            scroll: &[],
+            cues: &[],
+        };
+        let dat = root.join("ANLZ0000.DAT");
+        std::fs::write(&dat, crate::anlz::build_dat(&inp)).unwrap();
+        std::fs::write(dat.with_extension("EXT"), crate::anlz::build_ext(&inp)).unwrap();
+        let pristine = std::fs::read(&dat).unwrap();
+        let cue = Cue {
+            hot_slot: Some(1),
+            position_ms: 2_000,
+            loop_end_ms: None,
+            label: Some("B".into()),
+            color: Some([1, 2, 3]),
+        };
+        write_stick_cues(&dat, std::slice::from_ref(&cue)).unwrap();
+        assert_eq!(crate::anlz::read_cues(&dat), vec![cue.clone()]);
+        assert_eq!(std::fs::read(dat.with_extension("DAT.orig")).unwrap(), pristine);
+        write_stick_cues(&dat, &[]).unwrap();
+        assert!(crate::anlz::read_cues(&dat).is_empty());
+        assert_eq!(std::fs::read(dat.with_extension("DAT.orig")).unwrap(), pristine);
+    }
 }

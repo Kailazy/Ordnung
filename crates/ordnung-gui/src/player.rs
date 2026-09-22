@@ -978,10 +978,11 @@ impl App {
         true
     }
 
-    /// Write the player's hand-adjusted grid to the catalog, and mirror its tempo
-    /// into the visible table row so the BPM column agrees with the lines on
-    /// screen. Called when an edit settles — a button click, or a drag release —
-    /// rather than every frame of a drag.
+    /// Write the player's hand-adjusted grid to the catalog — or, for a device
+    /// track, straight onto the stick — and mirror its tempo into the visible
+    /// table row so the BPM column agrees with the lines on screen. Called when
+    /// an edit settles — a button click, or a drag release — rather than every
+    /// frame of a drag.
     fn commit_grid_edit(&mut self) {
         let Some((id, g)) = self
             .now_playing
@@ -990,6 +991,10 @@ impl App {
         else {
             return;
         };
+        if id >= USB_ID_BASE {
+            self.write_usb_grid(id, g);
+            return;
+        }
         if let Ok(cat) = Catalog::open(&self.db_path) {
             let _ = cat.set_manual_beatgrid(
                 id,
@@ -1001,12 +1006,73 @@ impl App {
         self.set_row_bpm(id, g.bpm);
     }
 
+    /// Expand the lane's grid to every beat of the loaded device track and
+    /// write it onto the stick: its ANLZ beatgrid, and the tempo in the
+    /// stick's databases — exactly what rekordbox's device view does on a
+    /// grid nudge, so a CDJ sees the change the moment the stick is ejected.
+    fn write_usb_grid(&mut self, id: Id, g: PlayerGrid) {
+        let (Some(i), Some(vol)) = (usb_track_index(id), self.usb_loaded_for.clone()) else {
+            return;
+        };
+        let (Some(dat), Some(pdb_id)) = (
+            self.usb_anlz_dat(id),
+            self.usb_pdb_info.get(&i).and_then(|p| p.pdb_id),
+        ) else {
+            return;
+        };
+        let duration_ms = self
+            .usb_tracks
+            .get(i)
+            .map(|t| t.properties.duration_ms)
+            .filter(|d| *d > 0)
+            .or_else(|| {
+                ordnung_rbdb::anlz::read_beatgrid(&dat)
+                    .last()
+                    .map(|b| b.position_ms)
+            })
+            .unwrap_or(0);
+        let anchor = ordnung_core::model::Beatgrid {
+            beats: vec![ordnung_core::model::Beat {
+                number: anchor_beat_number(g.downbeat_phase),
+                position_ms: g.first_beat_ms.max(0.0).round() as u64,
+                bpm: g.bpm,
+            }],
+        };
+        let beats = anchor.expand_to(duration_ms);
+        match ordnung_rbdb::edit::write_stick_beatgrid(&vol, pdb_id, &dat, &beats) {
+            Ok(()) => self.set_row_bpm(id, g.bpm),
+            Err(e) => self.status = format!("Couldn't write the grid to the stick: {e}"),
+        }
+    }
+
     /// Throw away a hand-adjusted grid and go back to the detected one, re-reading
-    /// it from the catalog so the lane shows exactly what was restored.
+    /// it from the catalog so the lane shows exactly what was restored. For a
+    /// device track the "detected" grid is what the stick carried before
+    /// Ordnung's first edit, kept beside the ANLZ file as `.orig`.
     fn reset_player_grid(&mut self) {
         let Some(id) = self.now_playing.as_ref().map(|n| n.id) else {
             return;
         };
+        if id >= USB_ID_BASE {
+            let Some(orig) = self
+                .usb_anlz_dat(id)
+                .and_then(|dat| ordnung_rbdb::edit::original_stick_beatgrid(&dat))
+            else {
+                self.status = "This track's grid is as the stick came; nothing to go back to.".into();
+                return;
+            };
+            let b0 = orig[0];
+            let g = PlayerGrid {
+                bpm: b0.bpm,
+                first_beat_ms: b0.position_ms as f64,
+                downbeat_phase: (1 - b0.number as i64).rem_euclid(4) as u32,
+            };
+            if let Some(np) = self.now_playing.as_mut() {
+                np.grid = Some(g);
+            }
+            self.write_usb_grid(id, g);
+            return;
+        }
         let Ok(cat) = Catalog::open(&self.db_path) else {
             return;
         };
@@ -1029,6 +1095,11 @@ impl App {
         if let Some(r) = self.rows.iter_mut().find(|r| r.id == id) {
             r.bpm_val = Some(bpm);
             r.bpm = format!("{bpm:.2}");
+        }
+        // A device row is rebuilt from the stick's pdb summary on every
+        // reload, so keep that in step too.
+        if let Some(info) = usb_track_index(id).and_then(|i| self.usb_pdb_info.get_mut(&i)) {
+            info.bpm = Some(bpm);
         }
     }
 
@@ -1326,16 +1397,24 @@ fn draw_beatgrid(
 /// one anchor beat, so the phase is `1 - number` (mod 4). `None` for a track with
 /// no tempo — there's nothing to draw or adjust.
 impl App {
+    /// A device track's `ANLZ0000.DAT` on the mounted stick — `None` for
+    /// library rows and for sticks that carry no rekordbox analysis.
+    pub(crate) fn usb_anlz_dat(&self, id: Id) -> Option<PathBuf> {
+        if id < USB_ID_BASE {
+            return None;
+        }
+        self.usb_pdb_info
+            .get(&usb_track_index(id)?)?
+            .anlz_path
+            .clone()
+    }
+
     /// The playing device track's grid, straight off the stick's ANLZ
     /// beatgrid — `None` for library rows (their grid comes from the
     /// catalog) and for sticks that were never analyzed.
     fn usb_anlz_grid(&self, id: Id) -> Option<PlayerGrid> {
-        if id < USB_ID_BASE {
-            return None;
-        }
-        let i = (id - USB_ID_BASE) as usize;
-        let dat = self.usb_pdb_info.get(&i)?.anlz_path.as_ref()?;
-        let beats = ordnung_rbdb::anlz::read_beatgrid(dat);
+        let dat = self.usb_anlz_dat(id)?;
+        let beats = ordnung_rbdb::anlz::read_beatgrid(&dat);
         let b0 = beats.first()?;
         Some(PlayerGrid {
             bpm: b0.bpm,

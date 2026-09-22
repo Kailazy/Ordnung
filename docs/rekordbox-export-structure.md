@@ -514,6 +514,17 @@ exportLibrary.db `image.path` references `bN.jpg`. (377 ids referenced here.)
 - rekordbox also (re)writes `MYSETTING.DAT`, `MYSETTING2.DAT`,
   `DJMMYSETTING.DAT`, `DEVSETTING.DAT` on every export; Ordnung writes none.
   Players default their settings without them.
+- **In-place edits (v0.142.0):** a cue or grid change made on a device
+  track in Ordnung is written straight to the stick, like rekordbox's
+  device view. `anlz::write_cues` / `anlz::write_beatgrid` splice new
+  `PCOB`/`PCO2` (both files) or `PQTZ` (+ the `.EXT`'s `PQT2` reduced to the
+  header-only form, first/last beat filled) into the existing files — every
+  other section and the `PMAI` words stay byte-identical, verified against
+  the 2026-09-21 golden ANLZ. A grid change also patches the track row's
+  tempo (u32 @0x38, same row size, no page bookkeeping) and the DLP's
+  `content.bpmx100`. The update-counter strings (slots 2/3/4) are *not*
+  bumped: a string edit would resize the row. First edit keeps `*.orig`
+  copies of the `.DAT`, `.EXT` and both databases.
 
 ## 10. Hardware incident log
 

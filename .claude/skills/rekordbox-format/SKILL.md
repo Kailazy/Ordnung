@@ -61,7 +61,10 @@ Tagged section format ("PMAI" header, then `PXXX` tagged sections). Key sections
   both files; `PCPT` 0x38 fixed (hot_cue = pad+1, type 1 point / 2 loop,
   status 4 for loops, loop_time 0xFFFFFFFF unless loop); `PCP2` 0x58 + comment
   bytes (UTF-16BE, no terminator), colour code 0 + RGB, 40 zero tail bytes.
-  `anlz::read_cues` reads them back for tests and the GUI's device tracks.
+  `anlz::read_cues` reads them back for tests and the GUI's device tracks;
+  `anlz::write_cues` / `anlz::write_beatgrid` (via `edit::write_stick_cues`
+  / `edit::write_stick_beatgrid`) rewrite just those sections of a stick's
+  existing files in place, leaving rekordbox's waveforms byte-identical.
 - `PPTH` — file path; `PVBR` — VBR seek index for MP3.
 - `PWAV`/`PWV2` — waveform preview; `PWV3`/`PWV4`/`PWV5` — detailed/color waveforms.
 - `.DAT` = the classic set CDJs require; `.EXT` = extended (color waveforms, nxs2).
