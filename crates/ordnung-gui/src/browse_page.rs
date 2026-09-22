@@ -12,7 +12,9 @@
 //! same browses the dig's threads use), 100 rows a page, in the order Discogs
 //! returns them — catalog order for a label, by year for an artist. Non-record
 //! rows (CDs, files) are dropped; master rows with no format of their own are
-//! kept rather than mislabeled. One paced request per page.
+//! kept rather than mislabeled. A run with no records in it at all (a
+//! digital-only label) shows every format instead of an empty page. One paced
+//! request per page.
 
 use super::*;
 use ordnung_core::discogs::{BrowsePage, BrowseRelease, BrowseThread};
@@ -95,18 +97,39 @@ enum Act {
 /// your shelves when there is one, else the first listed. That keeps the row's
 /// id pointing at *your* copy, so the shelf marks and the sheet it opens
 /// agree with your collection instead of with whichever pressing came first.
+///
+/// A run with no records at all (a digital-only label, an artist who only
+/// ever released files) is still a run: rather than an empty page, every
+/// format is shown, each row's caption naming its format so nothing reads as
+/// a pressing that isn't one.
 fn crate_rows(
     page: &BrowsePage,
     owned: &HashSet<u64>,
     wanted: &HashSet<u64>,
 ) -> Vec<BrowseRelease> {
+    let rows = collapse_rows(
+        page.releases
+            .iter()
+            .filter(|r| !r.format_known || crate::dig::is_vinyl(&r.format)),
+        owned,
+        wanted,
+    );
+    if rows.is_empty() && !page.releases.is_empty() {
+        return collapse_rows(page.releases.iter(), owned, wanted);
+    }
+    rows
+}
+
+/// One row per work out of `releases`, the surviving pressing chosen by
+/// shelf rank (owned, then wanted, then first listed).
+fn collapse_rows<'a>(
+    releases: impl Iterator<Item = &'a BrowseRelease>,
+    owned: &HashSet<u64>,
+    wanted: &HashSet<u64>,
+) -> Vec<BrowseRelease> {
     let mut slot: HashMap<String, usize> = HashMap::new();
     let mut rows: Vec<BrowseRelease> = Vec::new();
-    for r in page
-        .releases
-        .iter()
-        .filter(|r| !r.format_known || crate::dig::is_vinyl(&r.format))
-    {
+    for r in releases {
         let (a, t) = crate::dig::row_artist_title(r);
         let key = crate::dig::work_key(&a, &t);
         let rank = |id: u64| -> u8 {
@@ -765,5 +788,39 @@ mod tests {
         // Nothing shelved: first listed stands, as before.
         let rows = crate_rows(&page, &HashSet::new(), &HashSet::new());
         assert_eq!(rows[0].release_id, 1);
+    }
+
+    /// The Duty Cycle case: a label whose whole run is digital. The vinyl
+    /// filter would leave the page blank, so every format is shown instead;
+    /// a page with any record on it still shows only the records.
+    #[test]
+    fn crate_rows_show_every_format_when_a_run_has_no_records() {
+        let digital = BrowsePage {
+            pages: 1,
+            items: 3,
+            releases: vec![
+                release(1, "Polyplay", "Resolve", "2xFile, MP3, EP, 320 kbps"),
+                release(2, "Polyplay", "Faceshift", "4xFile, WAV, EP"),
+                release(3, "Polyplay", "Resolve", "2xFile, MP3, EP, 320 kbps"),
+            ],
+        };
+        let rows = crate_rows(&digital, &HashSet::new(), &HashSet::new());
+        let ids: Vec<u64> = rows.iter().map(|r| r.release_id).collect();
+        assert_eq!(ids, vec![1, 2], "digital rows shown, still one per work");
+
+        let mixed = BrowsePage {
+            pages: 1,
+            items: 2,
+            releases: vec![
+                release(1, "Polyplay", "Resolve", "2xFile, MP3, EP"),
+                release(2, "Polyplay", "Faceshift", "12\", EP"),
+            ],
+        };
+        let rows = crate_rows(&mixed, &HashSet::new(), &HashSet::new());
+        let ids: Vec<u64> = rows.iter().map(|r| r.release_id).collect();
+        assert_eq!(ids, vec![2], "a run with a record on it keeps the vinyl filter");
+
+        let empty = BrowsePage { pages: 1, items: 0, releases: Vec::new() };
+        assert!(crate_rows(&empty, &HashSet::new(), &HashSet::new()).is_empty());
     }
 }
