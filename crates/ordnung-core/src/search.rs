@@ -449,6 +449,7 @@ mod tests {
                 title: "Frocks (P.Scott Mix)".into(),
                 duration: "6:12".into(),
                 artist: None,
+                credits: Vec::new(),
             }],
             videos: Vec::new(),
             credits: Vec::new(),

@@ -456,9 +456,48 @@ pub struct ReleaseTrack {
     /// is what actually re-fetches those.
     #[serde(default)]
     pub artist: Option<String>,
+    /// This track's own credits, in Discogs's order: the remixer on a
+    /// remix 12", a producer, a featured player. Release-level credits live
+    /// on [`ReleaseDetail::credits`] (which also rolls these up, deduped);
+    /// they stay here per track so the tracklist can say whose remix a
+    /// side is. `#[serde(default)]` for rows cached before the field
+    /// existed; [`crate::catalog::DETAIL_SCHEMA_VERSION`] re-fetches them.
+    #[serde(default)]
+    pub credits: Vec<ReleaseCredit>,
 }
 
 impl ReleaseTrack {
+    /// The credits that name a *version* of this track rather than a hand
+    /// in making it: remixers, reworkers, editors. What a DJ reads off a
+    /// tracklist ("the Villalobos remix"), as opposed to who mastered it.
+    /// Grouped by role in listing order, each as `"Roman Flügel Remix"`,
+    /// `"A, B Remix [Dub]"`. A credit whose name the title already carries
+    /// (`"Drifting (Roman Flügel Remix)"`) is left out: it would only
+    /// repeat the title.
+    pub fn version_credits(&self) -> Vec<String> {
+        let title = self.title.to_lowercase();
+        let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
+        for c in &self.credits {
+            let role = c.role.trim();
+            let name = c.name.trim();
+            if name.is_empty() || !is_version_role(role) || title.contains(&name.to_lowercase()) {
+                continue;
+            }
+            match groups.iter_mut().find(|(r, _)| r.eq_ignore_ascii_case(role)) {
+                Some((_, names)) => {
+                    if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                        names.push(name);
+                    }
+                }
+                None => groups.push((role.to_string(), vec![name])),
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(role, names)| format!("{} {}", names.join(", "), role))
+            .collect()
+    }
+
     /// Which song this position is: its own credit when it has one, else
     /// the release's `artist`, on `release_id` at this position.
     pub fn song(&self, release_artist: &str, release_id: u64) -> crate::model::SongRef {
@@ -3572,6 +3611,7 @@ impl ReleaseResponse {
                     title: t.title,
                     duration: t.duration,
                     artist: join_credits(&t.artists),
+                    credits: track_credits(&t.extraartists),
                 })
                 .collect(),
             videos: self
@@ -3628,6 +3668,45 @@ fn join_credits(artists: &[ReleaseArtist]) -> Option<String> {
         .trim()
         .to_string();
     (!out.is_empty()).then_some(out)
+}
+
+/// Whether a credit role names a version of the track (a remix, a rework,
+/// an edit) rather than a job on it. Discogs writes the role with an
+/// optional bracketed qualifier — `Remix [Dub Version]` — which is kept on
+/// display but ignored here. "Mixed By" and "Edited By" are engineering
+/// credits and stay out.
+/// A track's own credits, as listed: one per person and role, nobody
+/// nameless. Unlike the release roll-up, the record's own artists stay in —
+/// an artist remixing their own track is still that track's remixer.
+fn track_credits(entries: &[CreditEntry]) -> Vec<ReleaseCredit> {
+    let mut out: Vec<ReleaseCredit> = Vec::new();
+    for c in entries {
+        let role = c.role.trim();
+        let name = c.name.trim();
+        if name.is_empty() || role.is_empty() {
+            continue;
+        }
+        if out
+            .iter()
+            .any(|o| o.artist_id == c.id && o.name == name && o.role.eq_ignore_ascii_case(role))
+        {
+            continue;
+        }
+        out.push(ReleaseCredit {
+            artist_id: c.id,
+            name: strip_discogs_number(name),
+            role: role.to_string(),
+        });
+    }
+    out
+}
+
+fn is_version_role(role: &str) -> bool {
+    let base = role.split('[').next().unwrap_or("").trim().to_lowercase();
+    matches!(
+        base.as_str(),
+        "remix" | "remixed by" | "rework" | "reworked by" | "re-edit" | "edit" | "version" | "dub"
+    )
 }
 
 fn none_if_empty(s: String) -> Option<String> {
@@ -3970,6 +4049,7 @@ mod tests {
             title: title.into(),
             duration: "5:00".into(),
             artist: None,
+            credits: Vec::new(),
         }
     }
 
@@ -4137,6 +4217,60 @@ mod tests {
                 (700, "Dubplates & Mastering", "Mastered At"),
             ]
         );
+        // Each track keeps its own credits, in listing order, so the sheet
+        // can say whose remix a side is; the engineer credit is kept on the
+        // track but is no version of it.
+        let per_track: Vec<Vec<(u64, &str, &str)>> = detail
+            .tracklist
+            .iter()
+            .map(|t| {
+                t.credits
+                    .iter()
+                    .map(|c| (c.artist_id, c.name.as_str(), c.role.as_str()))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            per_track,
+            vec![
+                vec![(30, "Maurizio", "Remix")],
+                vec![(30, "Maurizio", "remix"), (20, "Mark Ernestus", "Mixed By")],
+            ]
+        );
+        assert_eq!(detail.tracklist[0].version_credits(), vec!["Maurizio Remix"]);
+        assert_eq!(detail.tracklist[1].version_credits(), vec!["Maurizio remix"]);
+    }
+
+    /// The version line groups names under one role, keeps Discogs's
+    /// bracketed qualifier, skips a name the title already carries, and
+    /// leaves job credits (producer, mastering) out.
+    #[test]
+    fn version_credits_name_remixers_and_nothing_else() {
+        let credit = |id: u64, name: &str, role: &str| ReleaseCredit {
+            artist_id: id,
+            name: name.into(),
+            role: role.into(),
+        };
+        let t = ReleaseTrack {
+            credits: vec![
+                credit(1, "Roman Flügel", "Remix"),
+                credit(2, "Ricardo Villalobos", "Remix"),
+                credit(3, "Rashad Becker", "Mastered By"),
+                credit(4, "Theo Parrish", "Rework [Ugly Edit]"),
+                credit(5, "Someone", "Producer"),
+            ],
+            ..track("A1", "Drifting")
+        };
+        assert_eq!(
+            t.version_credits(),
+            vec!["Roman Flügel, Ricardo Villalobos Remix", "Theo Parrish Rework [Ugly Edit]"]
+        );
+        let t = ReleaseTrack {
+            credits: vec![credit(1, "Roman Flügel", "Remix")],
+            ..track("A1", "Drifting (Roman Flügel Remix)")
+        };
+        assert!(t.version_credits().is_empty(), "title already names the remixer");
+        assert!(track("B1", "Plain").version_credits().is_empty());
     }
 
     /// Artist and label pages decode to just their kin; a member with no

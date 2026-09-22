@@ -76,6 +76,11 @@ pub(crate) struct SheetRow {
     /// `None` on a single-artist album, where repeating the release's own
     /// artist on every row would be noise rather than information.
     pub artist: Option<String>,
+    /// Whose version this is, when the track credits one: "Roman Flügel
+    /// Remix", "Theo Parrish Rework". Discogs lists remixers as a credit
+    /// under the title rather than in it, so without this a remix 12" reads
+    /// as the same song twice. Empty on the ordinary track.
+    pub versions: Vec<String>,
     pub source: SheetSource,
     /// A video for a row whose primary source is a local file, so the sheet can
     /// still offer "watch it" alongside "play my copy".
@@ -770,6 +775,7 @@ impl App {
                                     !a.is_empty() && !a.eq_ignore_ascii_case(release_artist)
                                 })
                                 .map(str::to_string),
+                            versions: t.version_credits(),
                             // Your own file wins: it's lossless, analyzed, and
                             // plays in the real player bar.
                             source: match (file, video) {
@@ -2403,6 +2409,16 @@ fn sheet_row_ui(
                 if let Some(artist) = &row.artist {
                     ui.label(
                         egui::RichText::new(artist)
+                            .small()
+                            .color(egui::Color32::from_gray(if playable { 150 } else { 105 })),
+                    );
+                }
+                // Whose version: the remixer Discogs credits under the title.
+                // Same weight as the performer credit, so "Drifting  Roman
+                // Flügel Remix" reads as one name for the cut.
+                for version in &row.versions {
+                    ui.label(
+                        egui::RichText::new(version)
                             .small()
                             .color(egui::Color32::from_gray(if playable { 150 } else { 105 })),
                     );
