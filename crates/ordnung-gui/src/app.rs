@@ -3547,35 +3547,15 @@ impl App {
                     native_drag = self.draw_usb(ui, &vol);
                 } else if self.rows.is_empty()
                     && self.load_error.is_none()
-                    && (!self.filter.trim().is_empty()
-                        || self.col_filters.values().any(|v| !v.trim().is_empty()))
+                    && self.filter.trim().is_empty()
+                    && self.col_filters.values().all(|v| v.trim().is_empty())
                 {
-                    // A filter — the global search or a per-column header filter —
-                    // hid every row. The per-column filter UI lives in the table
-                    // header, which isn't drawn when there are no rows, so without an
-                    // escape hatch here the user is trapped: they can't reach a header
-                    // to clear the filter, and the "catalog is empty" screen below
-                    // would wrongly imply their library is gone. Offer a one-click
-                    // clear of every active filter.
-                    self.draw_table_filter_bar(ui);
-                    ui.centered_and_justified(|ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.heading("No tracks match the active filter");
-                            ui.add_space(6.0);
-                            ui.label("Clear the filter to see your full catalog again.");
-                            ui.add_space(14.0);
-                            if ui
-                                .add(egui::Button::new(
-                                    egui::RichText::new("  Clear filters  ")
-                                        .font(crate::ui::tokens::font::headline()),
-                                ))
-                                .clicked()
-                            {
-                                self.clear_all_filters();
-                            }
-                        });
-                    });
-                } else if self.rows.is_empty() && self.load_error.is_none() {
+                    // Nothing to show and no filter hiding anything: the view
+                    // really is empty, so explain how to fill it. A filter that
+                    // hides every row is not this case — it falls through to the
+                    // table below, which keeps its header (and the per-column
+                    // filter popups) up over an empty body, the way a table with
+                    // no matches should look.
                     let in_playlist = matches!(self.view, LibraryView::Playlist(_));
                     let is_recent = self.view == LibraryView::RecentlyAdded;
                     ui.centered_and_justified(|ui| {
