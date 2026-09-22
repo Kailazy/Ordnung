@@ -263,8 +263,26 @@ fn sanitize_fat(name: &str) -> String {
     }
 }
 
-/// Today as `YYYY-MM-DD` (UTC) without pulling in a date crate.
+/// Today as `YYYY-MM-DD` in local time (rekordbox stamps its export with the
+/// local date; a UTC date lands on "tomorrow" for an evening export in the
+/// Americas). Falls back to UTC arithmetic where local time isn't available.
 fn today() -> String {
+    #[cfg(unix)]
+    {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as libc::time_t)
+            .unwrap_or(0);
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        if !unsafe { libc::localtime_r(&now, &mut tm) }.is_null() {
+            return format!(
+                "{:04}-{:02}-{:02}",
+                tm.tm_year + 1900,
+                tm.tm_mon + 1,
+                tm.tm_mday
+            );
+        }
+    }
     let days = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() / 86_400)
@@ -783,7 +801,10 @@ fn export_impl(
             master_content_id: master_content_id(id),
             artwork_id,
             key_id,
-            label_id: labels.get(t.tags.label.as_deref()),
+            // rekordbox's "Label" column is the publisher tag (ID3 TPUB); the
+            // catalog keeps a separate label field, so fall back to publisher
+            // or most tracks lose their label on the player.
+            label_id: labels.get(t.tags.label.as_deref().or(t.tags.publisher.as_deref())),
             bitrate_kbps: match out_rate {
                 Some(rate) => rate * 32 / 1000, // 16-bit stereo PCM
                 None => props.and_then(|p| p.bitrate_kbps).unwrap_or(0),

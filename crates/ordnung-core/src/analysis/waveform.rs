@@ -280,8 +280,8 @@ fn preview(samples: &[f32]) -> Vec<u8> {
     out
 }
 
-/// Bytes per column in [`scroll_bands`]: `[low, mid, high, amp]`.
-pub const SCROLL_STRIDE: usize = 4;
+/// Bytes per column in [`scroll_bands`]: `[low, mid, high, amp, peak, rms]`.
+pub const SCROLL_STRIDE: usize = 6;
 /// Column rate of [`scroll_bands`] — rekordbox's detailed-waveform rate.
 pub const SCROLL_COLS_PER_SEC: u32 = 150;
 
@@ -348,8 +348,8 @@ const SCROLL_SMOOTH: usize = 2;
 /// rekordbox PWV7 percentiles for the same audio (see `scrollstats` example).
 const SCROLL_GAIN: [f32; 3] = [1.4, 2.2, 0.75];
 
-/// Rekordbox-style detailed 3-band waveform: `[low, mid, high, amp]` per
-/// column at [`SCROLL_COLS_PER_SEC`]. `low`/`mid`/`high` are windowed RMS
+/// Rekordbox-style detailed 3-band waveform: `[low, mid, high, amp, peak,
+/// rms]` per column at [`SCROLL_COLS_PER_SEC`]. `low`/`mid`/`high` are windowed RMS
 /// amplitudes of the band-filtered signal (split at 200 Hz / 2 kHz — low sits
 /// a little wider than [`color_bands`]' 120 Hz so the blue band carries the
 /// kick's punch), smoothed over ±[`SCROLL_SMOOTH`] columns, 0–127 like
@@ -358,12 +358,17 @@ const SCROLL_GAIN: [f32; 3] = [1.4, 2.2, 0.75];
 /// then trimmed per band by [`SCROLL_GAIN`] — matching golden rekordbox
 /// exports' per-band percentile profile, so a kick pulses per beat and
 /// breakdowns dip without the columns collapsing to zero between beats.
+/// `peak` and `rms` are the column's *absolute* (un-normalized) sample peak
+/// and RMS, 0–255 for 0–1.0 full scale: rekordbox's monochrome overview
+/// heights are a fixed function of absolute level, not of the track's own
+/// maximum, so the writer needs the real numbers.
 /// Time-domain single pass; meant for export, where the audio is already
 /// being read anyway.
 pub fn scroll_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let sr = sample_rate.max(1) as u64;
     let cols = ((samples.len() as u64 * SCROLL_COLS_PER_SEC as u64) / sr).max(1) as usize;
     let mut ssq = vec![[0.0f64; 3]; cols];
+    let mut ssq_full = vec![0.0f64; cols];
     let mut cnt = vec![0u32; cols];
     let mut amp_peak = vec![0.0f32; cols];
     let mut lp = Biquad::lowpass(200.0, sample_rate);
@@ -376,6 +381,7 @@ pub fn scroll_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
         for (k, v) in vals.iter().enumerate() {
             ssq[col][k] += f64::from(v * v);
         }
+        ssq_full[col] += f64::from(s * s);
         cnt[col] += 1;
         amp_peak[col] = amp_peak[col].max(s.abs());
     }
@@ -400,11 +406,14 @@ pub fn scroll_bands(samples: &[f32], sample_rate: u32) -> Vec<u8> {
         .max(1e-6);
     let peak_max = amp_peak.iter().copied().fold(0.0f32, f32::max).max(1e-6);
     let mut out = Vec::with_capacity(cols * SCROLL_STRIDE);
-    for (c, &ap) in smooth.iter().zip(&amp_peak) {
+    let to_byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    for (i, (c, &ap)) in smooth.iter().zip(&amp_peak).enumerate() {
         for k in 0..3 {
             out.push(((c[k] / band_max) * SCROLL_GAIN[k] * 127.0).round().min(127.0) as u8);
         }
-        out.push(((ap / peak_max) * 255.0).round().min(255.0) as u8);
+        out.push(to_byte(ap / peak_max));
+        out.push(to_byte(ap));
+        out.push(to_byte((ssq_full[i] / f64::from(cnt[i].max(1))).sqrt() as f32));
     }
     out
 }
@@ -446,6 +455,9 @@ mod tests {
             }
             // The unfiltered amp channel tracks the signal at full scale.
             assert!(mean(3) > 200, "amp channel too small: {}", mean(3));
+            // Absolute peak of a 0.8 sine is ~204; its RMS 0.8/√2 → ~144.
+            assert!((195..=210).contains(&mean(4)), "abs peak off: {}", mean(4));
+            assert!((135..=150).contains(&mean(5)), "abs rms off: {}", mean(5));
         }
     }
 

@@ -53,7 +53,7 @@ All integers little-endian. Page size 4096.
 | 0x04 | u32  | 4096      | len_page |
 | 0x08 | u32  | 20        | num_tables |
 | 0x0c | u32  | 136       | next_unused_page (== file length / 4096 + 1 slack) |
-| 0x10 | u32  | 5         | unknown, constant 5 |
+| 0x10 | u32  | 5         | unknown; 5 in this export, **4** in a rekordbox 7 export of 2026-09-21 (same machine) — not a fixed constant, players accept both |
 | 0x14 | u32  | 2381      | sequence (global transaction counter; every data page's own tx id is ≤ this) |
 | 0x18 | u32  | 0         | gap |
 | 0x1c | 20 × 16B | —     | table directory |
@@ -70,6 +70,19 @@ Table types: 0 tracks, 1 genres, 2 artists, 3 albums, 4 labels, 5 keys,
 history_playlists (empty), 12 history_entries (empty), 13 artwork, 14/15
 unknown (empty), 16 menu columns, 17 browse categories, 18 sort menu,
 19 export summary (DS calls it "history"; see §2.7).
+
+#### Index (sentinel) page body — resolved 2026-09-21
+
+The body after the 0x28 header is a list of **pages holding deleted or
+rewritten rows** (flags 0x34), i.e. garbage-collection candidates:
+`u16 0x03ec @0x24, u16 num_slots @0x26, u32 self @0x28, u32 first_data @0x2c,
+u32 0x03ffffff @0x30, u32 0 @0x34, u16 num_entries @0x38, u16 first_empty_slot
+@0x3a`, then u32 entries = `8 × page_index` of each 0x34 page, empty slots
+`0x1FFFFFF8`. Verified on a 94-track rekordbox 7 export: tracks index listed
+exactly its seven 0x34 pages (52,57,58,61,62,63,64 → 416…512), table 19's
+index listed its one 0x34 page (40 → 0x140). A one-shot export has no
+deletes, so the empty form Ordnung writes (0 entries, all `0x1FFFFFF8`) is
+what rekordbox writes for a fresh table too.
 
 ### 2.2 Page header (0x28 bytes)
 
@@ -356,9 +369,24 @@ u32 file_size, u32 0x190 (=400), u32 0x14 (=20)`, then 400 × 20-byte entries.
 per-beat, so dynamic grids just vary it), u32 time_ms`. First beat ≈ first
 downbeat anchor; beats cover the whole file.
 
-**PWAV / PWV2** (0x14): `u32 len (400 / 100), u32 0x00010000`, then len
-bytes: `bits 0–4 height (0–31), bits 5–7 "whiteness"`. PWAV is the 400-column
-preview, PWV2 the 100-column tiny one (CDJ-900 screen).
+**PWAV** (0x14): `u32 len 400, u32 0x00010000`, then 400 bytes: `bits 0–4
+height (0–31), bits 5–7 "whiteness"`. Height is a fixed function of the
+column's **absolute RMS**, not of the track's own peak: fitted on five tracks
+of the 2026-09-21 rekordbox 7 export against the decoded audio, linear RMS
+beat sqrt/dB/peak laws (mean error 3 px). The gain depends on the mono
+downmix: `41 × rms` on ffmpeg's `-ac 1` mix, `65 × rms` (full height at RMS
+0.477) on Ordnung's `decode_mono`, calibrated to equal mean height over 86
+matched tracks. A mastered techno track averages 18–21, a quiet MP3 8.
+Peak-based heights come out ~1.7× too tall and pin every loud track to a
+flat block.
+
+**PWV2** (0x14): `u32 len 100, u32 0x00010000`, then 100 bytes whose **four
+low bits** are the height (0–15) and whose **high nibble is always zero** —
+no whiteness bits (DS documents this; every golden byte is 1–15). It is the
+tiny list waveform of the CDJ-900 generation. The curve is dB-shaped (14–15
+on mastered material, 1–4 in breakdowns); `15 × (1 + dBFS/48)` fits within
+2 px. Ordnung wrote PWAV-style `whiteness<<5 | 5-bit height` here until
+v0.141.0 — bytes up to 190 where the spec allows 15.
 
 **PCOB** (0x18) — cue list, classic: `u32 type (1 = hot cues, 0 = memory —
 hot list comes FIRST in both files), u16 0, u16 count, u32 0xFFFFFFFF
@@ -389,6 +417,12 @@ form: first/last beat filled, count 0.
 **PWV3** (0x18): `u32 1 (entry bytes), u32 num_entries, u32 0x00960000`,
 then 1 byte/column, **150 columns/second** (0x96; num = ceil(duration×150)),
 same 5-bit height + 3-bit whiteness packing. The big scrolling waveform.
+
+**PWV3** heights (bits 0–4) are `31 × (column peak / track peak)²` — the
+squared per-column peak normalized to the track's loudest column (fitted on
+three golden tracks to 0.9 px mean error; 31 exactly on the loudest kick,
+track mean ≈7 on techno, ≈2.5 on a quiet MP3). The linear normalized peak is
+~2× too tall; RMS laws fit worse.
 
 **PWV5** (0x18): `u32 2, u32 num (same 150/s), u32 0x00960305`, then u16be
 per column: bits 15–13 red, 12–10 green, 9–7 blue, 6–2 height, 1–0 zero
@@ -450,6 +484,7 @@ exportLibrary.db `image.path` references `bN.jpg`. (377 ids referenced here.)
 
 ## 8. Open questions
 
+0. ~~Index-page body semantics~~ — resolved, see §2.1: list of 0x34 pages.
 1. PQT2 per-beat u16 payload semantics (empty form is a valid write).
 2. PWV4 6-byte column internals; PWVC field meanings.
 3. Track-row constants 0x2FDB @0x18 / 0x8F45 @0x1a (same in every row —
@@ -471,3 +506,27 @@ exportLibrary.db `image.path` references `bN.jpg`. (377 ids referenced here.)
   orders of §5; empty PCOB/PCO2/PQT2 forms are valid; PPTH/paths UTF-16BE.
 - Artwork: write a/b file pairs + _m thumbnails, 20 ids per dir.
 - FAT32 + MBR; `/Contents` and `/PIONEER` casing as in §1.
+- rekordbox 7 lays audio out as `/Contents/<Artist>/<Album>/<file>` and
+  **truncates the file stem to 43 characters** (keeping the extension);
+  Ordnung's flat `/Contents/<file>` with full names is accepted by players
+  but is a visible difference. Its "Label" column is the **publisher** tag
+  (ID3 TPUB) — Ordnung falls back to it since v0.141.1.
+- rekordbox also (re)writes `MYSETTING.DAT`, `MYSETTING2.DAT`,
+  `DJMMYSETTING.DAT`, `DEVSETTING.DAT` on every export; Ordnung writes none.
+  Players default their settings without them.
+
+## 10. Hardware incident log
+
+- **2026-09-21, CDJ-2000 (original):** an Ordnung export of the Stop126
+  playlist (93 tracks, v0.141.0, set-up-device + merge) mounted, showed an
+  **empty browse list and froze the player**; rekordbox 7's export of the
+  same files to the same stick worked. The Ordnung payload was overwritten
+  before it could be saved; a regenerated export was diffed byte-for-byte
+  against the rekordbox one (carbon copy at
+  `~/Desktop/EYEBAGS-rekordbox-stop126-2026-09-21/`). export.pdb: table
+  layout, sentinel bodies, row fields, string forms, tables 16–18 identical;
+  only ids/dates/counters, header 0x10 (5 vs 4) and interned content
+  differ. ANLZ: identical section layout; the one **spec violation was
+  PWV2** (bytes up to 190 in a 4-bit field), plus PWAV/PWV3 heights ~2× too
+  tall. Fixed in v0.141.1; whether PWV2 was the freeze is unverified until
+  the next CDJ-2000 test.

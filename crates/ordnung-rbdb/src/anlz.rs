@@ -24,15 +24,18 @@ pub(crate) struct AnlzInput<'a> {
     pub preview: &'a [u8],
     /// `[low, mid, high, loudness]` quads at 20 bins/sec (may be empty).
     pub bands: &'a [u8],
-    /// Rekordbox-style detail columns `[low, mid, high, amp]` at 150 col/s
-    /// (`waveform::scroll_bands`) — linear per-column band peaks, exactly
-    /// what the detailed waveforms should carry. Empty when the audio wasn't
-    /// decodable at export time; the coarse cached data above fills in.
+    /// Rekordbox-style detail columns `[low, mid, high, amp, peak, rms]` at
+    /// 150 col/s (`waveform::scroll_bands`) — linear per-column band levels
+    /// plus the absolute sample peak and RMS, exactly what the detailed and
+    /// overview waveforms should carry. Empty when the audio wasn't decodable
+    /// at export time; the coarse cached data above fills in.
     pub scroll: &'a [u8],
     /// Hot and memory cues. Any order; the writer sorts pads by slot and
     /// memory cues by time, the way rekordbox lists them.
     pub cues: &'a [Cue],
 }
+
+use ordnung_core::analysis::waveform::SCROLL_STRIDE;
 
 const BANDS_PER_SEC: f64 = 20.0;
 /// Detailed-waveform rate rekordbox uses everywhere (0x96 = 150 columns/sec).
@@ -257,7 +260,9 @@ fn parse_pco2_lists(data: &[u8]) -> Vec<Cue> {
 pub fn read_waveforms(dat_path: &std::path::Path) -> Option<AnlzWaveforms> {
     let dat = std::fs::read(dat_path).ok()?;
     // PWAV body: u32 len, u32 0x00010000, then len bytes of
-    // 5-bit height | 3-bit whiteness columns.
+    // 5-bit height | 3-bit whiteness columns. Heights are rekordbox's
+    // RMS-based overview (31 ≈ −7.6 dBFS), so a mastered track reads back
+    // around 168/255 rather than pinned at full scale.
     let body = find_section(&dat, b"PWAV")?;
     let n = u32::from_be_bytes(body.get(0..4)?.try_into().ok()?) as usize;
     let cols = body.get(8..8 + n)?;
@@ -495,10 +500,69 @@ fn whiteness(b: &[u8; 4]) -> u8 {
     (((mid / 2 + high) * 8) / total).min(7) as u8
 }
 
-/// Monochrome preview column: 3-bit whiteness | 5-bit height.
-fn mono_col(inp: &AnlzInput, frac: f64) -> u8 {
-    let h = amp_at(inp.preview, frac) >> 3; // 0..31
-    let b = band_at(inp.bands, frac * inp.duration_ms as f64);
+/// Absolute RMS (0–1.0 full scale) over the stretch `[f0, f1)` of the track,
+/// power-averaged from the export-time scroll columns. `None` without them.
+fn scroll_rms(inp: &AnlzInput, f0: f64, f1: f64) -> Option<f32> {
+    let cols = inp.scroll.len() / SCROLL_STRIDE;
+    if cols == 0 {
+        return None;
+    }
+    let a = ((f0 * cols as f64) as usize).min(cols - 1);
+    let b = ((f1 * cols as f64).ceil() as usize).clamp(a + 1, cols);
+    let sum: f64 = (a..b)
+        .map(|i| {
+            let r = f64::from(inp.scroll[i * SCROLL_STRIDE + 5]) / 255.0;
+            r * r
+        })
+        .sum();
+    Some((sum / (b - a) as f64).sqrt() as f32)
+}
+
+/// The absolute RMS (on `decode_mono`'s mono mix) that draws a monochrome
+/// column at full height — rekordbox's overview heights are linear in
+/// absolute RMS, not in the track's own peak. Calibrated so the mean height
+/// over 86 tracks matches rekordbox 7's PWAV for the same audio (peak-based
+/// heights came out ~1.7× too tall and pinned every mastered track to a flat
+/// block).
+const FULL_SCALE_RMS: f32 = 0.477;
+
+/// Column level 0–1.0+ on rekordbox's scale (1.0 = full height).
+fn level(rms: f32) -> f32 {
+    rms / FULL_SCALE_RMS
+}
+
+/// rekordbox's overview (`PWAV`) and scrolling (`PWV3`) column height:
+/// linear in absolute RMS, clamped at 31.
+fn mono_height(rms: f32) -> u8 {
+    (level(rms) * 31.0).round().clamp(0.0, 31.0) as u8
+}
+
+/// The tiny preview's (`PWV2`) 4-bit height: dB-shaped, 15 at full level,
+/// 0 at −48 dB and below. The golden files sit at 14–15 for a mastered
+/// track and dip to 1–4 in breakdowns; a linear map can't do both.
+fn pwv2_height(rms: f32) -> u8 {
+    let lv = level(rms);
+    if lv <= 0.0 {
+        return 0;
+    }
+    let db = 20.0 * lv.log10();
+    (15.0 * (1.0 + db / 48.0)).round().clamp(0.0, 15.0) as u8
+}
+
+/// Fallback overview height from the cached 0–255 peak preview when the
+/// audio couldn't be decoded at export time: half the peak, which is where
+/// rekordbox's RMS-based heights land for typical material.
+fn fallback_height(inp: &AnlzInput, frac: f64) -> u8 {
+    amp_at(inp.preview, frac) >> 4 // 0..15 of 31
+}
+
+/// Monochrome overview column: 3-bit whiteness | 5-bit height.
+fn mono_col(inp: &AnlzInput, f0: f64, f1: f64) -> u8 {
+    let h = match scroll_rms(inp, f0, f1) {
+        Some(rms) => mono_height(rms),
+        None => fallback_height(inp, f0),
+    };
+    let b = band_at(inp.bands, f0 * inp.duration_ms as f64);
     (whiteness(&b) << 5) | h
 }
 
@@ -507,17 +571,26 @@ fn pwav(inp: &AnlzInput) -> Vec<u8> {
     body.extend_from_slice(&be32(400));
     body.extend_from_slice(&be32(0x0001_0000));
     for i in 0..400 {
-        body.push(mono_col(inp, i as f64 / 400.0));
+        body.push(mono_col(inp, i as f64 / 400.0, (i + 1) as f64 / 400.0));
     }
     section(b"PWAV", 0x14, &body)
 }
 
+/// Tiny preview (the CDJ-900-era list waveform): 100 columns whose **four**
+/// low bits are the height (0–15) and whose high nibble is always zero —
+/// unlike `PWAV`, no whiteness bits. Golden rekordbox files never set bits
+/// 4–7 here; a byte above 15 is out of spec for the firmware that draws it.
 fn pwv2(inp: &AnlzInput) -> Vec<u8> {
     let mut body = Vec::with_capacity(8 + 100);
     body.extend_from_slice(&be32(100));
     body.extend_from_slice(&be32(0x0001_0000));
     for i in 0..100 {
-        body.push(mono_col(inp, i as f64 / 100.0));
+        let (f0, f1) = (i as f64 / 100.0, (i + 1) as f64 / 100.0);
+        let h = match scroll_rms(inp, f0, f1) {
+            Some(rms) => pwv2_height(rms),
+            None => fallback_height(inp, f0),
+        };
+        body.push(h & 0x0F);
     }
     section(b"PWV2", 0x14, &body)
 }
@@ -526,7 +599,11 @@ fn scroll_cols(duration_ms: u64) -> u32 {
     ((duration_ms as u64 * SCROLL_PER_SEC as u64) / 1000).max(1) as u32
 }
 
-/// Big scrolling monochrome waveform: 1 byte/column at 150 col/s.
+/// Big scrolling monochrome waveform: 1 byte/column at 150 col/s. Height is
+/// the **square** of the column peak normalized to the track's loudest
+/// column, × 31: fitted on three golden tracks to under 1 px mean error
+/// (31 exactly on the loudest kick, ~7 average on techno, ~2.5 on a quiet
+/// MP3). The linear peak the writer used before came out twice as tall.
 fn pwv3(inp: &AnlzInput) -> Vec<u8> {
     let n = scroll_cols(inp.duration_ms);
     let mut body = Vec::with_capacity(12 + n as usize);
@@ -536,8 +613,11 @@ fn pwv3(inp: &AnlzInput) -> Vec<u8> {
     for i in 0..n {
         let frac = i as f64 / n as f64;
         body.push(match scroll_col(inp, frac) {
-            Some([l, m, h, amp]) => (whiteness(&[l, m, h, 0]) << 5) | (amp >> 3),
-            None => mono_col(inp, frac),
+            Some([l, m, h, amp, ..]) => {
+                let r = amp as f32 / 255.0;
+                (whiteness(&[l, m, h, 0]) << 5) | (r * r * 31.0).round().min(31.0) as u8
+            }
+            None => mono_col(inp, frac, (i + 1) as f64 / n as f64),
         });
     }
     section(b"PWV3", 0x18, &body)
@@ -553,7 +633,7 @@ fn pwv5(inp: &AnlzInput) -> Vec<u8> {
     body.extend_from_slice(&be32(0x0096_0305));
     for i in 0..n {
         let frac = i as f64 / n as f64;
-        let (low, mid, high, h) = if let Some([l, m, hb, amp]) = scroll_col(inp, frac) {
+        let (low, mid, high, h) = if let Some([l, m, hb, amp, ..]) = scroll_col(inp, frac) {
             ((l >> 4) as u16, (m >> 4) as u16, (hb >> 4) as u16, (amp >> 3) as u16)
         } else {
             let b = band_at(inp.bands, frac * inp.duration_ms as f64);
@@ -609,15 +689,15 @@ fn pwv4(inp: &AnlzInput) -> Vec<u8> {
     section(b"PWV4", 0x18, &body)
 }
 
-/// The scroll column `[low, mid, high, amp]` at a fraction of the track,
-/// when export-time audio decoding produced one.
-fn scroll_col(inp: &AnlzInput, frac: f64) -> Option<[u8; 4]> {
-    let cols = inp.scroll.len() / 4;
+/// The scroll column `[low, mid, high, amp, peak, rms]` at a fraction of the
+/// track, when export-time audio decoding produced one.
+fn scroll_col(inp: &AnlzInput, frac: f64) -> Option<[u8; SCROLL_STRIDE]> {
+    let cols = inp.scroll.len() / SCROLL_STRIDE;
     if cols == 0 {
         return None;
     }
     let i = ((frac * cols as f64) as usize).min(cols - 1);
-    Some(inp.scroll[i * 4..i * 4 + 4].try_into().unwrap())
+    Some(inp.scroll[i * SCROLL_STRIDE..(i + 1) * SCROLL_STRIDE].try_into().unwrap())
 }
 
 /// One 3-band column `[low, mid, high]`, 0–127 — the scale the golden PWV7
@@ -628,7 +708,7 @@ fn scroll_col(inp: &AnlzInput, frac: f64) -> Option<[u8; 4]> {
 /// with no band data at all, shape the amplitude preview so the waveform
 /// never comes out blank.
 fn band3_col(inp: &AnlzInput, frac: f64) -> [u8; 3] {
-    if let Some([l, m, h, _]) = scroll_col(inp, frac) {
+    if let Some([l, m, h, ..]) = scroll_col(inp, frac) {
         return [l, m, h];
     }
     let decompand = |v: u8| {
@@ -883,11 +963,13 @@ mod tests {
 
         let got = read_waveforms(&dat).expect("waveforms read back");
         assert_eq!(got.preview.len(), 400);
-        // PWAV keeps the top 5 bits of each amplitude (quantization error ≤7),
-        // and the writer's float resampling can land one source column over
-        // (±1 on this ramp) — so values agree to within 8.
+        // Without export-time audio the writer falls back to half the cached
+        // peak (rekordbox's RMS heights land there), keeping the top 4 bits;
+        // the reader scales 5-bit heights back by 8. So values come back at
+        // half scale, quantized to 16, with the writer's float resampling
+        // landing one source column over (±1 on this ramp) — within 16.
         for (a, b) in preview.iter().zip(&got.preview) {
-            assert!(a.abs_diff(*b) <= 8, "preview {a} vs {b}");
+            assert!((a / 2).abs_diff(*b) <= 16, "preview {a} vs {b}");
         }
         // Bands come back at the same 20 bins/sec rate the analyzer uses.
         assert_eq!(got.bands.len() % 4, 0);
