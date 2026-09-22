@@ -233,6 +233,66 @@ pub fn inline(ui: &mut egui::Ui, label: &str) -> egui::Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A name on a line of text that opens a page: the artist on a record
+/// sheet's header, the performer or remixer on one of its tracks. Set in
+/// the line's own type and ink, so the line still reads as a line, and
+/// marked as a link only under the pointer: the ink brightens, a rule runs
+/// under the name, the hand shows. For the page a name stands for; an
+/// action on the record itself goes on a button.
+pub fn name_link(
+    ui: &mut egui::Ui,
+    name: &str,
+    font: egui::FontId,
+    ink: egui::Color32,
+) -> egui::Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(name.to_owned(), font, egui::Color32::PLACEHOLDER);
+    let (rect, resp) = ui.allocate_exact_size(galley.size(), egui::Sense::click());
+    paint_name_link(ui, rect, &resp, galley, ink);
+    resp
+}
+
+/// [`name_link`] painted into a rect the caller laid out earlier, in a
+/// galley the caller made, interacting through `id`. For a name inside a
+/// row that is itself a hit target: register it after the row's own
+/// interact, so the name sits on top and takes the click, the way
+/// [`like_mark_at`] does.
+pub fn name_link_at(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    id: egui::Id,
+    galley: std::sync::Arc<egui::Galley>,
+    ink: egui::Color32,
+) -> egui::Response {
+    let resp = ui.interact(rect, id, egui::Sense::click());
+    paint_name_link(ui, rect, &resp, galley, ink);
+    resp
+}
+
+fn paint_name_link(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    resp: &egui::Response,
+    galley: std::sync::Arc<egui::Galley>,
+    ink: egui::Color32,
+) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let hot = resp.hovered() || resp.is_pointer_button_down_on();
+    let ink = if hot { ui.visuals().strong_text_color() } else { ink };
+    if hot {
+        ui.painter().hline(
+            rect.x_range(),
+            rect.bottom() - 1.0,
+            egui::Stroke::new(1.0, ink),
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    ui.painter().galley(rect.min, galley, ink);
+}
+
 /// A glyph that acts, sitting at the edge of a row: a square the row's
 /// height, the glyph in the weak label tone until the pointer is on it,
 /// then strong on the hover fill. For the one action a row keeps at hand

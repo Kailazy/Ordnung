@@ -335,6 +335,13 @@ pub struct ReleaseDetail {
     /// re-fetches those.
     #[serde(default)]
     pub artist_ids: Vec<u64>,
+    /// The same artists by name, in credit order, with the connector between
+    /// each pair — what the header of a record sheet draws, name by name, so
+    /// every name on it can open its artist page. `#[serde(default)]` for
+    /// rows cached before the field existed; the schema version re-fetches
+    /// those.
+    #[serde(default)]
+    pub artists: Vec<ArtistCredit>,
     /// Discogs label ids, in release order — the primary label first. Same
     /// reasoning as [`ReleaseDetail::artist_ids`]: "Dial" and "Dial Record" are
     /// different labels that a name match conflates.
@@ -403,6 +410,58 @@ pub struct ReleaseCompany {
     pub role: String,
 }
 
+/// One name in an artist credit, on the release or on a track: who, and the
+/// connector Discogs writes after them ("&", "Feat.", ","), so "A & B" and
+/// "A Feat. B" can be drawn name by name without losing their meaning. The
+/// id is what an artist page opens on; `0` when Discogs lists none.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ArtistCredit {
+    pub id: u64,
+    pub name: String,
+    /// The connector to the next name, trimmed; empty on the last one and on
+    /// every credit of a single-artist record.
+    pub join: String,
+}
+
+impl ArtistCredit {
+    /// Whether an artist page can be opened on this name: it has an id, and
+    /// it isn't "Various", whose page lists every compilation on Discogs.
+    pub fn browsable(&self) -> bool {
+        self.id > 0 && !self.name.eq_ignore_ascii_case("various")
+    }
+
+    /// The connector as it reads between this name and the next: a comma
+    /// hugs the name before it, a word or symbol stands with spaces round it.
+    /// Empty when there is no next name.
+    pub fn join_text(&self) -> String {
+        let join = self.join.trim();
+        if join.is_empty() {
+            String::new()
+        } else if join.chars().all(|c| matches!(c, ',' | ';')) {
+            format!("{join} ")
+        } else {
+            format!(" {join} ")
+        }
+    }
+}
+
+/// One version line of a track — "Roman Flügel, Ricardo Villalobos Remix":
+/// who made it, each with the id their artist page opens on, and the role.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VersionCredit {
+    pub names: Vec<NamedRef>,
+    /// The role as Discogs writes it, qualifier kept: `Remix [Dub Version]`.
+    pub role: String,
+}
+
+impl VersionCredit {
+    /// The line as text: `"A, B Remix"`.
+    pub fn text(&self) -> String {
+        let names: Vec<&str> = self.names.iter().map(|n| n.name.as_str()).collect();
+        format!("{} {}", names.join(", "), self.role)
+    }
+}
+
 /// Another Discogs entity named by an artist or label page: an alias, a
 /// group, a member, a parent label, a sublabel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -456,6 +515,12 @@ pub struct ReleaseTrack {
     /// is what actually re-fetches those.
     #[serde(default)]
     pub artist: Option<String>,
+    /// The same credit name by name, each with its Discogs id, so a
+    /// compilation's per-track performer can open their artist page. Empty
+    /// where `artist` is `None`. `#[serde(default)]` for rows cached before
+    /// the field existed; the schema version re-fetches those.
+    #[serde(default)]
+    pub artists: Vec<ArtistCredit>,
     /// This track's own credits, in Discogs's order: the remixer on a
     /// remix 12", a producer, a featured player. Release-level credits live
     /// on [`ReleaseDetail::credits`] (which also rolls these up, deduped);
@@ -475,27 +540,37 @@ impl ReleaseTrack {
     /// (`"Drifting (Roman Flügel Remix)"`) is left out: it would only
     /// repeat the title.
     pub fn version_credits(&self) -> Vec<String> {
+        self.version_credit_refs().iter().map(VersionCredit::text).collect()
+    }
+
+    /// [`Self::version_credits`] with the ids kept: each line's names carry
+    /// the artist id their page opens on (`0` when Discogs lists none).
+    pub fn version_credit_refs(&self) -> Vec<VersionCredit> {
         let title = self.title.to_lowercase();
-        let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
+        let mut groups: Vec<VersionCredit> = Vec::new();
         for c in &self.credits {
             let role = c.role.trim();
             let name = c.name.trim();
             if name.is_empty() || !is_version_role(role) || title.contains(&name.to_lowercase()) {
                 continue;
             }
-            match groups.iter_mut().find(|(r, _)| r.eq_ignore_ascii_case(role)) {
-                Some((_, names)) => {
-                    if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
-                        names.push(name);
+            let named = NamedRef {
+                id: c.artist_id,
+                name: name.to_string(),
+            };
+            match groups.iter_mut().find(|g| g.role.eq_ignore_ascii_case(role)) {
+                Some(g) => {
+                    if !g.names.iter().any(|n| n.name.eq_ignore_ascii_case(name)) {
+                        g.names.push(named);
                     }
                 }
-                None => groups.push((role.to_string(), vec![name])),
+                None => groups.push(VersionCredit {
+                    names: vec![named],
+                    role: role.to_string(),
+                }),
             }
         }
         groups
-            .into_iter()
-            .map(|(role, names)| format!("{} {}", names.join(", "), role))
-            .collect()
     }
 
     /// Which song this position is: its own credit when it has one, else
@@ -3597,6 +3672,7 @@ impl ReleaseResponse {
             label,
             catalog_number,
             artist_ids,
+            artists: artist_credits(&self.artists),
             label_ids,
             master_id: (self.master_id > 0).then_some(self.master_id),
             tracklist: self
@@ -3611,6 +3687,7 @@ impl ReleaseResponse {
                     title: t.title,
                     duration: t.duration,
                     artist: join_credits(&t.artists),
+                    artists: artist_credits(&t.artists),
                     credits: track_credits(&t.extraartists),
                 })
                 .collect(),
@@ -3627,6 +3704,22 @@ impl ReleaseResponse {
                 .collect(),
         }
     }
+}
+
+/// The credit name by name, as [`ArtistCredit`]s: the same names
+/// [`join_credits`] runs together, kept apart with their ids so each can be
+/// drawn as its own link. Nameless entries are dropped; the disambiguation
+/// number comes off the name as it does everywhere else.
+fn artist_credits(artists: &[ReleaseArtist]) -> Vec<ArtistCredit> {
+    artists
+        .iter()
+        .filter(|a| !a.name.trim().is_empty())
+        .map(|a| ArtistCredit {
+            id: a.id,
+            name: strip_discogs_number(&a.name),
+            join: a.join.trim().to_string(),
+        })
+        .collect()
 }
 
 /// Render a track's artist credits the way Discogs punctuates them: each name
@@ -4024,6 +4117,7 @@ mod tests {
             label: Some("Plus 8".into()),
             catalog_number: Some("PLUS8 024".into()),
             artist_ids: vec![11209],
+            artists: Vec::new(),
             label_ids: vec![385],
             master_id: None,
             format: String::new(),
@@ -4049,6 +4143,7 @@ mod tests {
             title: title.into(),
             duration: "5:00".into(),
             artist: None,
+            artists: Vec::new(),
             credits: Vec::new(),
         }
     }
@@ -4125,6 +4220,54 @@ mod tests {
         assert_eq!(detail.tracklist[0].artist.as_deref(), Some("Some Artist"));
         // No `artists` key at all is the single-artist case, not an error.
         assert_eq!(detail.tracklist[1].artist, None);
+    }
+
+    /// The artists stay name by name with their ids and connectors, on the
+    /// release and on each track, so a sheet can open a page on any of
+    /// them; "Various" keeps its id but never opens a page. The version
+    /// line keeps the remixer's id too.
+    #[test]
+    fn release_keeps_artists_by_id_on_release_and_tracks() {
+        let json = r#"{
+            "id": 1,
+            "title": "Split",
+            "artists": [{"id": 194, "name": "Various"}],
+            "tracklist": [
+                {"position": "A", "title": "One",
+                 "artists": [{"id": 10, "name": "Lawrence (2)", "join": "&"},
+                             {"id": 11, "name": "Carsten Jost", "join": ""}],
+                 "extraartists": [{"id": 30, "name": "Maurizio", "role": "Remix"}]},
+                {"position": "B", "title": "Two",
+                 "artists": [{"id": 0, "name": "Unknown Artist", "join": ""}]}
+            ]
+        }"#;
+        let detail: ReleaseDetail = serde_json::from_str::<ReleaseResponse>(json)
+            .unwrap()
+            .into_detail();
+        assert_eq!(detail.artists.len(), 1);
+        assert_eq!(detail.artists[0].id, 194);
+        assert!(!detail.artists[0].browsable(), "Various opens no page");
+        assert!(detail.artist_ids.is_empty());
+        let a = &detail.tracklist[0];
+        assert_eq!(a.artist.as_deref(), Some("Lawrence (2) & Carsten Jost"));
+        // The number is Discogs's own disambiguation, not part of the name.
+        assert_eq!(
+            a.artists,
+            vec![
+                ArtistCredit { id: 10, name: "Lawrence".into(), join: "&".into() },
+                ArtistCredit { id: 11, name: "Carsten Jost".into(), join: String::new() },
+            ]
+        );
+        assert_eq!(a.artists[0].join_text(), " & ");
+        assert!(a.artists.iter().all(ArtistCredit::browsable));
+        let versions = a.version_credit_refs();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].role, "Remix");
+        assert_eq!(versions[0].names, vec![NamedRef { id: 30, name: "Maurizio".into() }]);
+        assert_eq!(versions[0].text(), "Maurizio Remix");
+        let b = &detail.tracklist[1];
+        assert_eq!(b.artists.len(), 1);
+        assert!(!b.artists[0].browsable(), "no id, no page");
     }
 
     /// Discogs sends `"country": null` (and nulls elsewhere) rather than

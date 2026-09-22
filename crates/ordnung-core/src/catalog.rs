@@ -25,8 +25,10 @@ use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 /// "Various" compilation. Version 6 added the record's credits (remixers,
 /// producers, engineers) and companies (distributor, pressing plant), which
 /// the crate dig follows sideways. Version 7 kept each track's own credits
-/// on the track, so a tracklist can name whose remix a side is.
-pub const DETAIL_SCHEMA_VERSION: i64 = 7;
+/// on the track, so a tracklist can name whose remix a side is. Version 8
+/// added the artists by name and id on the release and on each track, so
+/// the names on a record sheet open their artist pages.
+pub const DETAIL_SCHEMA_VERSION: i64 = 8;
 
 /// Which table backs a vinyl list. The two caches share an identical schema and
 /// every query below, so the list only ever picks the table name — never its own
@@ -7571,6 +7573,7 @@ mod tests {
             label: Some("Downwards".into()),
             catalog_number: Some("DN-01".into()),
             artist_ids: vec![42],
+            artists: Vec::new(),
             label_ids: vec![99],
             master_id: None,
             format: String::new(),

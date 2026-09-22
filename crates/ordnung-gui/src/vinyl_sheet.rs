@@ -76,11 +76,16 @@ pub(crate) struct SheetRow {
     /// `None` on a single-artist album, where repeating the release's own
     /// artist on every row would be noise rather than information.
     pub artist: Option<String>,
+    /// That credit name by name, each with the id its artist page opens
+    /// on, so the performer on a compilation track is a link and not just
+    /// a word. Empty exactly when `artist` is `None`.
+    pub artist_parts: Vec<discogs::ArtistCredit>,
     /// Whose version this is, when the track credits one: "Roman Flügel
     /// Remix", "Theo Parrish Rework". Discogs lists remixers as a credit
     /// under the title rather than in it, so without this a remix 12" reads
-    /// as the same song twice. Empty on the ordinary track.
-    pub versions: Vec<String>,
+    /// as the same song twice. Empty on the ordinary track. Each name
+    /// carries its artist id, so the remixer opens their page too.
+    pub versions: Vec<discogs::VersionCredit>,
     pub source: SheetSource,
     /// A video for a row whose primary source is a local file, so the sheet can
     /// still offer "watch it" alongside "play my copy".
@@ -757,25 +762,30 @@ impl App {
                     .map(|(i, t)| {
                         let file = files.get(i).copied().flatten();
                         let video = videos.tracks.get(i).copied().flatten();
+                        // Only worth showing when it says something the
+                        // header doesn't. On a compilation the header reads
+                        // "Various", so every track's credit is news; on a
+                        // single-artist album Discogs still sometimes
+                        // repeats the release artist per track, and drawing
+                        // it down the whole list adds nothing.
+                        let artist = t
+                            .artist
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|a| !a.is_empty() && !a.eq_ignore_ascii_case(release_artist))
+                            .map(str::to_string);
+                        let artist_parts = if artist.is_some() {
+                            t.artists.clone()
+                        } else {
+                            Vec::new()
+                        };
                         SheetRow {
                             position: t.position.clone(),
                             title: t.title.clone(),
                             duration: t.duration.clone(),
-                            // Only worth showing when it says something the
-                            // header doesn't. On a compilation the header reads
-                            // "Various", so every track's credit is news; on a
-                            // single-artist album Discogs still sometimes
-                            // repeats the release artist per track, and drawing
-                            // it down the whole list adds nothing.
-                            artist: t
-                                .artist
-                                .as_deref()
-                                .map(str::trim)
-                                .filter(|a| {
-                                    !a.is_empty() && !a.eq_ignore_ascii_case(release_artist)
-                                })
-                                .map(str::to_string),
-                            versions: t.version_credits(),
+                            artist,
+                            artist_parts,
+                            versions: t.version_credit_refs(),
                             // Your own file wins: it's lossless, analyzed, and
                             // plays in the real player bar.
                             source: match (file, video) {
@@ -1244,6 +1254,16 @@ impl App {
             .and_then(|s| s.detail.as_ref())
             .and_then(|d| d.label.clone())
             .filter(|l| !l.trim().is_empty());
+        // The artists name by name, once the detail lists them: each name
+        // on the header opens its own page. Before the detail lands (or for
+        // a cached row from before the field existed) the header is the
+        // shelf's one string.
+        let artist_parts: Vec<discogs::ArtistCredit> = self
+            .vinyl_sheet
+            .as_ref()
+            .and_then(|s| s.detail.as_ref())
+            .map(|d| d.artists.clone())
+            .unwrap_or_default();
         let price_line = match &self.vinyl_sheet.as_ref().map(|s| &s.price) {
             Some(PriceState::Ready(Some(p))) => Some(format!("From {}", fmt_market_price(p))),
             Some(PriceState::Ready(None)) => Some("No copies for sale".to_string()),
@@ -1307,6 +1327,9 @@ impl App {
             ToggleList(VinylList),
             /// Open the label page — this record's imprint, front to back.
             LabelPage,
+            /// Open an artist's page — everything they made — from a name
+            /// on the header or on a track's credit.
+            ArtistPage(u64, String),
             /// Look at the pressing that has copies for sale, here: swap the
             /// sheet over to it instead of sending the user to discogs.com.
             /// Its own sheet is where it gets wanted; a second wantlist
@@ -1381,11 +1404,47 @@ impl App {
                         // Clear of the window's close button in the corner,
                         // which sits on the artist's line.
                         ui.set_max_width(ui.available_width() - crate::ui::window::CLOSE_W);
-                        ui.label(egui::RichText::new(&artist).font(
-                            crate::ui::tokens::font::strong(
-                                crate::ui::tokens::font::headline().size,
-                            ),
-                        ));
+                        let artist_font = crate::ui::tokens::font::strong(
+                            crate::ui::tokens::font::headline().size,
+                        );
+                        if artist_parts.iter().any(discogs::ArtistCredit::browsable) {
+                            // Name by name, each a link to its artist page,
+                            // with Discogs's own connectors between them so
+                            // "A & B" still reads as one credit.
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                                let ink = ui.visuals().text_color();
+                                let last = artist_parts.len() - 1;
+                                for (i, a) in artist_parts.iter().enumerate() {
+                                    if a.browsable() {
+                                        if crate::ui::button::name_link(
+                                            ui,
+                                            &a.name,
+                                            artist_font.clone(),
+                                            ink,
+                                        )
+                                        .on_hover_note(format!("Every release by {}", a.name))
+                                        .clicked()
+                                        {
+                                            act = Some(Act::ArtistPage(a.id, a.name.clone()));
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new(&a.name)
+                                                .font(artist_font.clone()),
+                                        );
+                                    }
+                                    let join = a.join_text();
+                                    if i < last && !join.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(join).font(artist_font.clone()),
+                                        );
+                                    }
+                                }
+                            });
+                        } else {
+                            ui.label(egui::RichText::new(&artist).font(artist_font));
+                        }
                         ui.label(
                             egui::RichText::new(&title).font(crate::ui::tokens::font::headline()),
                         );
@@ -1781,6 +1840,9 @@ impl App {
                             match sheet_row_ui(ui, sheet, row, i, playing, running, marked == Some(i), liked) {
                                 Some(RowHit::Play) => act = Some(Act::Play(i)),
                                 Some(RowHit::Like) => act = Some(Act::Like(i)),
+                                Some(RowHit::Artist(id, name)) => {
+                                    act = Some(Act::ArtistPage(id, name))
+                                }
                                 None => {}
                             }
                         }
@@ -1861,6 +1923,9 @@ impl App {
         match act {
             Some(Act::LabelPage) => {
                 self.open_label_page(release_id, sheet_label.clone());
+            }
+            Some(Act::ArtistPage(id, name)) => {
+                self.open_artist_page(id, name);
             }
             // Starting a dig closes the sheet: the strip it drives sits behind
             // this window, and the first thing a digger does is look at it.
@@ -2311,12 +2376,24 @@ fn video_transport_ui(
 }
 
 /// What a click on a tracklist row asked for.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum RowHit {
     /// The row itself: play it.
     Play,
     /// The like mark at its edge.
     Like,
+    /// A name in the row's credit: open that artist's page.
+    Artist(u64, String),
+}
+
+/// A name in a row's credit laid out during the row and drawn as a link
+/// once the row's own hit target is registered, so the name sits on top of
+/// the row and takes the click (see [`crate::ui::button::name_link_at`]).
+struct RowLink {
+    rect: egui::Rect,
+    galley: std::sync::Arc<egui::Galley>,
+    artist_id: u64,
+    name: String,
 }
 
 /// One tracklist row. Returns what the user asked of it, if anything.
@@ -2342,6 +2419,10 @@ fn sheet_row_ui(
     // once the row's own hit target is registered, so the mark sits on top
     // of it and takes the click.
     let mut like_rect = egui::Rect::NOTHING;
+    // The names in the row's credit, likewise: laid out now, drawn as links
+    // after the row's hit target.
+    let mut links: Vec<RowLink> = Vec::new();
+    let credit_ink = egui::Color32::from_gray(if playable { 150 } else { 105 });
 
     // Reserve a slot underneath the row's content so the hover fill paints
     // behind the text instead of washing over it.
@@ -2406,22 +2487,70 @@ fn sheet_row_ui(
                 // the only place the performer's name appears. Dimmer than the
                 // title and set after it, so the tracklist still reads as a
                 // list of songs with the credit as support.
-                if let Some(artist) = &row.artist {
-                    ui.label(
-                        egui::RichText::new(artist)
-                            .small()
-                            .color(egui::Color32::from_gray(if playable { 150 } else { 105 })),
+                let small = egui::TextStyle::Small.resolve(ui.style());
+                // A word of the credit that opens no page.
+                let plain = |ui: &mut egui::Ui, text: &str| {
+                    ui.label(egui::RichText::new(text).font(small.clone()).color(credit_ink));
+                };
+                // A name that does: its slot is taken now, the link drawn
+                // over it once the row's hit target is down.
+                let mut link = |ui: &mut egui::Ui, id: u64, name: &str| {
+                    let galley = ui.painter().layout_no_wrap(
+                        name.to_owned(),
+                        small.clone(),
+                        egui::Color32::PLACEHOLDER,
                     );
+                    let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
+                    links.push(RowLink {
+                        rect,
+                        galley,
+                        artist_id: id,
+                        name: name.to_owned(),
+                    });
+                };
+                if let Some(artist) = &row.artist {
+                    if row.artist_parts.iter().any(discogs::ArtistCredit::browsable) {
+                        // Name by name, Discogs's connectors between, each
+                        // name a link to its page.
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            let last = row.artist_parts.len() - 1;
+                            for (i, a) in row.artist_parts.iter().enumerate() {
+                                if a.browsable() {
+                                    link(ui, a.id, &a.name);
+                                } else {
+                                    plain(ui, &a.name);
+                                }
+                                let join = a.join_text();
+                                if i < last && !join.is_empty() {
+                                    plain(ui, &join);
+                                }
+                            }
+                        });
+                    } else {
+                        plain(ui, artist);
+                    }
                 }
                 // Whose version: the remixer Discogs credits under the title.
                 // Same weight as the performer credit, so "Drifting  Roman
-                // Flügel Remix" reads as one name for the cut.
+                // Flügel Remix" reads as one name for the cut. The remixer's
+                // name is the link; the role after it is just a word.
                 for version in &row.versions {
-                    ui.label(
-                        egui::RichText::new(version)
-                            .small()
-                            .color(egui::Color32::from_gray(if playable { 150 } else { 105 })),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        let last = version.names.len() - 1;
+                        for (i, n) in version.names.iter().enumerate() {
+                            if n.id > 0 {
+                                link(ui, n.id, &n.name);
+                            } else {
+                                plain(ui, &n.name);
+                            }
+                            if i < last {
+                                plain(ui, ", ");
+                            }
+                        }
+                        plain(ui, &format!(" {}", version.role));
+                    });
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2506,7 +2635,22 @@ fn sheet_row_ui(
     let id = ui.id().with(("sheet-row", index));
     let hit = ui.interact(rect, id, egui::Sense::click());
     let like = crate::ui::button::like_mark_at(ui, like_rect, id.with("like"), liked);
-    if marked || like.hovered() || (playable && hit.hovered()) {
+    let mut on_name = false;
+    for (n, l) in links.into_iter().enumerate() {
+        let resp = crate::ui::button::name_link_at(
+            ui,
+            l.rect,
+            id.with(("artist", n)),
+            l.galley,
+            credit_ink,
+        )
+        .on_hover_note(format!("Every release by {}", l.name));
+        on_name |= resp.hovered();
+        if resp.clicked() {
+            hit_what = Some(RowHit::Artist(l.artist_id, l.name));
+        }
+    }
+    if marked || like.hovered() || on_name || (playable && hit.hovered()) {
         ui.painter().set(
             bg,
             egui::epaint::RectShape::filled(
@@ -2526,7 +2670,10 @@ fn sheet_row_ui(
         if hit.clicked() {
             hit_what = Some(RowHit::Play);
         }
-    } else {
+    } else if !on_name && !like.hovered() {
+        // Not while the pointer is on a name or the like mark: an open
+        // tooltip stays as long as the pointer is inside its widget's rect,
+        // so the row's note would sit over the name's.
         hit.on_hover_note("Not in your library, and Discogs lists no video for it");
     }
     hit_what
