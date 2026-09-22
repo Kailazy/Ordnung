@@ -191,6 +191,9 @@ impl App {
             graph: graph::GraphState::default(),
             radio: radio::Radio::default(),
             graph_rect: egui::Rect::NOTHING,
+            dig_graph: graph::GraphState::default(),
+            dig_graph_rect: egui::Rect::NOTHING,
+            dig_window_open: false,
             seller_shipping: HashMap::new(),
             wantlist_watch: Vec::new(),
             show_watch: false,
@@ -3878,6 +3881,7 @@ impl App {
         self.draw_delete_confirm(ctx);
         self.draw_vinyl_edit_confirm(ctx);
         self.draw_collect_wanted(ctx);
+        self.draw_dig_window(ctx);
         self.draw_vinyl_sheet(ctx, frame);
         self.draw_versions(ctx);
         self.draw_wantlist_watch(ctx);

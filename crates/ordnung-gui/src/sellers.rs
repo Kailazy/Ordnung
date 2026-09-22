@@ -597,6 +597,7 @@ impl App {
                         sub,
                         l.thumb_url,
                     );
+                    self.show_dig_window();
                 }
             }
             Some(SellerAct::LabelPage(idx)) => {

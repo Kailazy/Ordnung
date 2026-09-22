@@ -1835,7 +1835,7 @@ impl App {
                     .clicked()
                 {
                     let rect = self.graph_rect;
-                    self.graph_fit(rect);
+                    self.graph_fit(rect, graph::MapScope::Library);
                 }
                 return;
             }
@@ -1981,7 +1981,7 @@ impl App {
         if graph_mode {
             let rect = ui.available_rect_before_wrap();
             self.graph_rect = rect;
-            let act = self.draw_graph(ui, rect, &query);
+            let act = self.draw_graph(ui, rect, &query, graph::MapScope::Library);
             match act {
                 Some(graph::GraphAct::Open(rel)) => {
                     let cover_url = rel.cover_url();
@@ -1998,7 +1998,7 @@ impl App {
                     }
                 }
                 Some(graph::GraphAct::Thread(rel, thread)) => {
-                    self.map_take_thread(&rel, thread);
+                    self.map_take_thread(&rel, thread, graph::MapScope::Library);
                 }
                 Some(graph::GraphAct::Radio(rel)) => {
                     self.radio_start_from(&rel);
@@ -2185,7 +2185,10 @@ impl App {
                 }
             }
             Some(VinylGridAction::Open(key)) => self.open_vinyl_sheet(key, ctx),
-            Some(VinylGridAction::Dig(key)) => self.start_dig(key),
+            Some(VinylGridAction::Dig(key)) => {
+                self.start_dig(key);
+                self.show_dig_window();
+            }
             Some(VinylGridAction::Warm(id)) => self.warm_release_detail(id),
             Some(VinylGridAction::Versions(key)) => self.open_versions(key, ctx),
             Some(VinylGridAction::Label(key)) => {

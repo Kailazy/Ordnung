@@ -1391,6 +1391,13 @@ struct App {
     /// The canvas the map was last drawn into, so the toolbar's Fit button
     /// (drawn before the canvas each frame) knows what to fit to.
     graph_rect: egui::Rect,
+    /// The dig window's own map: the same simulation as the library's,
+    /// built from the dig's steps alone. See [`App::draw_dig_window`].
+    dig_graph: graph::GraphState,
+    /// The canvas the dig window's map was last drawn into.
+    dig_graph_rect: egui::Rect,
+    /// Whether the dig window is up. Every Dig button opens it.
+    dig_window_open: bool,
     /// Cheapest per-record shipping each seller quotes, `(price, currency)`
     /// keyed by username — the "shipping from" figure on the shop chips.
     /// Discogs computes quotes for this account's location; a seller

@@ -216,6 +216,16 @@ pub(crate) enum GraphAct {
     Radio(Release),
 }
 
+/// Which map is being drawn: the library's, with every record on every
+/// shelf, or the dig window's, with only the records of the dig running
+/// now. Each has its own simulation and camera on `App`, so framing one
+/// never moves the other.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum MapScope {
+    Library,
+    Dig,
+}
+
 /// A thread taken from the map, from the click to the landing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Await {
@@ -633,7 +643,14 @@ impl GraphState {
         if !hidden.is_empty() {
             releases.retain(|r| !hidden.contains(&r.status));
         }
+        self.rebuild(arrange, releases);
+    }
 
+    /// Rebuild the map from a merged, filtered release list: the shelves
+    /// and the dug records for the library map, the dig's own steps for
+    /// the dig window. Nothing moves while the list is the one it was
+    /// built from last.
+    fn rebuild(&mut self, arrange: Arrange, releases: Vec<Release>) {
         let mut sig = 0xcbf2_9ce4_8422_2325u64;
         mix(&mut sig, arrange as u64);
         for r in &releases {
@@ -1233,19 +1250,33 @@ impl App {
         ui: &mut egui::Ui,
         rect: egui::Rect,
         query: &str,
+        scope: MapScope,
     ) -> Option<GraphAct> {
         use crate::ui::tokens::{color, font};
-        let mut g = std::mem::take(&mut self.graph);
+        let mut g = std::mem::take(self.map_mut(scope));
         let arrange = Arrange::from_key(&self.config.graph_arrange);
-        let hidden = Status::hidden(&self.config.graph_hide);
-        g.sync(
-            arrange,
-            &self.vinyl,
-            &self.wantlist,
-            &self.dug,
-            &self.dug_genres,
-            &hidden,
-        );
+        // The dig map has no filter: everything on it is what's being dug.
+        let hidden = match scope {
+            MapScope::Library => Status::hidden(&self.config.graph_hide),
+            MapScope::Dig => Vec::new(),
+        };
+        match scope {
+            MapScope::Library => g.sync(
+                arrange,
+                &self.vinyl,
+                &self.wantlist,
+                &self.dug,
+                &self.dug_genres,
+                &hidden,
+            ),
+            MapScope::Dig => {
+                let releases = self.dig_releases();
+                g.rebuild(arrange, releases);
+                // The dig window always stands where the dig does: its
+                // head's threads are out without a hover.
+                g.focus = self.dig.as_ref().map(|d| format!("r:{}", d.head().release_id));
+            }
+        }
         self.map_dig_tick(&mut g);
 
         let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
@@ -1258,7 +1289,12 @@ impl App {
             // Empty because there's nothing, or because the filters hide
             // all of what there is: the second wants a different nudge.
             let have_any = !self.vinyl.is_empty() || !self.wantlist.is_empty() || !self.dug.is_empty();
-            let (head, hint) = if !hidden.is_empty() && have_any {
+            let (head, hint) = if scope == MapScope::Dig {
+                (
+                    "No dig running",
+                    "Press Dig on any record to start one",
+                )
+            } else if !hidden.is_empty() && have_any {
                 (
                     "Everything is hidden",
                     "Show more kinds of record from the Show menu above",
@@ -1283,7 +1319,7 @@ impl App {
                 font::footnote(),
                 color::LABEL_3,
             );
-            self.graph = g;
+            *self.map_mut(scope) = g;
             return None;
         }
 
@@ -2328,7 +2364,7 @@ impl App {
             );
         }
 
-        self.graph = g;
+        *self.map_mut(scope) = g;
         self.draw_radio_bar(ui, rect, &ctx);
         act
     }
@@ -2336,14 +2372,198 @@ impl App {
     /// Take `thread` out of `rel` from the map: stand the dig on the record
     /// and ask for the thread once its ids are in. The find lands on the map
     /// through the same path a strip step takes.
-    pub(crate) fn map_take_thread(&mut self, rel: &Release, thread: DigThread) {
+    pub(crate) fn map_take_thread(&mut self, rel: &Release, thread: DigThread, scope: MapScope) {
         self.map_stand_on(rel);
-        self.graph.focus = Some(format!("r:{}", rel.release_id));
-        self.graph.awaiting = Some(Await::Resolve {
+        let g = self.map_mut(scope);
+        g.focus = Some(format!("r:{}", rel.release_id));
+        g.awaiting = Some(Await::Resolve {
             from: rel.release_id,
             thread,
         });
-        self.graph.wake();
+        g.wake();
+    }
+
+    /// The simulation behind `scope`'s map.
+    pub(crate) fn map_mut(&mut self, scope: MapScope) -> &mut GraphState {
+        match scope {
+            MapScope::Library => &mut self.graph,
+            MapScope::Dig => &mut self.dig_graph,
+        }
+    }
+
+    /// The dig window's records: every step of the dig running now, and
+    /// nothing else. A step stands as its shelf does (the record the dig
+    /// started from is owned, a find asked for on the wantlist is wanted)
+    /// and is tagged with what the dig has resolved for it.
+    fn dig_releases(&self) -> Vec<Release> {
+        let Some(dig) = self.dig.as_ref() else {
+            return Vec::new();
+        };
+        dig.steps
+            .iter()
+            .map(|s| {
+                let status = if self.vinyl_owned.contains(&s.release_id) {
+                    Status::Owned
+                } else if self.vinyl_wanted.contains(&s.release_id)
+                    || self
+                        .dug
+                        .iter()
+                        .any(|d| d.release_id == s.release_id && d.wanted)
+                {
+                    Status::Wanted
+                } else {
+                    Status::Dug
+                };
+                let key = self.dig_start_keys.get(&s.release_id).copied();
+                let cover = match (key, s.thumb_url.as_deref()) {
+                    (Some(k), _) => Cover::Shelf(k),
+                    (None, Some(u)) if !u.trim().is_empty() => Cover::Url(u.to_string()),
+                    _ => Cover::None,
+                };
+                let mut genres: Vec<String> =
+                    s.genres.iter().chain(s.styles.iter()).cloned().collect();
+                if genres.is_empty() {
+                    genres = self.dug_genres.get(&s.release_id).cloned().unwrap_or_default();
+                }
+                Release {
+                    release_id: s.release_id,
+                    artist: s.artist.clone(),
+                    title: s.title.clone(),
+                    sub: s.sub.clone(),
+                    label: s.label.clone().or_else(|| match &s.via {
+                        Some((DigThread::Label, name)) => Some(name.clone()),
+                        _ => None,
+                    }),
+                    genres,
+                    status,
+                    cover,
+                    key,
+                }
+            })
+            .collect()
+    }
+
+    /// Put the dig window up, framed on the whole dig. Every Dig button in
+    /// the app ends here, so a dig started from a release sheet over the
+    /// library lands somewhere the user can see, not only on the strip in
+    /// the vinyl view.
+    pub(crate) fn show_dig_window(&mut self) {
+        self.dig_window_open = true;
+        self.dig_graph.follow_fit = true;
+        self.dig_graph.wake();
+    }
+
+    /// The dig window: the record map, cut down to the dig running now.
+    /// Drawn every frame over whichever view is up.
+    pub(crate) fn draw_dig_window(&mut self, ctx: &egui::Context) {
+        if !self.dig_window_open {
+            return;
+        }
+        let mut open = true;
+        let mut act = None;
+        crate::ui::window::Window::new("Dig")
+            .id(egui::Id::new("dig_window"))
+            .open(&mut open)
+            .resizable(true)
+            .default_size(egui::vec2(960.0, 640.0))
+            .min_size(egui::vec2(520.0, 360.0))
+            .show(ctx, |ui| {
+                // What's being dug, and the map's own two controls.
+                let (caption, count) = match self.dig.as_ref() {
+                    Some(d) => {
+                        let start = &d.steps[0];
+                        (
+                            format!("Digging from {} – {}", start.artist, start.title),
+                            d.steps.len(),
+                        )
+                    }
+                    None => (String::new(), 0),
+                };
+                let arrange = Arrange::from_key(&self.config.graph_arrange);
+                let mut pick = arrange;
+                let mut fit = false;
+                crate::ui::control_row(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if count > 0 {
+                            ui.label(egui::RichText::new(caption).weak());
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "· {count} record{}",
+                                    if count == 1 { "" } else { "s" }
+                                ))
+                                .weak(),
+                            );
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if crate::ui::button::button(ui, "⊙ Fit")
+                                .on_hover_note(
+                                    "Show the whole dig. Scroll or pinch to zoom, drag to move, \
+                                     double-click a record to lean in",
+                                )
+                                .clicked()
+                            {
+                                fit = true;
+                            }
+                            let segs = [
+                                crate::ui::button::Segment {
+                                    label: "Artists",
+                                    tip: "Gather records around their artists",
+                                },
+                                crate::ui::button::Segment {
+                                    label: "Genre clouds",
+                                    tip: "Gather records into clouds by style",
+                                },
+                            ];
+                            let sel = match arrange {
+                                Arrange::Artists => 0,
+                                Arrange::Genres => 1,
+                            };
+                            if let Some(i) = crate::ui::button::segmented(ui, Some(sel), &segs) {
+                                pick = if i == 0 { Arrange::Artists } else { Arrange::Genres };
+                            }
+                        });
+                    });
+                });
+                if pick != arrange {
+                    self.config.graph_arrange = pick.key().to_string();
+                    if let Err(e) = self.config.save() {
+                        self.status = format!("Couldn't save settings: {e}");
+                    }
+                }
+                ui.add_space(crate::ui::tokens::space::S3);
+                let rect = ui.available_rect_before_wrap();
+                self.dig_graph_rect = rect;
+                if fit {
+                    self.graph_fit(rect, MapScope::Dig);
+                }
+                act = self.draw_graph(ui, rect, "", MapScope::Dig);
+            });
+        match act {
+            Some(GraphAct::Open(rel)) => {
+                let cover_url = rel.cover_url();
+                match rel.key {
+                    Some(key) => self.open_vinyl_sheet(key, ctx),
+                    None => self.open_release_sheet(
+                        rel.release_id,
+                        rel.artist,
+                        rel.title,
+                        rel.sub,
+                        cover_url,
+                        ctx,
+                    ),
+                }
+            }
+            Some(GraphAct::Thread(rel, thread)) => {
+                self.map_take_thread(&rel, thread, MapScope::Dig);
+            }
+            Some(GraphAct::Radio(rel)) => {
+                self.radio_start_from(&rel);
+            }
+            None => {}
+        }
+        if !open {
+            self.dig_window_open = false;
+        }
     }
 
     /// Make `rel` the dig's head: a shelf record digs as that record, a bare
@@ -2480,9 +2700,10 @@ impl App {
 
     /// Aim the map's camera at the whole map. `rect` is the canvas as last
     /// drawn; the map keeps no size of its own.
-    pub(crate) fn graph_fit(&mut self, rect: egui::Rect) {
-        self.graph.fit(rect);
-        self.graph.wake();
+    pub(crate) fn graph_fit(&mut self, rect: egui::Rect, scope: MapScope) {
+        let g = self.map_mut(scope);
+        g.fit(rect);
+        g.wake();
     }
 
     /// A record landed on the map from a dig (or from a list add away from

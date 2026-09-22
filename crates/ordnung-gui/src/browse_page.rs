@@ -720,6 +720,7 @@ impl App {
                     };
                     let thumb = (!r.thumb_url.trim().is_empty()).then(|| r.thumb_url.clone());
                     self.start_dig_release(r.release_id, artist, title, label_name, sub, thumb);
+                    self.show_dig_window();
                 }
             }
             Some(Act::Page(p)) => self.fetch_browse_page(p),

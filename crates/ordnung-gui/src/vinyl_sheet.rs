@@ -1951,6 +1951,9 @@ impl App {
                         );
                     }
                 }
+                // The dig lands in its own window, wherever the sheet was
+                // opened from: the strip only shows in the vinyl view.
+                self.show_dig_window();
                 self.stop_sheet_video();
                 self.vinyl_sheet = None;
                 return;
