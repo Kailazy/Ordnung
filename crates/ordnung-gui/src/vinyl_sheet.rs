@@ -1216,7 +1216,7 @@ impl App {
                 Some(h) if h.release_id == release_id => {
                     let dig = self.dig.as_ref().expect("head came from it");
                     Some((
-                        h.hops(dig.wander_seed()),
+                        h.hops(dig.wander_seed(), &dig.anchor()),
                         h.detail_resolved,
                         h.kin_resolved,
                         dig.pending.is_some(),

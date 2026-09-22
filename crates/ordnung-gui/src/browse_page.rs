@@ -731,6 +731,8 @@ mod tests {
             catno: "NTD010".into(),
             thumb_url: String::new(),
             main: true,
+            genres: Vec::new(),
+            styles: Vec::new(),
         }
     }
 

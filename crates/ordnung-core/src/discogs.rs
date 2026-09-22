@@ -283,6 +283,13 @@ pub struct BrowseRelease {
     /// False when the artist is credited as a remixer rather than the main
     /// artist, so a dig can prefer their own records.
     pub main: bool,
+    /// Discogs's coarse genres ("Electronic") for the row. Only the search
+    /// endpoint carries them; an artist or label browse row has none, so
+    /// empty means "unknown", not "untagged".
+    pub genres: Vec<String>,
+    /// The row's style tags ("Minimal", "Techno"). Same source and same
+    /// caveat as [`BrowseRelease::genres`].
+    pub styles: Vec<String>,
 }
 
 /// One page of a seller's marketplace inventory
@@ -2005,6 +2012,10 @@ impl Client {
                         // Only the artist endpoint sets a role; a label's
                         // releases are all "main" as far as a dig cares.
                         main: !r.role.eq_ignore_ascii_case("remix"),
+                        // The browse endpoints list no tags; a dig judging
+                        // the row's sound has to wait for its detail.
+                        genres: Vec::new(),
+                        styles: Vec::new(),
                     })
                 })
                 .collect(),
@@ -2155,6 +2166,8 @@ impl Client {
                         // Search hits carry no credit role; every row is a
                         // full match for the style that found it.
                         main: true,
+                        genres: h.genre,
+                        styles: h.style,
                     }
                 })
                 .collect(),
@@ -2414,6 +2427,12 @@ struct SearchHit {
     label: Vec<String>,
     #[serde(default, deserialize_with = "null_as_default")]
     format: Vec<String>,
+    /// Coarse genres and style tags, as the search endpoint lists them on
+    /// every hit. What lets a dig judge a row's sound without a detail fetch.
+    #[serde(default, deserialize_with = "null_as_default")]
+    genre: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    style: Vec<String>,
     #[serde(default)]
     community: HitCommunity,
 }

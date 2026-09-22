@@ -14,6 +14,15 @@
 //! its own row below — so backtracking to compare two threads out of one
 //! record is a real move with nothing thrown away.
 //!
+//! The dig stays *thoughtful of where it started*. The record it began at is
+//! its anchor (see [`DigAnchor`]): its year and its tags are what the dig is
+//! about, and every later step is judged against them. A page browsed down
+//! any thread is ranked so records near the anchor's era and sound lead the
+//! pick, and the walk's own style and era hops search for the anchor's sound
+//! rather than whatever the last find happened to be tagged. Without that a
+//! walk drifts one hop at a time, a distributor and a mastering credit later,
+//! from 2015 minimal techno to 2020 new wave with nothing to pull it back.
+//!
 //! Each step costs one Discogs search, paced by the shared client throttle, so
 //! the fetch runs off the UI thread and the strip shows a spinner meanwhile.
 
@@ -291,6 +300,10 @@ pub(crate) struct DigStep {
     /// The release's style tags ("Deep House"), credit order — what the style
     /// thread searches by. Same resolution story as the ids.
     pub styles: Vec<String>,
+    /// The release's coarse genres ("Electronic"). Only the anchor reads its
+    /// own; a step's genres let a row that shares no style still count as
+    /// the same broad world rather than a different one.
+    pub genres: Vec<String>,
     /// True once the release detail has answered (even with empty fields), so
     /// an empty `styles` can say "no style listed" instead of "looking it up".
     pub detail_resolved: bool,
@@ -371,7 +384,12 @@ impl DigStep {
     /// threads first, then the sideways ones. `seed` rolls the era hops'
     /// years, so the same record offers the same years while the user
     /// looks at it and different ones the next time they come back.
-    pub(crate) fn hops(&self, seed: u64) -> Vec<Hop> {
+    ///
+    /// `anchor` is the record the dig started from. The style hop searches
+    /// the tags this record *shares* with it when there are any, and the
+    /// era hops pin the anchor's year and sound, so the two threads that
+    /// ask "more like this" ask for more like what the dig set out for.
+    pub(crate) fn hops(&self, seed: u64, anchor: &DigAnchor) -> Vec<Hop> {
         let mut out = Vec::new();
         let artist = strip_disambiguator(&self.artist).trim().to_string();
         if let Some(q) = self.query(DigThread::Artist) {
@@ -447,31 +465,54 @@ impl DigStep {
                 weight,
             });
         }
-        if let Some(q) = self.query(DigThread::Style) {
-            let caption = style_caption(&self.styles);
+        // The tags this record shares with the anchor, if any: the part of
+        // its sound that is still the dig's sound. A record with none in
+        // common is already off the path, and its own tags would only lead
+        // further out — so the style hop searches the shared set, and the
+        // era hops fall back to the anchor's tags outright.
+        let shared: Vec<String> = self
+            .styles
+            .iter()
+            .filter(|s| anchor.has_style(s))
+            .cloned()
+            .collect();
+        let style_tags: &[String] = if shared.is_empty() { &self.styles } else { &shared };
+        if !style_tags.is_empty() {
+            let caption = style_caption(style_tags);
             // The menu row names the first tags and counts the rest: four
             // tags in the detail column would push the row's own words off
             // the panel.
-            let who = if self.styles.len() > 2 {
+            let who = if style_tags.len() > 2 {
                 format!(
                     "{} +{}",
-                    style_caption(&self.styles[..2]),
-                    self.styles.len() - 2
+                    style_caption(&style_tags[..2]),
+                    style_tags.len() - 2
                 )
             } else {
                 caption.clone()
             };
             out.push(Hop {
                 thread: DigThread::Style,
-                query: q,
+                query: DigQuery::Style(style_tags.to_vec()),
                 matched: caption,
                 row: "Dig the style".to_string(),
                 who,
                 weight: 1,
             });
         }
-        if let Some(year) = self.year.filter(|y| *y > 0) {
-            for (i, style) in self.styles.iter().map(|s| s.trim()).enumerate() {
+        // The era is the dig's era: the anchor's year, and its tags where
+        // this record shares none. Only the very first record, before its
+        // own detail has answered, has no anchor year to pin to.
+        let era_year = anchor.year.or(self.year).filter(|y| *y > 0);
+        let era_tags: &[String] = if !shared.is_empty() {
+            &shared
+        } else if !anchor.styles.is_empty() {
+            &anchor.styles
+        } else {
+            &self.styles
+        };
+        if let Some(year) = era_year {
+            for (i, style) in era_tags.iter().map(|s| s.trim()).enumerate() {
                 if style.is_empty() {
                     continue;
                 }
@@ -499,6 +540,103 @@ impl DigStep {
         }
         out
     }
+}
+
+/// The record a dig started from, as far as its detail has answered: what
+/// the dig is *about*. Every page browsed down any thread is ranked against
+/// it (see [`rank_for_anchor`]) and the walk's sound hops search for it (see
+/// [`DigStep::hops`]), so a dig that set out from 2015 minimal techno keeps
+/// finding 2015 minimal techno rather than drifting a hop at a time into
+/// whatever the last find was tagged.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DigAnchor {
+    pub year: Option<u16>,
+    pub styles: Vec<String>,
+    pub genres: Vec<String>,
+}
+
+/// How far a browsed row's year may sit from the anchor's and still count
+/// as the same era. Tighter than the era hop's own three-year roll would
+/// suggest: a scene is a few years wide, and five years on is a different
+/// one — the 2020 record a 2015 dig should not land on.
+const ERA_SPAN: u16 = 4;
+
+impl DigAnchor {
+    fn has_style(&self, style: &str) -> bool {
+        let style = style.trim();
+        self.styles.iter().any(|s| s.trim().eq_ignore_ascii_case(style))
+    }
+
+    fn has_genre(&self, genre: &str) -> bool {
+        let genre = genre.trim();
+        self.genres.iter().any(|g| g.trim().eq_ignore_ascii_case(genre))
+    }
+
+    /// How far `row` sits from this anchor: 0 for a row nothing argues
+    /// against, more the further it is. Two axes, each scored 0 (fits), 1
+    /// (unknown) or 3 (doesn't), so a row that is wrong on one axis ranks
+    /// behind one that is merely unknown on both.
+    ///
+    /// Era: the row's year within [`ERA_SPAN`] of the anchor's. Sound: a
+    /// shared style tag fits; no shared style but a shared genre is
+    /// half-way (same world, different room); a row tagged with neither
+    /// doesn't fit. A row with no tags at all (every artist and label
+    /// browse row) is unknown, not wrong — it will be judged by its era.
+    pub(crate) fn distance(&self, row: &BrowseRelease) -> u32 {
+        let era = match (self.year, row.year.filter(|y| *y > 0)) {
+            (Some(a), Some(r)) => {
+                if a.abs_diff(r) <= ERA_SPAN {
+                    0
+                } else {
+                    3
+                }
+            }
+            _ => 1,
+        };
+        let tagged = !self.styles.is_empty() || !self.genres.is_empty();
+        let sound = if !tagged || (row.styles.is_empty() && row.genres.is_empty()) {
+            1
+        } else if row.styles.iter().any(|s| self.has_style(s)) {
+            0
+        } else if row.genres.iter().any(|g| self.has_genre(g)) {
+            2
+        } else {
+            3
+        };
+        era + sound
+    }
+}
+
+/// `order`, the candidate rows of a page in listing order, re-ordered for
+/// the pick: the rows closest to `anchor` first, the walk's start rolled by
+/// `seed` among them, then every further row in order of distance. The pick
+/// walks this front to back and takes the first row that survives its
+/// checks, so the closest fits are always tried before anything drifts —
+/// and a page with nothing close still yields its best row rather than
+/// nothing at all.
+pub(crate) fn rank_for_anchor(
+    rows: &[BrowseRelease],
+    order: &[usize],
+    anchor: &DigAnchor,
+    seed: u64,
+) -> Vec<usize> {
+    let mut ranked: Vec<(u32, usize)> = order
+        .iter()
+        .map(|&i| (anchor.distance(&rows[i]), i))
+        .collect();
+    // Stable: rows of one distance keep the page's own order.
+    ranked.sort_by_key(|(d, _)| *d);
+    let Some(&(best, _)) = ranked.first() else {
+        return Vec::new();
+    };
+    let near = ranked.iter().take_while(|(d, _)| *d == best).count();
+    let mut out: Vec<usize> = ranked.iter().map(|(_, i)| *i).collect();
+    // The roll picks where the walk starts, but only among the closest
+    // rows; from there it runs through the rest of that tier and only then
+    // on to the further ones.
+    let start = dig_roll_with(seed, near);
+    out[..near].rotate_left(start);
+    out
 }
 
 /// The current calendar year, from the system clock — close enough for
@@ -629,7 +767,9 @@ pub(crate) fn dig_controls(
     let walk_tip = if busy {
         "Searching Discogs…".to_string()
     } else if !hops.is_empty() {
-        "Follow one of this record's threads at random to a record you don't own".to_string()
+        "Follow one of this record's threads at random to a record you don't own, \
+         staying near the era and sound the dig started from"
+            .to_string()
     } else if resolved {
         "Discogs lists nothing to follow out of this record".to_string()
     } else {
@@ -777,6 +917,18 @@ impl DigPath {
         &self.steps[self.at]
     }
 
+    /// The record this dig started from, as the yardstick every later step
+    /// is measured by. Read off the root step, so it fills in as the root's
+    /// detail resolves and never changes after.
+    pub(crate) fn anchor(&self) -> DigAnchor {
+        let root = &self.steps[0];
+        DigAnchor {
+            year: root.year.filter(|y| *y > 0),
+            styles: root.styles.clone(),
+            genres: root.genres.clone(),
+        }
+    }
+
     /// The seed the random walk rolls with from the head: fixed for as long
     /// as the user looks at this record (so the primed hop is the one the
     /// button takes) and different once a hop has been taken out of it (so
@@ -793,7 +945,7 @@ impl DigPath {
         let h = self.head();
         let seed = self.wander_seed().wrapping_add(tried.len() as u64 * 0x2545_F491_4F6C_DD1D);
         wander_pick(
-            &h.hops(self.wander_seed()),
+            &h.hops(self.wander_seed(), &self.anchor()),
             seed,
             h.via.as_ref().map(|(t, _)| *t),
             &self.walked,
@@ -1396,6 +1548,7 @@ mod tests {
             artist_ids: Vec::new(),
             label_ids: Vec::new(),
             styles: Vec::new(),
+            genres: Vec::new(),
             detail_resolved: false,
             year: None,
             credits: Vec::new(),
@@ -1477,7 +1630,7 @@ mod tests {
     #[test]
     fn hops_cover_every_thread_and_skip_sleeve_credits() {
         let s = rich_step();
-        let hops = s.hops(7);
+        let hops = s.hops(7, &DigAnchor::default());
         let rows: Vec<(DigThread, &str, &str)> = hops
             .iter()
             .map(|h| (h.thread, h.row.as_str(), h.who.as_str()))
@@ -1508,7 +1661,10 @@ mod tests {
         // No year, no era.
         let mut s = rich_step();
         s.year = None;
-        assert!(s.hops(7).iter().all(|h| h.thread != DigThread::Era));
+        assert!(s
+            .hops(7, &DigAnchor::default())
+            .iter()
+            .all(|h| h.thread != DigThread::Era));
     }
 
     /// Roles read as Discogs writes them: qualifiers dropped, the first
@@ -1530,7 +1686,7 @@ mod tests {
     #[test]
     fn wander_prefers_new_ground_and_skips_tried_hops() {
         let s = rich_step();
-        let hops = s.hops(7);
+        let hops = s.hops(7, &DigAnchor::default());
         let none = HashSet::new();
         // Everything but the remixer is walked: the remixer it is.
         let walked: HashSet<(u8, u64)> = hops
@@ -1564,7 +1720,7 @@ mod tests {
             name: "Some Engineer".to_string(),
             role: "Mastered By".to_string(),
         }];
-        let hops = s.hops(7);
+        let hops = s.hops(7, &DigAnchor::default());
         let none = HashSet::new();
         let count = |hops: &[Hop], t: DigThread| {
             (0..400u64)
@@ -1574,7 +1730,7 @@ mod tests {
         let engineer = count(&hops, DigThread::Credit);
         let alias = count(&hops, DigThread::Alias);
         assert!(engineer * 3 < alias, "engineer {engineer} vs alias {alias}");
-        let remixed = rich_step().hops(7);
+        let remixed = rich_step().hops(7, &DigAnchor::default());
         let remixer = count(&remixed, DigThread::Credit);
         assert!(remixer > engineer * 3, "remixer {remixer} vs engineer {engineer}");
     }
@@ -1585,7 +1741,7 @@ mod tests {
     #[test]
     fn wander_is_stable_per_seed_and_walks_key_on_the_query() {
         let s = rich_step();
-        let hops = s.hops(7);
+        let hops = s.hops(7, &DigAnchor::default());
         let none = HashSet::new();
         let a = wander_pick(&hops, 99, None, &none, &[]).unwrap();
         let b = wander_pick(&hops, 99, None, &none, &[]).unwrap();
@@ -1670,6 +1826,143 @@ mod tests {
         );
     }
 
+    /// A browsed row for the ranking tests: only year and tags matter.
+    fn row(id: u64, year: Option<u16>, genres: &[&str], styles: &[&str]) -> BrowseRelease {
+        BrowseRelease {
+            release_id: id,
+            title: format!("Record {id}"),
+            artist: "Someone".to_string(),
+            year,
+            format: "12\"".to_string(),
+            format_known: true,
+            label: String::new(),
+            catno: String::new(),
+            thumb_url: String::new(),
+            main: true,
+            genres: genres.iter().map(|s| s.to_string()).collect(),
+            styles: styles.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn anchor() -> DigAnchor {
+        DigAnchor {
+            year: Some(2015),
+            styles: vec!["Minimal".to_string(), "Techno".to_string()],
+            genres: vec!["Electronic".to_string()],
+        }
+    }
+
+    /// The screenshot case: a 2020 new wave record is the furthest thing
+    /// from a 2015 minimal techno dig, an untagged browse row from the
+    /// same years is close, and an unknown row sits between.
+    #[test]
+    fn anchor_distance_scores_era_and_sound() {
+        let a = anchor();
+        let fits = row(1, Some(2016), &["Electronic"], &["Minimal"]);
+        let same_world = row(2, Some(2014), &["Electronic"], &["Deep House"]);
+        let browse_row = row(3, Some(2017), &[], &[]);
+        let unknown = row(4, None, &[], &[]);
+        let wrong_era = row(5, Some(2020), &["Electronic"], &["Minimal"]);
+        let new_wave = row(6, Some(2020), &["Rock", "Pop"], &["New Wave"]);
+        assert_eq!(a.distance(&fits), 0);
+        assert_eq!(a.distance(&browse_row), 1);
+        assert_eq!(a.distance(&same_world), 2);
+        assert_eq!(a.distance(&unknown), 2);
+        assert_eq!(a.distance(&wrong_era), 3);
+        assert_eq!(a.distance(&new_wave), 6);
+        // Case and whitespace in Discogs tags don't split a style in two.
+        let loose = row(7, Some(2015), &[], &[" minimal "]);
+        assert_eq!(a.distance(&loose), 0);
+        // An anchor whose detail hasn't answered judges nothing.
+        assert_eq!(DigAnchor::default().distance(&new_wave), 2);
+    }
+
+    /// The closest rows lead the pick whatever the page order, the roll
+    /// only moves the start within them, and the drift rows trail in
+    /// order of distance so a page with nothing close still yields.
+    #[test]
+    fn rank_for_anchor_puts_the_closest_rows_first() {
+        let rows = vec![
+            row(1, Some(2020), &["Rock"], &["New Wave"]),
+            row(2, Some(2016), &["Electronic"], &["Techno"]),
+            row(3, Some(2019), &["Electronic"], &["House"]),
+            row(4, Some(2014), &["Electronic"], &["Minimal"]),
+            row(5, Some(2017), &[], &[]),
+        ];
+        let order = vec![0, 1, 2, 3, 4];
+        for seed in 0..40u64 {
+            let ranked = rank_for_anchor(&rows, &order, &anchor(), seed);
+            assert_eq!(ranked.len(), 5);
+            // The two fits lead, in either order.
+            let mut lead = ranked[..2].to_vec();
+            lead.sort();
+            assert_eq!(lead, vec![1, 3], "seed {seed}: {ranked:?}");
+            assert_eq!(&ranked[2..], &[4, 2, 0], "seed {seed}");
+        }
+        // Both starts are reachable.
+        let starts: HashSet<usize> = (0..40u64)
+            .map(|seed| rank_for_anchor(&rows, &order, &anchor(), seed)[0])
+            .collect();
+        assert_eq!(starts, HashSet::from([1, 3]));
+        // Without an anchor the page keeps its own order, rolled.
+        let plain = rank_for_anchor(&rows, &order, &DigAnchor::default(), 0);
+        let mut sorted = plain.clone();
+        sorted.sort();
+        assert_eq!(sorted, order);
+        assert!(rank_for_anchor(&rows, &[], &anchor(), 0).is_empty());
+    }
+
+    /// A record that drifted off the anchor's sound offers the anchor's
+    /// era back: its era hops pin the anchor's year and tags, and its
+    /// style hop keeps the tags it still shares.
+    #[test]
+    fn hops_stay_anchored_to_where_the_dig_started() {
+        let a = anchor();
+        // Shares "Techno" with the anchor, has one foreign tag.
+        let mut s = rich_step();
+        s.styles = vec!["Techno".to_string(), "Dub".to_string()];
+        s.year = Some(2020);
+        let hops = s.hops(7, &a);
+        let style = hops.iter().find(|h| h.thread == DigThread::Style).unwrap();
+        assert_eq!(style.query, DigQuery::Style(vec!["Techno".to_string()]));
+        assert_eq!(style.who, "Techno");
+        let eras: Vec<&Hop> = hops.iter().filter(|h| h.thread == DigThread::Era).collect();
+        assert_eq!(eras.len(), 1);
+        let DigQuery::Era { style, year } = &eras[0].query else {
+            panic!("era query");
+        };
+        assert_eq!(style, "Techno");
+        assert!((2012..=2018).contains(year), "{year} is near 2015, not 2020");
+
+        // Nothing in common: the style hop is the record's own (and so a
+        // drift), but the era hops search the anchor's tags.
+        let mut s = rich_step();
+        s.styles = vec!["New Wave".to_string()];
+        s.year = Some(2020);
+        let hops = s.hops(7, &a);
+        let style = hops.iter().find(|h| h.thread == DigThread::Style).unwrap();
+        assert_eq!(style.query, DigQuery::Style(vec!["New Wave".to_string()]));
+        let era_tags: Vec<String> = hops
+            .iter()
+            .filter_map(|h| match &h.query {
+                DigQuery::Era { style, year } => {
+                    assert!((2012..=2018).contains(year));
+                    Some(style.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(era_tags, vec!["Minimal".to_string(), "Techno".to_string()]);
+
+        // No anchor: the record's own year and tags, as before.
+        let hops = rich_step().hops(7, &DigAnchor::default());
+        let style = hops.iter().find(|h| h.thread == DigThread::Style).unwrap();
+        assert_eq!(
+            style.query,
+            DigQuery::Style(vec!["Dub Techno".to_string(), "Deep House".to_string()])
+        );
+    }
+
     #[test]
     fn web_layout_branches_drop_below() {
         // 0 → 1 → 2, then back to 1 for a second thread (4), then back to the
@@ -1748,6 +2041,7 @@ fn browse_step(
     page: u32,
     skip: &HashSet<u64>,
     works: &HashSet<String>,
+    anchor: &DigAnchor,
     seed: u64,
     cancel: &AtomicBool,
 ) -> std::result::Result<BrowsePage, String> {
@@ -1792,11 +2086,11 @@ fn browse_step(
     if order.is_empty() {
         return Ok(p);
     }
-    // The roll picks where the walk starts; from there it runs through the
-    // rest of the page in listing order, so a rejected row is followed by the
-    // next one rather than another roll.
-    let start = dig_roll_with(seed, order.len());
-    order.rotate_left(start);
+    // Closest to the record the dig started from first, the walk's start
+    // rolled among those; a rejected row is followed by the next one in
+    // that order rather than another roll, so the pick only drifts away
+    // from the anchor's era and sound once every closer row is used up.
+    let order = rank_for_anchor(&p.releases, &order, anchor, seed);
 
     let cat = Catalog::open(db).ok();
     let mut budget = MAX_FORMAT_LOOKUPS;
@@ -1994,6 +2288,7 @@ impl App {
                 artist_ids: Vec::new(),
                 label_ids: Vec::new(),
                 styles: Vec::new(),
+                genres: Vec::new(),
                 detail_resolved: false,
                 year: None,
                 credits: Vec::new(),
@@ -2189,6 +2484,7 @@ impl App {
             skip.extend(dig.seen.iter().copied());
             works = dig.works.clone();
         }
+        let anchor = self.dig.as_ref().map(|d| d.anchor()).unwrap_or_default();
         let seed = self.dig_seed;
         let db = self.db_path.clone();
         let (tx, rx) = mpsc::channel();
@@ -2199,8 +2495,17 @@ impl App {
                 discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
             // An explicit step is never stood down: it's the request the user
             // is waiting on, so it runs to completion.
-            let result =
-                browse_step(&client, &db, &query, page, &skip, &works, seed, &NEVER_CANCEL);
+            let result = browse_step(
+                &client,
+                &db,
+                &query,
+                page,
+                &skip,
+                &works,
+                &anchor,
+                seed,
+                &NEVER_CANCEL,
+            );
             let _ = tx.send(DigFetched {
                 from,
                 thread,
@@ -2379,7 +2684,10 @@ impl App {
             // fetched next so this step's own branches are ready to take.
             artist_ids: Vec::new(),
             label_ids: Vec::new(),
-            styles: Vec::new(),
+            // A search row already carries its tags; a browse row's arrive
+            // with the detail. Either way the detail's set wins once it lands.
+            styles: pick.styles.clone(),
+            genres: pick.genres.clone(),
             detail_resolved: false,
             year: pick.year.filter(|y| *y > 0),
             credits: Vec::new(),
@@ -2646,6 +2954,7 @@ impl App {
         skip.extend(self.vinyl_wanted.iter().copied());
         skip.extend(dig.seen.iter().copied());
         let works = dig.works.clone();
+        let anchor = dig.anchor();
         let seed = self.dig_seed;
         let db = self.db_path.clone();
 
@@ -2677,7 +2986,8 @@ impl App {
                 // Offset the roll per job so the threads of one record don't
                 // all start from the same slot.
                 let seed = seed.wrapping_add(i as u64 * 0x9E37_79B9);
-                let result = browse_step(&client, &db, &query, page, &skip, &works, seed, &cancel);
+                let result =
+                    browse_step(&client, &db, &query, page, &skip, &works, &anchor, seed, &cancel);
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
@@ -2769,6 +3079,7 @@ impl App {
                         step.artist_ids = detail.artist_ids;
                         step.label_ids = detail.label_ids;
                         step.styles = detail.styles;
+                        step.genres = detail.genres;
                         step.credits = detail.credits;
                         step.companies = detail.companies;
                         if step.year.is_none() {
@@ -2951,7 +3262,7 @@ impl App {
                 dig.pending,
                 pending_slot,
                 dig.error.clone(),
-                head.hops(dig.wander_seed()),
+                head.hops(dig.wander_seed(), &dig.anchor()),
                 head.detail_resolved,
                 head.kin_resolved,
                 head.parent,
