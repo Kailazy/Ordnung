@@ -265,10 +265,14 @@ impl App {
         }
         let (id, cues) = (np.id, np.cues.clone());
         if id >= USB_ID_BASE {
-            let Some(dat) = self.usb_anlz_dat(id) else {
+            let (Some(dat), Some(vol), Some(pdb_id)) = (
+                self.usb_anlz_dat(id),
+                self.usb_loaded_for.clone(),
+                usb_track_index(id).and_then(|i| self.usb_pdb_info.get(&i)?.pdb_id),
+            ) else {
                 return;
             };
-            if let Err(e) = ordnung_rbdb::edit::write_stick_cues(&dat, &cues) {
+            if let Err(e) = ordnung_rbdb::edit::write_stick_cues(&vol, pdb_id, &dat, &cues) {
                 self.status = format!("Couldn't write cues to the stick: {e}");
             }
             return;

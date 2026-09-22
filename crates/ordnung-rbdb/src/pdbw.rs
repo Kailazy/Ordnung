@@ -59,7 +59,7 @@ pub(crate) fn dsql_string(s: &str) -> Vec<u8> {
 }
 
 /// The ISRC oddity: a 0x90 long string whose body is `0x03` + ASCII + NUL.
-fn dsql_isrc(s: &str) -> Vec<u8> {
+pub(crate) fn dsql_isrc(s: &str) -> Vec<u8> {
     if s.is_empty() {
         return dsql_string("");
     }

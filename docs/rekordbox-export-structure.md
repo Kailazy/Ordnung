@@ -521,10 +521,20 @@ exportLibrary.db `image.path` references `bN.jpg`. (377 ids referenced here.)
   header-only form, first/last beat filled) into the existing files — every
   other section and the `PMAI` words stay byte-identical, verified against
   the 2026-09-21 golden ANLZ. A grid change also patches the track row's
-  tempo (u32 @0x38, same row size, no page bookkeeping) and the DLP's
-  `content.bpmx100`. The update-counter strings (slots 2/3/4) are *not*
-  bumped: a string edit would resize the row. First edit keeps `*.orig`
-  copies of the `.DAT`, `.EXT` and both databases.
+  tempo and the DLP's `content.bpmx100`. **Every edit bumps the track's
+  update counter** — slot 4 (`cueUpdateCount`) for cues, slot 3
+  (`analysisDataUpdateCount`) for the grid — in the pdb row *and* the DLP
+  row: rekordbox compares them with its collection to decide which device
+  tracks carry newer cues/grids ("Update Collection" on the device); with
+  the counters untouched it showed the collection's (empty) cues for a
+  track Ordnung had cued on the stick (2026-09-22). The pdb row is
+  re-encoded and its page rebuilt slot for slot (deleted slots and every
+  header/bitmask word kept; only heap + offset words re-laid), see
+  `edit::rewrite_track_row`. First edit keeps `*.orig` copies of the
+  `.DAT`, `.EXT` and both databases. Observed on a rekordbox 7 export
+  (2026-09-21, 9 tracks): rekordbox writes hot/memory cues **only** into
+  the ANLZ `PCOB`/`PCO2` lists — the DLP `cue` table stays empty — and its
+  `PCPT`/`PCP2` entries are byte-for-byte the layout Ordnung writes.
 
 ## 10. Hardware incident log
 
