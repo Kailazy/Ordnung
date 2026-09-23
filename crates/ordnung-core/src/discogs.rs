@@ -164,6 +164,40 @@ impl ReleaseCandidate {
             _ => t,
         }
     }
+
+    /// Whether this candidate can stand as `artist`'s record with nobody
+    /// looking: its credited artist names the same act, or its title is
+    /// `album`. The search's free-text rung answers any words at all
+    /// (`Bright Sounds` turns up The Graduate soundtrack, whose notes
+    /// mention bright sounds), and a picker shows that mismatch to a
+    /// reader; an unattended match has to check for it, and leaves such a
+    /// track for a manual pick. Names are compared folded to their letters
+    /// and digits with `&` read as `and`, so `Simon & Garfunkel` sits inside
+    /// `Paul Simon, Simon & Garfunkel, David Grusin*`, and `Various` inside
+    /// `Various Artists`; a
+    /// name shorter than four characters only matches whole, so `UR` is
+    /// not found inside `Burial`.
+    pub fn agrees_with(&self, artist: &str, album: Option<&str>) -> bool {
+        fn fold(s: &str) -> String {
+            s.replace('&', " and ")
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect()
+        }
+        fn same(a: &str, b: &str) -> bool {
+            if a.is_empty() || b.is_empty() {
+                return false;
+            }
+            if a == b {
+                return true;
+            }
+            let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+            short.chars().count() >= 4 && long.contains(short)
+        }
+        same(&fold(artist), &fold(&self.artist))
+            || album.is_some_and(|a| same(&fold(a), &fold(self.release_title())))
+    }
 }
 
 /// One release returned by a free-text record lookup ([`Client::search_records`]).
@@ -2032,7 +2066,12 @@ impl Client {
         // Search without "(Original Mix)"-style markers: files carry them, the
         // official releases don't, and Discogs still matches titles that do.
         let album = album.map(strip_original_mix).filter(|s| !s.is_empty());
-        let title = title.map(strip_original_mix).filter(|s| !s.is_empty());
+        // A title that is only a position on the record (`A1`, `Untitled`)
+        // names no song, and a search built on it answers with whatever
+        // record's notes contain the letters: no track rung for those.
+        let title = title
+            .map(strip_original_mix)
+            .filter(|s| !s.is_empty() && !is_position_title(s));
 
         if let Some(a) = album {
             for key in ["artist", "q"] {
@@ -3245,6 +3284,29 @@ fn trim_filler(text: String) -> String {
     words.join(" ")
 }
 
+/// True when `title` is only a position on a record, not a song's name:
+/// `A1`, `B2`, `1`, `01`, `Track 3`, `Side A`, `Untitled`, `Untitled B1`.
+/// A label shop's download or a rip names its untitled cuts this way, and
+/// Discogs's `track` filter has nothing to match such a title against but
+/// text that happens to contain it, so no search is built on one.
+pub fn is_position_title(title: &str) -> bool {
+    let t = title.trim().to_ascii_lowercase();
+    let t = t.trim_start_matches("untitled").trim();
+    let side = t.strip_prefix("side").map(str::trim);
+    let t = side.or_else(|| t.strip_prefix("track").map(str::trim)).unwrap_or(t);
+    if t.is_empty() {
+        return true;
+    }
+    let letters = t.chars().take_while(|c| c.is_ascii_alphabetic()).count();
+    let digits = &t[letters..];
+    // A side alone (`Side A`) is a position; a lone letter otherwise is a
+    // title, however short.
+    letters <= 1
+        && (!digits.is_empty() || side.is_some())
+        && digits.len() <= 2
+        && digits.chars().all(|c| c.is_ascii_digit())
+}
+
 /// Drop a trailing "(Original Mix)"-style marker from a title before searching
 /// Discogs. Files from digital stores carry these suffixes, but the official
 /// releases usually don't, so leaving them in makes otherwise-good queries come
@@ -3957,6 +4019,69 @@ mod throttle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A side position or a bare number is not a song's name; a real
+    /// title is, however short, and so is an untitled cut with a name.
+    #[test]
+    fn position_titles_are_told_from_song_titles() {
+        for t in [
+            "A1", "b2", " B12 ", "1", "01", "Track 3", "Side A", "Side B1", "Untitled",
+            "Untitled A1", "untitled 2", "",
+        ] {
+            assert!(is_position_title(t), "{t:?} should read as a position");
+        }
+        for t in ["Go", "7 Ways", "A Love Supreme", "Untitled Song", "B12 Blues", "AA1"] {
+            assert!(!is_position_title(t), "{t:?} should read as a title");
+        }
+    }
+
+    fn cand(artist: &str, title: &str) -> ReleaseCandidate {
+        ReleaseCandidate {
+            release_id: "1".into(),
+            artist: artist.into(),
+            title: if artist.is_empty() {
+                title.into()
+            } else {
+                format!("{artist} - {title}")
+            },
+            year: String::new(),
+            label: String::new(),
+            catno: String::new(),
+            country: String::new(),
+            format: String::new(),
+            thumb_url: String::new(),
+            cover_image_url: String::new(),
+            in_collection: 0,
+            in_wantlist: 0,
+        }
+    }
+
+    /// The Graduate soundtrack came back for `Bright Sounds` + `A1` and was
+    /// committed unread; it names nobody the file names. A joint credit that
+    /// contains the artist, or a compilation titled as the album, agrees.
+    #[test]
+    fn a_candidate_agrees_only_when_it_names_the_artist_or_the_album() {
+        let graduate = cand(
+            "Paul Simon, Simon & Garfunkel, David Grusin*",
+            "The Graduate (Original Sound Track Recording)",
+        );
+        assert!(!graduate.agrees_with("Bright Sounds", Some("CN2 aka Archetype - First Movement")));
+        assert!(graduate.agrees_with("Simon & Garfunkel", None));
+        assert!(graduate.agrees_with("simon and garfunkel", None));
+        assert!(!graduate.agrees_with("Art Garfunkel", None));
+        assert!(graduate.agrees_with("Someone Else", Some("The Graduate (Original Sound Track Recording)")));
+        assert!(graduate.agrees_with("Someone Else", Some("the graduate")));
+
+        let various = cand("Various", "All Things Bright And Beautiful");
+        assert!(various.agrees_with("Various Artists", None));
+        assert!(!various.agrees_with("Bright Sounds", None));
+        assert!(various.agrees_with("Bright Sounds", Some("All Things Bright and Beautiful")));
+
+        // Short names match whole, never as a fragment of a longer one.
+        assert!(cand("UR", "Electronic Warfare").agrees_with("UR", None));
+        assert!(!cand("Burial", "Untrue").agrees_with("UR", None));
+        assert!(!cand("", "Untrue").agrees_with("", None));
+    }
 
     #[test]
     fn discogs_error_message_rewords_the_body_for_the_reader() {

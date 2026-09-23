@@ -1780,8 +1780,10 @@ fn auto_convert_tracks(
 /// configured rule, and apply it the way the picker's Save does — release
 /// link, cover art, empty tag fields, and the fetched marker. Only tracks with
 /// no recorded Discogs attempt are touched, so re-imports never re-fight a
-/// match (or a "none of these") that's already settled. Returns a tally
-/// sentence for the combined `Done` line, empty when there was nothing to do.
+/// match (or a "none of these") that's already settled, and only a candidate
+/// that names the track's artist or album is ever committed (see
+/// [`discogs::ReleaseCandidate::agrees_with`]). Returns a tally sentence for
+/// the combined `Done` line, empty when there was nothing to do.
 fn auto_match_tracks(
     catalog: &Catalog,
     spec: &AutoMatchSpec,
@@ -1813,7 +1815,7 @@ fn auto_match_tracks(
     let total = ids.len();
     let _ = tx.send(JobMsg::Progress { done: 0, total });
     ctx.request_repaint();
-    let (mut matched, mut none, mut skipped) = (0usize, 0usize, 0usize);
+    let (mut matched, mut none, mut skipped, mut strangers_only) = (0usize, 0usize, 0usize, 0usize);
     let mut fails: Vec<(String, String)> = Vec::new();
     // Tracks whose cover art changed, so the UI can drop their stale textures.
     let mut covers: Vec<Id> = Vec::new();
@@ -1876,7 +1878,14 @@ fn auto_match_tracks(
                 let (kept, dropped): (Vec<_>, Vec<_>) = found
                     .into_iter()
                     .partition(|c| medium_filter.shows_release_format(&c.format));
-                if kept.is_empty() {
+                // The search's last rung answers any words at all, so a hit
+                // can name someone else entirely. Unattended, only a
+                // candidate crediting the track's artist or titled as its
+                // album is committed; the rest is left for a manual pick.
+                let (kept, strangers): (Vec<_>, Vec<_>) = kept
+                    .into_iter()
+                    .partition(|c| c.agrees_with(&artist, album.as_deref()));
+                if kept.is_empty() && strangers.is_empty() {
                     for c in &dropped {
                         hidden_mediums_seen
                             .insert(config::ReleaseMedium::classify(&c.format).label());
@@ -1888,17 +1897,24 @@ fn auto_match_tracks(
                         covers.push(track_id);
                         matched += 1;
                     }
+                    // A true no-match is marked like the manual run, so it
+                    // isn't offered again.
+                    None if !hit_any => {
+                        none += 1;
+                        let _ = catalog.mark_metadata_fetched(track_id);
+                    }
+                    // Hits that name nobody the file names: neither marked
+                    // nor noticed, so the manual run still offers them and
+                    // a reader can decide.
+                    None if !strangers.is_empty() => {
+                        strangers_only += 1;
+                    }
+                    // A list emptied purely by the format filter is NOT
+                    // marked — widening the filter should bring the track
+                    // back.
                     None => {
                         none += 1;
-                        // A true no-match is marked like the manual run, so it
-                        // isn't offered again. A list emptied purely by the
-                        // format filter is NOT marked — widening the filter
-                        // should bring the track back.
-                        if !hit_any {
-                            let _ = catalog.mark_metadata_fetched(track_id);
-                        } else {
-                            hidden.push((track_id, label));
-                        }
+                        hidden.push((track_id, label));
                     }
                 }
             }
@@ -1928,6 +1944,11 @@ fn auto_match_tracks(
     let mut tally = format!("Matched {matched} of {total} to Discogs releases");
     if none > 0 {
         tally.push_str(&format!(", {none} without a match"));
+    }
+    if strangers_only > 0 {
+        tally.push_str(&format!(
+            ", {strangers_only} left for a manual pick (no hit named the artist)"
+        ));
     }
     if skipped > 0 {
         tally.push_str(&format!(", {skipped} skipped"));
