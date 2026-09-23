@@ -1815,7 +1815,8 @@ fn auto_match_tracks(
     let total = ids.len();
     let _ = tx.send(JobMsg::Progress { done: 0, total });
     ctx.request_repaint();
-    let (mut matched, mut none, mut skipped, mut strangers_only) = (0usize, 0usize, 0usize, 0usize);
+    let (mut matched, mut none, mut skipped, mut strangers_only, mut unlisted) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
     let mut fails: Vec<(String, String)> = Vec::new();
     // Tracks whose cover art changed, so the UI can drop their stale textures.
     let mut covers: Vec<Id> = Vec::new();
@@ -1891,11 +1892,39 @@ fn auto_match_tracks(
                             .insert(config::ReleaseMedium::classify(&c.format).label());
                     }
                 }
-                match best_candidate(&kept, spec.criterion) {
-                    Some(c) => {
-                        apply_release(catalog, &client, track_id, c);
-                        covers.push(track_id);
-                        matched += 1;
+                // The same matcher the tracklist match runs: the hits
+                // ranked, the pressing rule, and the record's own tracklist
+                // read to confirm it lists the song as the file names it, so
+                // `Song (X Remix)` lands on the record with the remix.
+                let line = ordnung_core::tracklist::TracklistLine {
+                    position: 0,
+                    raw: label.clone(),
+                    timestamp: None,
+                    artist: Some(artist.clone()).filter(|a| !a.is_empty()),
+                    title: title.clone(),
+                    label_hint: None,
+                    catno_hint: None,
+                    album_hint: album.clone(),
+                    kind: ordnung_core::tracklist::LineKind::Track,
+                };
+                let settled =
+                    settle_song(catalog, &client, &line, &kept, &medium_filter, spec.criterion, cancel);
+                match settled {
+                    Some(s) => {
+                        // A record read that doesn't list the song is not
+                        // committed unattended, unless the file's own album
+                        // tag names that record.
+                        let listed = s.confidence >= ordnung_core::tracklist::Confidence::Likely
+                            || !s.read_any;
+                        let album_says_so =
+                            album.as_deref().is_some_and(|a| s.chosen.agrees_with("", Some(a)));
+                        if listed || album_says_so {
+                            apply_release(catalog, &client, track_id, &s.chosen);
+                            covers.push(track_id);
+                            matched += 1;
+                        } else {
+                            unlisted += 1;
+                        }
                     }
                     // A true no-match is marked like the manual run, so it
                     // isn't offered again.
@@ -1950,11 +1979,140 @@ fn auto_match_tracks(
             ", {strangers_only} left for a manual pick (no hit named the artist)"
         ));
     }
+    if unlisted > 0 {
+        tally.push_str(&format!(
+            ", {unlisted} left for a manual pick (no record read lists the song)"
+        ));
+    }
     if skipped > 0 {
         tally.push_str(&format!(", {skipped} skipped"));
     }
     tally.push('.');
     tally
+}
+
+/// What [`settle_song`] settled on for one song among its Discogs hits.
+pub(crate) struct SettledSong {
+    pub chosen: discogs::ReleaseCandidate,
+    pub confidence: ordnung_core::tracklist::Confidence,
+    /// The record's own spelling of the song, when its tracklist confirmed
+    /// it and spells it differently from the song as named.
+    pub as_listed: Option<String>,
+    /// Every hit in the matcher's order, for "pick another".
+    pub ordered: Vec<discogs::ReleaseCandidate>,
+    /// Whether any record's tracklist was read. Unsure with a record read
+    /// means the records read don't list the song as named; Unsure without
+    /// means nothing could be read and the local score stands.
+    pub read_any: bool,
+}
+
+/// Settle one song on one of its Discogs hits, the one way for every
+/// unattended match (the tracklist match and the import auto-match):
+///
+/// 1. rank the hits locally with [`ordnung_core::tracklist::rank_candidates`]
+///    (no requests), the user's formats first among the records as sure as
+///    the best one — a song that scores the same on a FLAC release and on
+///    the 12" it was cut from lands on the 12", while a wanted format that
+///    is a worse match never beats a sure hit on an unwanted one;
+/// 2. let the pressing rule pick among the top-scoring group;
+/// 3. for anything short of Sure, read the record's own tracklist (one
+///    request each, cached), the chosen record first and then the next in
+///    rank: a record listing the song as named (a remix line only on a
+///    record listing that remix) is Sure; when none does, one carrying the
+///    song in another version becomes the guess at Unsure; records that
+///    couldn't be read leave the local score.
+///
+/// `None` when `cands` is empty.
+fn settle_song(
+    catalog: &Catalog,
+    client: &discogs::Client,
+    line: &ordnung_core::tracklist::TracklistLine,
+    cands: &[discogs::ReleaseCandidate],
+    medium_filter: &config::Config,
+    criterion: config::ReleaseAutoMatch,
+    cancel: &AtomicBool,
+) -> Option<SettledSong> {
+    use ordnung_core::tracklist::{self, Confidence};
+    if cands.is_empty() {
+        return None;
+    }
+    let ranked = tracklist::rank_candidates(line, cands);
+    let ranked: Vec<tracklist::RankedCandidate> = {
+        let top_conf = ranked[0].confidence;
+        let (wanted, rest): (Vec<_>, Vec<_>) = ranked.into_iter().partition(|r| {
+            r.confidence == top_conf && medium_filter.shows_release_format(&cands[r.index].format)
+        });
+        wanted.into_iter().chain(rest).collect()
+    };
+    let ordered: Vec<discogs::ReleaseCandidate> =
+        ranked.iter().map(|r| cands[r.index].clone()).collect();
+    let best_score = ranked[0].score;
+    let top: Vec<discogs::ReleaseCandidate> = ranked
+        .iter()
+        .take_while(|r| r.score == best_score)
+        .map(|r| cands[r.index].clone())
+        .collect();
+    let mut chosen = best_candidate(&top, criterion)
+        .cloned()
+        .unwrap_or_else(|| ordered[0].clone());
+    let mut confidence = tracklist::confidence_for(best_score);
+    let mut as_listed: Option<String> = None;
+    let mut read_any = false;
+
+    if confidence < Confidence::Sure {
+        if let Some(t) = line.title.as_deref() {
+            let mut tried = 0usize;
+            let mut read: Vec<(discogs::ReleaseCandidate, discogs::ReleaseDetail)> = Vec::new();
+            let mut verified: Option<(discogs::ReleaseCandidate, String)> = None;
+            // Two records when the score already says Likely; four when
+            // only the artist agreed, or the song names a remix or version
+            // the search hit can't confirm, and the tracklists must decide.
+            let names_version = tracklist::mix_tail(t).is_some();
+            let limit = if best_score >= 80 && !names_version { 2 } else { 4 };
+            let others = ordered.iter().filter(|c| c.release_id != chosen.release_id).cloned();
+            for cand in std::iter::once(chosen.clone()).chain(others) {
+                if tried >= limit || cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                tried += 1;
+                let id = cand.release_id.clone();
+                if let Ok(detail) = catalog.release_cached_or(&id, || client.fetch_release(&id)) {
+                    if let Some(listed) = detail.matching_track_title(t) {
+                        verified = Some((cand, listed.to_string()));
+                        break;
+                    }
+                    read.push((cand, detail));
+                }
+            }
+            read_any = verified.is_some() || !read.is_empty();
+            match verified {
+                Some((c, listed)) => {
+                    chosen = c;
+                    confidence = Confidence::Sure;
+                    if listed != t {
+                        as_listed = Some(listed);
+                    }
+                }
+                None if !read.is_empty() => {
+                    if let Some((c, _)) = read
+                        .iter()
+                        .find(|(_, d)| d.matching_track_title_any_version(t).is_some())
+                    {
+                        chosen = c.clone();
+                    }
+                    confidence = confidence.min(Confidence::Unsure);
+                }
+                None => {}
+            }
+        }
+    }
+    Some(SettledSong {
+        chosen,
+        confidence,
+        as_listed,
+        ordered,
+        read_any,
+    })
 }
 
 /// The candidate the automatic match commits to, by the configured rule.
@@ -4528,92 +4686,17 @@ pub(crate) fn run_match_tracklist(
             continue;
         }
 
-        // Rank locally (no requests), keep the ranked order for "pick another".
-        let ranked = tracklist::rank_candidates(&line, &cands);
-        // The user's formats come first among the records that are as sure a
-        // match as the best one: a song that scores the same on a FLAC
-        // release and on the 12" it was cut from lands on the 12". Other
-        // formats stay in the order as the fallback, and take the line only
-        // when nothing the user collects is as good — a wanted format that
-        // is a *worse* match (a different record that merely shares the
-        // artist) never beats a sure hit on an unwanted one.
-        let ranked: Vec<tracklist::RankedCandidate> = {
-            let top_conf = ranked[0].confidence;
-            let (wanted, rest): (Vec<_>, Vec<_>) = ranked.into_iter().partition(|r| {
-                r.confidence == top_conf && medium_filter.shows_release_format(&cands[r.index].format)
-            });
-            wanted.into_iter().chain(rest).collect()
-        };
-        let ordered: Vec<discogs::ReleaseCandidate> =
-            ranked.iter().map(|r| cands[r.index].clone()).collect();
-        let best_score = ranked[0].score;
-        // The top-scoring group, and the pressing rule picks among it.
-        let top: Vec<discogs::ReleaseCandidate> = ranked
-            .iter()
-            .take_while(|r| r.score == best_score)
-            .map(|r| cands[r.index].clone())
-            .collect();
-        let mut chosen = best_candidate(&top, spec.criterion)
-            .cloned()
-            .unwrap_or_else(|| ordered[0].clone());
-        let mut confidence = tracklist::confidence_for(best_score);
-        let mut rel_track: Option<String> = None;
-
-        // Verify anything short of Sure against the record's own tracklist:
-        // the chosen one first, then the next in rank. A hit is Sure; when
-        // no record read carries the song as the line names it, one that
-        // carries it in another version (the original 12" for a remix
-        // line) becomes the guess, at Unsure; a record that couldn't be
-        // read leaves the local score.
-        if confidence < Confidence::Sure {
-            if let Some(t) = entry.title.as_deref() {
-                let mut tried = 0usize;
-                let mut read: Vec<(discogs::ReleaseCandidate, discogs::ReleaseDetail)> = Vec::new();
-                let mut verified: Option<(discogs::ReleaseCandidate, String)> = None;
-                // Two records when the score already says Likely; four when
-                // only the artist agreed, or the line names a remix or
-                // version the search hit can't confirm, and the tracklists
-                // must decide.
-                let names_version = tracklist::mix_tail(t).is_some();
-                let limit = if best_score >= 80 && !names_version { 2 } else { 4 };
-                let others = ordered.iter().filter(|c| c.release_id != chosen.release_id).cloned();
-                for cand in std::iter::once(chosen.clone()).chain(others) {
-                    if tried >= limit || cancel.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    tried += 1;
-                    let id = cand.release_id.clone();
-                    if let Ok(detail) = catalog.release_cached_or(&id, || client.fetch_release(&id)) {
-                        if let Some(as_listed) = detail.matching_track_title(t) {
-                            verified = Some((cand, as_listed.to_string()));
-                            break;
-                        }
-                        read.push((cand, detail));
-                    }
-                }
-                match verified {
-                    Some((c, as_listed)) => {
-                        chosen = c;
-                        confidence = Confidence::Sure;
-                        // The record's own spelling, when it differs from
-                        // the paste, is what the row will show.
-                        if as_listed != t {
-                            rel_track = Some(as_listed);
-                        }
-                    }
-                    None if !read.is_empty() => {
-                        if let Some((c, _)) = read
-                            .iter()
-                            .find(|(_, d)| d.matching_track_title_any_version(t).is_some())
-                        {
-                            chosen = c.clone();
-                        }
-                        confidence = confidence.min(Confidence::Unsure);
-                    }
-                    None => {}
-                }
-            }
-        }
+        // Rank, pick by the pressing rule and read the record's tracklist:
+        // the one matcher every unattended match runs (see `settle_song`).
+        let settled = settle_song(&catalog, &client, &line, &cands, &medium_filter, spec.criterion, &cancel)
+            .expect("cands is not empty");
+        let SettledSong {
+            chosen,
+            confidence,
+            as_listed: rel_track,
+            ordered,
+            ..
+        } = settled;
         match confidence {
             Confidence::Sure => sure += 1,
             Confidence::Likely => likely += 1,

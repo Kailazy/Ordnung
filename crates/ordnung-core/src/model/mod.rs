@@ -663,6 +663,7 @@ impl TracklistEntry {
             title: self.title.clone(),
             label_hint: self.label_hint.clone(),
             catno_hint: self.catno_hint.clone(),
+            album_hint: None,
             kind: self.kind,
         }
     }

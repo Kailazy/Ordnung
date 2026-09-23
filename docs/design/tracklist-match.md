@@ -184,6 +184,14 @@ the version, the first that carries the song in any version becomes the
 guess at `Unsure` rather than a false `Sure` (v0.146.3; before it the bare
 title alone verified, and the original 12" took the remix line).
 
+Since v0.146.4 this whole step is one function, `jobs::settle_song`, and
+the import auto-match (`jobs::auto_match_tracks`) runs it too: an imported
+file's artist, title and album tag make a line (the album as `album_hint`,
+scored like the title), the hits are ranked, the pressing rule picks, and
+the record's tracklist is read the same way. Unattended, a record read that
+doesn't list the song as the file names it is left for a manual pick
+(tallied as such) unless the file's own album tag names that record.
+
 ### 4.4 Pressing choice
 
 The user wants *a* record with the track on it, usually the vinyl one they

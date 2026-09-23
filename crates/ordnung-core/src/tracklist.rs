@@ -61,6 +61,9 @@ pub struct TracklistLine {
     /// A trailing `[ENV 006]`-style token: a catalog number, which names one
     /// pressing outright.
     pub catno_hint: Option<String>,
+    /// The record the song is said to be from, when the source knows one: a
+    /// file's album tag. A paste never carries it.
+    pub album_hint: Option<String>,
     pub kind: LineKind,
 }
 
@@ -295,6 +298,7 @@ fn parse_line(raw: &str) -> TracklistLine {
         title: None,
         label_hint: None,
         catno_hint: None,
+        album_hint: None,
         kind: LineKind::Noise,
     };
     let text = normalise(raw);
@@ -869,7 +873,9 @@ pub fn confidence_for(score: i32) -> Confidence {
 /// version (`K.B's Groove (Analogue Cops Remix Two)`) is compared bare as
 /// well, since a record is titled after the song and not the remix, and a
 /// record whose title names the remixer scores 20 more; which version a
-/// record really carries is for the tracklist check to settle.
+/// record really carries is for the tracklist check to settle. An album
+/// hint (a file's album tag) counts like the title: a record titled as
+/// the album is as good a fit as one titled as the song.
 pub fn score_candidate(line: &TracklistLine, c: &ReleaseCandidate) -> i32 {
     let mut score = 0i32;
     let hit_artist = fold_name(&c.artist);
@@ -895,6 +901,9 @@ pub fn score_candidate(line: &TracklistLine, c: &ReleaseCandidate) -> i32 {
             if !names.is_empty() && names.iter().all(|n| have_words.contains(&n.as_str())) {
                 title += 20;
             }
+        }
+        if let Some(album) = line.album_hint.as_deref() {
+            title = title.max(title_score(&fold_title(album), &have));
         }
         score += title;
     }
@@ -1303,6 +1312,16 @@ mod tests {
         // The release title is compared without its `Artist - ` prefix.
         let plain = line("DJ Linus - K.B's Groove");
         assert_eq!(score_candidate(&plain, &original), 40 + 50 + 5);
+    }
+
+    #[test]
+    fn album_hint_counts_like_the_title() {
+        let mut l = line("Theo Parrish - Solitary Flight");
+        let twelve = cand("Theo Parrish", "Theo Parrish - Solitary Flight", "Sound Signature", "SS 011", "Vinyl");
+        let album = cand("Theo Parrish", "Theo Parrish - Parallel Dimensions", "Ubiquity", "U 1", "Vinyl");
+        assert!(score_candidate(&l, &twelve) > score_candidate(&l, &album));
+        l.album_hint = Some("Parallel Dimensions".into());
+        assert_eq!(score_candidate(&l, &twelve), score_candidate(&l, &album));
     }
 
     #[test]
