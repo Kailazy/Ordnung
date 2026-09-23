@@ -1,6 +1,9 @@
 //! Split out of `main.rs`; part of the GUI `App`.
 use super::*;
 
+/// The header row's height.
+const HEADER_H: f32 = 22.0;
+
 impl App {
     /// Re-read the selected track's full Tags from the catalog. Call after any
     /// change that may have touched its row (rename / convert / rescan).
@@ -858,6 +861,7 @@ impl App {
             | LibraryView::Missing
             | LibraryView::Liked
             | LibraryView::Vinyl
+            | LibraryView::CrateSet(_)
             | LibraryView::Usb(..) => None,
         };
         // USB rows aren't catalog tracks (synthetic ids, files on the device):
@@ -949,6 +953,7 @@ impl App {
             | LibraryView::Missing
             | LibraryView::Liked
             | LibraryView::Vinyl
+            | LibraryView::CrateSet(_)
             | LibraryView::Usb(..) => None,
         };
         // The leading order gutter is RESERVED in EVERY view — the library and every
@@ -1092,7 +1097,7 @@ impl App {
                     builder.reset();
                 }
                 builder
-                    .header(22.0, |mut header| {
+                    .header(HEADER_H, |mut header| {
                         // Each header is clickable to sort by that column (the cover
                         // column isn't sortable) and right-clickable to open the column
                         // reorder popup. The trailing spacer carries no label but is
@@ -2145,6 +2150,23 @@ impl App {
         self.row_screen_rects = row_rects;
         self.table_screen_rect = Some(scroll_out.inner_rect);
 
+        // egui_extras claims a band ten points wide down every column border,
+        // from the header to the table's floor, and shows the resize cursor
+        // anywhere in it. Crossing a row then flipped the cursor at every
+        // border, and the band lies over the edges of the cover thumbs. The
+        // border stays draggable from the body; only the header, where a
+        // column is resized on purpose, says so with the cursor.
+        let header_bottom = scroll_out.inner_rect.top() + HEADER_H;
+        let in_body = ctx_clone
+            .pointer_hover_pos()
+            .is_some_and(|p| scroll_out.inner_rect.contains(p) && p.y > header_bottom);
+        if in_body
+            && ctx_clone.output(|o| o.cursor_icon) == egui::CursorIcon::ResizeColumn
+            && !ctx_clone.input(|i| i.pointer.any_down())
+        {
+            ctx_clone.set_cursor_icon(egui::CursorIcon::Default);
+        }
+
         // Reconcile the columns' rendered widths with the saved set. egui_extras
         // owns the live width (so a drag updates smoothly within the session under
         // a single shared id); we mirror it into `self.column_widths` and persist
@@ -2311,27 +2333,7 @@ impl App {
         // While an in-app row-drag is live, float a "N track(s)" chip at the
         // cursor so it's clear something is being carried toward a playlist.
         if let Some(payload) = egui::DragAndDrop::payload::<DraggedTracks>(&ctx_clone) {
-            if let Some(pos) = ctx_clone.pointer_interact_pos() {
-                let text = format!("{} track(s)", payload.0.len());
-                let painter = ctx_clone.layer_painter(egui::LayerId::new(
-                    egui::Order::Tooltip,
-                    egui::Id::new("drag-preview"),
-                ));
-                let at = pos + egui::vec2(14.0, 6.0);
-                let galley = painter.layout_no_wrap(
-                    text,
-                    crate::ui::tokens::font::callout(),
-                    egui::Color32::WHITE,
-                );
-                let pad = egui::vec2(6.0, 3.0);
-                let rect = egui::Rect::from_min_size(at, galley.size() + pad * 2.0);
-                painter.rect_filled(
-                    rect,
-                    egui::Rounding::same(4.0),
-                    egui::Color32::from_rgb(60, 110, 170),
-                );
-                painter.galley(at + pad, galley, egui::Color32::WHITE);
-            }
+            crate::ui::drag_chip(&ctx_clone, format!("{} track(s)", payload.0.len()));
         }
 
         if let Some((id, path)) = preview_request {
@@ -2781,6 +2783,7 @@ pub(crate) fn load_rows(
         | LibraryView::Missing
         | LibraryView::Liked
         | LibraryView::Vinyl
+        | LibraryView::CrateSet(_)
         | LibraryView::Usb(..) => Ok(Vec::new()),
     }
     .map_err(|e| e.to_string())?;

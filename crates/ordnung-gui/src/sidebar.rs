@@ -390,26 +390,17 @@ pub(crate) fn draw_inline_rename(
     renaming: &mut Option<Renaming>,
     action: &mut Option<SidebarAction>,
 ) -> bool {
-    let Some(state) = renaming.as_mut().filter(|s| !s.usb && s.id == p.id) else {
-        return false;
-    };
     let hint = if p.is_folder {
         "New folder"
     } else {
         "New playlist"
     };
-    let Some(outcome) = inline_rename_editor(ui, state, hint) else {
-        return true;
-    };
-    let is_new = state.is_new;
-    match outcome {
-        Some(name) => *action = Some(SidebarAction::Rename(p.id, name)),
+    rename_row(ui, renaming, RenameTree::Playlist, p.id, hint, action, |name, is_new| match name {
+        Some(name) => Some(SidebarAction::Rename(p.id, name)),
         // Cancel: discard a just-created row, keep an existing one untouched.
-        None if is_new => *action = Some(SidebarAction::Delete(p.id)),
-        None => {}
-    }
-    *renaming = None;
-    true
+        None if is_new => Some(SidebarAction::Delete(p.id)),
+        None => None,
+    })
 }
 
 /// The device-tree twin of [`draw_inline_rename`]: same editor, same resolve
@@ -421,22 +412,55 @@ fn draw_usb_inline_rename(
     renaming: &mut Option<Renaming>,
     action: &mut Option<SidebarAction>,
 ) -> bool {
-    let Some(state) = renaming.as_mut().filter(|s| s.usb && s.id == p.id as Id) else {
-        return false;
-    };
     let hint = if p.is_folder {
         "New folder"
     } else {
         "New playlist"
     };
+    rename_row(ui, renaming, RenameTree::Usb, p.id as Id, hint, action, |name, is_new| match name {
+        Some(name) => Some(SidebarAction::RenameUsbPlaylist(p.id, name)),
+        None if is_new => Some(SidebarAction::DeleteUsbPlaylist(p.id)),
+        None => None,
+    })
+}
+
+/// The crates' twin: the ids are crate ids and the actions edit the crates.
+fn draw_crate_inline_rename(
+    ui: &mut egui::Ui,
+    c: &CrateSet,
+    renaming: &mut Option<Renaming>,
+    action: &mut Option<SidebarAction>,
+) -> bool {
+    rename_row(ui, renaming, RenameTree::CrateSet, c.id, "New crate", action, |name, is_new| match name {
+        Some(name) => Some(SidebarAction::RenameCrateSet(c.id, name)),
+        None if is_new => Some(SidebarAction::DeleteCrateSet(c.id)),
+        None => None,
+    })
+}
+
+/// The inline editor for row `id` of `tree`, drawn in place of the row
+/// while it is the one being renamed. Returns true when it was drawn (the
+/// caller skips the row's normal look). Once the edit resolves, `resolve`
+/// turns its outcome (the committed name, or `None` for a cancel or a blank)
+/// and whether the row was just created into the tree's own action.
+fn rename_row(
+    ui: &mut egui::Ui,
+    renaming: &mut Option<Renaming>,
+    tree: RenameTree,
+    id: Id,
+    hint: &str,
+    action: &mut Option<SidebarAction>,
+    resolve: impl FnOnce(Option<String>, bool) -> Option<SidebarAction>,
+) -> bool {
+    let Some(state) = renaming.as_mut().filter(|s| s.tree == tree && s.id == id) else {
+        return false;
+    };
     let Some(outcome) = inline_rename_editor(ui, state, hint) else {
         return true;
     };
     let is_new = state.is_new;
-    match outcome {
-        Some(name) => *action = Some(SidebarAction::RenameUsbPlaylist(p.id, name)),
-        None if is_new => *action = Some(SidebarAction::DeleteUsbPlaylist(p.id)),
-        None => {}
+    if let Some(a) = resolve(outcome, is_new) {
+        *action = Some(a);
     }
     *renaming = None;
     true
@@ -712,7 +736,7 @@ pub(crate) fn draw_playlist_leaf(
         if ui.button("Rename").clicked() {
             *renaming = Some(Renaming {
                 id: p.id,
-                usb: false,
+                tree: RenameTree::Playlist,
                 buf: p.name.clone(),
                 is_new: false,
                 needs_focus: true,
@@ -805,7 +829,7 @@ pub(crate) fn draw_usb_playlist_nodes(
                 if ui.button("Rename").clicked() {
                     *renaming = Some(Renaming {
                         id: p.id as Id,
-                        usb: true,
+                        tree: RenameTree::Usb,
                         buf: p.name.clone(),
                         is_new: false,
                         needs_focus: true,
@@ -878,7 +902,7 @@ pub(crate) fn draw_usb_playlist_nodes(
                 if ui.button("Rename").clicked() {
                     *renaming = Some(Renaming {
                         id: p.id as Id,
-                        usb: true,
+                        tree: RenameTree::Usb,
                         buf: p.name.clone(),
                         is_new: false,
                         needs_focus: true,
@@ -899,14 +923,15 @@ pub(crate) fn draw_usb_playlist_nodes(
     }
 }
 
-/// The "PLAYLISTS" caption row with its right-aligned "+" button, shared by
-/// the catalog group and the device group so both sources carry the same
-/// affordance. Returns `true` when "+" was clicked; `tip` is its hover note.
-pub(crate) fn playlists_header(ui: &mut egui::Ui, tip: &str) -> bool {
+/// A list's caption row ("PLAYLISTS", "CRATES") with its right-aligned "+"
+/// button, shared by the catalog group, the device group and the crates so
+/// every list carries the same affordance. Returns `true` when "+" was
+/// clicked; `tip` is its hover note.
+pub(crate) fn list_header(ui: &mut egui::Ui, caption: &str, tip: &str) -> bool {
     let mut clicked = false;
     ui.horizontal(|ui| {
         ui.label(
-            egui::RichText::new("PLAYLISTS")
+            egui::RichText::new(caption)
                 .font(crate::ui::tokens::font::footnote())
                 .color(egui::Color32::from_gray(140))
                 .strong(),
@@ -1085,6 +1110,63 @@ pub(crate) struct SourceTabsResponse {
     pub dropped: Option<Vec<Id>>,
 }
 
+/// The crates under the Vinyl tile, one row each in the playlist row's
+/// shape: the name, the song count in the lane, the crate glyph. A row is
+/// a drop target for songs (see [`crate::DraggedSongs`]) and lights while
+/// one hovers; its menu renames or deletes it.
+pub(crate) fn draw_crate_rows(
+    ui: &mut egui::Ui,
+    density: NavDensity,
+    crates: &[CrateSet],
+    view: &mut LibraryView,
+    renaming: &mut Option<Renaming>,
+    action: &mut Option<SidebarAction>,
+) {
+    let mark = RowMark {
+        glyph: crate::ui::phosphor_icons::glyph("package").unwrap_or("▤"),
+        tint: None,
+    };
+    for c in crates {
+        if draw_crate_inline_rename(ui, c, renaming, action) {
+            continue;
+        }
+        let selected = *view == LibraryView::CrateSet(c.id);
+        let resp = playlist_row(ui, density, &c.name, mark, selected, c.songs as usize);
+        if resp.dnd_hover_payload::<DraggedSongs>().is_some() {
+            ui.painter().rect_stroke(
+                resp.rect.shrink(1.0),
+                egui::Rounding::same(6.0),
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 150, 220)),
+            );
+        }
+        if let Some(payload) = resp.dnd_release_payload::<DraggedSongs>() {
+            if !payload.0.is_empty() {
+                *action = Some(SidebarAction::AddSongs(c.id, payload.0.clone()));
+            }
+        }
+        if resp.clicked() {
+            *view = LibraryView::CrateSet(c.id);
+        }
+        resp.context_menu(|ui| {
+            if ui.button("Rename").clicked() {
+                *renaming = Some(Renaming {
+                    id: c.id,
+                    tree: RenameTree::CrateSet,
+                    buf: c.name.clone(),
+                    is_new: false,
+                    needs_focus: true,
+                });
+                ui.close_menu();
+            }
+            if ui.button("Delete").on_hover_note("Remove the crate. Its songs stay liked if they were").clicked() {
+                *action = Some(SidebarAction::DeleteCrateSet(c.id));
+                ui.close_menu();
+            }
+        });
+        playlist_row_gap(ui, density);
+    }
+}
+
 pub(crate) fn folder_context_menu(
     ui: &mut egui::Ui,
     p: &Playlist,
@@ -1102,7 +1184,7 @@ pub(crate) fn folder_context_menu(
     if ui.button("Rename").clicked() {
         *renaming = Some(Renaming {
             id: p.id,
-            usb: false,
+            tree: RenameTree::Playlist,
             buf: p.name.clone(),
             is_new: false,
             needs_focus: true,

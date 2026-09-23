@@ -63,6 +63,16 @@ so the cache can invalidate correctly.
   UI state, prompt, or print.
 - Tests live next to code; the Camelot/key mapping and any format writer get unit
   tests with known-good fixtures.
+- Reuse before you build. Before adding a struct, table, view, menu, catalog
+  query or helper, find the one that already does the job and extend or call
+  it: `model` for shapes (one song model, `SongPin`, serves the liked songs
+  and the crates), `ui/` for components, the existing view modules for
+  tables and menus (the Liked view and every crate draw through
+  `song_rows`), `sidebar.rs` for rows, headers and inline rename. Grep for
+  the behaviour first and say in the commit what was reused. Two functions
+  laying out the same row, or two catalog methods reading the same columns,
+  are a bug to fix, not a shortcut; design each addition so the next feature
+  can share it.
 - GUI controls that share a row share a height. Size a row of buttons, pickers
   and fields through `crate::ui::control_row` (the single-line text field is the
   reference height); never mix `small_button` with full-size controls on one

@@ -3,7 +3,7 @@
 //! A song turns up as a file in the library ([`super::Track`]), a row of a
 //! record's Discogs tracklist ([`crate::discogs::ReleaseTrack`]), a line of
 //! a pasted mix ([`super::TracklistEntry`]), a song on the radio, and a
-//! like ([`super::LikedSong`]). Those are different things — a file has
+//! like ([`super::SongPin`]). Those are different things — a file has
 //! bytes and an analysis, a like is a bookmark, a tracklist line carries
 //! match state — and they stay different structs. What they share is
 //! *which song* they are, and that is a [`SongRef`]: artist and title,

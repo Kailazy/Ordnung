@@ -169,6 +169,10 @@ impl App {
             library_index: LibraryIndex::default(),
             library_index_dirty: true,
             liked_to_get_only: false,
+            crate_sets: Vec::new(),
+            crate_songs: Vec::new(),
+            crate_songs_for: None,
+            crate_layout: Default::default(),
             tracklists: Vec::new(),
             tracklist_current: None,
             tracklist_entries: Vec::new(),
@@ -176,6 +180,8 @@ impl App {
             tracklist_paste_open: false,
             tracklist_focus_paste: false,
             tracklist_paste: String::new(),
+            tracklist_name: String::new(),
+            tracklist_focus_name: false,
             tracklist_editing: None,
             tracklist_pick: None,
             seller_genres: HashMap::new(),
@@ -953,6 +959,8 @@ impl App {
                 .unwrap_or_default();
             // The crate of liked songs: one row per like, loads whole.
             self.load_liked();
+            // The crates: a few rows each; the open one's songs load lazily.
+            self.load_crate_sets();
             // Saved tracklists likewise: a few rows each; their lines load
             // lazily in the Tracklists window.
             self.tracklists = Catalog::open(&self.db_path)
@@ -2330,7 +2338,8 @@ impl App {
                     // writeback, relocation. The vinyl view shows Discogs
                     // records, not catalog tracks, so the group hides there
                     // rather than offering actions on rows that aren't visible.
-                    if self.view != LibraryView::Vinyl {
+                    // A crate is the vinyl side too: songs on records.
+                    if !matches!(self.view, LibraryView::Vinyl | LibraryView::CrateSet(_)) {
                         ui.add_enabled_ui(!busy, |ui| {
                             // "Add songs…" opens a small menu: pick individual files, or a
                             // whole folder. Both import into the catalog; source files are
@@ -2457,6 +2466,7 @@ impl App {
                                 | LibraryView::Missing
                                 | LibraryView::Liked
                                 | LibraryView::Vinyl
+                                | LibraryView::CrateSet(_)
                                 | LibraryView::Usb(..) => None,
                             };
                             if let Some(pid) = playlist_view {
@@ -2597,9 +2607,11 @@ impl App {
                             let n = self
                                 .liked
                                 .iter()
-                                .filter(|s| crate::liked::liked_matches(s, &query))
+                                .filter(|s| crate::song_rows::song_matches(s, &query))
                                 .count();
                             if n == 1 { "1 song".to_string() } else { format!("{n} songs") }
+                        } else if let LibraryView::CrateSet(_) = self.view {
+                            self.crate_count_words()
                         } else {
                             format!("{} tracks", self.rows.len())
                         };
@@ -2927,8 +2939,10 @@ impl App {
         // than leaving an empty panel with nothing to inspect. The crate of
         // liked songs is rows of songs that mostly aren't tracks, so it has
         // no inspector either.
-        let inspector_applies =
-            !matches!(self.view, LibraryView::Vinyl | LibraryView::Liked);
+        let inspector_applies = !matches!(
+            self.view,
+            LibraryView::Vinyl | LibraryView::Liked | LibraryView::CrateSet(_)
+        );
         // The slide is for the pull tab. On a view switch the drawer snaps:
         // the new view is laid out once, at its final width, rather than
         // re-flowed every frame of the slide (the vinyl wall went from six
@@ -3188,7 +3202,7 @@ impl App {
                                 *sidebar_action = Some(SidebarAction::NewPlaylist(None));
                             }
                             ui.add_space(6.0);
-                        } else if crate::sidebar::playlists_header(ui, "New playlist") {
+                        } else if crate::sidebar::list_header(ui, "PLAYLISTS", "New playlist") {
                             *sidebar_action = Some(SidebarAction::NewPlaylist(None));
                         }
                     };
@@ -3280,8 +3294,9 @@ impl App {
                                     && !density.icons_only()
                                 {
                                     if v.is_rekordbox_export {
-                                        if crate::sidebar::playlists_header(
+                                        if crate::sidebar::list_header(
                                             ui,
+                                            "PLAYLISTS",
                                             "New playlist, written to this device",
                                         ) {
                                             *sidebar_action =
@@ -3300,7 +3315,12 @@ impl App {
                 // The vinyl tile. Like the digital group, it's drawn from one
                 // place into whichever slot `nav_primary` assigns it — big and
                 // leading when vinyl is primary, a compact pinned row otherwise.
-                let draw_vinyl_tile = |ui: &mut egui::Ui, view: &mut LibraryView, lead: bool| {
+                let crate_sets = self.crate_sets.clone();
+                let draw_vinyl_tile = |ui: &mut egui::Ui,
+                                       view: &mut LibraryView,
+                                       lead: bool,
+                                       sidebar_action: &mut Option<SidebarAction>,
+                                       renaming: &mut Option<Renaming>| {
                     // The vinyl shelf is a top-level library whether or not it
                     // leads the sidebar, so at the icon tier it keeps the taller
                     // tile that earns the bigger glyph; only the captioned tiers
@@ -3328,6 +3348,38 @@ impl App {
                     {
                         *view = LibraryView::Vinyl;
                     }
+                    // The crates, under the shelf the way the playlists sit
+                    // under the library: a caption with its +, then a row per
+                    // crate. Capped in height so a long list of crates
+                    // never squeezes the playlist tree out.
+                    ui.add_space(6.0);
+                    if density.icons_only() {
+                        if crate::sidebar::rail_add_tile(ui)
+                            .on_hover_note("New crate")
+                            .clicked()
+                        {
+                            *sidebar_action = Some(SidebarAction::NewCrateSet);
+                        }
+                        ui.add_space(6.0);
+                    } else if crate::sidebar::list_header(ui, "CRATES", "New crate: a set of songs on records to bring to a gig") {
+                        *sidebar_action = Some(SidebarAction::NewCrateSet);
+                    }
+                    if !crate_sets.is_empty() {
+                        egui::ScrollArea::vertical()
+                            .id_salt("nav_crates_scroll")
+                            .max_height(if lead { 260.0 } else { 180.0 })
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                crate::sidebar::draw_crate_rows(
+                                    ui,
+                                    density,
+                                    &crate_sets,
+                                    view,
+                                    renaming,
+                                    sidebar_action,
+                                );
+                            });
+                    }
                 };
 
                 // ── Leading section (top) ─────────────────────────────────────
@@ -3345,7 +3397,7 @@ impl App {
                                 draw_library_group(ui, &mut self.view, &mut sidebar_action);
                             }
                             NavPrimary::Vinyl => {
-                                draw_vinyl_tile(ui, &mut self.view, true);
+                                draw_vinyl_tile(ui, &mut self.view, true, &mut sidebar_action, &mut self.renaming);
                                 ui.add_space(10.0);
                                 ui.separator();
                                 ui.add_space(8.0);
@@ -3403,7 +3455,7 @@ impl App {
                         // Only when the digital library leads; if vinyl is the
                         // primary library its tile lives at the top instead.
                         if nav_primary == NavPrimary::Digital {
-                            draw_vinyl_tile(ui, &mut self.view, false);
+                            draw_vinyl_tile(ui, &mut self.view, false, &mut sidebar_action, &mut self.renaming);
                             ui.add_space(6.0);
                             ui.separator();
                             ui.add_space(6.0);
@@ -3509,7 +3561,7 @@ impl App {
                     }
                     self.renaming = Some(Renaming {
                         id: id as Id,
-                        usb: true,
+                        tree: RenameTree::Usb,
                         buf: String::new(),
                         is_new: true,
                         needs_focus: true,
@@ -3541,7 +3593,7 @@ impl App {
                         // an empty name on blur means "discard this entry".
                         self.renaming = Some(Renaming {
                             id,
-                            usb: false,
+                            tree: RenameTree::Playlist,
                             buf: String::new(),
                             is_new: true,
                             needs_focus: true,
@@ -3590,6 +3642,43 @@ impl App {
                     self.reload_after_playlist_edit();
                 }
             }
+            Some(SidebarAction::NewCrateSet) => {
+                match Catalog::open(&self.db_path).and_then(|c| c.create_crate_set("New crate")) {
+                    Ok(id) => {
+                        self.view = LibraryView::CrateSet(id);
+                        // An empty buffer, like a new playlist: the hint shows
+                        // the placeholder, and a blank name on blur discards
+                        // the crate.
+                        self.renaming = Some(Renaming {
+                            id,
+                            tree: RenameTree::CrateSet,
+                            buf: String::new(),
+                            is_new: true,
+                            needs_focus: true,
+                        });
+                    }
+                    Err(e) => self.fail(format!("Couldn't make the crate: {e}")),
+                }
+                self.load_crate_sets();
+            }
+            Some(SidebarAction::RenameCrateSet(id, name)) => {
+                if let Err(e) = Catalog::open(&self.db_path).and_then(|c| c.rename_crate_set(id, &name)) {
+                    self.fail(format!("Couldn't rename the crate: {e}"));
+                }
+                self.load_crate_sets();
+            }
+            Some(SidebarAction::DeleteCrateSet(id)) => {
+                if let Err(e) = Catalog::open(&self.db_path).and_then(|c| c.delete_crate_set(id)) {
+                    self.fail(format!("Couldn't delete the crate: {e}"));
+                }
+                if self.view == LibraryView::CrateSet(id) {
+                    self.view = LibraryView::Vinyl;
+                }
+                self.load_crate_sets();
+            }
+            Some(SidebarAction::AddSongs(id, songs)) => {
+                self.add_songs_to_crate(id, songs);
+            }
             Some(SidebarAction::OpenHealth) => {
                 let tab = self.health_tab.clone();
                 self.open_health_tab(tab, ctx);
@@ -3601,7 +3690,10 @@ impl App {
             // closes it rather than leaving it stranded over the Library — and,
             // as everywhere else the sheet closes, takes its video with it so
             // nothing keeps playing with no sheet on screen to explain it.
-            if prev_view == LibraryView::Vinyl && self.vinyl_sheet.is_some() {
+            if prev_view == LibraryView::Vinyl
+                && !matches!(self.view, LibraryView::CrateSet(_))
+                && self.vinyl_sheet.is_some()
+            {
                 self.stop_sheet_video();
                 self.vinyl_sheet = None;
             }
@@ -3633,6 +3725,8 @@ impl App {
                     self.draw_liked(ui, ctx);
                 } else if self.view == LibraryView::Vinyl {
                     self.draw_vinyl(ui, ctx);
+                } else if let LibraryView::CrateSet(id) = self.view {
+                    self.draw_crate_set(ui, ctx, id);
                 } else if let LibraryView::Usb(vol, _) = self.view.clone() {
                     native_drag = self.draw_usb(ui, &vol);
                 } else if self.rows.is_empty()
@@ -3789,6 +3883,13 @@ impl App {
                     }
                 }
             }
+        }
+
+        // While songs are being carried to a crate, say how many at the
+        // pointer, the way a track drag does.
+        if let Some(payload) = egui::DragAndDrop::payload::<DraggedSongs>(ctx) {
+            let n = payload.0.len();
+            crate::ui::drag_chip(ctx, if n == 1 { "1 song".to_string() } else { format!("{n} songs") });
         }
 
         // Drop a folder / audio files from Finder anywhere on the window to import.

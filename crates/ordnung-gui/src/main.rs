@@ -18,6 +18,8 @@ mod inspector;
 mod jobs;
 mod browse_page;
 mod liked;
+mod crates;
+mod song_rows;
 mod macos_drag;
 mod macos_menu;
 mod macos_pasteboard;
@@ -56,7 +58,7 @@ use ordnung_core::genredb;
 use ordnung_core::library_index::LibraryIndex;
 use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
-    Analysis, Cue, Format, Id, LikedSong, Playlist, SellerListing, SellerShop, Tags, Track,
+    Analysis, CrateSet, Cue, Format, Id, Playlist, SongPin, SellerListing, SellerShop, Tags, Track,
     Tracklist, TracklistEntry, TranscodeVerdict, VinylList, VinylRecord,
 };
 use ordnung_core::search::{ScoredHit, SearchHit};
@@ -280,6 +282,9 @@ enum LibraryView {
     /// The user's Discogs vinyl collection — rendered as a grid of cover art,
     /// not the flat track table. Backed by the local `vinyl_collection` cache.
     Vinyl,
+    /// A crate (see `crates`): a named set of songs on records, the vinyl
+    /// side's playlist, shown as the records to bring or as its songs.
+    CrateSet(Id),
     /// A mounted removable volume (USB stick / external drive), keyed by its
     /// mount path, showing either the whole device (`None`) or one playlist
     /// from its rekordbox export (`Some(playlist id)`). The tracks live on the
@@ -693,6 +698,13 @@ struct ColFilterPopup {
 /// drag-out to rekordbox instead and never sets this payload.)
 #[derive(Clone)]
 struct DraggedTracks(Vec<Id>);
+
+/// egui drag-and-drop payload carried by a song row that isn't a library
+/// track (a record sheet's row, a liked song, a tracklist line): the songs
+/// being dragged, each with the record it sits on. Dropping it on a crate
+/// in the sidebar puts them in (see `crates`).
+#[derive(Clone)]
+struct DraggedSongs(Vec<liked::LikeSpec>);
 
 /// True while the current drag gesture has been cancelled with Esc. Set in
 /// `App::update` when Esc lands during a live drag, cleared there on the next
@@ -1312,7 +1324,7 @@ struct App {
     seller_genres: HashMap<u64, Vec<String>>,
     /// The crate of liked songs (see `liked`), from the `liked_songs`
     /// table, newest like first; reloaded with the catalog.
-    liked: Vec<LikedSong>,
+    liked: Vec<SongPin>,
     /// The song keys of `liked`, what every row's mark asks.
     liked_keys: HashSet<String>,
     /// The library by song (see `ordnung_core::library_index`): the one
@@ -1323,6 +1335,15 @@ struct App {
     library_index_dirty: bool,
     /// The Liked view's switch: show only the songs no file is yet.
     liked_to_get_only: bool,
+    /// The crates (see `crates`), from the `crates` table; reloaded with
+    /// the catalog.
+    crate_sets: Vec<CrateSet>,
+    /// The open crate's songs, loaded lazily; `crate_songs_for` names the
+    /// crate they belong to.
+    crate_songs: Vec<SongPin>,
+    crate_songs_for: Option<Id>,
+    /// Which layout the crate view shows: the records to bring, or the songs.
+    crate_layout: crates::CrateLayout,
     /// The Tracklists window (see `tracklists`), opened from the tiny ≡
     /// button in the top bar.
     tracklist_open: bool,
@@ -1344,6 +1365,11 @@ struct App {
     /// bar's ≡ too, where it opens the paste window when nothing is saved yet.
     tracklist_focus_paste: bool,
     tracklist_paste: String,
+    /// The name the paste window will save the tracklist under; blank
+    /// takes the suggestion (a `Tracklist:` line, else the day).
+    tracklist_name: String,
+    /// Put the focus on the paste window's name field on the next frame.
+    tracklist_focus_name: bool,
     /// The saved tracklist the paste box is editing, when it holds one's
     /// text rather than a new paste; Match then saves back into it.
     tracklist_editing: Option<Id>,
@@ -2194,12 +2220,12 @@ struct LookEditor {
 }
 
 struct Renaming {
-    /// The playlist (or folder) being edited.
+    /// The playlist (or folder, or crate) being edited.
     id: Id,
-    /// True when `id` names a node of the mounted device's rekordbox tree
-    /// rather than a catalog playlist — the two id spaces are unrelated, so
-    /// the editor must know which tree it belongs to.
-    usb: bool,
+    /// Which tree `id` belongs to: the catalog's playlists, the mounted
+    /// device's rekordbox tree or the crates. The id spaces are unrelated,
+    /// so the editor must know which one it is in.
+    tree: RenameTree,
     /// Live edit buffer bound to the `TextEdit`.
     buf: String,
     /// True when the row was just created, so an empty/cancelled edit removes it
@@ -2216,6 +2242,12 @@ struct Renaming {
 enum SidebarAction {
     /// Create a playlist under the given parent folder (`None` = top level).
     NewPlaylist(Option<Id>),
+    /// Make a crate and hand its row to the inline editor.
+    NewCrateSet,
+    RenameCrateSet(Id, String),
+    DeleteCrateSet(Id),
+    /// Songs dropped onto a crate (crate id, the dragged songs).
+    AddSongs(Id, Vec<liked::LikeSpec>),
     Rename(Id, String),
     Delete(Id),
     /// Right-click on a local playlist/folder: open the icon-and-colour
@@ -2248,6 +2280,17 @@ enum SidebarAction {
     ImportUsbPlaylist(u32),
     /// Right-click on a device playlist: save its track list as a text file.
     SaveUsbPlaylistText(u32),
+}
+
+/// The tree a [`Renaming`] edits a row of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenameTree {
+    /// The catalog's playlists and folders.
+    Playlist,
+    /// The mounted device's rekordbox playlist tree.
+    Usb,
+    /// The crates (see `crates`).
+    CrateSet,
 }
 
 /// A pending USB export awaiting the user's confirmation. `playlist_ids`

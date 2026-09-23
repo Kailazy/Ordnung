@@ -568,17 +568,20 @@ impl ChosenBy {
     }
 }
 
-/// A song the user liked where it appeared without being a track in the
-/// library: a line of a mix tracklist, a row of a record's tracklist in the
-/// sheet, a song on the radio. Together these are the crate of liked songs
-/// (see the `liked_songs` catalog table): which songs on each record the
-/// user likes, and which of them are still to be got digitally. Keyed by
-/// the song ([`crate::catalog::song_key`]: folded artist and title), so the
-/// same song liked on a compilation and again on its original 12" is one
-/// row; the release fields pin the record it was first liked on, the way a
-/// dug release pins the map.
+/// A song pinned to the record it was met on: the row shape of every
+/// set of songs that aren't library tracks. A song met outside the library
+/// (a line of a mix tracklist, a row of a record's tracklist in the sheet,
+/// a song on the radio) is kept as one of these when the user likes it
+/// (the crate of liked songs, the `liked_songs` catalog table) or puts it
+/// in a crate (a [`CrateSet`], the `crate_songs` table). Either way the
+/// question it answers is which songs on which records, and which of them
+/// are still to be got digitally. Keyed by the song
+/// ([`crate::catalog::song_key`]: folded artist and title), so the same
+/// song met on a compilation and again on its original 12" is one row of
+/// a set; the release fields pin the record it was first met on, the way
+/// a dug release pins the map.
 #[derive(Debug, Clone, PartialEq)]
-pub struct LikedSong {
+pub struct SongPin {
     pub id: Id,
     pub artist: String,
     pub title: String,
@@ -594,14 +597,14 @@ pub struct LikedSong {
     pub rel_year: Option<u16>,
     pub rel_thumb: Option<String>,
     /// A track in the local library that is this song, when one was known
-    /// where it was liked. The crate looks the rest up by song key.
+    /// where it was met. The views look the rest up by song key.
     pub local_track_id: Option<Id>,
-    /// Unix seconds when it was liked.
-    pub liked_at: i64,
+    /// Unix seconds when it was liked, or put in the crate.
+    pub added_at: i64,
 }
 
-impl LikedSong {
-    /// Which song was liked, on the record it was liked on.
+impl SongPin {
+    /// Which song this is, on the record it was met on.
     pub fn song(&self) -> SongRef {
         SongRef::new(self.artist.clone(), self.title.clone())
             .at(self.release_id, self.position.as_deref())
@@ -611,6 +614,35 @@ impl LikedSong {
     pub fn song_label(&self) -> String {
         self.song().label()
     }
+
+    /// The record's name, `Artist – Title`, or whichever half is known.
+    pub fn record_name(&self) -> String {
+        match (self.rel_artist.as_deref(), self.rel_title.as_deref()) {
+            (Some(a), Some(t)) => format!("{a} – {t}"),
+            (_, Some(t)) => t.to_string(),
+            (Some(a), None) => a.to_string(),
+            (None, None) => String::new(),
+        }
+    }
+}
+
+/// A crate: a named set of songs on records, the vinyl side's playlist
+/// (see the `crates` and `crate_songs` catalog tables). A playlist holds
+/// library tracks; a crate holds [`SongPin`]s, songs as they sit on
+/// records, so a set for a gig says which records to bring as well as
+/// which songs are on them. The counts are read with the row for the
+/// sidebar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrateSet {
+    pub id: Id,
+    pub name: String,
+    /// Unix seconds when it was made.
+    pub created_at: i64,
+    /// How many songs it holds.
+    pub songs: u32,
+    /// How many distinct records those songs sit on (songs pinned to no
+    /// record count as none).
+    pub records: u32,
 }
 
 /// One song line of a saved [`Tracklist`], with whatever the matcher (or

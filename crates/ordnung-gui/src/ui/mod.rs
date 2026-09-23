@@ -43,6 +43,29 @@ pub fn control_h(ui: &egui::Ui) -> f32 {
     ui.text_style_height(&egui::TextStyle::Body).round() + field::MARGIN.sum().y
 }
 
+/// The chip that floats at the pointer while something is dragged inside
+/// the app ("3 track(s)", "1 song"), so it's clear something is being
+/// carried toward a drop target. Painted in the tooltip layer, above all.
+pub fn drag_chip(ctx: &egui::Context, text: String) {
+    let Some(pos) = ctx.pointer_interact_pos() else {
+        return;
+    };
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("drag-preview"),
+    ));
+    let at = pos + egui::vec2(14.0, 6.0);
+    let galley = painter.layout_no_wrap(text, tokens::font::callout(), egui::Color32::WHITE);
+    let pad = egui::vec2(6.0, 3.0);
+    let rect = egui::Rect::from_min_size(at, galley.size() + pad * 2.0);
+    painter.rect_filled(
+        rect,
+        egui::Rounding::same(4.0),
+        egui::Color32::from_rgb(60, 110, 170),
+    );
+    painter.galley(at + pad, galley, egui::Color32::WHITE);
+}
+
 /// Lay out a row of controls at one height. Every `Button`, `ComboBox`,
 /// glyph and single-line `TextEdit` added inside comes out [`control_h`]
 /// tall, so a row never shows three neighbouring controls at three heights.

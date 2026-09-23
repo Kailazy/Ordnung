@@ -7,8 +7,8 @@
 use crate::error::{Error, Result};
 use crate::model::key::{Key, Mode, PitchClass};
 use crate::model::{
-    Analysis, AudioProperties, Beat, Beatgrid, ChosenBy, Cue, DugRelease, Format, Id, LikedSong,
-    Playlist, SellerListing, SellerShop, Tags, Track, Tracklist, TracklistEntry,
+    Analysis, AudioProperties, Beat, Beatgrid, ChosenBy, CrateSet, Cue, DugRelease, Format, Id,
+    Playlist, SellerListing, SellerShop, SongPin, Tags, Track, Tracklist, TracklistEntry,
     TranscodeVerdict, VinylList, VinylRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -363,7 +363,10 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// Schema 21 re-keys `liked_songs`: `song_key` gained the `(Original Mix)`
 /// and `(2)` folding, so every stored key is recomputed (see
 /// [`Catalog::rekey_liked_songs`]).
-const SCHEMA_VERSION: i64 = 21;
+///
+/// Schema 22 adds the crates (`crates`, `crate_songs`): named sets of
+/// songs on records, the vinyl side's playlists (see [`CrateSet`]).
+const SCHEMA_VERSION: i64 = 22;
 
 /// The columns of the two vinyl list tables (`vinyl_collection`,
 /// `vinyl_wantlist`), shared so both are created alike and so an older
@@ -836,6 +839,33 @@ impl Catalog {
                 rel_thumb      TEXT,
                 local_track_id INTEGER,
                 liked_at       INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            -- Crates (schema 22): named sets of songs on records, the vinyl
+            -- side's playlists. A crate's songs are `SongPin` rows like the
+            -- liked songs, one per song per crate (`song_key`), in the
+            -- order they were put in (`ord`).
+            CREATE TABLE IF NOT EXISTS crates (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                name       TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE IF NOT EXISTS crate_songs (
+                crate_id       INTEGER NOT NULL REFERENCES crates(id) ON DELETE CASCADE,
+                song_key       TEXT NOT NULL,
+                ord            INTEGER NOT NULL,
+                artist         TEXT NOT NULL,
+                title          TEXT NOT NULL,
+                release_id     INTEGER,
+                position       TEXT,
+                rel_artist     TEXT,
+                rel_title      TEXT,
+                rel_label      TEXT,
+                rel_catno      TEXT,
+                rel_year       INTEGER,
+                rel_thumb      TEXT,
+                local_track_id INTEGER,
+                added_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (crate_id, song_key)
             );",
         )?;
         self.conn.execute_batch(&format!(
@@ -4429,9 +4459,9 @@ impl Catalog {
 
     /// Like a song: add it to the crate, or refresh the row that already
     /// holds it. Idempotent on the song key: a song liked twice keeps its
-    /// first `liked_at` and its first record, and only fills in what the
+    /// first `added_at` and its first record, and only fills in what the
     /// first like didn't know (a library track, a cover). Returns the row id.
-    pub fn like_song(&self, s: &LikedSong) -> Result<Id> {
+    pub fn like_song(&self, s: &SongPin) -> Result<Id> {
         let key = song_key(&s.artist, &s.title, s.release_id, s.position.as_deref());
         self.conn.execute(
             "INSERT INTO liked_songs
@@ -4461,7 +4491,7 @@ impl Catalog {
                 s.rel_year.map(|y| y as i64),
                 s.rel_thumb,
                 s.local_track_id.map(|t| t as i64),
-                s.liked_at,
+                s.added_at,
             ],
         )?;
         let id: i64 = self.conn.query_row(
@@ -4491,30 +4521,156 @@ impl Catalog {
 
     /// Every liked song, newest like first. One row per like, so it loads
     /// whole.
-    pub fn list_liked_songs(&self) -> Result<Vec<LikedSong>> {
+    pub fn list_liked_songs(&self) -> Result<Vec<SongPin>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id, {SONG_PIN_COLS}, liked_at
+             FROM liked_songs ORDER BY liked_at DESC, id DESC"
+        ))?;
+        let rows = stmt
+            .query_map([], read_song_pin)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    // --- Crates ------------------------------------------------------------
+
+    /// Make a crate. Returns its id.
+    pub fn create_crate_set(&self, name: &str) -> Result<Id> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Invalid("a crate needs a name".into()));
+        }
+        self.conn
+            .execute("INSERT INTO crates (name) VALUES (?1)", params![name])?;
+        Ok(self.conn.last_insert_rowid() as Id)
+    }
+
+    /// Every crate with its counts, oldest first, so the sidebar keeps a
+    /// stable order as crates are added.
+    pub fn list_crate_sets(&self) -> Result<Vec<CrateSet>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, artist, title, release_id, position, rel_artist, rel_title,
-                    rel_label, rel_catno, rel_year, rel_thumb, local_track_id, liked_at
-             FROM liked_songs ORDER BY liked_at DESC, id DESC",
+            "SELECT c.id, c.name, c.created_at,
+                    (SELECT COUNT(*) FROM crate_songs s WHERE s.crate_id = c.id),
+                    (SELECT COUNT(DISTINCT s.release_id) FROM crate_songs s
+                      WHERE s.crate_id = c.id AND s.release_id IS NOT NULL)
+             FROM crates c
+             ORDER BY c.created_at ASC, c.id ASC",
         )?;
         let rows = stmt
             .query_map([], |r| {
-                Ok(LikedSong {
+                Ok(CrateSet {
                     id: r.get::<_, i64>(0)? as Id,
-                    artist: r.get(1)?,
-                    title: r.get(2)?,
-                    release_id: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
-                    position: r.get(4)?,
-                    rel_artist: r.get(5)?,
-                    rel_title: r.get(6)?,
-                    rel_label: r.get(7)?,
-                    rel_catno: r.get(8)?,
-                    rel_year: r.get::<_, Option<i64>>(9)?.map(|v| v as u16),
-                    rel_thumb: r.get(10)?,
-                    local_track_id: r.get::<_, Option<i64>>(11)?.map(|v| v as Id),
-                    liked_at: r.get(12)?,
+                    name: r.get(1)?,
+                    created_at: r.get(2)?,
+                    songs: r.get::<_, i64>(3)? as u32,
+                    records: r.get::<_, i64>(4)? as u32,
                 })
             })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn rename_crate_set(&self, id: Id, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Invalid("a crate needs a name".into()));
+        }
+        let n = self.conn.execute(
+            "UPDATE crates SET name = ?2 WHERE id = ?1",
+            params![id as i64, name],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("crate {id}")));
+        }
+        Ok(())
+    }
+
+    /// Delete a crate and its songs. The songs stay liked if they were.
+    pub fn delete_crate_set(&self, id: Id) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM crates WHERE id = ?1", params![id as i64])?;
+        Ok(())
+    }
+
+    /// Put songs in a crate, after whatever is there. A song already in it
+    /// (by [`song_key`]) is left as it was. Returns how many went in.
+    pub fn add_crate_songs(&self, crate_id: Id, songs: &[SongPin]) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM crates WHERE id = ?1)",
+            params![crate_id as i64],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(Error::NotFound(format!("crate {crate_id}")));
+        }
+        let mut next: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(ord), 0) + 1 FROM crate_songs WHERE crate_id = ?1",
+            params![crate_id as i64],
+            |r| r.get(0),
+        )?;
+        let mut added = 0;
+        {
+            let mut stmt = tx.prepare(&format!(
+                "INSERT OR IGNORE INTO crate_songs
+                    (crate_id, song_key, ord, {SONG_PIN_COLS}, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
+            ))?;
+            for s in songs {
+                let key = song_key(&s.artist, &s.title, s.release_id, s.position.as_deref());
+                let n = stmt.execute(params![
+                    crate_id as i64,
+                    key,
+                    next,
+                    s.artist,
+                    s.title,
+                    s.release_id.map(|r| r as i64),
+                    s.position,
+                    s.rel_artist,
+                    s.rel_title,
+                    s.rel_label,
+                    s.rel_catno,
+                    s.rel_year.map(|y| y as i64),
+                    s.rel_thumb,
+                    s.local_track_id.map(|t| t as i64),
+                    s.added_at,
+                ])?;
+                if n > 0 {
+                    added += 1;
+                    next += 1;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+
+    /// Take a song out of a crate, named the way it went in (see
+    /// [`song_key`]). Returns whether it was there.
+    pub fn remove_crate_song(
+        &self,
+        crate_id: Id,
+        artist: &str,
+        title: &str,
+        release_id: Option<u64>,
+        position: Option<&str>,
+    ) -> Result<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM crate_songs WHERE crate_id = ?1 AND song_key = ?2",
+            params![crate_id as i64, song_key(artist, title, release_id, position)],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// A crate's songs in the order they went in. `id` is the row's
+    /// position in the crate.
+    pub fn list_crate_songs(&self, crate_id: Id) -> Result<Vec<SongPin>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT ord, {SONG_PIN_COLS}, added_at
+             FROM crate_songs WHERE crate_id = ?1 ORDER BY ord ASC"
+        ))?;
+        let rows = stmt
+            .query_map(params![crate_id as i64], read_song_pin)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -5040,6 +5196,30 @@ pub(crate) fn norm_match(s: &str) -> String {
 /// sides are four songs, not one. Empty when neither side has a word in
 /// it. Public because the front-end asks "is this song liked?" by key on
 /// every row it draws.
+/// The columns a [`SongPin`] is stored in, in the order [`read_song_pin`]
+/// reads them, shared by the liked songs and the crates.
+const SONG_PIN_COLS: &str = "artist, title, release_id, position, rel_artist, rel_title, \
+                             rel_label, rel_catno, rel_year, rel_thumb, local_track_id";
+
+/// One [`SongPin`] from a row of `id, SONG_PIN_COLS, <added_at>`.
+fn read_song_pin(r: &Row) -> rusqlite::Result<SongPin> {
+    Ok(SongPin {
+        id: r.get::<_, i64>(0)? as Id,
+        artist: r.get(1)?,
+        title: r.get(2)?,
+        release_id: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+        position: r.get(4)?,
+        rel_artist: r.get(5)?,
+        rel_title: r.get(6)?,
+        rel_label: r.get(7)?,
+        rel_catno: r.get(8)?,
+        rel_year: r.get::<_, Option<i64>>(9)?.map(|v| v as u16),
+        rel_thumb: r.get(10)?,
+        local_track_id: r.get::<_, Option<i64>>(11)?.map(|v| v as Id),
+        added_at: r.get(12)?,
+    })
+}
+
 pub fn song_key(
     artist: &str,
     title: &str,
@@ -6927,7 +7107,7 @@ mod tests {
     fn liked_songs_key_by_song_and_keep_the_first_record() {
         let path = temp_db_path("liked_songs");
         let cat = Catalog::open(&path).unwrap();
-        let like = |artist: &str, title: &str, release: Option<u64>, at: i64| LikedSong {
+        let like = |artist: &str, title: &str, release: Option<u64>, at: i64| SongPin {
             id: 0,
             artist: artist.into(),
             title: title.into(),
@@ -6940,7 +7120,7 @@ mod tests {
             rel_year: None,
             rel_thumb: None,
             local_track_id: None,
-            liked_at: at,
+            added_at: at,
         };
         let first = cat.like_song(&like("Metro Area", "Miura", Some(42), 100)).unwrap();
         // The same song, spelled and punctuated differently, from a comp:
@@ -6954,7 +7134,7 @@ mod tests {
         assert_eq!(rows[0].release_id, Some(42));
         assert_eq!(rows[0].rel_title.as_deref(), Some("Record 42"));
         assert_eq!(rows[0].rel_label.as_deref(), Some("Environ"));
-        assert_eq!(rows[0].liked_at, 100);
+        assert_eq!(rows[0].added_at, 100);
         // A second song lists first: newest like on top.
         cat.like_song(&like("Theo Parrish", "Solitary Flight", None, 300)).unwrap();
         let rows = cat.list_liked_songs().unwrap();
@@ -6969,7 +7149,7 @@ mod tests {
     fn untitled_songs_are_told_apart_by_record_and_position() {
         let path = temp_db_path("liked_untitled");
         let cat = Catalog::open(&path).unwrap();
-        let like = |pos: &str, release: u64| LikedSong {
+        let like = |pos: &str, release: u64| SongPin {
             id: 0,
             artist: "(CN)²".into(),
             title: "Untitled".into(),
@@ -6982,7 +7162,7 @@ mod tests {
             rel_year: None,
             rel_thumb: None,
             local_track_id: None,
-            liked_at: 1,
+            added_at: 1,
         };
         let a1 = cat.like_song(&like("A1", 9)).unwrap();
         let a2 = cat.like_song(&like("A2", 9)).unwrap();
@@ -7029,6 +7209,72 @@ mod tests {
     }
 
     #[test]
+    fn crates_hold_songs_once_in_order_and_count_their_records() {
+        let path = temp_db_path("crates");
+        let cat = Catalog::open(&path).unwrap();
+        let pin = |artist: &str, title: &str, release: Option<u64>, pos: &str| SongPin {
+            id: 0,
+            artist: artist.into(),
+            title: title.into(),
+            release_id: release,
+            position: release.map(|_| pos.to_string()),
+            rel_artist: release.map(|_| "Metro Area".to_string()),
+            rel_title: release.map(|r| format!("Record {r}")),
+            rel_label: None,
+            rel_catno: None,
+            rel_year: None,
+            rel_thumb: None,
+            local_track_id: None,
+            added_at: 5,
+        };
+        assert!(cat.create_crate_set("  ").is_err());
+        let gig = cat.create_crate_set("Friday").unwrap();
+        let other = cat.create_crate_set("Sunday").unwrap();
+        let n = cat
+            .add_crate_songs(
+                gig,
+                &[
+                    pin("Metro Area", "Miura", Some(42), "A1"),
+                    pin("Metro Area", "Caught Up", Some(42), "B1"),
+                    pin("Theo Parrish", "Solitary Flight", None, ""),
+                    // The same song again, spelled differently: not twice.
+                    pin("METRO AREA", "Miura!", Some(7), "A1"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(n, 3);
+        let songs = cat.list_crate_songs(gig).unwrap();
+        assert_eq!(
+            songs.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(),
+            ["Miura", "Caught Up", "Solitary Flight"]
+        );
+        assert_eq!(songs[0].release_id, Some(42));
+        let sets = cat.list_crate_sets().unwrap();
+        assert_eq!(sets.len(), 2);
+        assert_eq!(sets[0].name, "Friday");
+        assert_eq!((sets[0].songs, sets[0].records), (3, 1));
+        assert_eq!((sets[1].songs, sets[1].records), (0, 0));
+        // Later additions go after; another crate keeps its own copy.
+        cat.add_crate_songs(gig, &[pin("Pépé Bradock", "Deep Burnt", Some(9), "A")])
+            .unwrap();
+        cat.add_crate_songs(other, &[pin("Metro Area", "Miura", Some(42), "A1")])
+            .unwrap();
+        assert_eq!(cat.list_crate_songs(gig).unwrap().len(), 4);
+        assert_eq!(cat.list_crate_sets().unwrap()[0].records, 2);
+        assert!(cat.remove_crate_song(gig, "metro area", "miura", None, None).unwrap());
+        assert!(!cat.remove_crate_song(gig, "metro area", "miura", None, None).unwrap());
+        assert_eq!(cat.list_crate_songs(gig).unwrap().len(), 3);
+        assert_eq!(cat.list_crate_songs(other).unwrap().len(), 1);
+        cat.rename_crate_set(gig, "Friday night").unwrap();
+        assert!(cat.rename_crate_set(999, "x").is_err());
+        assert_eq!(cat.list_crate_sets().unwrap()[0].name, "Friday night");
+        cat.delete_crate_set(gig).unwrap();
+        assert_eq!(cat.list_crate_sets().unwrap().len(), 1);
+        assert!(cat.list_crate_songs(gig).unwrap().is_empty());
+        assert!(cat.add_crate_songs(gig, &[pin("A", "B", None, "")]).is_err());
+    }
+
+    #[test]
     fn schema_21_rekeys_liked_songs_and_folds_duplicates() {
         let path = temp_db_path("liked_rekey");
         let cat = Catalog::open(&path).unwrap();
@@ -7047,7 +7293,7 @@ mod tests {
         let cat = Catalog::open(&path).unwrap();
         let liked = cat.list_liked_songs().unwrap();
         assert_eq!(liked.len(), 2);
-        assert!(liked.iter().any(|s| s.title == "Miura" && s.liked_at == 10));
+        assert!(liked.iter().any(|s| s.title == "Miura" && s.added_at == 10));
         assert!(cat.unlike_song("Metro Area", "Miura (Original)", None, None).unwrap());
         assert!(cat.unlike_song("Pepe Bradock", "Deep Burnt", None, None).unwrap());
         assert!(cat.list_liked_songs().unwrap().is_empty());

@@ -1315,6 +1315,8 @@ impl App {
             Play(usize),
             /// Put this row's song in the crate of liked songs, or take it out.
             Like(usize),
+            /// Put this row's song in that crate.
+            AddToCrate(usize, Id),
             /// Play the record, or pause/resume whatever of it is loaded.
             TogglePlay,
             PlayExtra(usize),
@@ -1839,12 +1841,18 @@ impl App {
                                 Some(sheet.release_id),
                                 Some(&row.position),
                             );
-                            match sheet_row_ui(ui, sheet, row, i, playing, running, marked == Some(i), liked) {
+                            match sheet_row_ui(ui, sheet, row, i, playing, running, marked == Some(i), liked, &self.crate_sets) {
                                 Some(RowHit::Play) => act = Some(Act::Play(i)),
                                 Some(RowHit::Like) => act = Some(Act::Like(i)),
                                 Some(RowHit::Artist(id, name)) => {
                                     act = Some(Act::ArtistPage(id, name))
                                 }
+                                Some(RowHit::DragStart) => {
+                                    if let Some(spec) = sheet_row_spec(sheet, i) {
+                                        egui::DragAndDrop::set_payload(ui.ctx(), DraggedSongs(vec![spec]));
+                                    }
+                                }
+                                Some(RowHit::AddToCrate(cid)) => act = Some(Act::AddToCrate(i, cid)),
                                 None => {}
                             }
                         }
@@ -2099,32 +2107,13 @@ impl App {
                 }
             }
             Some(Act::Like(i)) => {
-                let spec = self.vinyl_sheet.as_ref().and_then(|s| {
-                    let row = s.rows.get(i)?;
-                    let local = match row.source {
-                        SheetSource::Local(l) => s.local.get(l).map(|t| t.id),
-                        _ => None,
-                    };
-                    Some(crate::liked::LikeSpec {
-                        artist: row.artist.clone().unwrap_or_else(|| s.artist.clone()),
-                        title: row.title.clone(),
-                        release_id: Some(s.release_id),
-                        position: Some(row.position.clone()),
-                        rel_artist: Some(s.artist.clone()),
-                        rel_title: Some(s.title.clone()),
-                        rel_label: s
-                            .detail
-                            .as_ref()
-                            .and_then(|d| d.label.clone())
-                            .or_else(|| s.label.clone()),
-                        rel_catno: s.detail.as_ref().and_then(|d| d.catalog_number.clone()),
-                        rel_year: s.detail.as_ref().and_then(|d| d.year),
-                        rel_thumb: s.cover_url.clone(),
-                        local_track_id: local,
-                    })
-                });
-                if let Some(spec) = spec {
+                if let Some(spec) = self.vinyl_sheet.as_ref().and_then(|s| sheet_row_spec(s, i)) {
                     self.toggle_like(spec);
+                }
+            }
+            Some(Act::AddToCrate(i, cid)) => {
+                if let Some(spec) = self.vinyl_sheet.as_ref().and_then(|s| sheet_row_spec(s, i)) {
+                    self.add_songs_to_crate(cid, vec![spec]);
                 }
             }
             Some(Act::Goto) => {
@@ -2386,6 +2375,38 @@ enum RowHit {
     Like,
     /// A name in the row's credit: open that artist's page.
     Artist(u64, String),
+    /// The row was picked up: carry the song to a crate (see
+    /// [`crate::DraggedSongs`]).
+    DragStart,
+    /// Add to crate, from the row's menu.
+    AddToCrate(Id),
+}
+
+/// What a row of the sheet carries to a like, a crate or a drag: the song
+/// and the record it sits on, as far as the sheet knows it.
+fn sheet_row_spec(s: &VinylSheet, i: usize) -> Option<crate::liked::LikeSpec> {
+    let row = s.rows.get(i)?;
+    let local = match row.source {
+        SheetSource::Local(l) => s.local.get(l).map(|t| t.id),
+        _ => None,
+    };
+    Some(crate::liked::LikeSpec {
+        artist: row.artist.clone().unwrap_or_else(|| s.artist.clone()),
+        title: row.title.clone(),
+        release_id: Some(s.release_id),
+        position: Some(row.position.clone()),
+        rel_artist: Some(s.artist.clone()),
+        rel_title: Some(s.title.clone()),
+        rel_label: s
+            .detail
+            .as_ref()
+            .and_then(|d| d.label.clone())
+            .or_else(|| s.label.clone()),
+        rel_catno: s.detail.as_ref().and_then(|d| d.catalog_number.clone()),
+        rel_year: s.detail.as_ref().and_then(|d| d.year),
+        rel_thumb: s.cover_url.clone(),
+        local_track_id: local,
+    })
 }
 
 /// A name in a row's credit laid out during the row and drawn as a link
@@ -2411,6 +2432,7 @@ fn sheet_row_ui(
     running: bool,
     marked: bool,
     liked: bool,
+    crates: &[CrateSet],
 ) -> Option<RowHit> {
     const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
     /// The like mark's square: the row's height.
@@ -2635,7 +2657,8 @@ fn sheet_row_ui(
     // position or a title, and two rows sharing an id share hover state — one
     // cursor would light up both.
     let id = ui.id().with(("sheet-row", index));
-    let hit = ui.interact(rect, id, egui::Sense::click());
+    // Click plays; a drag carries the song to a crate.
+    let hit = ui.interact(rect, id, egui::Sense::click_and_drag());
     let like = crate::ui::button::like_mark_at(ui, like_rect, id.with("like"), liked);
     let mut on_name = false;
     for (n, l) in links.into_iter().enumerate() {
@@ -2665,6 +2688,14 @@ fn sheet_row_ui(
     if like.clicked() {
         hit_what = Some(RowHit::Like);
     }
+    if hit.drag_started() {
+        hit_what = Some(RowHit::DragStart);
+    }
+    hit.context_menu(|ui| {
+        if let Some(cid) = crate::crates::add_to_crate_menu(ui, crates, None) {
+            hit_what = Some(RowHit::AddToCrate(cid));
+        }
+    });
     if playable {
         if hit.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);

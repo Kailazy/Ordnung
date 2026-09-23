@@ -5,6 +5,9 @@ with `Catalog::like_song` / `unlike_song` / `list_liked_songs` /
 `library_song_keys` and the key rule `catalog::song_key`; the GUI's
 `liked.rs` (the `LikeSpec`, `App::toggle_like`, the Liked view) and the
 `ui::button::like_mark` component on every song row that isn't a track.
+Since v0.147.0 the row struct is `SongPin` (the same shape the crates
+hold, see `crates.md`) and the Liked view's table is the shared
+`song_rows`; liked rows drag to a crate and carry **Add to crate ▸**.
 **Target surface:** Ordnung GUI, both sides; engine in `ordnung-core`.
 **One line:** a + on every song you meet on a record's sheet, a mix
 tracklist or the radio puts it in one crate, so each record says which of

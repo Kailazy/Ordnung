@@ -6,17 +6,20 @@
 //! wherever that song shows, so a record's sheet says at a glance which of
 //! its songs are liked. The crate is the Liked view in the sidebar: every
 //! liked song with the record it was liked on, marked where a track in the
-//! library already is that song. Storage is the `liked_songs` catalog table, keyed
-//! by [`song_key`] so a song liked twice, on two records, is one row.
+//! library already is that song, drawn through the one song table
+//! (`song_rows`) the crates share. Storage is the `liked_songs` catalog
+//! table, keyed by [`song_key`] so a song liked twice, on two records, is
+//! one row.
 
 use super::*;
-use crate::ui::hover::HoverNoteExt;
+use crate::song_rows::{song_matches, SongSet};
 use crate::ui::tokens::{color, font, space};
 use ordnung_core::catalog::song_key;
-use ordnung_core::model::{LikedSong, SongRef};
+use ordnung_core::model::{SongPin, SongRef};
 
-/// What a like carries in from the row it was clicked on: the song, and
-/// the record it was met on when there was one.
+/// What a song carries in from the row it was met on: the song, and the
+/// record it sits on when there was one. What a like, a drag to a crate
+/// and Add to crate all hand over.
 #[derive(Clone, Default)]
 pub(crate) struct LikeSpec {
     pub artist: String,
@@ -33,8 +36,9 @@ pub(crate) struct LikeSpec {
 }
 
 impl LikeSpec {
-    fn into_song(self) -> LikedSong {
-        LikedSong {
+    /// The row to store, stamped now.
+    pub(crate) fn into_pin(self) -> SongPin {
+        SongPin {
             id: 0,
             artist: self.artist,
             title: self.title,
@@ -47,21 +51,29 @@ impl LikeSpec {
             rel_year: self.rel_year,
             rel_thumb: self.rel_thumb.filter(|s| !s.is_empty()),
             local_track_id: self.local_track_id,
-            liked_at: std::time::SystemTime::now()
+            added_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0),
         }
     }
-}
 
-/// What a row of the crate asked for, applied once the table has let go
-/// of its borrows. Indices are into `liked`.
-enum LikedAct {
-    Open(usize),
-    PlayLocal(usize),
-    Search(usize),
-    Unlike(usize),
+    /// The spec of a stored row, for carrying it on to another set.
+    pub(crate) fn from_pin(s: &SongPin) -> LikeSpec {
+        LikeSpec {
+            artist: s.artist.clone(),
+            title: s.title.clone(),
+            release_id: s.release_id,
+            position: s.position.clone(),
+            rel_artist: s.rel_artist.clone(),
+            rel_title: s.rel_title.clone(),
+            rel_label: s.rel_label.clone(),
+            rel_catno: s.rel_catno.clone(),
+            rel_year: s.rel_year,
+            rel_thumb: s.rel_thumb.clone(),
+            local_track_id: s.local_track_id,
+        }
+    }
 }
 
 impl App {
@@ -103,7 +115,7 @@ impl App {
             }
         } else {
             let label = spec_label(&spec);
-            let mut song = spec.into_song();
+            let mut song = spec.into_pin();
             match cat.like_song(&song) {
                 Ok(id) => {
                     song.id = id;
@@ -148,24 +160,22 @@ impl App {
     /// The Liked view: the crate as a table, every song with the record
     /// it was liked on and whether a file in the library is it.
     pub(crate) fn draw_liked(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        use egui_extras::{Column, TableBuilder};
         self.ensure_library_index();
-        let in_library: Vec<Option<Id>> = self
-            .liked
+        let rows = self.liked.clone();
+        let in_library: Vec<Option<Id>> = rows
             .iter()
             .map(|s| self.local_track(&s.song(), s.local_track_id))
             .collect();
         let query = self.filter.trim().to_lowercase();
         let to_get_only = self.liked_to_get_only;
-        let shown: Vec<usize> = self
-            .liked
+        let shown: Vec<usize> = rows
             .iter()
             .enumerate()
-            .filter(|(i, s)| liked_matches(s, &query) && !(to_get_only && in_library[*i].is_some()))
+            .filter(|(i, s)| song_matches(s, &query) && !(to_get_only && in_library[*i].is_some()))
             .map(|(i, _)| i)
             .collect();
         let have = in_library.iter().filter(|l| l.is_some()).count();
-        let to_get = self.liked.len() - have;
+        let to_get = rows.len() - have;
 
         // The count is the top bar's (see the toolbar in `app`), where every
         // view's count sits; the heading carries the one number the crate
@@ -174,7 +184,7 @@ impl App {
         ui.add_space(space::S3);
         ui.horizontal(|ui| {
             ui.add(egui::Label::new(egui::RichText::new("Liked songs").font(font::headline())).truncate());
-            if !self.liked.is_empty() {
+            if !rows.is_empty() {
                 let words = match (have, to_get) {
                     (_, 0) => "every song is a file in your library".to_string(),
                     (0, n) => format!("{n} still to get"),
@@ -202,7 +212,7 @@ impl App {
         });
         ui.add_space(space::S2);
 
-        if self.liked.is_empty() {
+        if rows.is_empty() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
                 ui.heading("Nothing liked yet");
@@ -222,178 +232,14 @@ impl App {
             });
             return;
         }
-        for &i in &shown {
-            if let Some(u) = self.liked[i].rel_thumb.clone() {
-                let _ = self.dig_cover(&u);
-            }
-        }
-
-        let mut act: Option<LikedAct> = None;
-        let row_h = 46.0;
-        const THUMB: f32 = 36.0;
-        TableBuilder::new(ui)
-            .id_salt("liked_rows")
-            .striped(true)
-            .sense(egui::Sense::click())
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(THUMB + 6.0))
-            .column(Column::remainder().at_least(160.0).clip(true))
-            .column(Column::remainder().at_least(160.0).clip(true))
-            .column(Column::exact(150.0).clip(true))
-            .body(|body| {
-                body.rows(row_h, shown.len(), |mut row| {
-                    let i = shown[row.index()];
-                    let s = self.liked[i].clone();
-                    let local = in_library[i];
-                    let tex = s.rel_thumb.as_deref().and_then(|u| self.dig_cover(u).cloned());
-                    row.col(|ui| {
-                        let (rect, _) = ui.allocate_exact_size(egui::vec2(THUMB, THUMB), egui::Sense::hover());
-                        match &tex {
-                            Some(h) => {
-                                egui::Image::new(h)
-                                    .fit_to_exact_size(egui::vec2(THUMB, THUMB))
-                                    .rounding(egui::Rounding::same(4.0))
-                                    .paint_at(ui, rect);
-                            }
-                            None => {
-                                ui.painter().rect_filled(rect, egui::Rounding::same(4.0), egui::Color32::from_gray(34));
-                                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "♪", egui::FontId::proportional(16.0), egui::Color32::from_gray(70));
-                            }
-                        }
-                    });
-                    // The song: title over artist.
-                    row.col(|ui| {
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            center_two(ui, !s.artist.is_empty());
-                            ui.add(egui::Label::new(egui::RichText::new(&s.title).color(color::LABEL)).truncate());
-                            if !s.artist.is_empty() {
-                                ui.add(egui::Label::new(egui::RichText::new(&s.artist).font(font::caption()).color(color::LABEL_3)).truncate());
-                            }
-                        });
-                    });
-                    // The record it was liked on.
-                    row.col(|ui| {
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            let name = match (s.rel_artist.as_deref(), s.rel_title.as_deref()) {
-                                (Some(a), Some(t)) => format!("{a} – {t}"),
-                                (_, Some(t)) => t.to_string(),
-                                (Some(a), None) => a.to_string(),
-                                (None, None) => String::new(),
-                            };
-                            let sub = liked_record_sub(&s);
-                            if name.is_empty() && sub.is_empty() {
-                                center_two(ui, false);
-                                ui.label(egui::RichText::new("No record").color(color::LABEL_3));
-                            } else {
-                                center_two(ui, !sub.is_empty());
-                                ui.add(egui::Label::new(egui::RichText::new(name).color(color::LABEL)).truncate());
-                                if !sub.is_empty() {
-                                    ui.add(egui::Label::new(egui::RichText::new(sub).font(font::caption()).color(color::LABEL_3)).truncate());
-                                }
-                            }
-                        });
-                    });
-                    // The heart at the row's edge, and a green FILE mark on
-                    // the songs a track in the library already is. A song
-                    // still to be got carries no mark: the absence says it.
-                    row.col(|ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let side = ui.spacing().interact_size.y;
-                            if crate::ui::button::like_mark(ui, true, side).clicked() {
-                                act = Some(LikedAct::Unlike(i));
-                            }
-                            if local.is_some() {
-                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                    ui.add(egui::Label::new(egui::RichText::new("FILE").font(font::caption()).color(color::GREEN).strong()))
-                                        .on_hover_note("A track in your library is this song");
-                                });
-                            }
-                        });
-                    });
-                    let resp = row.response();
-                    if resp.hovered() && s.release_id.is_some() {
-                        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-                    if resp.clicked() && s.release_id.is_some() {
-                        act = Some(LikedAct::Open(i));
-                    }
-                    resp.context_menu(|ui| {
-                        if s.release_id.is_some() && ui.button("Open record").clicked() {
-                            act = Some(LikedAct::Open(i));
-                            ui.close_menu();
-                        }
-                        if local.is_some() && ui.button("▶ Play my file").clicked() {
-                            act = Some(LikedAct::PlayLocal(i));
-                            ui.close_menu();
-                        }
-                        if ui.button("Search Discogs for this song").on_hover_note("Put the song in the search box, Discogs mode").clicked() {
-                            act = Some(LikedAct::Search(i));
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("Unlike").clicked() {
-                            act = Some(LikedAct::Unlike(i));
-                            ui.close_menu();
-                        }
-                    });
-                });
-            });
-
-        let Some(act) = act else { return };
-        let i = match act {
-            LikedAct::Open(i) | LikedAct::PlayLocal(i) | LikedAct::Search(i) | LikedAct::Unlike(i) => i,
-        };
-        let Some(s) = self.liked.get(i).cloned() else { return };
-        match act {
-            LikedAct::Open(_) => {
-                if let Some(r) = s.release_id {
-                    let sub = liked_record_sub(&s);
-                    self.open_release_sheet(
-                        r,
-                        s.rel_artist.clone().unwrap_or_default(),
-                        s.rel_title.clone().unwrap_or_default(),
-                        sub,
-                        s.rel_thumb.clone(),
-                        ctx,
-                    );
-                    // The sheet lights the song's row the way the pointer
-                    // would, so it's found at a glance.
-                    if let Some(sheet) = self.vinyl_sheet.as_mut().filter(|sh| sh.release_id == r) {
-                        sheet.mark = Some(s.title.clone());
-                    }
-                }
-            }
-            LikedAct::PlayLocal(_) => {
-                if let Some(tid) = in_library.get(i).copied().flatten() {
-                    match Catalog::open(&self.db_path).and_then(|c| c.get_track(tid)) {
-                        Ok(t) => self.play_track(tid, PathBuf::from(t.source_path)),
-                        Err(e) => self.fail(format!("Couldn't find that track: {e}")),
-                    }
-                }
-            }
-            LikedAct::Search(_) => {
-                self.search_query = s.song_label();
-                self.set_search_scope(crate::records::SearchScope::Discogs);
-                self.search_popup_open = true;
-                self.start_record_search();
-            }
-            LikedAct::Unlike(_) => {
-                self.toggle_like(LikeSpec {
-                    artist: s.artist.clone(),
-                    title: s.title.clone(),
-                    release_id: s.release_id,
-                    position: s.position.clone(),
-                    ..Default::default()
-                });
-            }
+        if let Some(act) = self.song_rows(ui, ctx, SongSet::Liked, &rows, &shown, &in_library) {
+            self.apply_song_act(ctx, SongSet::Liked, act, &rows, &in_library);
         }
     }
 }
 
 /// The key a liked song is held under.
-fn liked_key(s: &LikedSong) -> String {
+fn liked_key(s: &SongPin) -> String {
     song_key(&s.artist, &s.title, s.release_id, s.position.as_deref())
 }
 
@@ -403,53 +249,4 @@ fn spec_label(s: &LikeSpec) -> String {
     } else {
         format!("{} - {}", s.artist, s.title)
     }
-}
-
-/// Whether the liked song has `query` (already lowercased) in any of its
-/// words. Blank matches everything.
-pub(crate) fn liked_matches(s: &LikedSong, query: &str) -> bool {
-    if query.is_empty() {
-        return true;
-    }
-    [
-        Some(s.artist.as_str()),
-        Some(s.title.as_str()),
-        s.rel_artist.as_deref(),
-        s.rel_title.as_deref(),
-        s.rel_label.as_deref(),
-        s.rel_catno.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|f| f.to_lowercase().contains(query))
-}
-
-/// The caption under the record: `A1 · 2001 · Environ ENV 006`.
-fn liked_record_sub(s: &LikedSong) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(p) = s.position.as_deref() {
-        parts.push(p.to_string());
-    }
-    if let Some(y) = s.rel_year {
-        parts.push(y.to_string());
-    }
-    match (s.rel_label.as_deref(), s.rel_catno.as_deref()) {
-        (Some(l), Some(c)) => parts.push(format!("{l} {c}")),
-        (Some(l), None) => parts.push(l.to_string()),
-        (None, Some(c)) => parts.push(c.to_string()),
-        (None, None) => {}
-    }
-    parts.join(" · ")
-}
-
-/// Pad a cell so its one- or two-line text block sits in the middle of the
-/// row rather than against its top.
-fn center_two(ui: &mut egui::Ui, two: bool) {
-    let body = ui.text_style_height(&egui::TextStyle::Body);
-    let block = if two {
-        body + 1.0 + ui.fonts(|f| f.row_height(&font::caption()))
-    } else {
-        body
-    };
-    ui.add_space(((ui.available_height() - block) / 2.0).max(0.0));
 }

@@ -43,6 +43,8 @@ enum LineAct {
     Retry(usize),
     /// Put the song in the crate of liked songs, or take it out.
     Like(usize),
+    /// Put the song in that crate.
+    AddToCrate(usize, Id),
 }
 
 /// Whole-list actions, from the header's ⋯ or a tab's menu in the left bar.
@@ -51,6 +53,8 @@ enum ListAct {
     Match,
     Rematch,
     Edit,
+    /// Open the paste window on the name field, to rename the tracklist.
+    Rename,
     CopyText,
     Delete,
 }
@@ -69,6 +73,9 @@ fn list_menu(ui: &mut egui::Ui, busy: bool, with_match: bool) -> Option<ListAct>
     }
     if ui.button("Edit the paste").on_hover_note("Open the text in the paste window to add, fix or remove lines").clicked() {
         act = Some(ListAct::Edit);
+    }
+    if ui.button("Rename").on_hover_note("Give the tracklist another name").clicked() {
+        act = Some(ListAct::Rename);
     }
     if ui.button("Copy as text").on_hover_note("Copy the lines with their matched records").clicked() {
         act = Some(ListAct::CopyText);
@@ -366,22 +373,25 @@ impl App {
     /// saved one's text to add, fix or remove lines.
     fn open_tracklist_paste(&mut self, edit: Option<Id>) {
         self.tracklist_paste.clear();
+        self.tracklist_name.clear();
         self.tracklist_editing = None;
         if let Some(t) = edit.and_then(|id| self.tracklists.iter().find(|t| t.id == id)) {
             self.tracklist_paste = t.pasted_text.clone();
             if !self.tracklist_paste.ends_with('\n') {
                 self.tracklist_paste.push('\n');
             }
+            self.tracklist_name = t.name.clone();
             self.tracklist_editing = Some(t.id);
         }
         self.tracklist_paste_open = true;
         self.tracklist_focus_paste = true;
+        self.tracklist_focus_name = false;
     }
 
-    /// The paste window: one square box for the text and a Match button in
-    /// its corner, nothing else. The name comes from a `Tracklist:` line in
-    /// the paste, else the day; a saved tracklist reopened here keeps its
-    /// name, and Match reads Save.
+    /// The paste window: the name, one square box for the text and a Match
+    /// button in its corner. A blank name takes the suggestion: a
+    /// `Tracklist:` line in the paste, else the day; a saved tracklist
+    /// reopened here shows its name to change, and Match reads Save.
     fn draw_tracklist_paste_window(&mut self, ctx: &egui::Context) {
         if !self.tracklist_paste_open {
             return;
@@ -401,6 +411,19 @@ impl App {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.set_width(SIDE);
+                let suggested = tracklist::suggested_name(&self.tracklist_paste)
+                    .unwrap_or_else(|| format!("Pasted {}", fmt_day(now_unix())));
+                let focus_name = std::mem::take(&mut self.tracklist_focus_name);
+                let name = crate::ui::field::Field::singleline(&mut self.tracklist_name)
+                    .id(egui::Id::new("tracklist_name_box"))
+                    .width(SIDE)
+                    .hint(suggested)
+                    .show(ui)
+                    .on_hover_note("The tracklist's name. Blank takes the suggestion");
+                if focus_name {
+                    name.request_focus();
+                }
+                ui.add_space(space::S2);
                 egui::ScrollArea::vertical()
                     .id_salt("tracklist_paste_scroll")
                     .max_height(SIDE)
@@ -440,9 +463,11 @@ impl App {
         }
         let text = self.tracklist_paste.clone();
         let lines = tracklist::parse_tracklist(&text);
-        let name = match &editing {
-            Some(t) => t.name.clone(),
-            None => tracklist::suggested_name(&text)
+        let typed = self.tracklist_name.trim().to_string();
+        let name = match (&editing, typed.is_empty()) {
+            (_, false) => typed,
+            (Some(t), true) => t.name.clone(),
+            (None, true) => tracklist::suggested_name(&text)
                 .unwrap_or_else(|| format!("Pasted {}", fmt_day(now_unix()))),
         };
         let saved = match editing {
@@ -476,6 +501,7 @@ impl App {
 
     fn close_tracklist_paste(&mut self, ctx: &egui::Context, box_id: egui::Id) {
         self.tracklist_paste.clear();
+        self.tracklist_name.clear();
         self.tracklist_editing = None;
         self.tracklist_paste_open = false;
         ctx.memory_mut(|m| m.surrender_focus(box_id));
@@ -570,6 +596,11 @@ impl App {
             ListAct::Match => self.spawn_match_tracklist(ctx.clone(), id, MatchScope::Unsettled),
             ListAct::Rematch => self.spawn_match_tracklist(ctx.clone(), id, MatchScope::All),
             ListAct::Edit => self.open_tracklist_paste(Some(id)),
+            ListAct::Rename => {
+                self.open_tracklist_paste(Some(id));
+                self.tracklist_focus_paste = false;
+                self.tracklist_focus_name = true;
+            }
             ListAct::CopyText => {
                 let mut out = String::new();
                 for e in &self.tracklist_entries {
@@ -684,7 +715,8 @@ impl App {
         }
         builder
             .striped(true)
-            .sense(egui::Sense::click())
+            // Click opens the record; a drag carries the song to a crate.
+            .sense(egui::Sense::click_and_drag())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::exact(COL_INDEX))
             .column(Column::exact(COL_COVER))
@@ -848,6 +880,11 @@ impl App {
                     if resp.hovered() && e.release_id.is_some() {
                         ui_cursor_hand(ctx);
                     }
+                    if resp.drag_started() {
+                        if let Some(spec) = self.line_spec(&e) {
+                            egui::DragAndDrop::set_payload(ctx, DraggedSongs(vec![spec]));
+                        }
+                    }
                     if resp.clicked() {
                         if e.release_id.is_some() {
                             line_act = Some(LineAct::Open(i));
@@ -896,6 +933,11 @@ impl App {
                                 line_act = Some(LineAct::SearchDiscogs(i));
                                 ui.close_menu();
                             }
+                            if line_song(&e).is_some() {
+                                if let Some(cid) = crate::crates::add_to_crate_menu(ui, &self.crate_sets, None) {
+                                    line_act = Some(LineAct::AddToCrate(i, cid));
+                                }
+                            }
                             if e.release_id.is_some() && ui.button("✖ Not this record").on_hover_note("Clear the match. A re-match won't touch this line").clicked() {
                                 line_act = Some(LineAct::NotThis(i));
                                 ui.close_menu();
@@ -913,7 +955,7 @@ impl App {
         let Some(e) = self.tracklist_entries.get(match act {
             LineAct::Open(i) | LineAct::Want(i) | LineAct::Dig(i) | LineAct::Buy(i) | LineAct::Pick(i)
             | LineAct::SearchDiscogs(i) | LineAct::NotThis(i) | LineAct::PlayLocal(i) | LineAct::Retry(i)
-            | LineAct::Like(i) => i,
+            | LineAct::Like(i) | LineAct::AddToCrate(i, _) => i,
         }).cloned() else { return };
         let rel_artist = e.rel_artist.clone().unwrap_or_default();
         let rel_title = e.rel_title.clone().unwrap_or_default();
@@ -975,23 +1017,35 @@ impl App {
                 }
             }
             LineAct::Like(_) => {
-                if let Some((artist, title)) = line_song(&e) {
-                    self.toggle_like(crate::liked::LikeSpec {
-                        artist,
-                        title,
-                        release_id: e.release_id,
-                        position: None,
-                        rel_artist: e.rel_artist.clone(),
-                        rel_title: e.rel_title.clone(),
-                        rel_label: e.rel_label.clone(),
-                        rel_catno: e.rel_catno.clone(),
-                        rel_year: e.rel_year,
-                        rel_thumb: e.rel_thumb.clone(),
-                        local_track_id: self.local_track(&e.song(), e.local_track_id),
-                    });
+                if let Some(spec) = self.line_spec(&e) {
+                    self.toggle_like(spec);
+                }
+            }
+            LineAct::AddToCrate(_, cid) => {
+                if let Some(spec) = self.line_spec(&e) {
+                    self.add_songs_to_crate(cid, vec![spec]);
                 }
             }
         }
+    }
+
+    /// What a line carries to a like, a crate or a drag: the song it names
+    /// and the record it matched.
+    fn line_spec(&self, e: &TracklistEntry) -> Option<crate::liked::LikeSpec> {
+        let (artist, title) = line_song(e)?;
+        Some(crate::liked::LikeSpec {
+            artist,
+            title,
+            release_id: e.release_id,
+            position: None,
+            rel_artist: e.rel_artist.clone(),
+            rel_title: e.rel_title.clone(),
+            rel_label: e.rel_label.clone(),
+            rel_catno: e.rel_catno.clone(),
+            rel_year: e.rel_year,
+            rel_thumb: e.rel_thumb.clone(),
+            local_track_id: self.local_track(&e.song(), e.local_track_id),
+        })
     }
 
     /// Write a user's choice for one line and refresh what's shown.
