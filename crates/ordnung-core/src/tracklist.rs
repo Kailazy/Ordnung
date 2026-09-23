@@ -11,7 +11,7 @@
 //! with the caller, which holds the release cache. See
 //! `docs/design/tracklist-match.md`.
 
-use crate::discogs::{strip_original_mix, ReleaseCandidate};
+use crate::discogs::{strip_original_mix, without_brackets, ReleaseCandidate};
 
 /// What one pasted line turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -696,6 +696,72 @@ pub fn fold_title(s: &str) -> String {
     fold_name(strip_original_mix(s))
 }
 
+/// The version a title names in its brackets, as written: `K.B's Groove
+/// (Analogue Cops Remix Two)` → `Analogue Cops Remix Two`, `Dark & Long
+/// (Dark Train Mix)` → `Dark Train Mix`. `None` when the brackets hold no
+/// such marker (`Grand Central (Deep Into The Bowel Of House)` is a
+/// subtitle, `(feat. X)` a credit) or the title has none. An `(Original
+/// Mix)` marker names no version. Whole words, so `(Meditation)` isn't an
+/// edit and `(Dublin)` isn't a dub.
+///
+/// A line that names a version is only matched by a record that carries
+/// that version: the original 12" of a song does not carry its remix.
+pub fn mix_tail(title: &str) -> Option<String> {
+    let title = strip_original_mix(title);
+    let mut tails: Vec<String> = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for c in title.chars() {
+        match c {
+            '(' | '[' => {
+                if depth == 0 {
+                    cur.clear();
+                }
+                depth += 1;
+            }
+            ')' | ']' => {
+                depth = (depth - 1).max(0);
+                if depth == 0 {
+                    let inner = cur.trim();
+                    if fold_name(inner).split(' ').any(is_version_word) {
+                        tails.push(inner.to_string());
+                    }
+                }
+            }
+            c if depth > 0 => cur.push(c),
+            _ => {}
+        }
+    }
+    if tails.is_empty() {
+        None
+    } else {
+        Some(tails.join(" "))
+    }
+}
+
+/// A word that makes a bracketed tail a version marker rather than a
+/// subtitle or a credit.
+fn is_version_word(w: &str) -> bool {
+    matches!(
+        w,
+        "mix" | "mixes" | "remix" | "remixes" | "remixed" | "rmx" | "edit" | "edits" | "version"
+            | "dub" | "instrumental" | "rework" | "bootleg" | "vip" | "extended" | "radio"
+            | "club" | "acoustic" | "live" | "reprise" | "cut" | "refix" | "rerub" | "vocal"
+            | "acapella" | "beats" | "part" | "pt"
+    )
+}
+
+/// The words of a version marker that name who made it: `Analogue Cops
+/// Remix Two` → `analogue cops`. Version words and short words (`two`,
+/// `the`) are dropped; empty for `Club Mix`.
+pub(crate) fn version_names(tail: &str) -> Vec<String> {
+    fold_name(tail)
+        .split(' ')
+        .filter(|w| w.len() >= 4 && !is_version_word(w))
+        .map(str::to_string)
+        .collect()
+}
+
 /// Is `artist` the credited artist on a hit? Exact fold, or the hit credits
 /// several and one of them is ours ("A & B", "A / B", "A Feat. B").
 fn artist_agrees(line_artist: &str, hit_artist: &str) -> bool {
@@ -799,7 +865,11 @@ pub fn confidence_for(score: i32) -> Confidence {
 
 /// One candidate's score against one line. Weights: catno 100 (decisive),
 /// artist 40, title equal 50 / contained 40, label 30, vinyl 5; an artist
-/// that plainly disagrees (and isn't "Various") costs 25.
+/// that plainly disagrees (and isn't "Various") costs 25. A line naming a
+/// version (`K.B's Groove (Analogue Cops Remix Two)`) is compared bare as
+/// well, since a record is titled after the song and not the remix, and a
+/// record whose title names the remixer scores 20 more; which version a
+/// record really carries is for the tracklist check to settle.
 pub fn score_candidate(line: &TracklistLine, c: &ReleaseCandidate) -> i32 {
     let mut score = 0i32;
     let hit_artist = fold_name(&c.artist);
@@ -812,15 +882,21 @@ pub fn score_candidate(line: &TracklistLine, c: &ReleaseCandidate) -> i32 {
         }
     }
     if let Some(t) = line.title.as_deref() {
-        let want = fold_title(t);
-        let have = fold_title(&c.title);
-        if !want.is_empty() {
-            if have == want {
-                score += 50;
-            } else if have.contains(&want) || (want.len() >= 8 && want.contains(&have) && !have.is_empty()) {
-                score += 40;
+        let have = fold_title(c.release_title());
+        let mut title = title_score(&fold_title(t), &have);
+        if let Some(version) = mix_tail(t) {
+            // Bare, a remix line's song is as good a fit for the record
+            // titled exactly after it as for the `… EP` or `… Remixes`
+            // beside it, which is where the remix usually is: contained
+            // is all either earns.
+            title = title.max(title_score(&fold_title(&without_brackets(t)), &have).min(40));
+            let names = version_names(&version);
+            let have_words: Vec<&str> = have.split(' ').collect();
+            if !names.is_empty() && names.iter().all(|n| have_words.contains(&n.as_str())) {
+                title += 20;
             }
         }
+        score += title;
     }
     if let Some(l) = line.label_hint.as_deref() {
         let want = fold_name(l);
@@ -838,6 +914,21 @@ pub fn score_candidate(line: &TracklistLine, c: &ReleaseCandidate) -> i32 {
         score += 5;
     }
     score
+}
+
+/// A folded song title against a folded release title: equal 50, one
+/// inside the other 40 (the line's title only when it is long enough not
+/// to sit inside every record), else nothing.
+fn title_score(want: &str, have: &str) -> i32 {
+    if want.is_empty() || have.is_empty() {
+        0
+    } else if have == want {
+        50
+    } else if have.contains(want) || (want.len() >= 8 && want.contains(have)) {
+        40
+    } else {
+        0
+    }
 }
 
 /// Catalog numbers compare without case, spaces or punctuation: `ENV 006`,
@@ -1178,6 +1269,40 @@ mod tests {
         assert_eq!(confidence_for(score_candidate(&l, &by_catno)), Confidence::Sure);
         assert!(score_candidate(&l, &comp) >= 0);
         assert_eq!(confidence_for(score_candidate(&l, &comp)), Confidence::Unsure);
+    }
+
+    #[test]
+    fn version_marker_is_read_off_the_brackets() {
+        assert_eq!(mix_tail("K.B's Groove (Analogue Cops Remix Two)").as_deref(), Some("Analogue Cops Remix Two"));
+        assert_eq!(mix_tail("Dark & Long [Dark Train Mix]").as_deref(), Some("Dark Train Mix"));
+        assert_eq!(mix_tail("It´s 2 Late 4 U And Me (youANDme EDIT)").as_deref(), Some("youANDme EDIT"));
+        assert_eq!(mix_tail("Grand Central, Pt. I (Deep Into The Bowel Of House)"), None);
+        assert_eq!(mix_tail("The Word Is Love (Say The Word) (Steve's Anthem)"), None);
+        assert_eq!(mix_tail("Miura (Original Mix)"), None);
+        assert_eq!(mix_tail("Song (feat. Dajae)"), None);
+        assert_eq!(mix_tail("Meditation (Dublin)"), None);
+        assert_eq!(mix_tail("K.B's Groove"), None);
+        assert_eq!(version_names("Analogue Cops Remix Two"), vec!["analogue", "cops"]);
+        assert!(version_names("Club Mix").is_empty());
+    }
+
+    #[test]
+    fn remix_line_scores_the_song_bare_and_the_remixer_named_in_the_title() {
+        let l = line("[21] DJ Linus - K.B's Groove (Analogue Cops Remix Two)");
+        let original = cand("DJ Linus", "DJ Linus - K.B.'s Groove", "Compose Records", "COMPOSE 0120", "Vinyl, 12\"");
+        let ep = cand("DJ Linus", "DJ Linus - K.B.'s Groove EP", "Initials", "INITIALS03", "Vinyl, 12\", EP");
+        let named = cand("DJ Linus", "DJ Linus - K.B.'s Groove (The Analogue Cops Remixes)", "Initials", "INITIALS03", "Vinyl");
+        // The search hit can't tell the original from the EP: both are the
+        // song by the artist, Likely and level, and the tracklist check
+        // decides.
+        assert_eq!(confidence_for(score_candidate(&l, &original)), Confidence::Likely);
+        assert_eq!(score_candidate(&l, &original), 40 + 40 + 5);
+        assert_eq!(score_candidate(&l, &original), score_candidate(&l, &ep));
+        // A record titled after the remix ranks ahead of both.
+        assert!(score_candidate(&l, &named) > score_candidate(&l, &ep));
+        // The release title is compared without its `Artist - ` prefix.
+        let plain = line("DJ Linus - K.B's Groove");
+        assert_eq!(score_candidate(&plain, &original), 40 + 50 + 5);
     }
 
     #[test]

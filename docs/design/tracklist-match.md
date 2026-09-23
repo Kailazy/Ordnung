@@ -174,6 +174,16 @@ candidate (at most two verifications per line). This is the step that makes
 "matched" mean the track is actually on the record, and it pre-warms the
 detail the sheet will show. `Sure` rows skip it.
 
+A line that names a version (`DJ Linus - K.B's Groove (Analogue Cops Remix
+Two)`, read by `tracklist::mix_tail`) is only `Sure` on a record whose
+tracklist names that version too, in the track's brackets, its title or a
+remix credit (`ReleaseDetail::matching_track_title`): the 1997 Compose 12"
+lists only `K.B.'s Groove`, so it doesn't carry the remix, and the 2012
+Initials EP does. Such a line reads up to four records, and when none names
+the version, the first that carries the song in any version becomes the
+guess at `Unsure` rather than a false `Sure` (v0.146.3; before it the bare
+title alone verified, and the original 12" took the remix line).
+
 ### 4.4 Pressing choice
 
 The user wants *a* record with the track on it, usually the vinyl one they

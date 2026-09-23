@@ -1813,7 +1813,9 @@ impl App {
                         ui.add_space(4.0);
                         let marked = sheet.mark.as_deref().and_then(|m| {
                             let d = sheet.detail.as_ref()?;
-                            let hit = d.matching_track_title(m)?;
+                            let hit = d
+                                .matching_track_title(m)
+                                .or_else(|| d.matching_track_title_any_version(m))?;
                             d.tracklist.iter().position(|t| t.title == hit)
                         });
                         for (i, row) in sheet.rows.iter().enumerate() {

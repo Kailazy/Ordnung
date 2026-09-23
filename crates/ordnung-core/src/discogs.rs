@@ -766,7 +766,26 @@ impl ReleaseDetail {
 
     /// The track on this release that [`Self::carries_title`] accepts for
     /// `title`, as the release spells it.
+    ///
+    /// A `title` that names a version (`K.B's Groove (Analogue Cops Remix
+    /// Two)`, see [`crate::tracklist::mix_tail`]) is only carried by a track
+    /// that names it too, in its own brackets, its title or a remix credit:
+    /// the original 12" of a song does not carry its remix. A title naming
+    /// no version takes any: `Dark & Long` is on a record listing only `Dark
+    /// & Long (Dark Train Mix)`. [`Self::matching_track_title_any_version`]
+    /// waives the version.
     pub fn matching_track_title(&self, title: &str) -> Option<&str> {
+        let version = crate::tracklist::mix_tail(title);
+        self.title_match(title, |t| version.as_deref().map_or(true, |v| version_agrees(v, t)))
+    }
+
+    /// [`Self::matching_track_title`] with the version the title names
+    /// waived: the track that carries the song in any version.
+    pub fn matching_track_title_any_version(&self, title: &str) -> Option<&str> {
+        self.title_match(title, |_| true)
+    }
+
+    fn title_match(&self, title: &str, accept: impl Fn(&ReleaseTrack) -> bool) -> Option<&str> {
         let forms = |t: &str| {
             let mut v = title_forms(t);
             let bare = norm_loose(&without_brackets(t));
@@ -786,7 +805,7 @@ impl ReleaseDetail {
                     wants
                         .iter()
                         .any(|want| have == want || levenshtein(have, want) <= typo_budget(want))
-                })
+                }) && accept(t)
             })
             .map(|t| t.title.as_str())
     }
@@ -3331,9 +3350,51 @@ pub fn strip_original_mix(title: &str) -> &str {
     }
 }
 
+/// Does a listed track carry the version `want` names (`Analogue Cops
+/// Remix Two`)? Its own bracketed marker agrees, give or take a `The` or
+/// a typo, or one names the other (`Remix` sits inside `Analogue Cops
+/// Remix Two`); its whole title says it (`Song Pt. 2`, `Song - Dub`); or
+/// Discogs lists the version as a credit on the track rather than in its
+/// title (`K.B.'s Groove`, Remix: The Analogue Cops). A paste that shortens
+/// the remix to its maker's name agrees when every name word is listed.
+fn version_agrees(want: &str, track: &ReleaseTrack) -> bool {
+    let want_words = dethe(&norm_loose(want)).to_string();
+    let want = title_key(&want_words);
+    if want.is_empty() {
+        return true;
+    }
+    if let Some(have) = crate::tracklist::mix_tail(&track.title) {
+        let have_words = norm_loose(&have);
+        let have = title_key(&have_words);
+        if have == want
+            || have.contains(&want)
+            || want.contains(&have)
+            || levenshtein(&have, &want) <= typo_budget(&want)
+        {
+            return true;
+        }
+        // The paste shortens the remix to its maker (`Kris Wadsworth
+        // Remix` for `Kris Wadsworth's A Love Letter To Dance Music
+        // Remix`): the names agreeing is enough.
+        let names = crate::tracklist::version_names(&want_words);
+        let listed: Vec<&str> = have_words.split(' ').collect();
+        if !names.is_empty() && names.iter().all(|n| listed.contains(&n.as_str())) {
+            return true;
+        }
+    }
+    let listed = format!(" {} ", norm_loose(&track.title));
+    if listed.contains(&format!(" {want_words} ")) {
+        return true;
+    }
+    track.credits.iter().any(|c| {
+        let name = title_key(&norm_loose(&c.name));
+        !name.is_empty() && is_version_role(&c.role) && want.contains(&name)
+    })
+}
+
 /// A title without its `(…)` / `[…]` parts: `The Word Is Love (Say The
 /// Word) (Steve's Anthem)` → `The Word Is Love`.
-fn without_brackets(title: &str) -> String {
+pub(crate) fn without_brackets(title: &str) -> String {
     let mut out = String::with_capacity(title.len());
     let mut depth = 0i32;
     for c in title.chars() {
@@ -4228,6 +4289,47 @@ mod tests {
         assert!(!d.carries_title("Big Drummer Boy"));
         assert_eq!(without_brackets("The Word Is Love (Say The Word) (Steve 'Silk' Hurley's Anthem of Life)"), "The Word Is Love");
         assert_eq!(without_brackets("Rubbernotes [5th Gear Edit]"), "Rubbernotes");
+    }
+
+    /// The original 12" of a song does not carry its remix: a line naming
+    /// a version is only Sure on a record that lists that version.
+    #[test]
+    fn a_named_version_is_only_carried_by_a_track_that_names_it() {
+        let want = "K.B's Groove (Analogue Cops Remix Two)";
+        let mut original = detail();
+        original.tracklist = vec![track("A1", "K.B.'s Groove"), track("A2", "Sex"), track("B", "Otradnoje")];
+        assert!(!original.carries_title(want));
+        assert_eq!(original.matching_track_title_any_version(want), Some("K.B.'s Groove"));
+        assert!(original.carries_title("K.B's Groove"));
+
+        let mut ep = detail();
+        ep.tracklist = vec![
+            track("A1", "K.B.'s Groove"),
+            track("A2", "K.B.'s Groove (The Analogue Cops Remix Two)"),
+            track("B1", "K.B.'s Groove (Kris Wadsworth's A Love Letter To Dance Music Remix)"),
+        ];
+        assert_eq!(ep.matching_track_title(want), Some("K.B.'s Groove (The Analogue Cops Remix Two)"));
+        assert_eq!(ep.matching_track_title("K.B's Groove"), Some("K.B.'s Groove"));
+        assert_eq!(
+            ep.matching_track_title("K.B's Groove (Kris Wadsworth Remix)"),
+            Some("K.B.'s Groove (Kris Wadsworth's A Love Letter To Dance Music Remix)")
+        );
+        assert!(!ep.carries_title("K.B's Groove (Villalobos Remix)"));
+
+        // The version as a credit on the track, not in its title.
+        let mut credited = detail();
+        let mut t = track("A", "K.B.'s Groove");
+        t.credits.push(ReleaseCredit { artist_id: 1, name: "The Analogue Cops".into(), role: "Remix".into() });
+        credited.tracklist = vec![t];
+        assert!(credited.carries_title(want));
+        // A subtitle is not a version and never bars the bare title.
+        let mut sub = detail();
+        sub.tracklist = vec![track("A", "The Word Is Love")];
+        assert!(sub.carries_title("The Word Is Love (Say The Word)"));
+        // `Pt. 2` written into the title, no brackets.
+        let mut parts = detail();
+        parts.tracklist = vec![track("A", "Song Pt. 1"), track("B", "Song Pt. 2")];
+        assert_eq!(parts.matching_track_title("Song (Part 2)"), Some("Song Pt. 2"));
     }
 
     fn detail() -> ReleaseDetail {

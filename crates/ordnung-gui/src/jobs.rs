@@ -4560,17 +4560,22 @@ pub(crate) fn run_match_tracklist(
         let mut rel_track: Option<String> = None;
 
         // Verify anything short of Sure against the record's own tracklist:
-        // the chosen one first, then the next in rank. A hit is Sure; a record
-        // read that doesn't carry the song leaves the first choice as
-        // Unsure; a record that couldn't be read leaves the local score.
+        // the chosen one first, then the next in rank. A hit is Sure; when
+        // no record read carries the song as the line names it, one that
+        // carries it in another version (the original 12" for a remix
+        // line) becomes the guess, at Unsure; a record that couldn't be
+        // read leaves the local score.
         if confidence < Confidence::Sure {
             if let Some(t) = entry.title.as_deref() {
                 let mut tried = 0usize;
-                let mut read = 0usize;
+                let mut read: Vec<(discogs::ReleaseCandidate, discogs::ReleaseDetail)> = Vec::new();
                 let mut verified: Option<(discogs::ReleaseCandidate, String)> = None;
                 // Two records when the score already says Likely; four when
-                // only the artist agreed and the tracklists must decide.
-                let limit = if best_score >= 80 { 2 } else { 4 };
+                // only the artist agreed, or the line names a remix or
+                // version the search hit can't confirm, and the tracklists
+                // must decide.
+                let names_version = tracklist::mix_tail(t).is_some();
+                let limit = if best_score >= 80 && !names_version { 2 } else { 4 };
                 let others = ordered.iter().filter(|c| c.release_id != chosen.release_id).cloned();
                 for cand in std::iter::once(chosen.clone()).chain(others) {
                     if tried >= limit || cancel.load(Ordering::Relaxed) {
@@ -4579,11 +4584,11 @@ pub(crate) fn run_match_tracklist(
                     tried += 1;
                     let id = cand.release_id.clone();
                     if let Ok(detail) = catalog.release_cached_or(&id, || client.fetch_release(&id)) {
-                        read += 1;
                         if let Some(as_listed) = detail.matching_track_title(t) {
                             verified = Some((cand, as_listed.to_string()));
                             break;
                         }
+                        read.push((cand, detail));
                     }
                 }
                 match verified {
@@ -4596,7 +4601,15 @@ pub(crate) fn run_match_tracklist(
                             rel_track = Some(as_listed);
                         }
                     }
-                    None if read > 0 => confidence = confidence.min(Confidence::Unsure),
+                    None if !read.is_empty() => {
+                        if let Some((c, _)) = read
+                            .iter()
+                            .find(|(_, d)| d.matching_track_title_any_version(t).is_some())
+                        {
+                            chosen = c.clone();
+                        }
+                        confidence = confidence.min(Confidence::Unsure);
+                    }
                     None => {}
                 }
             }
