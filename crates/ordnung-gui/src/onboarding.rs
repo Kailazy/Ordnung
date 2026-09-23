@@ -307,6 +307,9 @@ impl App {
         let mut finish = false;
         let mut auto_write = tour.auto_write;
         let mut library_root = tour.library_root.clone();
+        // The folder panel runs off the frame (see `pick`); the tour's
+        // root is filled in when it settles.
+        let mut pick_root = false;
         let mut vinyl_first = tour.vinyl_first;
         let mut token_input = tour.token_input.clone();
         let mut auto_fetch = tour.auto_fetch;
@@ -512,10 +515,7 @@ impl App {
                                         )
                                         .fill(accent);
                                         if ui.add(btn).clicked() {
-                                            if let Some(dir) = rfd::FileDialog::new().pick_folder()
-                                            {
-                                                library_root = Some(dir);
-                                            }
+                                            pick_root = true;
                                         }
                                     });
                                 ui.add_space(crate::ui::tokens::space::S5);
@@ -805,6 +805,9 @@ impl App {
 
         // Apply what the frame decided. The live selections are kept even when
         // the user steps back and forth, so Finish commits what they see.
+        if pick_root {
+            self.open_panel(crate::pick::Panel::Folder, crate::pick::Then::TourLibraryRoot);
+        }
         if let Some(t) = self.tour.as_mut() {
             t.auto_write = auto_write;
             t.library_root = library_root.clone();

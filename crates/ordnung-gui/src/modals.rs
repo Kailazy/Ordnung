@@ -139,6 +139,7 @@ impl App {
         let mut open = self.batch_convert.is_some();
         let mut start = false;
         let mut close = false;
+        let mut pick_out_dir = false;
         if let Some(m) = self.batch_convert.as_mut() {
             crate::ui::window::Window::new("Convert selected tracks")
                 .open(&mut open)
@@ -192,9 +193,7 @@ impl App {
                                 };
                                 ui.label(egui::RichText::new(text).monospace());
                                 if ui.small_button("Pick…").clicked() {
-                                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                                        m.out_dir = Some(d);
-                                    }
+                                    pick_out_dir = true;
                                 }
                                 if m.out_dir.is_some() && ui.small_button("Clear").clicked() {
                                     m.out_dir = None;
@@ -234,6 +233,9 @@ impl App {
                         }
                     });
                 });
+        }
+        if pick_out_dir {
+            self.open_panel(crate::pick::Panel::Folder, crate::pick::Then::BatchConvertOutDir);
         }
         if start {
             if let Some(m) = self.batch_convert.as_ref() {
@@ -813,23 +815,10 @@ impl App {
                                                 .on_hover_note("Set where your library lives")
                                                 .clicked()
                                             {
-                                                if let Some(dir) =
-                                                    rfd::FileDialog::new().pick_folder()
-                                                {
-                                                    self.config.library_root = Some(dir);
-                                                    match self.config.save() {
-                                                        Ok(()) => {
-                                                            self.status = "Library folder set. \
-                                                                Scan for new songs to import it."
-                                                                .into();
-                                                        }
-                                                        Err(e) => {
-                                                            self.status = format!(
-                                                                "Couldn't save settings: {e}"
-                                                            );
-                                                        }
-                                                    }
-                                                }
+                                                self.open_panel(
+                                                    crate::pick::Panel::Folder,
+                                                    crate::pick::Then::LibraryRoot,
+                                                );
                                             }
                                             let can_scan = self.config.library_root.is_some()
                                                 && !self.is_busy();
@@ -1670,12 +1659,10 @@ impl App {
                                                     };
                                                     ui.label(egui::RichText::new(text).monospace());
                                                     if ui.small_button("Pick…").clicked() {
-                                                        if let Some(d) =
-                                                            rfd::FileDialog::new().pick_folder()
-                                                        {
-                                                            self.config.convert_out_dir = Some(d);
-                                                            convert_dirty = true;
-                                                        }
+                                                        self.open_panel(
+                                                            crate::pick::Panel::Folder,
+                                                            crate::pick::Then::ConvertSettingOutDir,
+                                                        );
                                                     }
                                                     if self.config.convert_out_dir.is_some()
                                                         && ui.small_button("Clear").clicked()

@@ -23,6 +23,7 @@ mod macos_menu;
 mod macos_pasteboard;
 mod modals;
 mod onboarding;
+mod pick;
 mod playback;
 mod player;
 mod radio;
@@ -2010,6 +2011,9 @@ struct App {
     /// not a Finder import — the tracks are already in the library — so
     /// `handle_file_drop` ignores it. Cleared on the next mouse press.
     native_drag_paths: Vec<PathBuf>,
+    /// The file panel that is up, if any, and what to do with its answer.
+    /// Panels never run on the frame (see [`pick`]); one at a time.
+    pending_pick: Option<pick::Pending>,
     /// Fraction `[0, 1]` the user is dragging the scrubber to, before release. The
     /// actual seek fires on release so we rebuild the audio sink once, not per
     /// frame; `None` when not scrubbing.

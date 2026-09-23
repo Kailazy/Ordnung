@@ -1,5 +1,6 @@
 //! Split out of `main.rs`; part of the GUI `App`.
 use super::*;
+use crate::pick;
 use crate::ui::tokens::space;
 use ordnung_rbdb::edit;
 
@@ -360,6 +361,7 @@ impl App {
             player_native_drag: None,
             native_drag_spent: false,
             native_drag_paths: Vec::new(),
+            pending_pick: None,
             scrub: None,
             wave_grab: None,
             volume_dirty: false,
@@ -1472,22 +1474,122 @@ impl App {
         if sources.is_empty() {
             return;
         }
-        let Some(dest) = self.resolve_library_root() else {
-            return;
-        };
-        self.spawn_usb_transfer(ctx, sources, vol, dest, None);
+        self.transfer_to_library(ctx, sources, vol, None);
     }
 
-    /// The configured library folder, asking for one (and persisting it) the
-    /// first time a copy-to-library needs it. `None` = user canceled the pick.
-    fn resolve_library_root(&mut self) -> Option<PathBuf> {
+    /// Copy `sources` off the stick into the library root, asking for the
+    /// root (and keeping the answer) the first time a copy needs one. The
+    /// panel runs off the frame (see [`crate::pick`]), so with no root yet
+    /// the copy resumes when the pick settles.
+    fn transfer_to_library(
+        &mut self,
+        ctx: egui::Context,
+        sources: Vec<PathBuf>,
+        vol: PathBuf,
+        playlist: Option<String>,
+    ) {
         match self.config.library_root.clone() {
-            Some(d) => Some(d),
-            None => {
-                let d = rfd::FileDialog::new().pick_folder()?;
-                self.config.library_root = Some(d.clone());
-                let _ = self.config.save();
-                Some(d)
+            Some(dest) => self.spawn_usb_transfer(ctx, sources, vol, dest, playlist),
+            None => self.open_panel(
+                pick::Panel::Folder,
+                pick::Then::LibraryRootFor {
+                    sources,
+                    vol,
+                    playlist,
+                },
+            ),
+        }
+    }
+
+    /// Open a file panel off the frame; `then` runs with the answer once it
+    /// settles (see [`crate::pick`]). One panel at a time: the panel is
+    /// modal, so a second click while one is up can only have been meant
+    /// for it, and is answered with a status line instead.
+    pub(crate) fn open_panel(&mut self, panel: pick::Panel, then: pick::Then) {
+        if self.pending_pick.is_some() {
+            self.status = "A file window is already open.".into();
+            return;
+        }
+        self.pending_pick = Some(pick::open(panel, then, self.egui_ctx.clone()));
+    }
+
+    /// Run what a settled file panel was opened for, with the paths it
+    /// returned (see [`crate::pick`]). A cancelled panel runs nothing.
+    fn settle_panel(&mut self, ctx: &egui::Context) {
+        let Some(paths) = self.pending_pick.as_ref().and_then(pick::Pending::poll) else {
+            return;
+        };
+        let then = self.pending_pick.take().expect("polled above").then;
+        let first = paths.first().cloned();
+        use pick::Then;
+        match then {
+            Then::ImportFiles => {
+                if !paths.is_empty() {
+                    self.spawn_import(ctx.clone(), paths);
+                }
+            }
+            Then::ScanFolder => {
+                if let Some(dir) = first {
+                    self.spawn_scan(ctx.clone(), dir);
+                }
+            }
+            Then::Relocate => {
+                if let Some(dir) = first {
+                    self.spawn_relocate(ctx.clone(), dir);
+                }
+            }
+            Then::LibraryRootFor {
+                sources,
+                vol,
+                playlist,
+            } => {
+                if let Some(dest) = first {
+                    self.config.library_root = Some(dest.clone());
+                    let _ = self.config.save();
+                    self.spawn_usb_transfer(ctx.clone(), sources, vol, dest, playlist);
+                }
+            }
+            Then::LibraryRoot => {
+                if let Some(dir) = first {
+                    self.config.library_root = Some(dir);
+                    self.status = match self.config.save() {
+                        Ok(()) => "Library folder set. Scan for new songs to import it.".into(),
+                        Err(e) => format!("Couldn't save settings: {e}"),
+                    };
+                }
+            }
+            Then::TourLibraryRoot => {
+                if let (Some(dir), Some(t)) = (first, self.tour.as_mut()) {
+                    t.library_root = Some(dir);
+                }
+            }
+            Then::ConvertOutDir => {
+                if let (Some(dir), Some(m)) = (first, self.convert_modal.as_mut()) {
+                    m.out_dir = Some(dir);
+                }
+            }
+            Then::BatchConvertOutDir => {
+                if let (Some(dir), Some(m)) = (first, self.batch_convert.as_mut()) {
+                    m.out_dir = Some(dir);
+                }
+            }
+            Then::ConvertSettingOutDir => {
+                if let Some(dir) = first {
+                    self.config.convert_out_dir = Some(dir);
+                    if let Err(e) = self.config.save() {
+                        self.status = format!("Couldn't save settings: {e}");
+                    }
+                }
+            }
+            Then::SaveTrackList { text, count } => {
+                if let Some(path) = first {
+                    match std::fs::write(&path, text) {
+                        Ok(()) => {
+                            self.status = format!("Saved {count} track(s) to {}.", path.display())
+                        }
+                        Err(e) => self.fail(format!("Couldn't write the track list: {e}")),
+                    }
+                }
             }
         }
     }
@@ -1523,10 +1625,7 @@ impl App {
             self.status = "That playlist has no tracks on the device.".into();
             return;
         }
-        let Some(dest) = self.resolve_library_root() else {
-            return;
-        };
-        self.spawn_usb_transfer(ctx, sources, vol, dest, Some(name));
+        self.transfer_to_library(ctx, sources, vol, Some(name));
     }
 
     /// Everything exporting playlist `id` would put on a stick, computed from
@@ -1661,18 +1760,15 @@ impl App {
             self.status = "That playlist has no tracks to list.".into();
             return;
         }
-        let Some(path) = rfd::FileDialog::new()
-            .set_file_name(format!("{name}.txt"))
-            .save_file()
-        else {
-            return;
-        };
-        match std::fs::write(&path, util::track_list_text(name, &entries)) {
-            Ok(()) => {
-                self.status = format!("Saved {} track(s) to {}.", entries.len(), path.display())
-            }
-            Err(e) => self.fail(format!("Couldn't write the track list: {e}")),
-        }
+        self.open_panel(
+            pick::Panel::Save {
+                file_name: format!("{name}.txt"),
+            },
+            pick::Then::SaveTrackList {
+                text: util::track_list_text(name, &entries),
+                count: entries.len(),
+            },
+        );
     }
 
     /// Build table rows for the active USB view straight from the scanned
@@ -1880,6 +1976,7 @@ impl App {
             self.menu_installed = true;
             crate::macos_menu::install();
         }
+        self.settle_panel(ctx);
         // The file-drop landing zones are re-recorded by whatever draws them
         // this frame; a view that draws neither must not inherit last frame's.
         self.table_screen_rect = None;
@@ -2087,9 +2184,7 @@ impl App {
                     ctx.input_mut(|i| i.events.push(egui::Event::Copy));
                 }
                 macos_menu::MenuCommand::AddFolder => {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                        self.spawn_scan(ctx.clone(), dir);
-                    }
+                    self.open_panel(pick::Panel::Folder, pick::Then::ScanFolder);
                 }
                 macos_menu::MenuCommand::PlayPause => self.toggle_play_pause(),
                 macos_menu::MenuCommand::FocusSearch => self.focus_search = true,
@@ -2256,20 +2351,16 @@ impl App {
                                     .on_hover_note("Add audio files")
                                     .clicked()
                                 {
-                                    let picked = rfd::FileDialog::new()
-                                        .add_filter(
-                                            "Audio",
-                                            &[
+                                    self.open_panel(
+                                        pick::Panel::Files {
+                                            name: "Audio",
+                                            exts: &[
                                                 "mp3", "flac", "aiff", "aif", "wav", "m4a", "aac",
                                                 "ogg",
                                             ],
-                                        )
-                                        .pick_files();
-                                    if let Some(files) = picked {
-                                        if !files.is_empty() {
-                                            self.spawn_import(ctx.clone(), files);
-                                        }
-                                    }
+                                        },
+                                        pick::Then::ImportFiles,
+                                    );
                                     ui.close_menu();
                                 }
                                 if ui
@@ -2277,9 +2368,7 @@ impl App {
                                     .on_hover_note("Add a folder, subfolders included")
                                     .clicked()
                                 {
-                                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                        self.spawn_scan(ctx.clone(), dir);
-                                    }
+                                    self.open_panel(pick::Panel::Folder, pick::Then::ScanFolder);
                                     ui.close_menu();
                                 }
                             });
@@ -2463,9 +2552,7 @@ impl App {
                                     })
                                     .clicked()
                                 {
-                                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                        self.spawn_relocate(ctx.clone(), dir);
-                                    }
+                                    self.open_panel(pick::Panel::Folder, pick::Then::Relocate);
                                 }
                             }
                         });
@@ -3604,9 +3691,7 @@ impl App {
                                     ))
                                     .clicked()
                                 {
-                                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                        self.spawn_scan(ctx.clone(), dir);
-                                    }
+                                    self.open_panel(pick::Panel::Folder, pick::Then::ScanFolder);
                                 }
                             }
                         });
@@ -3713,6 +3798,7 @@ impl App {
         let mut open = self.convert_modal.is_some();
         let mut close_modal = false;
         let mut start_convert: Option<()> = None;
+        let mut pick_out_dir = false;
         if let Some(modal) = self.convert_modal.as_mut() {
             crate::ui::window::Window::new("Convert track")
                 .open(&mut open)
@@ -3786,9 +3872,7 @@ impl App {
                                 };
                                 ui.label(egui::RichText::new(text).monospace().small());
                                 if ui.small_button("Pick…").clicked() {
-                                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                                        modal.out_dir = Some(d);
-                                    }
+                                    pick_out_dir = true;
                                 }
                                 if modal.out_dir.is_some() && ui.small_button("Clear").clicked() {
                                     modal.out_dir = None;
@@ -3842,6 +3926,9 @@ impl App {
                 });
         }
         // Apply deferred modal actions to satisfy the borrow checker.
+        if pick_out_dir {
+            self.open_panel(pick::Panel::Folder, pick::Then::ConvertOutDir);
+        }
         if start_convert.is_some() {
             let modal_clone = self.convert_modal.as_ref().map(|m| ConvertModal {
                 track_id: m.track_id,

@@ -2963,9 +2963,7 @@ impl App {
 
         // Apply the non-modal actions.
         if relocate {
-            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                self.spawn_relocate(ui.ctx().clone(), dir);
-            }
+            self.open_panel(crate::pick::Panel::Folder, crate::pick::Then::Relocate);
         }
         if let Some(id) = remove_one {
             self.missing_pending_remove = Some(vec![id]);
