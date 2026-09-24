@@ -703,13 +703,30 @@ pub struct FieldFill {
 }
 
 /// What [`ReleaseDetail::match_videos`] found: `tracks[i]` is the index into
-/// `videos` playing tracklist position `i`, and `leftover` the videos no
-/// track claimed, in release order.
+/// `videos` playing tracklist position `i`; `guesses[i]` is the closest
+/// leftover offered to a position the strict rules left empty, with how
+/// far the names agree; and `leftover` the videos neither claimed nor
+/// guessed, in release order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoMatches {
     pub tracks: Vec<Option<usize>>,
+    pub guesses: Vec<Option<VideoGuess>>,
     pub leftover: Vec<usize>,
 }
+
+/// A video offered to a track the strict rules left without one: the
+/// leftover whose title comes closest, and how much of the two names
+/// agreed, `0..=100`. Never below [`GUESS_FLOOR`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoGuess {
+    pub video: usize,
+    pub confidence: u8,
+}
+
+/// The least agreement between a track's name and a video's that is still
+/// offered as a guess: half the words. Below it the two share a word or
+/// two, which on a record is any two tracks.
+pub const GUESS_FLOOR: u8 = 50;
 
 /// One reading of a video title, normalized. A `literal` reading is the
 /// title as typed (or its tail after a separator), and settles first: a video
@@ -841,8 +858,12 @@ impl ReleaseDetail {
     ///    to no other track on the release.
     ///
     /// Anything looser makes a short title like "Love" swallow the wrong
-    /// video. Whatever no track claims (album rips, live sets, interviews)
-    /// comes back in `leftover`.
+    /// video, so nothing looser *claims*. Instead, a track those rules left
+    /// empty is offered a *guess*: the leftover video whose words agree most
+    /// with the track's, scored `0..=100` (see [`guess_videos`]) and offered
+    /// only from [`GUESS_FLOOR`] up, so the row can say how sure it is.
+    /// Whatever is neither claimed nor guessed (album rips, live sets,
+    /// interviews) comes back in `leftover`.
     pub fn match_videos(&self, release_artist: &str) -> VideoMatches {
         let cx = TitleContext::new(self, release_artist);
         let candidates: Vec<Vec<Cand>> = self
@@ -851,11 +872,110 @@ impl ReleaseDetail {
             .map(|v| video_title_candidates(&v.title, &cx))
             .collect();
         let tracks = self.claim_by_title(&candidates, true);
-        let claimed: std::collections::HashSet<usize> = tracks.iter().flatten().copied().collect();
+        let mut claimed: HashSet<usize> = tracks.iter().flatten().copied().collect();
+        let guesses = self.guess_videos(&candidates, &tracks, &claimed, &cx);
+        claimed.extend(guesses.iter().flatten().map(|g| g.video));
         let leftover = (0..self.videos.len())
             .filter(|i| !claimed.contains(i))
             .collect();
-        VideoMatches { tracks, leftover }
+        VideoMatches {
+            tracks,
+            guesses,
+            leftover,
+        }
+    }
+
+    /// For each track `tracks` left without a video, the unclaimed video
+    /// whose title agrees most with the track's, when they agree at least
+    /// [`GUESS_FLOOR`] percent. The score is the word overlap of the two
+    /// names (see [`word_agreement`]), taken over every reading of the
+    /// video title ([`video_title_candidates`], so an uploader's prefix is
+    /// read past) and both forms of the track's. Each video goes to the
+    /// track it agrees with most, best pairs first, so two remixes of one
+    /// song each get their own video and never share one.
+    ///
+    /// Two things are never guessed, whatever the words say: a video longer
+    /// than the track by half again and a minute (a side or album rip), and
+    /// a video naming the release whose only agreement with the track *is*
+    /// the release's name (the full album upload of `Lost In Dreams` is not
+    /// the track `Too Lost In Dreams`).
+    fn guess_videos(
+        &self,
+        candidates: &[Vec<Cand>],
+        tracks: &[Option<usize>],
+        claimed: &HashSet<usize>,
+        cx: &TitleContext,
+    ) -> Vec<Option<VideoGuess>> {
+        let release_words: HashSet<&str> = cx.title.split(' ').collect();
+        let mut pairs: Vec<(u8, usize, usize)> = Vec::new();
+        for (ti, t) in self.tracklist.iter().enumerate() {
+            if tracks[ti].is_some() {
+                continue;
+            }
+            let wants: Vec<Vec<String>> = title_forms(&t.title)
+                .iter()
+                .map(|f| agreement_words(f))
+                .filter(|w| !w.is_empty())
+                .collect();
+            if wants.is_empty() {
+                continue;
+            }
+            let track_secs = crate::tracklist::parse_clock(t.duration.trim());
+            let track_version = version_names(&t.title);
+            for (vi, cands) in candidates.iter().enumerate() {
+                if claimed.contains(&vi) {
+                    continue;
+                }
+                let video = &self.videos[vi];
+                if let (Some(v), Some(t)) = (video.duration_secs, track_secs) {
+                    if v > t + t / 2 + 60 {
+                        continue;
+                    }
+                }
+                // A named mix of the song is not another named mix of it,
+                // nor its original: `(Single Mix)` is not `(Hausmeister
+                // Mix)`, and `(Jared Wilson Remix)` is not `(Original
+                // Mix)`. Halved rather than dropped: the words still say
+                // it's the song.
+                let video_version = version_names(&video.title);
+                let clash = !track_version.is_empty()
+                    && if video_version.is_empty() {
+                        strip_original_mix(&video.title) != video.title
+                    } else {
+                        !track_version.iter().any(|a| {
+                            video_version.iter().any(|b| word_similarity(a, b) > 0.0)
+                        })
+                    };
+                let names_release = norm_loose(&video.title).contains(cx.title.as_str());
+                let explained = names_release.then_some(&release_words);
+                let best = wants
+                    .iter()
+                    .flat_map(|want| cands.iter().map(move |c| (want, c)))
+                    .filter_map(|(want, c)| {
+                        word_agreement(want, &agreement_words(&c.text), &cx.name_words, explained)
+                    })
+                    .fold(0u8, u8::max);
+                let best = if clash { best / 2 } else { best };
+                if best >= GUESS_FLOOR {
+                    pairs.push((best, ti, vi));
+                }
+            }
+        }
+        // Surest pairs first; ties settle in release order on both sides.
+        pairs.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        let mut out = vec![None; self.tracklist.len()];
+        let mut used: HashSet<usize> = HashSet::new();
+        for (confidence, ti, vi) in pairs {
+            if out[ti].is_some() || used.contains(&vi) {
+                continue;
+            }
+            out[ti] = Some(VideoGuess {
+                video: vi,
+                confidence,
+            });
+            used.insert(vi);
+        }
+        out
     }
 
     /// Which of `titles` (the track titles of local files linked to this
@@ -3091,6 +3211,11 @@ struct TitleContext {
     /// The title and every credited name, normalized, longest first, so
     /// `Skudge Presents X` peels before `Skudge`.
     prefixes: Vec<String>,
+    /// Every word of `prefixes`: what a video title may carry that says
+    /// nothing about *which* track it is (`feat. Greg Capozzi` on a track
+    /// credited to him). [`word_agreement`] doesn't hold these against a
+    /// video.
+    name_words: HashSet<String>,
 }
 
 impl TitleContext {
@@ -3114,9 +3239,15 @@ impl TitleContext {
             }
         }
         prefixes.sort_by_key(|p| std::cmp::Reverse(p.len()));
+        let name_words = prefixes
+            .iter()
+            .flat_map(|p| p.split(' '))
+            .map(String::from)
+            .collect();
         TitleContext {
             title: norm_loose(&detail.title),
             prefixes,
+            name_words,
         }
     }
 }
@@ -3252,6 +3383,170 @@ fn video_title_candidates(title: &str, cx: &TitleContext) -> Vec<Cand> {
         }
     }
     out
+}
+
+/// The words a title is scored on for a guess: its normalized words with
+/// the ones that say nothing about which track it is dropped (articles,
+/// `featuring`, upload filler) and mix synonyms folded (`remix`, `rmx` →
+/// `mix`), so `Slippin (Eric Cloutier's Remix)` and `Slippin (Eric
+/// Cloutier Perpetual Motion Mix)` differ only where the names do.
+fn agreement_words(text: &str) -> Vec<String> {
+    const NOISE: [&str; 22] = [
+        "a",
+        "an",
+        "the",
+        "of",
+        "and",
+        "featuring",
+        "version",
+        "full",
+        "album",
+        "ep",
+        "lp",
+        "hd",
+        "hq",
+        "official",
+        "video",
+        "audio",
+        "teaser",
+        "preview",
+        "snippet",
+        "promo",
+        "clip",
+        "remastered",
+    ];
+    norm_loose(text)
+        .split(' ')
+        .filter(|w| !w.is_empty() && !NOISE.contains(w))
+        .map(|w| match w {
+            "remix" | "rmx" | "remixed" => "mix",
+            "versus" => "vs",
+            w => w,
+        })
+        .map(String::from)
+        .collect()
+}
+
+/// The words that name *which* version a title's brackets mean: the
+/// version marker (see [`crate::tracklist::mix_tail`]) less the words every
+/// marker carries (`mix`, `dub`, `edit`, `vocal`...). `Dark & Long (Dark
+/// Train Mix)` → `dark train`; `Deeper (Vocal Mix)` → nothing, as does a
+/// title with no marker.
+fn version_names(title: &str) -> Vec<String> {
+    const GENERIC: [&str; 16] = [
+        "mix",
+        "dub",
+        "edit",
+        "original",
+        "vocal",
+        "vox",
+        "instrumental",
+        "extended",
+        "club",
+        "radio",
+        "cut",
+        "rework",
+        "inch",
+        "12",
+        "7",
+        "bonus",
+    ];
+    crate::tracklist::mix_tail(title)
+        .map(|tail| {
+            agreement_words(&tail)
+                .into_iter()
+                .filter(|w| !GENERIC.contains(&w.as_str()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// How far two titles agree, word for word, as a percentage: the harmonic
+/// mean of how much of `want` (the track) is found in `have` (one reading
+/// of the video) and how much of `have` is accounted for by `want`. A
+/// word counts in full when spelled the same and in part when a typo away
+/// (see [`word_similarity`]), so `Clarivoyant` still finds `Clairvoyant`.
+/// Words of `have` in `names` (the release's own title and credits) that
+/// `want` doesn't carry are left out of the reckoning rather than held
+/// against the video. `None` when nothing beyond a number agrees, or,
+/// with `explained` (the release title's words, for a video that names
+/// the release), when nothing beyond the release's name does: that video
+/// is the whole record, not this track. Two names that both carry a
+/// number but never the same one (`Rekksmow 001`, `Rekksmow 002`) agree
+/// half as much as their words say.
+fn word_agreement(
+    want: &[String],
+    have: &[String],
+    names: &HashSet<String>,
+    explained: Option<&HashSet<&str>>,
+) -> Option<u8> {
+    let numeric = |w: &str| w.bytes().all(|b| b.is_ascii_digit());
+    // A number is checked against the video as typed: `3` in `(Part 3)`
+    // still tells `Part 1` apart, whether or not the release is
+    // `Parts 1-3`.
+    let have_numbers: HashSet<&str> = have.iter().map(String::as_str).filter(|w| numeric(w)).collect();
+    let have: Vec<&str> = have
+        .iter()
+        .map(String::as_str)
+        .filter(|w| want.iter().any(|x| x == w) || !names.contains(*w))
+        .collect();
+    if have.is_empty() {
+        return None;
+    }
+    let mut used = vec![false; have.len()];
+    let mut matched = 0.0f32;
+    let mut evidence = false;
+    for w in want {
+        let best = have
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| !used[*j])
+            .map(|(j, h)| (j, word_similarity(w, h)))
+            .filter(|(_, s)| *s > 0.0)
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((j, s)) = best {
+            used[j] = true;
+            matched += s;
+            evidence |= !numeric(w) && explained.is_none_or(|r| !r.contains(w.as_str()));
+        }
+    }
+    if !evidence {
+        return None;
+    }
+    let coverage = matched / want.len() as f32;
+    let precision = matched / have.len() as f32;
+    let mut score = 2.0 * coverage * precision / (coverage + precision);
+    let want_numbers: HashSet<&str> = want.iter().map(String::as_str).filter(|w| numeric(w)).collect();
+    if !want_numbers.is_empty() && !have_numbers.is_empty() && want_numbers.is_disjoint(&have_numbers) {
+        score *= 0.5;
+    }
+    Some((score * 100.0).round().clamp(0.0, 100.0) as u8)
+}
+
+/// How alike two words are, `0..=1`: `1` when the same, a fraction when
+/// within a typo or two of each other (one for a word of four or five
+/// letters, two from six), `0` otherwise. A number is only ever itself:
+/// `001` is not `002`, and a three-letter word gets no slack at all, since
+/// one changed letter is a different word (`mix` is not `dub`).
+fn word_similarity(a: &str, b: &str) -> f32 {
+    if a == b {
+        return 1.0;
+    }
+    if a.bytes().all(|c| c.is_ascii_digit()) || b.bytes().all(|c| c.is_ascii_digit()) {
+        return 0.0;
+    }
+    let n = a.chars().count().max(b.chars().count());
+    let budget = match n {
+        0..=3 => 0,
+        4..=5 => 1,
+        _ => 2,
+    };
+    let d = levenshtein(a, b);
+    if d > budget {
+        0.0
+    } else {
+        1.0 - d as f32 / n as f32
+    }
 }
 
 /// `text` and the tail after each character of `seps` in it: `A - B | C`
@@ -4925,8 +5220,9 @@ mod tests {
             "DJ Metatron – Loops Of Infinity (A Rave Loveletter) [APW3]",
         )];
         // The full-album upload names the release, not the track that
-        // happens to share the parenthetical.
+        // happens to share the parenthetical — not even as a guess.
         assert_eq!(d.match_videos("DJ Metatron").tracks, vec![None]);
+        assert_eq!(d.match_videos("DJ Metatron").guesses, vec![None]);
         assert_eq!(d.match_videos("DJ Metatron").leftover, vec![0]);
     }
 
@@ -4938,6 +5234,81 @@ mod tests {
         // "One Love" merely *contains* "Love" — claiming it would play the
         // wrong track, so the row stays empty.
         assert_eq!(d.video_matches(), vec![None]);
+        // It is offered as a guess, though, and says how little agrees.
+        let m = d.match_videos("");
+        assert_eq!(m.guesses, vec![Some(VideoGuess { video: 0, confidence: 67 })]);
+        assert!(m.leftover.is_empty());
+    }
+
+    /// Real shapes from the collection: a track the strict rules leave
+    /// empty takes the leftover whose words agree most, scored, and the
+    /// leftovers that agree too little (or not at all) stay leftovers.
+    #[test]
+    fn a_track_without_a_video_is_offered_the_closest_leftover_with_a_confidence() {
+        let mut d = detail();
+        d.title = "Space Age".into();
+        d.tracklist = vec![
+            track("A1", "Slippin (Eric Cloutier Perpetual Motion Remix)"),
+            track("A2", "The Clairvoyant"),
+            track("B1", "Space Travel"),
+            track("B2", "Listen (Running Mix)"),
+        ];
+        d.tracklist[3].artist = Some("DKMA Featuring Greg Capozzi".into());
+        d.videos = vec![
+            video("https://youtu.be/v1", "NTD004 - Trinity - Slippin (Eric Cloutier's Remix)"),
+            video("https://youtu.be/v2", "Jeff Mills - The Clarivoyant"),
+            video("https://youtu.be/v3", "The Willers Brothers – Space Age"),
+            video("https://youtu.be/v4", "Listen feat. Greg Capozzi (Running Mix)"),
+            video("https://youtu.be/v5", "Some Interview"),
+        ];
+        let m = d.match_videos("The Willers Brothers");
+        assert_eq!(m.tracks, vec![None, None, None, None]);
+        let got: Vec<Option<(usize, u8)>> = m
+            .guesses
+            .iter()
+            .map(|g| g.map(|g| (g.video, g.confidence)))
+            .collect();
+        // A remix credit spelled two ways still mostly agrees; a
+        // transposed typo is most of the word; a video naming only the
+        // release is the record, not the track; a featured credit the
+        // track already carries isn't held against the video.
+        assert_eq!(got, vec![Some((0, 73)), Some((1, 82)), None, Some((3, 100))]);
+        assert_eq!(m.leftover, vec![2, 4]);
+    }
+
+    #[test]
+    fn a_guess_never_takes_an_album_rip_or_another_named_mix() {
+        let mut d = detail();
+        d.title = "Lost In Dreams".into();
+        d.tracklist = vec![
+            track("A1", "Too Lost In Dreams"),
+            track("A2", "Sun And Rain (Single Mix)"),
+            track("A3", "Be Quiet (Jared Wilson Remix)"),
+            track("B1", "Part 1"),
+            track("B2", "Ascension (Drums)"),
+        ];
+        d.videos = vec![
+            // Names the release and nothing more, and runs an hour.
+            ReleaseVideo {
+                duration_secs: Some(3600),
+                ..video("https://youtu.be/v1", "irini – lost in dreams [APW-4] FULL")
+            },
+            video("https://youtu.be/v2", "Sun and Rain (Hausmeister Mix)"),
+            video("https://youtu.be/v3", "Be Quiet (Original Mix)"),
+            video("https://youtu.be/v4", "The Ineffible Plan (Part 3) - Intonation"),
+            video("https://youtu.be/v5", "Studio OST - Ascension"),
+        ];
+        let m = d.match_videos("");
+        let got: Vec<Option<(usize, u8)>> = m
+            .guesses
+            .iter()
+            .map(|g| g.map(|g| (g.video, g.confidence)))
+            .collect();
+        // Another mix's name, the original of a remix, and a number that
+        // disagrees all halve the agreement, under the floor; a plain
+        // upload of the song still serves a version of it.
+        assert_eq!(got, vec![None, None, None, None, Some((4, 67))]);
+        assert_eq!(m.leftover, vec![0, 1, 2, 3]);
     }
 
     #[test]

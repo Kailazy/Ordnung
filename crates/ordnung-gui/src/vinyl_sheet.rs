@@ -90,6 +90,11 @@ pub(crate) struct SheetRow {
     /// A video for a row whose primary source is a local file, so the sheet can
     /// still offer "watch it" alongside "play my copy".
     pub also_video: Option<usize>,
+    /// Set when the row's video is a *guess* rather than a match: the
+    /// leftover whose title came closest, and how far the names agreed,
+    /// `50..=100` (see [`discogs::VideoGuess`]). The chip shows the
+    /// figure so the user knows what they're about to play.
+    pub guess: Option<u8>,
 }
 
 /// The open record sheet.
@@ -761,7 +766,15 @@ impl App {
                     .enumerate()
                     .map(|(i, t)| {
                         let file = files.get(i).copied().flatten();
-                        let video = videos.tracks.get(i).copied().flatten();
+                        // A matched video, else the closest leftover
+                        // (offered with its confidence, see `guess`).
+                        let guess = videos.guesses.get(i).copied().flatten();
+                        let video = videos
+                            .tracks
+                            .get(i)
+                            .copied()
+                            .flatten()
+                            .or(guess.map(|g| g.video));
                         // Only worth showing when it says something the
                         // header doesn't. On a compilation the header reads
                         // "Various", so every track's credit is news; on a
@@ -794,6 +807,7 @@ impl App {
                                 (None, None) => SheetSource::None,
                             },
                             also_video: file.and(video),
+                            guess: guess.map(|g| g.confidence),
                         }
                     })
                     .collect();
@@ -2443,6 +2457,8 @@ fn sheet_row_ui(
     // once the row's own hit target is registered, so the mark sits on top
     // of it and takes the click.
     let mut like_rect = egui::Rect::NOTHING;
+    // The guessed-video chip's slot and its note, when the row has one.
+    let mut guess_note: Option<(egui::Rect, String)> = None;
     // The names in the row's credit, likewise: laid out now, drawn as links
     // after the row's hit target.
     let mut links: Vec<RowLink> = Vec::new();
@@ -2612,12 +2628,32 @@ fn sheet_row_ui(
                             }
                             ui.label(egui::RichText::new("♪ your copy").small().color(ACCENT));
                         }
-                        SheetSource::Video(_) => {
-                            ui.label(
-                                egui::RichText::new("▶ video")
+                        SheetSource::Video(v) => {
+                            // A guessed video says how sure it is, and
+                            // names the video it would play on hover: the
+                            // row shows the track's title, not the
+                            // video's, and the two can differ.
+                            let text = match row.guess {
+                                Some(c) => format!("▶ video {c}%"),
+                                None => "▶ video".to_string(),
+                            };
+                            let chip = ui.label(
+                                egui::RichText::new(text)
                                     .small()
                                     .color(egui::Color32::from_rgb(190, 130, 130)),
                             );
+                            if let Some(c) = row.guess {
+                                let title = sheet
+                                    .detail
+                                    .as_ref()
+                                    .and_then(|d| d.videos.get(v))
+                                    .map(|v| v.title.as_str())
+                                    .unwrap_or("");
+                                guess_note = Some((
+                                    chip.rect,
+                                    format!("Closest video, {c}% of the name agrees: {title}"),
+                                ));
+                            }
                         }
                         SheetSource::None => {
                             ui.label(
@@ -2660,6 +2696,19 @@ fn sheet_row_ui(
     // Click plays; a drag carries the song to a crate.
     let hit = ui.interact(rect, id, egui::Sense::click_and_drag());
     let like = crate::ui::button::like_mark_at(ui, like_rect, id.with("like"), liked);
+    // The guess chip's note, on its own target laid over the row's, like
+    // the like mark: the row's hit would otherwise take the hover. A click
+    // on it still plays.
+    let mut on_guess = false;
+    if let Some((chip_rect, note)) = guess_note {
+        let chip = ui
+            .interact(chip_rect, id.with("guess"), egui::Sense::click())
+            .on_hover_note(note);
+        on_guess = chip.hovered();
+        if chip.clicked() && playable {
+            hit_what = Some(RowHit::Play);
+        }
+    }
     let mut on_name = false;
     for (n, l) in links.into_iter().enumerate() {
         let resp = crate::ui::button::name_link_at(
@@ -2675,7 +2724,7 @@ fn sheet_row_ui(
             hit_what = Some(RowHit::Artist(l.artist_id, l.name));
         }
     }
-    if marked || like.hovered() || on_name || (playable && hit.hovered()) {
+    if marked || like.hovered() || on_name || (playable && (hit.hovered() || on_guess)) {
         ui.painter().set(
             bg,
             egui::epaint::RectShape::filled(
@@ -2697,7 +2746,7 @@ fn sheet_row_ui(
         }
     });
     if playable {
-        if hit.hovered() {
+        if hit.hovered() || on_guess {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         if hit.clicked() {

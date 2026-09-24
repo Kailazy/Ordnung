@@ -115,6 +115,10 @@ pub struct RankedCandidate {
 /// Parse a whole paste into lines, in order. Noise lines are kept (so the
 /// caller can show what was skipped) but take no position number.
 pub fn parse_tracklist(text: &str) -> Vec<TracklistLine> {
+    // A table pasted a cell per line reads as rows, not lines.
+    if let Some(c) = parse_columnar(text) {
+        return c.lines;
+    }
     let mut out = Vec::new();
     let mut position = 0usize;
     let text = unfold(text);
@@ -151,6 +155,278 @@ pub fn parse_tracklist(text: &str) -> Vec<TracklistLine> {
         }
     }
     out
+}
+
+// --- Columnar pastes -------------------------------------------------------
+
+/// One line of a table pasted a cell per line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cell {
+    /// An empty line or a `Tracklist:` heading: a row break in some pastes,
+    /// never a field.
+    Blank,
+    /// A clock on its own, `0:09:35` or `[12:34]`: a start, an end or a
+    /// duration.
+    Clock(u32),
+    /// A bare number: a position, a play count, a year, or a numeric artist
+    /// (`2562`) that the row's layout has to vouch for.
+    Num(u32),
+    /// Words: an artist, a title, a label.
+    Text,
+}
+
+impl Cell {
+    fn of(line: &str) -> Cell {
+        let s = normalise(line);
+        if s.is_empty() || is_heading(&s) {
+            return Cell::Blank;
+        }
+        let inner = s
+            .strip_prefix('[')
+            .and_then(|r| r.strip_suffix(']'))
+            .or_else(|| s.strip_prefix('(').and_then(|r| r.strip_suffix(')')))
+            .unwrap_or(&s)
+            .trim();
+        if let Some(secs) = parse_clock(inner) {
+            return Cell::Clock(secs);
+        }
+        let digits = inner.strip_prefix('#').unwrap_or(inner);
+        let digits = digits.strip_suffix(['.', ')']).unwrap_or(digits);
+        if !digits.is_empty() && digits.len() <= 6 && digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Cell::Num(digits.parse().unwrap_or(0));
+        }
+        Cell::Text
+    }
+
+    /// The kind alone, for comparing row layouts.
+    fn tag(self) -> u8 {
+        match self {
+            Cell::Blank => 0,
+            Cell::Clock(_) => 1,
+            Cell::Num(_) => 2,
+            Cell::Text => 3,
+        }
+    }
+}
+
+/// A columnar paste read into lines, plus the heading it opened with.
+struct Columnar {
+    heading: Option<String>,
+    lines: Vec<TracklistLine>,
+}
+
+/// A tracklist copied off a table lands one cell per line: position, start,
+/// end, artist, title, label, play count, then the next row. Nothing on
+/// such a line reads as `Artist - Title`, so the line parser would keep only
+/// the odd title with a dash in it. Read the table instead: group the cells
+/// into rows, work out which column is which from the row most of them
+/// share, and read artist, title, label and the first clock off each row.
+///
+/// Rows are cut, in order of preference, at a running position number
+/// (`2`, `3`, `4` … on their own lines), at blank lines, or where a run of
+/// text lines meets the numbers and clocks between rows. The layout of the
+/// commonest row vouches for cells the kinds alone misread: a `2562` in the
+/// artist column is an artist, not a count. `None` when the paste is not
+/// shaped like that (most of its text lines are songs, or fewer than three
+/// rows come out), so the line parser gets its turn.
+fn parse_columnar(text: &str) -> Option<Columnar> {
+    let cells: Vec<(Cell, String)> = text
+        .lines()
+        .map(|l| (Cell::of(l), normalise(l)))
+        .collect();
+    let texts = cells.iter().filter(|(c, _)| *c == Cell::Text).count();
+    let songs = cells
+        .iter()
+        .filter(|(c, s)| *c == Cell::Text && looks_like_song(s))
+        .count();
+    if texts < 4 || songs * 3 >= texts {
+        return None;
+    }
+    let rows = split_rows(&cells);
+    // The commonest row layout, first seen winning a tie.
+    let mut layouts: Vec<(Vec<u8>, usize)> = Vec::new();
+    for row in &rows {
+        let sig: Vec<u8> = row.iter().map(|(c, _)| c.tag()).collect();
+        match layouts.iter_mut().find(|(s, _)| *s == sig) {
+            Some((_, n)) => *n += 1,
+            None => layouts.push((sig, 1)),
+        }
+    }
+    let modal: Vec<u8> = layouts
+        .iter()
+        .max_by_key(|(_, n)| *n)
+        .map(|(s, _)| s.clone())
+        .unwrap_or_default();
+    let modal_texts = modal.iter().filter(|&&t| t == Cell::Text.tag()).count();
+
+    let mut heading = None;
+    let mut lines = Vec::new();
+    let mut paired = 0usize;
+    for (r, row) in rows.iter().enumerate() {
+        let same = row.len() == modal.len();
+        let mut fields: Vec<&str> = Vec::new();
+        let mut clock = None;
+        for (k, (c, s)) in row.iter().enumerate() {
+            match c {
+                Cell::Text => fields.push(s),
+                Cell::Num(_) if same && modal[k] == Cell::Text.tag() => fields.push(s),
+                Cell::Clock(t) => {
+                    clock.get_or_insert(*t);
+                }
+                _ => {}
+            }
+        }
+        if fields.is_empty() {
+            continue;
+        }
+        // A lone line of words before rows of two or more is the paste's
+        // heading (`Kia @ noclubs`), not a track.
+        if r == 0 && fields.len() == 1 && clock.is_none() && modal_texts >= 2 && rows.len() > 1 {
+            heading = Some(fields[0].trim_end_matches(':').to_string());
+            continue;
+        }
+        if fields.len() >= 2 {
+            paired += 1;
+        }
+        lines.push(columnar_line(&fields, clock));
+    }
+    let n = lines.len();
+    let timed = lines.iter().filter(|l| l.timestamp.is_some()).count();
+    // Rows that mostly carry an artist and a title, or a title with its
+    // clock on every row; anything thinner is a title list or noise.
+    if n < 3 || (paired * 3 < n * 2 && timed < n) {
+        return None;
+    }
+    let mut position = 0usize;
+    for l in lines.iter_mut() {
+        if l.kind != LineKind::Noise {
+            position += 1;
+            l.position = position;
+        }
+    }
+    Some(Columnar { heading, lines })
+}
+
+/// Cut a columnar paste's cells into rows; see [`parse_columnar`] for the
+/// three cuts. Blank cells never land in a row.
+fn split_rows(cells: &[(Cell, String)]) -> Vec<Vec<(Cell, String)>> {
+    let n = cells.len();
+    let is_text = |i: usize| cells[i].0 == Cell::Text;
+    let text_runs = (0..n).filter(|&i| is_text(i) && (i == 0 || !is_text(i - 1))).count();
+    // A running position number: the longest chain of bare numbers that
+    // each read one above the last, counted from any start (the paste may
+    // open mid-list, and a play count between two positions is skipped).
+    let nums: Vec<(usize, u32)> = cells
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (c, _))| match c {
+            Cell::Num(v) => Some((i, *v)),
+            _ => None,
+        })
+        .collect();
+    let mut chain: Vec<usize> = Vec::new();
+    for s in 0..nums.len() {
+        let mut cur = vec![nums[s].0];
+        let mut last = nums[s].1;
+        for &(i, v) in &nums[s + 1..] {
+            if v == last + 1 {
+                cur.push(i);
+                last = v;
+            }
+        }
+        if cur.len() > chain.len() {
+            chain = cur;
+        }
+    }
+    let first_text = (0..n).find(|&i| is_text(i));
+    let last_text = (0..n).rev().find(|&i| is_text(i));
+    let inner_blank = match (first_text, last_text) {
+        (Some(a), Some(b)) => (a..b).any(|i| cells[i].0 == Cell::Blank),
+        _ => false,
+    };
+    // (where a row starts, whether that cell is a marker to drop)
+    let (anchors, drop): (Vec<usize>, bool) = if chain.len() >= 2 && chain.len() * 3 >= text_runs * 2 {
+        (chain, true)
+    } else if inner_blank {
+        ((0..n).filter(|&i| cells[i].0 == Cell::Blank).collect(), true)
+    } else if first_text == Some(0) && last_text != Some(n.saturating_sub(1)) {
+        // Words first, clocks last: the numbers after a run belong to it.
+        ((1..n).filter(|&i| is_text(i) && !is_text(i - 1)).collect(), false)
+    } else {
+        // Clocks first: the numbers before a run belong to it.
+        ((1..n).filter(|&i| !is_text(i) && is_text(i - 1)).collect(), false)
+    };
+    let mut rows = Vec::new();
+    let mut cur: Vec<(Cell, String)> = Vec::new();
+    for (i, cell) in cells.iter().enumerate() {
+        if anchors.binary_search(&i).is_ok() {
+            if !cur.is_empty() {
+                rows.push(std::mem::take(&mut cur));
+            }
+            if drop {
+                continue;
+            }
+        }
+        if cell.0 != Cell::Blank {
+            cur.push(cell.clone());
+        }
+    }
+    if !cur.is_empty() {
+        rows.push(cur);
+    }
+    rows
+}
+
+/// One row's text cells, in column order, as a line: artist, title, label.
+/// A lone cell is a title. The raw line is spelt the way a one-line paste
+/// would spell it, so it displays and re-parses like one.
+fn columnar_line(fields: &[&str], timestamp: Option<u32>) -> TracklistLine {
+    let (artist, title, label) = match fields {
+        [] => (None, None, None),
+        [t] => (None, Some(t.to_string()), None),
+        [a, t, rest @ ..] => (
+            Some(a.to_string()),
+            Some(t.to_string()),
+            rest.first()
+                .filter(|l| l.split_whitespace().count() <= 4)
+                .map(|l| l.to_string()),
+        ),
+    };
+    // A `[CAT 01]` on the title cell is a catalog number, as on a one-line
+    // paste; a parenthesised tail stays on the title, the label has its own
+    // cell here.
+    let (title, label_hint, catno_hint) = match title {
+        Some(t) if t.ends_with(']') => {
+            let (body, l, c) = split_hints(&t);
+            (Some(body), l, c)
+        }
+        t => (t, None, None),
+    };
+    let label_hint = label.or(label_hint);
+    let mut raw = String::new();
+    if let Some(a) = &artist {
+        raw.push_str(a);
+        raw.push_str(" - ");
+    }
+    if let Some(t) = &title {
+        raw.push_str(t);
+    }
+    if let Some(l) = &label_hint {
+        raw.push_str(&format!(" [{l}]"));
+    }
+    let mut line = TracklistLine {
+        position: 0,
+        raw: raw.trim().to_string(),
+        timestamp,
+        artist: None,
+        title: None,
+        label_hint,
+        catno_hint,
+        album_hint: None,
+        kind: LineKind::Noise,
+    };
+    settle_kind(&mut line, artist, title);
+    line
 }
 
 /// A paste whose line breaks were lost (a SoundCloud comment, a description
@@ -328,6 +604,14 @@ fn parse_line(raw: &str) -> TracklistLine {
     if line.label_hint.is_none() {
         line.label_hint = extra_label;
     }
+    settle_kind(&mut line, artist, title);
+    line
+}
+
+/// Settle a line's kind from the halves read off it: nothing is noise, ID
+/// words alone are an ID, anything readable is a track. Shared by the line
+/// and the columnar parsers.
+fn settle_kind(line: &mut TracklistLine, artist: Option<String>, title: Option<String>) {
     match (artist, title) {
         (None, None) => {
             line.kind = LineKind::Noise;
@@ -346,7 +630,6 @@ fn parse_line(raw: &str) -> TracklistLine {
             }
         }
     }
-    line
 }
 
 /// Fold the typographic variants a paste carries into the plain forms the
@@ -432,7 +715,7 @@ fn take_timestamp(s: &str) -> (Option<u32>, String) {
 }
 
 /// `12:34` → 754, `1:02:03` → 3723. Anything else is not a clock.
-fn parse_clock(s: &str) -> Option<u32> {
+pub(crate) fn parse_clock(s: &str) -> Option<u32> {
     let parts: Vec<&str> = s.split(':').collect();
     if !(2..=3).contains(&parts.len()) {
         return None;
@@ -964,6 +1247,11 @@ pub fn search_terms(line: &TracklistLine) -> (String, String) {
 /// A name for a paste: its `Tracklist:` / title heading when it has one,
 /// else `None` (the caller dates it).
 pub fn suggested_name(text: &str) -> Option<String> {
+    // A table's first line is a cell (an artist), not a heading, unless the
+    // columnar read set one aside.
+    if let Some(c) = parse_columnar(text) {
+        return c.heading;
+    }
     for raw in text.lines().take(3) {
         let l = normalise(raw);
         if l.is_empty() {
@@ -1225,6 +1513,97 @@ mod tests {
             Some("Ben UFO @ Dekmantel 2016")
         );
         assert_eq!(suggested_name("01. A - B\n02. C - D"), None);
+    }
+
+    // --- columnar pastes
+
+    /// A table copied a cell per line: position, start, end, artist, title,
+    /// label, play count. The paste opens mid-row (the first position and
+    /// clocks were not selected), one row has no label, one artist is a
+    /// number, two titles carry a dash.
+    const TABLE_PASTE: &str = "Rabbit in the Moon\nDubassex (Wish You Were Here)\nRabbit in the Moon\n11\n2\n0:09:35\n0:14:30\nJesper Dahlbäck\nMaster Circuit\nTurbo Recordings\n2\n3\n0:14:30\n0:18:42\nAutokinetic\nWakeword\nAutokinetic\n11\n4\n0:20:57\n0:24:48\nMatt Whitehead\nSpinning Mobile\nCultivated Electronics\n17\n5\n0:30:02\n0:31:32\nCarsten Fietz\nLab Jerk\nTAKEAWAY\n3\n6\n0:39:34\n0:41:08\nIdentified Patient\nInternal Pace\nDekmantel\n24\n7\n0:43:09\n0:46:18\nG-Man aka Gez Varley\nQuoVadis - Original Mix\nClaque Musique\n182\n8\n0:50:15\n0:54:28\nDelta Funktionen\nSilhouette\nRadio Matrix\n19\n9\n0:58:23\n1:00:23\nAedis\nSaense\nAnimalia\n3\n10\n1:02:13\n1:04:44\nShonky\nCloser to Pluton\nShonky\n15\n11\n1:18:44\n1:20:51\nTimeblind\nInterrupt (Original Mix)\nCommunique Rec\n39\n12\n1:20:55\n1:24:36\n2562\nMorvern\nTectonic\n38\n13\n1:24:45\n1:28:44\nAfriqua\nDrive\nNilla\n54\n14\n1:33:18\n1:34:07\nLuna Ludmila\nLighter Days (Deep Mix - Edit)\nBerg Audio\n3\n15\n1:35:23\n1:37:36\nJack Brickel & Sam Brickel\nResurgence\nAnimalia\n53\n16\n1:43:27\n1:48:03\nShonky\nZeds Dead\nResopal Red\n3\n17\n2:04:17\n2:09:28\nMOKShA thee original\nSubstance (Remix)\n1\n18\n2:22:47\n2:23:40\nTimeblind\nCharred (Original Mix)\nTimeblind\n19\n19\n2:24:21\n2:30:38\nThe Astec Mystic\nJaguar\nSubmerge Recordings\n";
+
+    #[test]
+    fn table_paste_reads_every_row() {
+        let lines = parse_tracklist(TABLE_PASTE);
+        assert_eq!(lines.len(), 19, "{lines:#?}");
+        assert!(lines.iter().all(|l| l.kind == LineKind::Track));
+        let l = &lines[0];
+        assert_eq!(l.artist.as_deref(), Some("Rabbit in the Moon"));
+        assert_eq!(l.title.as_deref(), Some("Dubassex (Wish You Were Here)"));
+        assert_eq!(l.label_hint.as_deref(), Some("Rabbit in the Moon"));
+        assert_eq!(l.timestamp, None);
+        assert_eq!(l.position, 1);
+        let l = &lines[1];
+        assert_eq!(l.artist.as_deref(), Some("Jesper Dahlbäck"));
+        assert_eq!(l.title.as_deref(), Some("Master Circuit"));
+        assert_eq!(l.label_hint.as_deref(), Some("Turbo Recordings"));
+        assert_eq!(l.timestamp, Some(9 * 60 + 35));
+        assert_eq!(l.raw, "Jesper Dahlbäck - Master Circuit [Turbo Recordings]");
+        // A dash inside the title cell stays in the title.
+        assert_eq!(lines[6].artist.as_deref(), Some("G-Man aka Gez Varley"));
+        assert_eq!(lines[6].title.as_deref(), Some("QuoVadis - Original Mix"));
+        assert_eq!(lines[13].title.as_deref(), Some("Lighter Days (Deep Mix - Edit)"));
+        // The row layout vouches for a numeric artist.
+        assert_eq!(lines[11].artist.as_deref(), Some("2562"));
+        assert_eq!(lines[11].title.as_deref(), Some("Morvern"));
+        assert_eq!(lines[11].label_hint.as_deref(), Some("Tectonic"));
+        // A row short of its label still reads.
+        assert_eq!(lines[16].artist.as_deref(), Some("MOKShA thee original"));
+        assert_eq!(lines[16].title.as_deref(), Some("Substance (Remix)"));
+        assert_eq!(lines[16].label_hint, None);
+        assert_eq!(lines[16].timestamp, Some(2 * 3600 + 4 * 60 + 17));
+        assert_eq!(lines[18].artist.as_deref(), Some("The Astec Mystic"));
+        assert_eq!(lines[18].position, 19);
+        // No heading: the first cell is an artist.
+        assert_eq!(suggested_name(TABLE_PASTE), None);
+    }
+
+    #[test]
+    fn blank_separated_pairs_are_artist_and_title() {
+        let text = "Kia @ noclubs\n\nMetro Area\nMiura\n\nTheo Parrish\nSolitary Flight\n\nPépé Bradock\nDeep Burnt\n12:34\n\nID\nID\n";
+        let lines = parse_tracklist(text);
+        assert_eq!(lines.len(), 4, "{lines:#?}");
+        assert_eq!(lines[0].artist.as_deref(), Some("Metro Area"));
+        assert_eq!(lines[0].title.as_deref(), Some("Miura"));
+        assert_eq!(lines[2].artist.as_deref(), Some("Pépé Bradock"));
+        assert_eq!(lines[2].timestamp, Some(754));
+        assert_eq!(lines[3].kind, LineKind::Id);
+        assert_eq!(lines[2].position, 3);
+        assert_eq!(suggested_name(text).as_deref(), Some("Kia @ noclubs"));
+    }
+
+    #[test]
+    fn clock_then_artist_then_title_rows() {
+        let text = "0:00\nMetro Area\nMiura\n4:20\nTheo Parrish\nSolitary Flight\n9:10\nPépé Bradock\nDeep Burnt\n";
+        let lines = parse_tracklist(text);
+        assert_eq!(lines.len(), 3, "{lines:#?}");
+        assert_eq!(lines[1].artist.as_deref(), Some("Theo Parrish"));
+        assert_eq!(lines[1].title.as_deref(), Some("Solitary Flight"));
+        assert_eq!(lines[1].timestamp, Some(260));
+        // Clocks after the words belong to the row before them.
+        let text = "Metro Area\nMiura\n0:00\nTheo Parrish\nSolitary Flight\n4:20\nPépé Bradock\nDeep Burnt\n9:10\n";
+        let lines = parse_tracklist(text);
+        assert_eq!(lines.len(), 3, "{lines:#?}");
+        assert_eq!(lines[1].artist.as_deref(), Some("Theo Parrish"));
+        assert_eq!(lines[1].timestamp, Some(260));
+    }
+
+    #[test]
+    fn one_line_pastes_never_read_as_tables() {
+        // A heading, a rule and blank lines around ordinary lines.
+        let text = "Tracklist:\n\n01. A - B\n02. ID - ID\n-----\n03. C - D [Label]\n\n04. E - F\n";
+        let lines = parse_tracklist(text);
+        assert_eq!(lines.iter().filter(|l| l.kind == LineKind::Track).count(), 3);
+        // A title-only list, blank-separated, stays a title list.
+        let text = "Miura\n\nSolitary Flight\n\nDeep Burnt\n\nRain\n";
+        let lines = parse_tracklist(text);
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().all(|l| l.artist.is_none() && l.kind == LineKind::Track));
+        // A heading over a title list is not a two-row table.
+        let text = "Ben UFO @ Dekmantel\n\nMiura\nSolitary Flight\nDeep Burnt\n";
+        let lines = parse_tracklist(text);
+        assert!(lines.iter().all(|l| l.artist.is_none()), "{lines:#?}");
     }
 
     // --- scoring
