@@ -2334,58 +2334,64 @@ impl App {
                     // it sits in the same spot whichever view is showing.
                     let toolbar_center_x = ui.max_rect().center().x;
                     let busy = self.is_busy();
-                    // Every button in this left group acts on the digital
-                    // library: importing files, analysis, conversion, tag
-                    // writeback, relocation. The vinyl view shows Discogs
-                    // records, not catalog tracks, so the group hides there
-                    // rather than offering actions on rows that aren't visible.
-                    // A crate is the vinyl side too: songs on records.
-                    if !matches!(self.view, LibraryView::Vinyl | LibraryView::CrateSet(_)) {
-                        ui.add_enabled_ui(!busy, |ui| {
-                            // "Add songs…" opens a small menu: pick individual files, or a
-                            // whole folder. Both import into the catalog; source files are
-                            // never moved or modified, and unchanged files are skipped on a
-                            // re-add (same size + mtime), so it's never a full re-read.
-                            // Primary action: an accent fill marks it as the toolbar's
-                            // main entry point (it's the only action that grows the library).
-                            // The fill is the frame; the theme's grey outline
-                            // around it only dulled the accent's edge.
-                            let add_btn = egui::Button::new(
-                                egui::RichText::new("Add songs…").color(egui::Color32::WHITE),
-                            )
-                            .fill(egui::Color32::from_rgb(64, 110, 180))
-                            .stroke(egui::Stroke::NONE);
-                            let add = egui::menu::menu_custom_button(ui, add_btn, |ui| {
-                                if ui
-                                    .button("🎵  Choose files…")
-                                    .on_hover_note("Add audio files")
-                                    .clicked()
-                                {
-                                    self.open_panel(
-                                        pick::Panel::Files {
-                                            name: "Audio",
-                                            exts: &[
-                                                "mp3", "flac", "aiff", "aif", "wav", "m4a", "aac",
-                                                "ogg",
-                                            ],
-                                        },
-                                        pick::Then::ImportFiles,
-                                    );
-                                    ui.close_menu();
-                                }
-                                if ui
-                                    .button("📁  Choose folder…")
-                                    .on_hover_note("Add a folder, subfolders included")
-                                    .clicked()
-                                {
-                                    self.open_panel(pick::Panel::Folder, pick::Then::ScanFolder);
-                                    ui.close_menu();
-                                }
-                            });
-                            add.response.on_hover_note(
+                    // "Add songs…" opens a small menu: pick individual files, or a
+                    // whole folder. Both import into the catalog; source files are
+                    // never moved or modified, and unchanged files are skipped on a
+                    // re-add (same size + mtime), so it's never a full re-read.
+                    // Primary action: an accent fill marks it as the toolbar's
+                    // main entry point (it's the only action that grows the library).
+                    // The fill is the frame; the theme's grey outline
+                    // around it only dulled the accent's edge.
+                    // It stays on every view, the vinyl side included: adding
+                    // to the library is never about the rows on screen, and a
+                    // collector browsing records shouldn't have to switch back
+                    // to Library to bring a new rip in.
+                    ui.add_enabled_ui(!busy, |ui| {
+                        let add_btn = egui::Button::new(
+                            egui::RichText::new("Add songs…").color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(64, 110, 180))
+                        .stroke(egui::Stroke::NONE);
+                        let add = egui::menu::menu_custom_button(ui, add_btn, |ui| {
+                            if ui
+                                .button("🎵  Choose files…")
+                                .on_hover_note("Add audio files")
+                                .clicked()
+                            {
+                                self.open_panel(
+                                    pick::Panel::Files {
+                                        name: "Audio",
+                                        exts: &[
+                                            "mp3", "flac", "aiff", "aif", "wav", "m4a", "aac",
+                                            "ogg",
+                                        ],
+                                    },
+                                    pick::Then::ImportFiles,
+                                );
+                                ui.close_menu();
+                            }
+                            if ui
+                                .button("📁  Choose folder…")
+                                .on_hover_note("Add a folder, subfolders included")
+                                .clicked()
+                            {
+                                self.open_panel(pick::Panel::Folder, pick::Then::ScanFolder);
+                                ui.close_menu();
+                            }
+                        });
+                        add.response.on_hover_note(
                             "Add files or a folder to the catalog. Source files are never modified",
                         );
-                            ui.separator();
+                    });
+                    ui.separator();
+                    // Every other button in this left group acts on the rows of
+                    // the digital library: analysis, conversion, tag writeback,
+                    // relocation. The vinyl view shows Discogs records, not
+                    // catalog tracks, so the group hides there rather than
+                    // offering actions on rows that aren't visible. A crate is
+                    // the vinyl side too: songs on records.
+                    if !matches!(self.view, LibraryView::Vinyl | LibraryView::CrateSet(_)) {
+                        ui.add_enabled_ui(!busy, |ui| {
                             // When rows are selected, the toolbar buttons act on just that
                             // selection (in visible order); otherwise they fall back to the
                             // whole filtered view. The label reflects which, so a user who
