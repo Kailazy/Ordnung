@@ -126,6 +126,25 @@ credits stay part of the title. Anything without a ` - ` and without quotes
 is `Noise` unless it is the only shape in the paste, in which case the whole
 paste is treated as title-only lines (some SoundCloud descriptions do this).
 
+**Columnar pastes (v0.151.0).** A tracklist copied off a table (a site's
+track table, a spreadsheet) lands one cell per line: position, start, end,
+artist, title, label, play count, then the next row. Nothing on such a
+line is `Artist - Title`, so before the line parser runs, `parse_columnar`
+tries to read the paste as rows. It cuts rows at a running position number
+on its own line (`2`, `3`, `4` …, counted from wherever the paste opens),
+else at blank lines, else where a run of text lines meets the numbers and
+clocks between rows (clocks before the words belong to the row after them,
+clocks after the words to the row before). The layout of the commonest row
+decides what each cell is, so a `2562` in the artist column is an artist,
+not a count. Text cells read in order as artist, title, label (a lone cell
+is a title); the first clock is the timestamp; a dash inside the title cell
+stays in the title; an `ID` / `ID` row is an ID. A single line of words
+above rows of two or more is the paste's heading and feeds
+`suggested_name`. The read only stands when most text lines are not songs
+already, at least three rows come out and most rows carry two or more text
+cells (or every row a clock), so ordinary pastes, title lists and a heading
+over a title list still go to the line parser.
+
 `scan::parse_filename` is the closest existing parser; it stays where it is
 (it answers a different question: filename stems, with disc/track prefixes)
 but its number-stripping helper is worth sharing.
