@@ -218,6 +218,11 @@ pub struct Config {
     /// level it was left at.
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// Key lock (a CDJ's master tempo) for the player's pitch fader: on, the
+    /// fader changes the tempo and keeps the musical key; off, it behaves
+    /// like a turntable's and shifts both. Remembered like a deck setting.
+    #[serde(default)]
+    pub key_lock: bool,
     /// How the player's waveform is colored: `"energy"` (cool→hot gradient by
     /// each section's energy — perceived loudness × spectral occupancy) or
     /// `"spectrum"` (additive RGB from the low/mid/high band balance, like
@@ -731,6 +736,7 @@ impl Default for Config {
             auto_convert: false,
             auto_convert_sources: Vec::new(),
             volume: default_volume(),
+            key_lock: false,
             waveform_color_mode: default_waveform_color_mode(),
             waveform_height_exp: default_waveform_height_exp(),
             waveform_band_gain: default_waveform_band_gain(),

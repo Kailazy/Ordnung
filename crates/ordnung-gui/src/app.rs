@@ -388,6 +388,7 @@ impl App {
         // shows whatever the user left it at.
         if let Some(a) = &mut app.audio {
             a.set_volume(app.config.volume);
+            a.set_key_lock(app.config.key_lock);
         }
         // Same for the video player. It has no panel yet — that's built on the
         // first video — but the level is recorded now so the first one to play

@@ -16,6 +16,7 @@ pub mod error;
 pub mod model;
 pub mod scan;
 pub mod search;
+pub mod stretch;
 pub mod tag;
 pub mod tracklist;
 pub mod update;

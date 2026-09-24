@@ -190,13 +190,15 @@ impl App {
 
         let np_path = self.now_playing.as_ref().unwrap().source_path.clone();
         let art = self.cover_full_texture(ctx, np_id, &np_path);
-        let (pos, dur, loading, playing) = {
+        let (pos, dur, loading, playing, pitch_pct, key_lock) = {
             let a = self.audio.as_ref().unwrap();
             (
                 a.position(),
                 a.duration(),
                 matches!(a.state_for(np_id), PlayState::Loading),
                 a.state_for(np_id) == PlayState::Playing,
+                a.pitch(),
+                a.key_lock(),
             )
         };
 
@@ -252,6 +254,10 @@ impl App {
         let mut shuffle = false;
         let mut smart_shuffle = false;
         let mut seek_to: Option<f32> = None;
+        // The pitch fader moved / the key-lock key was pressed this frame;
+        // applied to the engine after the panel closure.
+        let mut set_pitch: Option<f32> = None;
+        let mut toggle_key_lock = false;
         // Set by clicking the title/artist labels; applied after the panel closure
         // (jumping rebuilds rows and selection, which needs `&mut self`).
         let mut filter_album = false;
@@ -593,6 +599,40 @@ impl App {
                     }
                     ui.add_space(12.0);
 
+                    // Pitch fader and key lock: the tempo section of the deck.
+                    // The fader is a turntable's (see `ui::fader`); the key is
+                    // a CDJ's master tempo, lit while it holds the key. Both
+                    // read and drive the engine directly, so the fader keeps
+                    // its position from one record to the next as a real one
+                    // would.
+                    if let Some(v) = crate::ui::fader::pitch(
+                        ui,
+                        pitch_pct,
+                        crate::audio::PITCH_RANGE_PCT,
+                        grid.map(|g| g.bpm),
+                    ) {
+                        set_pitch = Some(v);
+                    }
+                    ui.add_space(6.0);
+                    crate::ui::control_row(ui, |ui| {
+                        if crate::ui::button::deck(
+                            ui,
+                            "Key lock",
+                            key_lock.then_some(crate::ui::tokens::color::ACCENT_HOVER),
+                            true,
+                        )
+                        .on_hover_note(if key_lock {
+                            "Key lock on: the fader changes tempo, the key stays"
+                        } else {
+                            "Key lock off: the fader shifts tempo and pitch like a turntable"
+                        })
+                        .clicked()
+                        {
+                            toggle_key_lock = true;
+                        }
+                    });
+                    ui.add_space(12.0);
+
                     // Elapsed time. Fixed-width so the digits changing during a
                     // scrub (e.g. "0:05" → "0:00", or crossing "10:00") can't shift
                     // the waveform that follows it — that shift was the scrub jitter.
@@ -704,6 +744,18 @@ impl App {
             if let Some(a) = self.audio.as_mut() {
                 a.seek(s);
             }
+        }
+        if let Some(v) = set_pitch {
+            if let Some(a) = self.audio.as_mut() {
+                a.set_pitch(v);
+            }
+        }
+        if toggle_key_lock {
+            self.config.key_lock = !self.config.key_lock;
+            if let Some(a) = self.audio.as_mut() {
+                a.set_key_lock(self.config.key_lock);
+            }
+            let _ = self.config.save();
         }
         if toggle {
             // Resuming from the bar is a start too: a video that paused this

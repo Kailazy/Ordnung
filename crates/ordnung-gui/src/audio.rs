@@ -18,6 +18,7 @@
 
 use ordnung_core::analysis::decode::decode_interleaved_chunks;
 use ordnung_core::model::Id;
+use ordnung_core::stretch::{hermite, Block, Stretcher};
 use rodio::source::Source;
 use rodio::{OutputStream, OutputStreamHandle, Sink};
 use souvlaki::{
@@ -25,7 +26,7 @@ use souvlaki::{
     SeekDirection,
 };
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -132,10 +133,77 @@ struct BufferSource {
     /// Fractional frame position of the scrub cursor.
     fpos: f64,
     /// The interpolated frame being emitted, one sample per channel, and how
-    /// many of its samples have gone out.
+    /// many of its samples have gone out. Shared by the scrub and the
+    /// varispeed paths, which never run at once.
     frame: Vec<f32>,
     frame_idx: usize,
+    /// The engine's pitch fader, read at every frame (see [`PitchState`]).
+    pitch: Arc<PitchState>,
+    /// How the source is currently reading the buffer (see [`RateMode`]).
+    mode: RateMode,
+    /// The rate the audio actually runs at. Chases the fader's rate with a
+    /// platter's inertia rather than jumping to it (see [`RATE_SLEW_SECS`]).
+    cur_rate: f64,
+    /// Fractional frame position of the varispeed cursor.
+    vpos: f64,
 }
+
+/// Which read path a [`BufferSource`] is on. The plain path copies samples
+/// out one to one and is bit-exact; the other two are the pitch fader's.
+enum RateMode {
+    /// Fader at zero: straight copy through `pos`.
+    Plain,
+    /// Fader off zero, key lock off: a turntable. The cursor `vpos` walks the
+    /// buffer at the rate, interpolating between frames, so tempo and pitch
+    /// move together.
+    Vari,
+    /// Fader off zero, key lock on: the WSOLA stretcher changes the tempo and
+    /// keeps the pitch.
+    Stretch(Stretcher),
+}
+
+/// The pitch fader as the audio thread sees it, shared between the engine
+/// (set from the player bar) and every [`BufferSource`] the engine builds.
+/// `rate` is the playback speed as a multiple of normal (`1.08` is +8%),
+/// stored as `f32` bits; `key_lock` chooses between the turntable and the
+/// time-stretch paths when the rate is off unity.
+pub struct PitchState {
+    rate: AtomicU32,
+    key_lock: AtomicBool,
+}
+
+impl Default for PitchState {
+    fn default() -> Self {
+        Self {
+            rate: AtomicU32::new(1.0f32.to_bits()),
+            key_lock: AtomicBool::new(false),
+        }
+    }
+}
+
+impl PitchState {
+    fn rate(&self) -> f64 {
+        f32::from_bits(self.rate.load(Ordering::Acquire)) as f64
+    }
+    fn set_rate(&self, rate: f32) {
+        self.rate.store(rate.to_bits(), Ordering::Release);
+    }
+    fn key_lock(&self) -> bool {
+        self.key_lock.load(Ordering::Acquire)
+    }
+}
+
+/// Reach of the pitch fader either side of zero, in percent. A Technics
+/// SL-1200's fader: ±8%, which is the range key lock stays clean over too.
+pub const PITCH_RANGE_PCT: f32 = 8.0;
+/// How long the platter takes to close most of the gap to a moved fader. A
+/// quartz-locked direct drive follows the fader quickly but not instantly;
+/// the short glide is what makes a nudge sound like a record and not a
+/// sample-rate switch, and it keeps a dragged fader free of zipper noise.
+const RATE_SLEW_SECS: f64 = 0.08;
+/// Within this of unity the slewed rate snaps to exactly 1.0 and the source
+/// returns to the bit-exact plain path.
+const RATE_UNITY_EPS: f64 = 1e-4;
 
 /// Where the user is holding the record, shared between the engine (set from
 /// the zoom lane every frame of a drag) and the playing [`BufferSource`] (which
@@ -194,6 +262,7 @@ impl BufferSource {
         pcm: Arc<StreamingPcm>,
         looping: Arc<LoopRegion>,
         scrub: Arc<ScrubTarget>,
+        pitch: Arc<PitchState>,
         pos: usize,
         sample_rate: u32,
         channels: u16,
@@ -211,6 +280,231 @@ impl BufferSource {
             fpos: 0.0,
             frame: Vec::new(),
             frame_idx: 0,
+            pitch,
+            mode: RateMode::Plain,
+            cur_rate: 1.0,
+            vpos: 0.0,
+        }
+    }
+
+    /// Make sure the local chunk covers interleaved samples `need0..need1`
+    /// (both within `published`), refilling a window centred on `need0` when
+    /// it doesn't, so a cursor moving in either direction reads locally for a
+    /// while before locking again. Shared by the scrub and varispeed paths.
+    fn ensure_window(&mut self, need0: usize, need1: usize, published: usize) {
+        let chunk_end = self.chunk_start + self.chunk.len();
+        if need0 >= self.chunk_start && need1 <= chunk_end {
+            return;
+        }
+        let ch = self.channels.max(1) as usize;
+        let start = need0.saturating_sub(REFILL_SAMPLES / 2) / ch * ch;
+        let data = self.pcm.data.read().unwrap();
+        let end = (start + REFILL_SAMPLES).max(need1).min(published).min(data.len());
+        self.chunk_start = start;
+        self.chunk.clear();
+        self.chunk.extend_from_slice(&data[start..end]);
+    }
+
+    /// Sample `idx` from the local chunk, silence outside it.
+    #[inline]
+    fn at(&self, idx: usize) -> f32 {
+        idx.checked_sub(self.chunk_start)
+            .and_then(|k| self.chunk.get(k))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Move the fader's rate toward the target with the platter's inertia,
+    /// snapping to exactly unity when it gets there.
+    fn slew_rate(&mut self, frames: f64) {
+        let target = self.pitch.rate();
+        let k = (frames / (self.sample_rate.max(1) as f64 * RATE_SLEW_SECS)).min(1.0);
+        self.cur_rate += (target - self.cur_rate) * k;
+        if target == 1.0 && (self.cur_rate - 1.0).abs() < RATE_UNITY_EPS {
+            self.cur_rate = 1.0;
+        }
+    }
+
+    /// Leave whatever rate path is active, putting its position into `pos`
+    /// so the plain path (or the scrub) carries on from the same frame.
+    fn sync_to_plain(&mut self) {
+        let ch = self.channels.max(1) as usize;
+        let frame = match &self.mode {
+            RateMode::Plain => return,
+            RateMode::Vari => self.vpos,
+            RateMode::Stretch(st) => st.input_position(),
+        };
+        self.pos = (frame.max(0.0).round() as usize) * ch;
+        self.mode = RateMode::Plain;
+    }
+
+    /// Pick the read path for the current rate and key-lock setting, carrying
+    /// the position across so a switch is heard as a change of speed, not a
+    /// jump. Returns the mode to use this sample.
+    fn choose_mode(&mut self) {
+        let ch = self.channels.max(1) as usize;
+        let key_lock = self.pitch.key_lock();
+        let want_plain = self.cur_rate == 1.0 && self.pitch.rate() == 1.0;
+        match (&self.mode, want_plain, key_lock) {
+            (RateMode::Plain, true, _) | (RateMode::Vari, false, false) => {}
+            (RateMode::Stretch(_), false, true) => {}
+            (_, true, _) => self.sync_to_plain(),
+            (_, false, false) => {
+                let frame = match &self.mode {
+                    RateMode::Plain => (self.pos / ch) as f64,
+                    RateMode::Vari => self.vpos,
+                    RateMode::Stretch(st) => st.input_position(),
+                };
+                self.vpos = frame;
+                self.frame_idx = ch;
+                self.mode = RateMode::Vari;
+            }
+            (_, false, true) => {
+                let frame = match &self.mode {
+                    RateMode::Plain => (self.pos / ch) as f64,
+                    RateMode::Vari => self.vpos,
+                    RateMode::Stretch(st) => st.input_position(),
+                };
+                self.mode =
+                    RateMode::Stretch(Stretcher::new(self.sample_rate, ch, frame));
+            }
+        }
+    }
+
+    /// Loop bounds in frames, when a loop is set and well-formed.
+    fn loop_frames(&self) -> Option<(usize, usize)> {
+        let ch = self.channels.max(1) as usize;
+        self.looping
+            .get()
+            .map(|(a, b)| (a / ch, b / ch))
+            .filter(|(a, b)| b > a)
+    }
+
+    /// One sample of varispeed audio: the record read at `cur_rate`, a frame
+    /// interpolated between its neighbours at each frame boundary.
+    fn vari_sample(&mut self) -> Option<f32> {
+        let ch = self.channels.max(1) as usize;
+        if self.frame_idx >= ch {
+            match self.fill_vari_frame() {
+                Some(true) => self.frame_idx = 0,
+                // Starved: silence, cursor held.
+                Some(false) => return Some(0.0),
+                None => return None,
+            }
+        }
+        let s = self.frame.get(self.frame_idx).copied().unwrap_or(0.0);
+        self.frame_idx += 1;
+        Some(s)
+    }
+
+    /// Advance the varispeed cursor one output frame and interpolate the
+    /// frame there. `Some(true)` filled `frame`; `Some(false)` means the
+    /// decoder hasn't reached it yet (nothing advanced); `None` is the end.
+    fn fill_vari_frame(&mut self) -> Option<bool> {
+        let ch = self.channels.max(1) as usize;
+        self.slew_rate(1.0);
+        let published = self.pcm.published_len() / ch * ch;
+        let frames = published / ch;
+        // Need frames i-1..=i+2 around the cursor for the cubic.
+        let i = self.vpos.max(0.0) as usize;
+        if i + 2 >= frames {
+            if self.pcm.is_done() {
+                return None;
+            }
+            return Some(false);
+        }
+        let t = (self.vpos - i as f64) as f32;
+        let i0 = i.saturating_sub(1);
+        self.ensure_window(i0 * ch, (i + 3) * ch, published);
+        self.frame.clear();
+        for c in 0..ch {
+            let y0 = self.at(i0 * ch + c);
+            let y1 = self.at(i * ch + c);
+            let y2 = self.at((i + 1) * ch + c);
+            let y3 = self.at((i + 2) * ch + c);
+            self.frame.push(hermite(y0, y1, y2, y3, t));
+        }
+        self.vpos += self.cur_rate;
+        if let Some((a, b)) = self.loop_frames() {
+            if self.vpos >= b as f64 {
+                self.vpos -= (b - a) as f64;
+            }
+        }
+        Some(true)
+    }
+
+    /// One sample of key-locked audio out of the stretcher, building the next
+    /// block when the current one is spent.
+    fn stretch_sample(&mut self) -> Option<f32> {
+        let ch = self.channels.max(1) as usize;
+        let (hop, at_frame) = match &mut self.mode {
+            RateMode::Stretch(st) => {
+                if let Some(s) = st.pop() {
+                    return Some(s);
+                }
+                (st.hop() as f64, st.input_position())
+            }
+            _ => return Some(0.0),
+        };
+        let published = self.pcm.published_len() / ch * ch;
+        let frames = published / ch;
+        let done = self.pcm.is_done();
+        if done && at_frame >= frames as f64 {
+            return None;
+        }
+        let looping = self.loop_frames();
+        // Slew once per block by the frames the block spans.
+        self.slew_rate(hop);
+        let rate = self.cur_rate;
+        let pcm = &self.pcm;
+        let RateMode::Stretch(st) = &mut self.mode else {
+            return Some(0.0);
+        };
+        let block = st.next_block(rate, |first, buf| {
+            let n = buf.len() / ch;
+            // Frames past the loop end read from its start; frames past the
+            // decoded frontier of an unfinished decode mean "not yet".
+            let map = |f: i64| -> Option<usize> {
+                if f < 0 {
+                    return None;
+                }
+                let mut f = f as usize;
+                if let Some((a, b)) = looping {
+                    if f >= b {
+                        f = a + (f - b) % (b - a);
+                    }
+                }
+                Some(f)
+            };
+            if !done {
+                let last = (0..n).filter_map(|i| map(first + i as i64)).max().unwrap_or(0);
+                if last + 1 > frames {
+                    return false;
+                }
+            }
+            let data = pcm.data.read().unwrap();
+            for i in 0..n {
+                let dst = &mut buf[i * ch..(i + 1) * ch];
+                match map(first + i as i64) {
+                    Some(f) if (f + 1) * ch <= published.min(data.len()) => {
+                        dst.copy_from_slice(&data[f * ch..(f + 1) * ch]);
+                    }
+                    _ => dst.fill(0.0),
+                }
+            }
+            true
+        });
+        match block {
+            Block::Ready => {
+                // Fold the stretcher's cursor at the loop end so its nominal
+                // position circles the loop with the audio (the reads already
+                // wrapped through `map`).
+                if let Some((a, b)) = looping {
+                    st.wrap(b as f64, (b - a) as f64);
+                }
+                Some(st.pop().unwrap_or(0.0))
+            }
+            Block::Starved => Some(0.0),
         }
     }
 
@@ -261,26 +555,10 @@ impl BufferSource {
         let i = fpos as usize;
         let t = (fpos - i as f64) as f32;
         let (need0, need1) = (i * ch, (i + 2) * ch);
-        let chunk_end = self.chunk_start + self.chunk.len();
-        if need0 < self.chunk_start || need1 > chunk_end {
-            // Refill a window centred on the cursor, so a scrub in either
-            // direction reads locally for a while before locking again.
-            let start = need0.saturating_sub(REFILL_SAMPLES / 2) / ch * ch;
-            let data = self.pcm.data.read().unwrap();
-            let end = (start + REFILL_SAMPLES).max(need1).min(published).min(data.len());
-            self.chunk_start = start;
-            self.chunk.clear();
-            self.chunk.extend_from_slice(&data[start..end]);
-        }
+        self.ensure_window(need0, need1, published);
         for c in 0..ch {
-            let at = |idx: usize| {
-                idx.checked_sub(self.chunk_start)
-                    .and_then(|k| self.chunk.get(k))
-                    .copied()
-                    .unwrap_or(0.0)
-            };
-            let a = at(need0 + c);
-            let b = at(need0 + ch + c);
+            let a = self.at(need0 + c);
+            let b = self.at(need0 + ch + c);
             self.frame[c] = a + (b - a) * t;
         }
     }
@@ -290,6 +568,9 @@ impl Iterator for BufferSource {
     type Item = f32;
     fn next(&mut self) -> Option<f32> {
         if self.scrub.active.load(Ordering::Acquire) {
+            // The hand overrides the fader: the scrub picks up from wherever
+            // the rate path had got to.
+            self.sync_to_plain();
             return Some(self.scrub_sample());
         }
         if self.scrubbing {
@@ -299,6 +580,15 @@ impl Iterator for BufferSource {
             self.scrubbing = false;
             let ch = self.channels.max(1) as usize;
             self.pos = (self.fpos.max(0.0) as usize) * ch;
+        }
+        // The pitch fader: off zero, the record is read at a rate, either as
+        // a turntable would or through the key-locked stretcher. At zero the
+        // plain path below copies samples through untouched.
+        self.choose_mode();
+        match self.mode {
+            RateMode::Plain => {}
+            RateMode::Vari => return self.vari_sample(),
+            RateMode::Stretch(_) => return self.stretch_sample(),
         }
         loop {
             let chunk_end = self.chunk_start + self.chunk.len();
@@ -400,6 +690,11 @@ pub struct AudioEngine {
     /// The scrub target as the audio thread sees it, shared with every
     /// `BufferSource` the engine builds.
     scrub: Arc<ScrubTarget>,
+    /// The pitch fader as the audio thread sees it, shared with every
+    /// `BufferSource` the engine builds.
+    pitch: Arc<PitchState>,
+    /// The fader's position in percent, `-PITCH_RANGE_PCT..=PITCH_RANGE_PCT`.
+    pitch_pct: f32,
     /// `Some` while the user holds the waveform: whether playback resumes on
     /// release (it was playing at the grab, and no pause toggled since). The
     /// sink runs throughout to voice the scrub, so this, not the sink, is the
@@ -464,6 +759,8 @@ impl AudioEngine {
             loop_region: Arc::new(LoopRegion::default()),
             loop_secs: None,
             scrub: Arc::new(ScrubTarget::default()),
+            pitch: Arc::new(PitchState::default()),
+            pitch_pct: 0.0,
             scrub_resume: None,
             sample_rate: 0,
             channels: 1,
@@ -521,8 +818,11 @@ impl AudioEngine {
 
     /// Current playback position in seconds, clamped to the track length.
     pub fn position(&self) -> f32 {
+        // The clock runs at the fader's rate: +8% covers 8% more of the
+        // record per second. `set_pitch` rebases the clock on every change so
+        // the rate only ever applies to the time since it was set.
         let mut p = match self.started_at {
-            Some(t) => self.base_secs + t.elapsed().as_secs_f32(),
+            Some(t) => self.base_secs + t.elapsed().as_secs_f32() * self.rate(),
             None => self.base_secs,
         };
         // The audio thread wraps at the loop end; fold the wall clock the
@@ -844,6 +1144,7 @@ impl AudioEngine {
                     pcm,
                     self.loop_region.clone(),
                     self.scrub.clone(),
+                    self.pitch.clone(),
                     pos,
                     self.sample_rate,
                     self.channels.max(1),
@@ -867,6 +1168,52 @@ impl AudioEngine {
         if let Some(s) = &self.sink {
             s.set_volume(self.volume);
         }
+    }
+
+    /// Playback speed as a multiple of normal, from the fader's percent.
+    fn rate(&self) -> f32 {
+        1.0 + self.pitch_pct / 100.0
+    }
+
+    /// The pitch fader's position in percent, `-8..=8`.
+    pub fn pitch(&self) -> f32 {
+        self.pitch_pct
+    }
+
+    /// Move the pitch fader to `percent` (clamped to ±[`PITCH_RANGE_PCT`]).
+    /// The audio thread picks the new rate up within a frame and glides to it;
+    /// the wall clock is rebased so the position keeps tracking the audio.
+    /// Takes effect with nothing loaded too, so a fader left off zero applies
+    /// to the next record like a turntable's would.
+    pub fn set_pitch(&mut self, percent: f32) {
+        let percent = if percent.is_finite() {
+            percent.clamp(-PITCH_RANGE_PCT, PITCH_RANGE_PCT)
+        } else {
+            0.0
+        };
+        if percent == self.pitch_pct {
+            return;
+        }
+        let now = self.position();
+        self.pitch_pct = percent;
+        self.pitch.set_rate(self.rate());
+        if self.current.is_some() {
+            self.base_secs = now;
+            if self.started_at.is_some() {
+                self.started_at = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Whether key lock (master tempo) is on: the fader then changes the
+    /// tempo and leaves the pitch alone.
+    pub fn key_lock(&self) -> bool {
+        self.pitch.key_lock()
+    }
+
+    /// Switch key lock on or off. Applies to the running audio at once.
+    pub fn set_key_lock(&mut self, on: bool) {
+        self.pitch.key_lock.store(on, Ordering::Release);
     }
 
     /// Stop playback and clear all player state. Also cancels any in-flight
@@ -1144,14 +1491,14 @@ mod tests {
 
     #[test]
     fn buffer_source_reports_duration_and_drains() {
-        let src = BufferSource::new(finished_pcm(vec![0.0; 100]), Arc::new(LoopRegion::default()), Arc::new(ScrubTarget::default()), 0, 50, 1);
+        let src = BufferSource::new(finished_pcm(vec![0.0; 100]), Arc::new(LoopRegion::default()), Arc::new(ScrubTarget::default()), Arc::new(PitchState::default()), 0, 50, 1);
         assert_eq!(src.sample_rate(), 50);
         assert_eq!(src.channels(), 1);
         assert_eq!(src.total_duration(), Some(Duration::from_secs_f32(2.0)));
         assert_eq!(src.count(), 100);
 
         // Stereo: 100 interleaved samples = 50 frames at 50 Hz = 1 s.
-        let stereo = BufferSource::new(finished_pcm(vec![0.0; 100]), Arc::new(LoopRegion::default()), Arc::new(ScrubTarget::default()), 0, 50, 2);
+        let stereo = BufferSource::new(finished_pcm(vec![0.0; 100]), Arc::new(LoopRegion::default()), Arc::new(ScrubTarget::default()), Arc::new(PitchState::default()), 0, 50, 2);
         assert_eq!(stereo.channels(), 2);
         assert_eq!(stereo.total_duration(), Some(Duration::from_secs_f32(1.0)));
     }
@@ -1168,6 +1515,7 @@ mod tests {
             pcm.clone(),
             Arc::new(LoopRegion::default()),
             Arc::new(ScrubTarget::default()),
+            Arc::new(PitchState::default()),
             0,
             50,
             1,
@@ -1196,7 +1544,7 @@ mod tests {
         let pcm = finished_pcm((0..10).map(|i| i as f32).collect());
         let region = Arc::new(LoopRegion::default());
         region.set(Some((2, 5)));
-        let mut src = BufferSource::new(pcm, region.clone(), Arc::new(ScrubTarget::default()), 0, 50, 1);
+        let mut src = BufferSource::new(pcm, region.clone(), Arc::new(ScrubTarget::default()), Arc::new(PitchState::default()), 0, 50, 1);
         let first: Vec<f32> = (0..9).map(|_| src.next().unwrap()).collect();
         assert_eq!(first, vec![0.0, 1.0, 2.0, 3.0, 4.0, 2.0, 3.0, 4.0, 2.0]);
         region.set(None);
@@ -1210,7 +1558,7 @@ mod tests {
     fn scrub_holds_still_in_silence() {
         let pcm = finished_pcm((0..100).map(|i| 1.0 + i as f32).collect());
         let scrub = Arc::new(ScrubTarget::default());
-        let mut src = BufferSource::new(pcm, Arc::new(LoopRegion::default()), scrub.clone(), 10, 50, 1);
+        let mut src = BufferSource::new(pcm, Arc::new(LoopRegion::default()), scrub.clone(), Arc::new(PitchState::default()), 10, 50, 1);
         scrub.target.store(10, Ordering::Release);
         scrub.active.store(true, Ordering::Release);
         for _ in 0..200 {
@@ -1234,6 +1582,7 @@ mod tests {
             pcm,
             Arc::new(LoopRegion::default()),
             scrub.clone(),
+            Arc::new(PitchState::default()),
             1_000,
             48_000,
             1,
@@ -1263,6 +1612,89 @@ mod tests {
         assert!((resumed - 500.0).abs() < 2.0, "plain playback resumes where the scrub settled: {resumed}");
     }
 
+    /// The fader off zero with key lock off is a turntable: the ramp `i`
+    /// comes out climbing ~1.08 per sample once the platter has caught up,
+    /// so tempo and pitch both rose 8%. Back at zero the plain path resumes
+    /// where the varispeed cursor left off, bit-exact.
+    #[test]
+    fn vari_reads_the_record_faster_and_hands_back_to_plain() {
+        let pcm = finished_pcm((0..200_000).map(|i| i as f32).collect());
+        let pitch = Arc::new(PitchState::default());
+        let mut src = BufferSource::new(
+            pcm,
+            Arc::new(LoopRegion::default()),
+            Arc::new(ScrubTarget::default()),
+            pitch.clone(),
+            0,
+            48_000,
+            1,
+        );
+        assert_eq!(src.next(), Some(0.0));
+        pitch.set_rate(1.08);
+        // Past the slew (~0.4 s), the step settles at the rate.
+        let settled: Vec<f32> = (0..30_000).filter_map(|_| src.next()).collect();
+        let tail = &settled[25_000..];
+        for w in tail.windows(2) {
+            assert!((w[1] - w[0] - 1.08).abs() < 1e-2, "step {}", w[1] - w[0]);
+        }
+        pitch.set_rate(1.0);
+        let back: Vec<f32> = (0..30_000).filter_map(|_| src.next()).collect();
+        let last = *back.last().unwrap();
+        assert!(matches!(src.mode, RateMode::Plain), "snapped back to the plain path");
+        assert_eq!(src.next(), Some(last + 1.0), "plain path continues on the sample");
+    }
+
+    /// Key lock on: a 200 Hz tone stretched 8% faster keeps its 200 Hz.
+    #[test]
+    fn key_lock_keeps_the_pitch() {
+        let sr = 8_000u32;
+        let pcm = finished_pcm(
+            (0..sr * 6)
+                .map(|i| (i as f32 * 200.0 * std::f32::consts::TAU / sr as f32).sin())
+                .collect(),
+        );
+        let pitch = Arc::new(PitchState::default());
+        pitch.set_rate(1.08);
+        pitch.key_lock.store(true, Ordering::Release);
+        let mut src = BufferSource::new(
+            pcm,
+            Arc::new(LoopRegion::default()),
+            Arc::new(ScrubTarget::default()),
+            pitch,
+            0,
+            sr,
+            1,
+        );
+        let out: Vec<f32> = (0..sr * 2).filter_map(|_| src.next()).collect();
+        assert!(matches!(src.mode, RateMode::Stretch(_)));
+        let second = &out[sr as usize..];
+        let rising = second.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+        assert!((195..=205).contains(&rising), "{rising} cycles/s, want ~200");
+    }
+
+    /// A rate off unity still honours the loop: the varispeed cursor folds at
+    /// the loop's end and never plays past it.
+    #[test]
+    fn vari_wraps_at_the_loop() {
+        let pcm = finished_pcm((0..100_000).map(|i| i as f32).collect());
+        let region = Arc::new(LoopRegion::default());
+        region.set(Some((1_000, 2_000)));
+        let pitch = Arc::new(PitchState::default());
+        pitch.set_rate(0.92);
+        let mut src = BufferSource::new(
+            pcm,
+            region,
+            Arc::new(ScrubTarget::default()),
+            pitch,
+            1_000,
+            48_000,
+            1,
+        );
+        let out: Vec<f32> = (0..20_000).filter_map(|_| src.next()).collect();
+        assert!(out.iter().all(|s| *s >= 999.0 && *s < 2_001.0), "stayed in the loop");
+        assert!(out.windows(2).filter(|w| w[1] < w[0]).count() >= 10, "wrapped several times");
+    }
+
     /// Scrubbing an interleaved stereo buffer keeps channels aligned: each
     /// emitted frame is a left sample followed by the matching right one.
     #[test]
@@ -1275,7 +1707,7 @@ mod tests {
         }
         let pcm = finished_pcm(data);
         let scrub = Arc::new(ScrubTarget::default());
-        let mut src = BufferSource::new(pcm, Arc::new(LoopRegion::default()), scrub.clone(), 0, 48_000, 2);
+        let mut src = BufferSource::new(pcm, Arc::new(LoopRegion::default()), scrub.clone(), Arc::new(PitchState::default()), 0, 48_000, 2);
         scrub.active.store(true, Ordering::Release);
         scrub.target.store(4_000 * 2, Ordering::Release);
         let out: Vec<f32> = (0..2_000).filter_map(|_| src.next()).collect();
