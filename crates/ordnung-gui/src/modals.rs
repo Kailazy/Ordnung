@@ -477,14 +477,15 @@ impl App {
         ui.add_space(10.0);
 
         // ---- Release formats ----------------------------------------------
-        // Narrows the release picker to the carriers the user actually
-        // collects. A records-only digger stops scrolling past CD and digital
-        // pressings they'd never wantlist.
+        // Narrows the release picker, and the artist and label pages, to the
+        // carriers the user actually collects. A records-only digger stops
+        // scrolling past CD and digital pressings they'd never wantlist.
         ui.label(egui::RichText::new("Release formats").strong());
         ui.label(
             egui::RichText::new(
-                "Which formats to show when finding a Discogs release. Turn off \
-                 the ones you don't collect and they stop appearing in the picker.",
+                "Which formats to show when finding a Discogs release and on an \
+                 artist's or label's page. Turn off the ones you don't collect \
+                 and they stop appearing in either.",
             )
             .small()
             .weak(),
@@ -524,6 +525,8 @@ impl App {
             if let Err(e) = self.config.save() {
                 self.status = format!("Couldn't save settings: {e}");
             }
+            // An open artist or label page follows the setting at once.
+            self.refilter_browse_page();
         }
 
         ui.add_space(14.0);

@@ -10,11 +10,13 @@
 //!
 //! Rides `GET /labels/{id}/releases` and `GET /artists/{id}/releases` (the
 //! same browses the dig's threads use), 100 rows a page, in the order Discogs
-//! returns them — catalog order for a label, by year for an artist. Non-record
-//! rows (CDs, files) are dropped; master rows with no format of their own are
-//! kept rather than mislabeled. A run with no records in it at all (a
-//! digital-only label) shows every format instead of an empty page. One paced
-//! request per page.
+//! returns them — catalog order for a label, by year for an artist. Rows are
+//! narrowed by the same "Release formats" setting the Discogs release picker
+//! honours (`Config::shows_release_format`): hide CDs and files there and
+//! they drop out of the run here too. Master rows with no format of their
+//! own are kept rather than mislabeled. A run with nothing on the shown
+//! formats at all (a digital-only label for a records-only digger) shows
+//! every format instead of an empty page. One paced request per page.
 
 use super::*;
 use ordnung_core::discogs::{BrowsePage, BrowseRelease, BrowseThread};
@@ -98,19 +100,25 @@ enum Act {
 /// id pointing at *your* copy, so the shelf marks and the sheet it opens
 /// agree with your collection instead of with whichever pressing came first.
 ///
-/// A run with no records at all (a digital-only label, an artist who only
-/// ever released files) is still a run: rather than an empty page, every
-/// format is shown, each row's caption naming its format so nothing reads as
-/// a pressing that isn't one.
+/// Which formats make the page is the user's "Release formats" setting, the
+/// one the Discogs release picker filters by — one config, so a collector who
+/// hides CDs there never scrolls past them here either. A row with no format
+/// of its own (a master entry) is unknown, not hidden, and stays.
+///
+/// A run with nothing on the shown formats (a digital-only label, an artist
+/// who only ever released files) is still a run: rather than an empty page,
+/// every format is shown, each row's caption naming its format so nothing
+/// reads as a pressing that isn't one.
 fn crate_rows(
     page: &BrowsePage,
     owned: &HashSet<u64>,
     wanted: &HashSet<u64>,
+    formats: &crate::config::Config,
 ) -> Vec<BrowseRelease> {
     let rows = collapse_rows(
         page.releases
             .iter()
-            .filter(|r| !r.format_known || crate::dig::is_vinyl(&r.format)),
+            .filter(|r| !r.format_known || formats.shows_release_format(&r.format)),
         owned,
         wanted,
     );
@@ -320,7 +328,7 @@ impl App {
 
     /// Turn the panel to `page`, building its rows.
     fn adopt_browse_page(&mut self, page_no: u32, page: &BrowsePage) {
-        let rows = crate_rows(page, &self.vinyl_owned, &self.vinyl_wanted);
+        let rows = crate_rows(page, &self.vinyl_owned, &self.vinyl_wanted, &self.config);
         let Some(panel) = self.browse_panel.as_mut() else {
             return;
         };
@@ -328,6 +336,19 @@ impl App {
         panel.pages = page.pages.max(1);
         panel.items = page.items;
         panel.releases = rows;
+    }
+
+    /// Rebuild the open page's rows from the panel's cache — for when the
+    /// "Release formats" setting changes under an open run, so the page
+    /// follows the setting without a refetch.
+    pub(crate) fn refilter_browse_page(&mut self) {
+        let Some(panel) = self.browse_panel.as_ref() else {
+            return;
+        };
+        let page_no = panel.page;
+        if let Some(cached) = panel.cache.get(&page_no).cloned() {
+            self.adopt_browse_page(page_no, &cached);
+        }
     }
 
     /// Adopt finished browse-page fetches onto the open panel.
@@ -774,28 +795,77 @@ mod tests {
                 release(3, "Trinity", "Cascade Drive", "12\""),
             ],
         };
+        let cfg = crate::config::Config::default();
         let owned: HashSet<u64> = [2].into_iter().collect();
-        let rows = crate_rows(&page, &owned, &HashSet::new());
+        let rows = crate_rows(&page, &owned, &HashSet::new(), &cfg);
         let ids: Vec<u64> = rows.iter().map(|r| r.release_id).collect();
         assert_eq!(ids, vec![2, 3], "owned pressing wins, order of first sight kept");
 
         // A wanted pressing wins over an unshelved one, but not over an owned one.
         let wanted: HashSet<u64> = [1].into_iter().collect();
-        let rows = crate_rows(&page, &HashSet::new(), &wanted);
+        let rows = crate_rows(&page, &HashSet::new(), &wanted, &cfg);
         assert_eq!(rows[0].release_id, 1);
-        let rows = crate_rows(&page, &owned, &wanted);
+        let rows = crate_rows(&page, &owned, &wanted, &cfg);
         assert_eq!(rows[0].release_id, 2);
 
         // Nothing shelved: first listed stands, as before.
-        let rows = crate_rows(&page, &HashSet::new(), &HashSet::new());
+        let rows = crate_rows(&page, &HashSet::new(), &HashSet::new(), &cfg);
         assert_eq!(rows[0].release_id, 1);
     }
 
-    /// The Duty Cycle case: a label whose whole run is digital. The vinyl
-    /// filter would leave the page blank, so every format is shown instead;
-    /// a page with any record on it still shows only the records.
+    /// A records-only collector's config: everything but vinyl hidden.
+    fn vinyl_only() -> crate::config::Config {
+        use crate::config::ReleaseMedium;
+        let mut cfg = crate::config::Config::default();
+        for m in [ReleaseMedium::Cd, ReleaseMedium::Digital, ReleaseMedium::Cassette] {
+            cfg.set_release_medium_shown(m, false);
+        }
+        cfg
+    }
+
+    /// The page follows the release picker's "Release formats" setting: with
+    /// nothing hidden every row shows; hide CDs and digital and they drop out
+    /// of the run; a master row with no format of its own stays either way.
+    #[test]
+    fn crate_rows_follow_the_release_formats_setting() {
+        let mut master = release(4, "Trinity", "Cascade Drive", "");
+        master.format_known = false;
+        let page = BrowsePage {
+            pages: 1,
+            items: 4,
+            releases: vec![
+                release(1, "Trinity", "Night Drive EP", "12\", EP"),
+                release(2, "Trinity", "Night Drive EP", "CD, EP"),
+                release(3, "Trinity", "Faceshift", "2xFile, MP3, EP"),
+                master,
+            ],
+        };
+        let none = HashSet::new();
+        let ids = |cfg: &crate::config::Config| -> Vec<u64> {
+            crate_rows(&page, &none, &none, cfg)
+                .iter()
+                .map(|r| r.release_id)
+                .collect()
+        };
+        assert_eq!(
+            ids(&crate::config::Config::default()),
+            vec![1, 3, 4],
+            "nothing hidden: every format shows, one row per work"
+        );
+        assert_eq!(ids(&vinyl_only()), vec![1, 4], "CDs and files hidden, master kept");
+        let mut cd_only = crate::config::Config::default();
+        cd_only.set_release_medium_shown(crate::config::ReleaseMedium::Vinyl, false);
+        cd_only.set_release_medium_shown(crate::config::ReleaseMedium::Digital, false);
+        assert_eq!(ids(&cd_only), vec![2, 4], "the CD pressing stands in for the work");
+    }
+
+    /// The Duty Cycle case: a label whose whole run is digital, read by a
+    /// records-only collector. The filter would leave the page blank, so every
+    /// format is shown instead; a page with any record on it still shows only
+    /// the records.
     #[test]
     fn crate_rows_show_every_format_when_a_run_has_no_records() {
+        let cfg = vinyl_only();
         let digital = BrowsePage {
             pages: 1,
             items: 3,
@@ -805,7 +875,7 @@ mod tests {
                 release(3, "Polyplay", "Resolve", "2xFile, MP3, EP, 320 kbps"),
             ],
         };
-        let rows = crate_rows(&digital, &HashSet::new(), &HashSet::new());
+        let rows = crate_rows(&digital, &HashSet::new(), &HashSet::new(), &cfg);
         let ids: Vec<u64> = rows.iter().map(|r| r.release_id).collect();
         assert_eq!(ids, vec![1, 2], "digital rows shown, still one per work");
 
@@ -817,11 +887,11 @@ mod tests {
                 release(2, "Polyplay", "Faceshift", "12\", EP"),
             ],
         };
-        let rows = crate_rows(&mixed, &HashSet::new(), &HashSet::new());
+        let rows = crate_rows(&mixed, &HashSet::new(), &HashSet::new(), &cfg);
         let ids: Vec<u64> = rows.iter().map(|r| r.release_id).collect();
-        assert_eq!(ids, vec![2], "a run with a record on it keeps the vinyl filter");
+        assert_eq!(ids, vec![2], "a run with a record on it keeps the format filter");
 
         let empty = BrowsePage { pages: 1, items: 0, releases: Vec::new() };
-        assert!(crate_rows(&empty, &HashSet::new(), &HashSet::new()).is_empty());
+        assert!(crate_rows(&empty, &HashSet::new(), &HashSet::new(), &cfg).is_empty());
     }
 }
