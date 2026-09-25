@@ -45,6 +45,8 @@ enum LineAct {
     Like(usize),
     /// Put the song in that crate.
     AddToCrate(usize, Id),
+    /// Mark the song with a tag, or take it off (line, tag, on).
+    SetTag(usize, Id, bool),
 }
 
 /// Whole-list actions, from the header's ⋯ or a tab's menu in the left bar.
@@ -933,9 +935,18 @@ impl App {
                                 line_act = Some(LineAct::SearchDiscogs(i));
                                 ui.close_menu();
                             }
-                            if line_song(&e).is_some() {
+                            if let Some(spec) = self.line_spec(&e) {
                                 if let Some(cid) = crate::crates::add_to_crate_menu(ui, &self.crate_sets, None) {
                                     line_act = Some(LineAct::AddToCrate(i, cid));
+                                }
+                                let tagged = self.song_tag_ids(&ordnung_core::catalog::song_key(
+                                    &spec.artist,
+                                    &spec.title,
+                                    spec.release_id,
+                                    spec.position.as_deref(),
+                                ));
+                                if let Some((tag, on)) = crate::crates::tag_menu(ui, &self.crate_sets, tagged) {
+                                    line_act = Some(LineAct::SetTag(i, tag, on));
                                 }
                             }
                             if e.release_id.is_some() && ui.button("✖ Not this record").on_hover_note("Clear the match. A re-match won't touch this line").clicked() {
@@ -955,7 +966,7 @@ impl App {
         let Some(e) = self.tracklist_entries.get(match act {
             LineAct::Open(i) | LineAct::Want(i) | LineAct::Dig(i) | LineAct::Buy(i) | LineAct::Pick(i)
             | LineAct::SearchDiscogs(i) | LineAct::NotThis(i) | LineAct::PlayLocal(i) | LineAct::Retry(i)
-            | LineAct::Like(i) | LineAct::AddToCrate(i, _) => i,
+            | LineAct::Like(i) | LineAct::AddToCrate(i, _) | LineAct::SetTag(i, _, _) => i,
         }).cloned() else { return };
         let rel_artist = e.rel_artist.clone().unwrap_or_default();
         let rel_title = e.rel_title.clone().unwrap_or_default();
@@ -1024,6 +1035,11 @@ impl App {
             LineAct::AddToCrate(_, cid) => {
                 if let Some(spec) = self.line_spec(&e) {
                     self.add_songs_to_crate(cid, vec![spec]);
+                }
+            }
+            LineAct::SetTag(_, tag, on) => {
+                if let Some(spec) = self.line_spec(&e) {
+                    self.set_tag(tag, on, vec![spec]);
                 }
             }
         }

@@ -204,6 +204,7 @@ impl App {
                 SortColumn::Duration => a.dur_ms.cmp(&b.dur_ms),
                 SortColumn::Bitrate => a.bitrate_val.cmp(&b.bitrate_val),
                 SortColumn::Notes => ci(&a.notes, &b.notes),
+                SortColumn::Tags => ci(&a.tags, &b.tags),
                 SortColumn::Added => a.added_at.cmp(&b.added_at),
                 SortColumn::Key => a.key_sort.cmp(&b.key_sort),
                 SortColumn::Bpm => fcmp(a.bpm_val, b.bpm_val),
@@ -916,6 +917,16 @@ impl App {
             .filter(|x| self.selection.contains(&x.id))
             .map(|x| x.id)
             .collect();
+        // The selection's song keys in the same order, for the Tags
+        // submenu: a tag is checked when every selected song carries it.
+        let selected_keys: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|x| self.selection.contains(&x.id))
+            .map(|x| crate::crates::track_song_key(&x.artist, &x.title))
+            .collect();
+        let menu_sets = &self.crate_sets;
+        let song_tags = &self.song_tags;
         const ROW_H: f32 = 28.0;
         const COVER_PX: f32 = 24.0;
         /// Half-extent of the Discogs-match check painted in the cover's corner,
@@ -1557,6 +1568,7 @@ impl App {
                                     TableColumn::Format => &r.format_label,
                                     TableColumn::Bitrate => &r.bitrate,
                                     TableColumn::Notes => &r.notes,
+                                    TableColumn::Tags => &r.tags,
                                     TableColumn::Added => &r.added,
                                     _ => "",
                                 };
@@ -1824,6 +1836,24 @@ impl App {
                                                 }
                                             }
                                         });
+                                        // Tags ▸: a check per tag, on when every
+                                        // song the menu acts on carries it.
+                                        let tagged: Vec<Id> = {
+                                            let own = [crate::crates::track_song_key(&r.artist, &r.title)];
+                                            let keys: &[String] = if is_sel { &selected_keys } else { &own };
+                                            let mut common: Option<Vec<Id>> = None;
+                                            for k in keys {
+                                                let ids = song_tags.get(k).map(Vec::as_slice).unwrap_or(&[]);
+                                                common = Some(match common {
+                                                    None => ids.to_vec(),
+                                                    Some(c) => c.into_iter().filter(|i| ids.contains(i)).collect(),
+                                                });
+                                            }
+                                            common.unwrap_or_default()
+                                        };
+                                        if let Some((tag, on)) = crate::crates::tag_menu(ui, menu_sets, &tagged) {
+                                            menu_action = Some(TrackMenuAction::SetTag(tag, on, drag_ids.clone()));
+                                        }
                                         if let Some(pid) = menu_playlist_view {
                                             ui.separator();
                                             if ui.button("Remove from playlist").clicked() {
@@ -2367,6 +2397,10 @@ impl App {
                 }
                 self.reload();
             }
+            Some(TrackMenuAction::SetTag(tag, on, ids)) => {
+                let specs = self.track_specs(&ids);
+                self.set_tag(tag, on, specs);
+            }
             Some(TrackMenuAction::RemoveFromPlaylist(pid, ids)) => {
                 match Catalog::open(&self.db_path).and_then(|c| c.remove_tracks(pid, &ids)) {
                     Ok(n) => self.status = format!("Removed {n} track(s) from playlist."),
@@ -2799,8 +2833,33 @@ pub(crate) fn load_rows(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    // The user's tags per song, for the Tags column: the tag sets and
+    // which song keys are in them (see `crates`), read once per listing.
+    let (tag_sets, tagged): (Vec<CrateSet>, HashMap<String, Vec<Id>>) = if tracks.is_empty() {
+        (Vec::new(), HashMap::new())
+    } else {
+        let sets = catalog.list_crate_sets().map_err(|e| e.to_string())?;
+        let mut by_key: HashMap<String, Vec<Id>> = HashMap::new();
+        for (tag, key) in catalog
+            .crate_memberships(CrateKind::Tag)
+            .map_err(|e| e.to_string())?
+        {
+            by_key.entry(key).or_default().push(tag);
+        }
+        (sets, by_key)
+    };
     let mut rows = Vec::with_capacity(tracks.len());
     for t in tracks {
+        let tags = {
+            let key = crate::crates::track_song_key(
+                t.tags.artist.as_deref().unwrap_or(""),
+                t.tags.title.as_deref().unwrap_or(""),
+            );
+            tagged
+                .get(&key)
+                .map(|ids| crate::crates::tag_words(&tag_sets, ids))
+                .unwrap_or_default()
+        };
         let cached = analyses.get(&t.id);
         let analysis = cached.map(|c| &c.analysis);
         let bpm_val = analysis.as_ref().and_then(|a| a.bpm);
@@ -2868,6 +2927,7 @@ pub(crate) fn load_rows(
             format_label: format_label(t.format).into(),
             bitrate,
             notes: t.tags.comment.unwrap_or_default(),
+            tags,
             added: added_at
                 .get(&t.id)
                 .map(|&ts| fmt_added(ts, now))

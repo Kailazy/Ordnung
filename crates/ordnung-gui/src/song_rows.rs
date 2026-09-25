@@ -35,6 +35,8 @@ pub(crate) enum SongAct {
     AddToCrate(usize, Id),
     /// Take the song out of the crate the rows are from.
     RemoveFromCrate(usize),
+    /// Mark the song with that tag, or take the tag off it.
+    SetTag(usize, Id, bool),
 }
 
 impl SongAct {
@@ -45,7 +47,8 @@ impl SongAct {
             | SongAct::Search(i)
             | SongAct::ToggleLike(i)
             | SongAct::AddToCrate(i, _)
-            | SongAct::RemoveFromCrate(i) => i,
+            | SongAct::RemoveFromCrate(i)
+            | SongAct::SetTag(i, _, _) => i,
         }
     }
 }
@@ -144,6 +147,14 @@ impl App {
         let mut act: Option<SongAct> = None;
         let row_h = 46.0;
         const THUMB: f32 = 36.0;
+        // In a crate the ✕ takes the song out; in a tag it takes the tag
+        // off the song. Same act, said for what the set is.
+        let (remove_note, remove_item) = match set {
+            SongSet::CrateSet(id) if self.crate_kind(id) == ordnung_core::model::CrateKind::Tag => {
+                ("Take the tag off this song", "Take the tag off")
+            }
+            _ => ("Take the song out of this crate", "Take out of this crate"),
+        };
         let salt = match set {
             SongSet::Liked => egui::Id::new("liked_rows"),
             SongSet::CrateSet(id) => egui::Id::new(("crate_song_rows", id)),
@@ -165,14 +176,22 @@ impl App {
                     let local = in_library[i];
                     let tex = s.rel_thumb.as_deref().and_then(|u| self.dig_cover(u).cloned());
                     row.col(|ui| thumb(ui, THUMB, tex.as_ref()));
-                    // The song: title over artist.
+                    // The song: title over artist, and the tags it
+                    // carries after the artist (`Artist · dub, dark`).
+                    let tags = self.tag_words(&s.song().key());
                     row.col(|ui| {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
-                            center_two(ui, !s.artist.is_empty());
+                            let caption = match (s.artist.is_empty(), tags.is_empty()) {
+                                (true, true) => String::new(),
+                                (false, true) => s.artist.clone(),
+                                (true, false) => tags.clone(),
+                                (false, false) => format!("{} · {tags}", s.artist),
+                            };
+                            center_two(ui, !caption.is_empty());
                             ui.add(egui::Label::new(egui::RichText::new(&s.title).color(color::LABEL)).truncate());
-                            if !s.artist.is_empty() {
-                                ui.add(egui::Label::new(egui::RichText::new(&s.artist).font(font::caption()).color(color::LABEL_3)).truncate());
+                            if !caption.is_empty() {
+                                ui.add(egui::Label::new(egui::RichText::new(caption).font(font::caption()).color(color::LABEL_3)).truncate());
                             }
                         });
                     });
@@ -207,7 +226,7 @@ impl App {
                             }
                             if matches!(set, SongSet::CrateSet(_))
                                 && crate::ui::button::glyph(ui, "✕", true)
-                                    .on_hover_note("Take the song out of this crate")
+                                    .on_hover_note(remove_note)
                                     .clicked()
                             {
                                 act = Some(SongAct::RemoveFromCrate(i));
@@ -252,12 +271,16 @@ impl App {
                         if let Some(cid) = crate::crates::add_to_crate_menu(ui, &crates, here) {
                             act = Some(SongAct::AddToCrate(i, cid));
                         }
+                        let tagged = self.song_tag_ids(&s.song().key()).to_vec();
+                        if let Some((tag, on)) = crate::crates::tag_menu(ui, &crates, &tagged) {
+                            act = Some(SongAct::SetTag(i, tag, on));
+                        }
                         let liked = self.is_liked(&s.artist, &s.title, s.release_id, s.position.as_deref());
                         if ui.button(if liked { "Unlike" } else { "♥ Like" }).clicked() {
                             act = Some(SongAct::ToggleLike(i));
                             ui.close_menu();
                         }
-                        if here.is_some() && ui.button("Take out of this crate").clicked() {
+                        if here.is_some() && ui.button(remove_item).clicked() {
                             act = Some(SongAct::RemoveFromCrate(i));
                             ui.close_menu();
                         }
@@ -318,6 +341,7 @@ impl App {
                     self.remove_crate_song(cid, &s);
                 }
             }
+            SongAct::SetTag(_, tag, on) => self.set_tag(tag, on, vec![LikeSpec::from_pin(&s)]),
         }
     }
 }

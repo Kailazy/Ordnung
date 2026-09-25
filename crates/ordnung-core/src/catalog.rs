@@ -7,9 +7,9 @@
 use crate::error::{Error, Result};
 use crate::model::key::{Key, Mode, PitchClass};
 use crate::model::{
-    Analysis, AudioProperties, Beat, Beatgrid, ChosenBy, CrateSet, Cue, DugRelease, Format, Id,
-    Playlist, SellerListing, SellerShop, SongPin, Tags, Track, Tracklist, TracklistEntry,
-    TranscodeVerdict, VinylList, VinylRecord,
+    Analysis, AudioProperties, Beat, Beatgrid, ChosenBy, CrateKind, CrateSet, Cue, DugRelease,
+    Format, Id, Playlist, SellerListing, SellerShop, SongPin, Tags, Track, Tracklist,
+    TracklistEntry, TranscodeVerdict, VinylList, VinylRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashMap;
@@ -366,7 +366,10 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 ///
 /// Schema 22 adds the crates (`crates`, `crate_songs`): named sets of
 /// songs on records, the vinyl side's playlists (see [`CrateSet`]).
-const SCHEMA_VERSION: i64 = 22;
+///
+/// Schema 23 adds `crates.kind`: a set is a crate or a tag (see
+/// [`CrateKind`]). Every set that existed before is a crate.
+const SCHEMA_VERSION: i64 = 23;
 
 /// The columns of the two vinyl list tables (`vinyl_collection`,
 /// `vinyl_wantlist`), shared so both are created alike and so an older
@@ -847,7 +850,8 @@ impl Catalog {
             CREATE TABLE IF NOT EXISTS crates (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 name       TEXT NOT NULL,
-                created_at INTEGER NOT NULL DEFAULT (unixepoch())
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                kind       TEXT NOT NULL DEFAULT 'crate'
             );
             CREATE TABLE IF NOT EXISTS crate_songs (
                 crate_id       INTEGER NOT NULL REFERENCES crates(id) ON DELETE CASCADE,
@@ -884,6 +888,8 @@ impl Catalog {
         // Schema 14 — a playlist's own icon and colour (see `Playlist::icon`).
         self.add_column_if_missing("playlists", "icon", "TEXT")?;
         self.add_column_if_missing("playlists", "color", "INTEGER")?;
+        // Schema 23: a set is a crate or a tag (see `CrateKind`).
+        self.add_column_if_missing("crates", "kind", "TEXT NOT NULL DEFAULT 'crate'")?;
 
         // Full standardized tag set (added later — DBs created before now lose
         // these by default; rescanning fills them in).
@@ -4547,25 +4553,29 @@ impl Catalog {
 
     // --- Crates ------------------------------------------------------------
 
-    /// Make a crate. Returns its id.
-    pub fn create_crate_set(&self, name: &str) -> Result<Id> {
+    /// Make a crate, or a tag (see [`CrateKind`]). Returns its id.
+    pub fn create_crate_set(&self, name: &str, kind: CrateKind) -> Result<Id> {
         let name = name.trim();
         if name.is_empty() {
-            return Err(Error::Invalid("a crate needs a name".into()));
+            return Err(Error::Invalid(format!("a {} needs a name", kind.noun())));
         }
-        self.conn
-            .execute("INSERT INTO crates (name) VALUES (?1)", params![name])?;
+        self.conn.execute(
+            "INSERT INTO crates (name, kind) VALUES (?1, ?2)",
+            params![name, kind.as_str()],
+        )?;
         Ok(self.conn.last_insert_rowid() as Id)
     }
 
-    /// Every crate with its counts, oldest first, so the sidebar keeps a
-    /// stable order as crates are added.
+    /// Every crate and tag with its counts, oldest first, so the sidebar
+    /// keeps a stable order as sets are added. The caller splits them by
+    /// kind.
     pub fn list_crate_sets(&self) -> Result<Vec<CrateSet>> {
         let mut stmt = self.conn.prepare(
             "SELECT c.id, c.name, c.created_at,
                     (SELECT COUNT(*) FROM crate_songs s WHERE s.crate_id = c.id),
                     (SELECT COUNT(DISTINCT s.release_id) FROM crate_songs s
-                      WHERE s.crate_id = c.id AND s.release_id IS NOT NULL)
+                      WHERE s.crate_id = c.id AND s.release_id IS NOT NULL),
+                    c.kind
              FROM crates c
              ORDER BY c.created_at ASC, c.id ASC",
         )?;
@@ -4577,7 +4587,26 @@ impl Catalog {
                     created_at: r.get(2)?,
                     songs: r.get::<_, i64>(3)? as u32,
                     records: r.get::<_, i64>(4)? as u32,
+                    kind: CrateKind::parse(&r.get::<_, String>(5)?),
                 })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Which songs are in which sets of `kind`, as `(set id, song key)`
+    /// pairs: the one read behind every "which tags does this song
+    /// carry?" mark, so a row asks a map instead of the catalog.
+    pub fn crate_memberships(&self, kind: CrateKind) -> Result<Vec<(Id, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.crate_id, s.song_key FROM crate_songs s
+             JOIN crates c ON c.id = s.crate_id
+             WHERE c.kind = ?1
+             ORDER BY c.created_at ASC, c.id ASC, s.ord ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![kind.as_str()], |r| {
+                Ok((r.get::<_, i64>(0)? as Id, r.get::<_, String>(1)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
@@ -7247,9 +7276,9 @@ mod tests {
             local_track_id: None,
             added_at: 5,
         };
-        assert!(cat.create_crate_set("  ").is_err());
-        let gig = cat.create_crate_set("Friday").unwrap();
-        let other = cat.create_crate_set("Sunday").unwrap();
+        assert!(cat.create_crate_set("  ", CrateKind::Crate).is_err());
+        let gig = cat.create_crate_set("Friday", CrateKind::Crate).unwrap();
+        let other = cat.create_crate_set("Sunday", CrateKind::Crate).unwrap();
         let n = cat
             .add_crate_songs(
                 gig,
@@ -7292,6 +7321,51 @@ mod tests {
         assert_eq!(cat.list_crate_sets().unwrap().len(), 1);
         assert!(cat.list_crate_songs(gig).unwrap().is_empty());
         assert!(cat.add_crate_songs(gig, &[pin("A", "B", None, "")]).is_err());
+    }
+
+    #[test]
+    fn tags_are_sets_of_their_own_kind_and_answer_membership() {
+        let path = temp_db_path("tags");
+        let cat = Catalog::open(&path).unwrap();
+        let pin = |artist: &str, title: &str| SongPin {
+            id: 0,
+            artist: artist.into(),
+            title: title.into(),
+            release_id: None,
+            position: None,
+            rel_artist: None,
+            rel_title: None,
+            rel_label: None,
+            rel_catno: None,
+            rel_year: None,
+            rel_thumb: None,
+            local_track_id: None,
+            added_at: 5,
+        };
+        let gig = cat.create_crate_set("Friday", CrateKind::Crate).unwrap();
+        let dub = cat.create_crate_set("dub", CrateKind::Tag).unwrap();
+        let dark = cat.create_crate_set("dark", CrateKind::Tag).unwrap();
+        cat.add_crate_songs(gig, &[pin("Rhythm & Sound", "Mango Drive")]).unwrap();
+        cat.add_crate_songs(dub, &[pin("Rhythm & Sound", "Mango Drive"), pin("Basic Channel", "Phylyps Trak")]).unwrap();
+        cat.add_crate_songs(dark, &[pin("Basic Channel", "Phylyps Trak")]).unwrap();
+        let sets = cat.list_crate_sets().unwrap();
+        assert_eq!(
+            sets.iter().map(|c| (c.name.as_str(), c.kind)).collect::<Vec<_>>(),
+            [("Friday", CrateKind::Crate), ("dub", CrateKind::Tag), ("dark", CrateKind::Tag)]
+        );
+        // Memberships of one kind only, in set order; the crate's song
+        // is not a tag membership.
+        let tagged = cat.crate_memberships(CrateKind::Tag).unwrap();
+        let phylyps = song_key("Basic Channel", "Phylyps Trak", None, None);
+        let mango = song_key("Rhythm & Sound", "Mango Drive", None, None);
+        assert_eq!(
+            tagged,
+            [(dub, mango.clone()), (dub, phylyps.clone()), (dark, phylyps.clone())]
+        );
+        assert_eq!(cat.crate_memberships(CrateKind::Crate).unwrap(), [(gig, mango)]);
+        // Untagging is taking the song out of the set.
+        assert!(cat.remove_crate_song(dub, "basic channel", "phylyps trak", None, None).unwrap());
+        assert_eq!(cat.crate_memberships(CrateKind::Tag).unwrap().len(), 2);
     }
 
     #[test]

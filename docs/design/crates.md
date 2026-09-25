@@ -1,6 +1,6 @@
 # Crates — sets of songs on records, the vinyl side's playlists
 
-**Status:** built (2026-09-23, v0.147.0). `crates` + `crate_songs` tables
+**Status:** built (2026-09-23, v0.147.0); tags added 2026-09-25 (v0.154.0, §5). `crates` + `crate_songs` tables
 (schema v22) with `Catalog::create_crate_set` / `list_crate_sets` /
 `rename_crate_set` / `delete_crate_set` / `add_crate_songs` /
 `remove_crate_song` / `list_crate_songs`; the GUI's `crates.rs` (the crate
@@ -66,7 +66,38 @@ three inline-rename twins (playlist, device, crate) resolve through one
 `rename_row`. `CLAUDE.md` now states the rule this followed: look for the
 component or engine that already does it before adding one.
 
-## 5. Open
+## 5. Tags (2026-09-25, v0.154.0)
+
+A tag is a crate of another kind: `crates.kind` (schema v23, `CrateKind`
+in `model`) says whether a set is a **crate** (a selection for a night)
+or a **tag** (a word marked on songs: "dub", "muddy", "sunrise",
+"melodic"). Both live in the same two tables and go through the same
+catalog methods; `create_crate_set` takes the kind and
+`crate_memberships(kind)` reads every `(set, song key)` pair of one kind,
+the one query behind "which tags does this song carry?"
+(`App::song_tags`, a map from song key to tag ids, reloaded with the
+sets).
+
+- Sidebar: **TAGS** under the playlist tree, the same header, rows,
+  inline rename and drop target as CRATES (`draw_crate_rows` takes the
+  kind; the tag glyph instead of the package). Dropping songs on a tag
+  marks them.
+- Marking: every song menu (a library row, the shared song table, a
+  record sheet's row, a tracklist line) has **Tags ▸**
+  (`crates::tag_menu`), a check per tag; checking marks, unchecking
+  unmarks (`App::set_tag`, which adds to or removes from the set). In the
+  library the menu acts on the whole selection, and a tag is checked when
+  every selected song carries it. The inspector shows a Tags line with
+  the same menu. Library tracks are keyed the way the library index keys
+  them (`crates::track_song_key`) and carry the same `LikeSpec` a like
+  does (`LikeSpec::from_track`, now shared with the inspector's heart).
+- Reading: the library table has a **Tags** column (`dub, dark`; sorts
+  and filters like any text column, so typing a tag in the column filter
+  is that tag's view of the library); the song table shows the tags after
+  the artist; a tag in the sidebar opens through the crate view, on its
+  Songs layout by default (the layout is remembered per kind).
+
+## 6. Open
 
 - Reordering songs inside a crate (they keep the order they went in).
 - A crate's records as a Discogs wantlist push, or a text export like a

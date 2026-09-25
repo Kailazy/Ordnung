@@ -1338,6 +1338,8 @@ impl App {
             Like(usize),
             /// Put this row's song in that crate.
             AddToCrate(usize, Id),
+            /// Mark the row's song with a tag, or take it off (row, tag, on).
+            SetTag(usize, Id, bool),
             /// Play the record, or pause/resume whatever of it is loaded.
             TogglePlay,
             PlayExtra(usize),
@@ -1936,7 +1938,18 @@ impl App {
                             // the pointer.
                             let lit = marked == Some(i) || cursor == Some(i);
                             let top = ui.cursor().top();
-                            let hit = sheet_row_ui(ui, sheet, row, i, playing, running, lit, liked, &self.crate_sets);
+                            let tagged: Vec<Id> = sheet_row_spec(sheet, i)
+                                .map(|sp| {
+                                    self.song_tag_ids(&ordnung_core::catalog::song_key(
+                                        &sp.artist,
+                                        &sp.title,
+                                        sp.release_id,
+                                        sp.position.as_deref(),
+                                    ))
+                                    .to_vec()
+                                })
+                                .unwrap_or_default();
+                            let hit = sheet_row_ui(ui, sheet, row, i, playing, running, lit, liked, &self.crate_sets, &tagged);
                             // A step off the visible part of the list brings
                             // the row it landed on into view.
                             if cursor_moved && cursor == Some(i) {
@@ -1958,6 +1971,7 @@ impl App {
                                     }
                                 }
                                 Some(RowHit::AddToCrate(cid)) => act = Some(Act::AddToCrate(i, cid)),
+                                Some(RowHit::SetTag(tag, on)) => act = Some(Act::SetTag(i, tag, on)),
                                 None => {}
                             }
                         }
@@ -2219,6 +2233,11 @@ impl App {
             Some(Act::AddToCrate(i, cid)) => {
                 if let Some(spec) = self.vinyl_sheet.as_ref().and_then(|s| sheet_row_spec(s, i)) {
                     self.add_songs_to_crate(cid, vec![spec]);
+                }
+            }
+            Some(Act::SetTag(i, tag, on)) => {
+                if let Some(spec) = self.vinyl_sheet.as_ref().and_then(|s| sheet_row_spec(s, i)) {
+                    self.set_tag(tag, on, vec![spec]);
                 }
             }
             Some(Act::Goto) => {
@@ -2485,6 +2504,8 @@ enum RowHit {
     DragStart,
     /// Add to crate, from the row's menu.
     AddToCrate(Id),
+    /// A tag checked or unchecked in the row's menu (tag id, on).
+    SetTag(Id, bool),
 }
 
 /// What a row of the sheet carries to a like, a crate or a drag: the song
@@ -2538,6 +2559,7 @@ fn sheet_row_ui(
     marked: bool,
     liked: bool,
     crates: &[CrateSet],
+    tagged: &[Id],
 ) -> Option<RowHit> {
     const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 200, 120);
     /// The like mark's square: the row's height.
@@ -2846,6 +2868,9 @@ fn sheet_row_ui(
     hit.context_menu(|ui| {
         if let Some(cid) = crate::crates::add_to_crate_menu(ui, crates, None) {
             hit_what = Some(RowHit::AddToCrate(cid));
+        }
+        if let Some((tag, on)) = crate::crates::tag_menu(ui, crates, tagged) {
+            hit_what = Some(RowHit::SetTag(tag, on));
         }
     });
     if playable {

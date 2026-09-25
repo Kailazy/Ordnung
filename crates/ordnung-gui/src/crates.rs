@@ -15,22 +15,44 @@
 //! themselves through the one song table (`song_rows`), like the Liked
 //! view. Storage is the `crates` and `crate_songs` catalog tables; see
 //! `docs/design/crates.md`.
+//!
+//! A **tag** is a crate of another kind ([`CrateKind::Tag`]): a word the
+//! user marks songs with ("dub", "muddy", "sunrise") rather than a set
+//! put together for a night. It lives in the same tables and opens
+//! through the same view; what differs is the way in. Every song's menu
+//! has a **Tags ▸** submenu ([`tag_menu`]) with a check per tag that
+//! marks or unmarks the song ([`App::set_tag`]), a song carries any
+//! number of tags, the song table and the library's Tags column say which
+//! ([`App::tag_words`]), and the sidebar lists the tags under the
+//! playlists. Which songs carry which tags is one map (`App::song_tags`)
+//! read with the sets.
 
 use super::*;
 use crate::liked::LikeSpec;
 use crate::song_rows::{center_two, song_matches, thumb, SongSet};
 use crate::ui::hover::HoverNoteExt;
 use crate::ui::tokens::{color, font, space};
-use ordnung_core::model::{CrateSet, SongPin};
+use ordnung_core::catalog::song_key;
+use ordnung_core::model::{CrateKind, CrateSet, SongPin};
 
-/// Which layout the crate view shows.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+/// Which layout the crate view shows. Remembered per kind (see
+/// [`App::crate_layout`]): a crate opens on the records to bring, a tag on
+/// its songs, since most of a tag's songs are files rather than records.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CrateLayout {
     /// One row per record: what to bring.
-    #[default]
     Records,
     /// One row per song, like the Liked view.
     Songs,
+}
+
+impl CrateLayout {
+    fn default_for(kind: CrateKind) -> Self {
+        match kind {
+            CrateKind::Crate => CrateLayout::Records,
+            CrateKind::Tag => CrateLayout::Songs,
+        }
+    }
 }
 
 /// A record the crate takes songs from, with those songs.
@@ -61,7 +83,7 @@ pub(crate) fn add_to_crate_menu(
     let mut pick = None;
     ui.menu_button("Add to crate", |ui| {
         let mut any = false;
-        for c in crates.iter().filter(|c| Some(c.id) != here) {
+        for c in crates.iter().filter(|c| c.kind == CrateKind::Crate && Some(c.id) != here) {
             any = true;
             if ui.button(&c.name).clicked() {
                 pick = Some(c.id);
@@ -71,6 +93,30 @@ pub(crate) fn add_to_crate_menu(
         if !any {
             ui.add_enabled(false, egui::Button::new("No other crate yet"))
                 .on_disabled_hover_note("Make one with the + beside CRATES in the sidebar");
+        }
+    });
+    pick
+}
+
+/// The "Tags" submenu of a song's context menu: a check per tag, on for
+/// the tags in `on` (the song's, or with several songs the tags every one
+/// of them carries). Returns the tag toggled and its new state. Shown
+/// even with no tags, saying so, so the way in is found.
+pub(crate) fn tag_menu(ui: &mut egui::Ui, sets: &[CrateSet], on: &[Id]) -> Option<(Id, bool)> {
+    let mut pick = None;
+    ui.menu_button("Tags", |ui| {
+        let mut any = false;
+        for t in sets.iter().filter(|c| c.kind == CrateKind::Tag) {
+            any = true;
+            let mut checked = on.contains(&t.id);
+            if ui.checkbox(&mut checked, &t.name).clicked() {
+                pick = Some((t.id, checked));
+                ui.close_menu();
+            }
+        }
+        if !any {
+            ui.add_enabled(false, egui::Button::new("No tags yet"))
+                .on_disabled_hover_note("Make one with the + beside TAGS in the sidebar");
         }
     });
     pick
@@ -125,9 +171,14 @@ impl App {
     /// Read the crates back from the catalog (part of `reload`). The open
     /// crate's songs are read again the next time they are drawn.
     pub(crate) fn load_crate_sets(&mut self) {
-        self.crate_sets = Catalog::open(&self.db_path)
-            .and_then(|c| c.list_crate_sets())
+        let (sets, tagged) = Catalog::open(&self.db_path)
+            .and_then(|c| Ok((c.list_crate_sets()?, c.crate_memberships(CrateKind::Tag)?)))
             .unwrap_or_default();
+        self.crate_sets = sets;
+        self.song_tags.clear();
+        for (tag, key) in tagged {
+            self.song_tags.entry(key).or_default().push(tag);
+        }
         self.crate_songs_for = None;
         if let LibraryView::CrateSet(id) = self.view {
             if !self.crate_sets.iter().any(|c| c.id == id) {
@@ -156,9 +207,84 @@ impl App {
             .unwrap_or_else(|| "the crate".to_string())
     }
 
+    /// Whether the set is a crate or a tag; a set no longer listed counts
+    /// as a crate.
+    pub(crate) fn crate_kind(&self, id: Id) -> CrateKind {
+        self.crate_sets
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.kind)
+            .unwrap_or_default()
+    }
+
+    /// The ids of the tags on the song with this key (see [`song_key`]),
+    /// in sidebar order; none for an untagged song.
+    pub(crate) fn song_tag_ids(&self, key: &str) -> &[Id] {
+        self.song_tags.get(key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The tags on the song with this key as words, `dub, dark`, for a
+    /// row's caption; empty when untagged.
+    pub(crate) fn tag_words(&self, key: &str) -> String {
+        tag_words(&self.crate_sets, self.song_tag_ids(key))
+    }
+
+    /// What these library tracks carry to a tag (see
+    /// [`LikeSpec::from_track`]); a track no longer in the catalog is
+    /// skipped.
+    pub(crate) fn track_specs(&self, ids: &[Id]) -> Vec<LikeSpec> {
+        let Ok(cat) = Catalog::open(&self.db_path) else { return Vec::new() };
+        ids.iter()
+            .filter_map(|&id| cat.get_track(id).ok())
+            .map(|t| LikeSpec::from_track(&t, self.track_releases.get(&t.id).copied()))
+            .collect()
+    }
+
+    /// Mark songs with a tag, or take it off them (a check in the Tags
+    /// submenu). Songs already marked stay as they were. Reloads the
+    /// library rows so the Tags column follows.
+    pub(crate) fn set_tag(&mut self, tag: Id, on: bool, songs: Vec<LikeSpec>) {
+        let name = self.crate_name(tag);
+        let pins: Vec<SongPin> = songs.into_iter().map(LikeSpec::into_pin).collect();
+        let n = pins.len();
+        let first = pins.first().map(SongPin::song_label).unwrap_or_default();
+        let res = Catalog::open(&self.db_path).and_then(|c| {
+            if on {
+                c.add_crate_songs(tag, &pins)
+            } else {
+                let mut took = 0;
+                for s in &pins {
+                    if c.remove_crate_song(tag, &s.artist, &s.title, s.release_id, s.position.as_deref())? {
+                        took += 1;
+                    }
+                }
+                Ok(took)
+            }
+        });
+        match res {
+            Ok(changed) => {
+                self.status = match (on, changed, n) {
+                    (true, 0, 1) => format!("{first} is already tagged {name}"),
+                    (true, _, 1) => format!("Tagged {first} {name}"),
+                    (true, c, _) => format!("Tagged {c} songs {name}"),
+                    (false, _, 1) => format!("Took {name} off {first}"),
+                    (false, c, _) => format!("Took {name} off {c} songs"),
+                };
+                self.load_crate_sets();
+                self.reload();
+            }
+            Err(e) => self.fail(format!("Couldn't tag with {name}: {e}")),
+        }
+    }
+
     /// Put songs in a crate (a drop on its row, or Add to crate in a
-    /// song's menu). Songs already in it stay as they were.
+    /// song's menu). Songs already in it stay as they were. A drop on a
+    /// tag's row marks the songs with the tag.
     pub(crate) fn add_songs_to_crate(&mut self, id: Id, songs: Vec<LikeSpec>) {
+        if self.crate_kind(id) == CrateKind::Tag {
+            self.set_tag(id, true, songs);
+            return;
+        }
         let name = self.crate_name(id);
         let pins: Vec<SongPin> = songs.into_iter().map(LikeSpec::into_pin).collect();
         match Catalog::open(&self.db_path).and_then(|c| c.add_crate_songs(id, &pins)) {
@@ -190,12 +316,21 @@ impl App {
         }
     }
 
+    /// The layout the open set of `kind` shows: the one last picked for
+    /// that kind, else the kind's default.
+    pub(crate) fn crate_layout(&self, kind: CrateKind) -> CrateLayout {
+        self.crate_layouts
+            .get(&kind)
+            .copied()
+            .unwrap_or_else(|| CrateLayout::default_for(kind))
+    }
+
     /// The top bar's count for the open crate: records or songs, whichever
     /// the view shows, through the same filter it applies.
-    pub(crate) fn crate_count_words(&self) -> String {
+    pub(crate) fn crate_count_words(&self, id: Id) -> String {
         let query = self.filter.trim().to_lowercase();
         let shown = self.crate_songs.iter().filter(|s| song_matches(s, &query));
-        match self.crate_layout {
+        match self.crate_layout(self.crate_kind(id)) {
             CrateLayout::Songs => {
                 let n = shown.count();
                 if n == 1 { "1 song".to_string() } else { format!("{n} songs") }
@@ -231,6 +366,7 @@ impl App {
             .map(|(i, _)| i)
             .collect();
         let to_get = in_library.iter().filter(|l| l.is_none()).count();
+        let layout = self.crate_layout(set.kind);
 
         ui.add_space(space::S3);
         ui.horizontal(|ui| {
@@ -240,9 +376,13 @@ impl App {
                     1 => "1 record".to_string(),
                     n => format!("{n} records"),
                 };
-                let mut words = match set.songs {
-                    1 => format!("1 song on {records}"),
-                    n => format!("{n} songs on {records}"),
+                // Songs met without a record (a tag full of library
+                // files, say) are counted alone.
+                let mut words = match (set.songs, set.records) {
+                    (1, 0) => "1 song".to_string(),
+                    (n, 0) => format!("{n} songs"),
+                    (1, _) => format!("1 song on {records}"),
+                    (n, _) => format!("{n} songs on {records}"),
                 };
                 if to_get > 0 {
                     words.push_str(&format!(" · {to_get} not in your library"));
@@ -254,18 +394,24 @@ impl App {
                 use crate::ui::button::{segmented, Segment};
                 let picked = segmented(
                     ui,
-                    Some(match self.crate_layout {
+                    Some(match layout {
                         CrateLayout::Records => 0,
                         CrateLayout::Songs => 1,
                     }),
-                    &[
-                        Segment { label: "Records", tip: "The records to bring, with the songs the crate takes from each" },
-                        Segment { label: "Songs", tip: "Every song in the crate" },
-                    ],
+                    &match set.kind {
+                        CrateKind::Crate => [
+                            Segment { label: "Records", tip: "The records to bring, with the songs the crate takes from each" },
+                            Segment { label: "Songs", tip: "Every song in the crate" },
+                        ],
+                        CrateKind::Tag => [
+                            Segment { label: "Records", tip: "The records the tagged songs sit on" },
+                            Segment { label: "Songs", tip: "Every song with this tag" },
+                        ],
+                    },
                 );
                 match picked {
-                    Some(0) => self.crate_layout = CrateLayout::Records,
-                    Some(1) => self.crate_layout = CrateLayout::Songs,
+                    Some(0) => { self.crate_layouts.insert(set.kind, CrateLayout::Records); }
+                    Some(1) => { self.crate_layouts.insert(set.kind, CrateLayout::Songs); }
                     _ => {}
                 }
             });
@@ -274,17 +420,26 @@ impl App {
 
         if songs.is_empty() {
             ui.add_space(24.0);
-            ui.vertical_centered(|ui| {
-                ui.heading("Nothing in this crate yet");
-                ui.label("Drag songs here from a record's sheet, the liked songs or a tracklist, or pick Add to crate in a song's menu.");
+            ui.vertical_centered(|ui| match set.kind {
+                CrateKind::Crate => {
+                    ui.heading("Nothing in this crate yet");
+                    ui.label("Drag songs here from a record's sheet, the liked songs or a tracklist, or pick Add to crate in a song's menu.");
+                }
+                CrateKind::Tag => {
+                    ui.heading(format!("No song is tagged {} yet", set.name));
+                    ui.label("Right-click a song in the library, on a record's sheet or in a tracklist and check the tag under Tags. Songs dropped here get it too.");
+                }
             });
         } else if shown.is_empty() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("No song in the crate matches the filter.").weak());
+                ui.label(egui::RichText::new(match set.kind {
+                    CrateKind::Crate => "No song in the crate matches the filter.",
+                    CrateKind::Tag => "No song with this tag matches the filter.",
+                }).weak());
             });
         } else {
-            match self.crate_layout {
+            match layout {
                 CrateLayout::Songs => {
                     let set = SongSet::CrateSet(id);
                     if let Some(act) = self.song_rows(ui, ctx, set, &songs, &shown, &in_library) {
@@ -464,9 +619,45 @@ impl App {
     }
 }
 
+/// `dub, dark`: the names of the sets `ids` name, in the order the sets
+/// are listed (the sidebar's), skipping any not found.
+pub(crate) fn tag_words(sets: &[CrateSet], ids: &[Id]) -> String {
+    sets.iter()
+        .filter(|c| c.kind == CrateKind::Tag && ids.contains(&c.id))
+        .map(|c| c.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The key a library track's song is tagged under: the song as its tags
+/// say it (see `Track::song`), the same key the library index uses.
+pub(crate) fn track_song_key(artist: &str, title: &str) -> String {
+    song_key(artist, title, None, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tag_words_follow_sidebar_order_and_skip_crates() {
+        let set = |id: Id, name: &str, kind: CrateKind| CrateSet {
+            id,
+            name: name.into(),
+            kind,
+            created_at: 0,
+            songs: 0,
+            records: 0,
+        };
+        let sets = [
+            set(1, "dub", CrateKind::Tag),
+            set(2, "Friday", CrateKind::Crate),
+            set(3, "dark", CrateKind::Tag),
+        ];
+        assert_eq!(tag_words(&sets, &[3, 1, 2]), "dub, dark");
+        assert_eq!(tag_words(&sets, &[2]), "");
+        assert_eq!(tag_words(&sets, &[]), "");
+    }
 
     fn pin(title: &str, release: Option<u64>, pos: &str) -> SongPin {
         SongPin {

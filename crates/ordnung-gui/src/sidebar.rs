@@ -425,14 +425,19 @@ fn draw_usb_inline_rename(
     })
 }
 
-/// The crates' twin: the ids are crate ids and the actions edit the crates.
+/// The crates' twin: the ids are crate (or tag) ids and the actions edit
+/// the crates.
 fn draw_crate_inline_rename(
     ui: &mut egui::Ui,
     c: &CrateSet,
     renaming: &mut Option<Renaming>,
     action: &mut Option<SidebarAction>,
 ) -> bool {
-    rename_row(ui, renaming, RenameTree::CrateSet, c.id, "New crate", action, |name, is_new| match name {
+    let hint = match c.kind {
+        CrateKind::Crate => "New crate",
+        CrateKind::Tag => "New tag",
+    };
+    rename_row(ui, renaming, RenameTree::CrateSet, c.id, hint, action, |name, is_new| match name {
         Some(name) => Some(SidebarAction::RenameCrateSet(c.id, name)),
         None if is_new => Some(SidebarAction::DeleteCrateSet(c.id)),
         None => None,
@@ -1111,23 +1116,35 @@ pub(crate) struct SourceTabsResponse {
     pub dropped: Option<Vec<Id>>,
 }
 
-/// The crates under the Vinyl tile, one row each in the playlist row's
-/// shape: the name, the song count in the lane, the crate glyph. A row is
+/// The crates under the Vinyl tile, or the tags under the playlists
+/// (whichever `kind` names), one row each in the playlist row's shape:
+/// the name, the song count in the lane, the crate or tag glyph. A row is
 /// a drop target for songs (see [`crate::DraggedSongs`]) and lights while
 /// one hovers; its menu renames or deletes it.
 pub(crate) fn draw_crate_rows(
     ui: &mut egui::Ui,
     density: NavDensity,
     crates: &[CrateSet],
+    kind: CrateKind,
     view: &mut LibraryView,
     renaming: &mut Option<Renaming>,
     action: &mut Option<SidebarAction>,
 ) {
-    let mark = RowMark {
-        glyph: crate::ui::phosphor_icons::glyph("package").unwrap_or("▤"),
-        tint: None,
+    let mark = match kind {
+        CrateKind::Crate => RowMark {
+            glyph: crate::ui::phosphor_icons::glyph("package").unwrap_or("▤"),
+            tint: None,
+        },
+        CrateKind::Tag => RowMark {
+            glyph: crate::ui::phosphor_icons::glyph("tag").unwrap_or("#"),
+            tint: None,
+        },
     };
-    for c in crates {
+    let delete_note = match kind {
+        CrateKind::Crate => "Remove the crate. Its songs stay liked if they were",
+        CrateKind::Tag => "Remove the tag from every song that carries it",
+    };
+    for c in crates.iter().filter(|c| c.kind == kind) {
         if draw_crate_inline_rename(ui, c, renaming, action) {
             continue;
         }
@@ -1159,7 +1176,7 @@ pub(crate) fn draw_crate_rows(
                 });
                 ui.close_menu();
             }
-            if ui.button("Delete").on_hover_note("Remove the crate. Its songs stay liked if they were").clicked() {
+            if ui.button("Delete").on_hover_note(delete_note).clicked() {
                 *action = Some(SidebarAction::DeleteCrateSet(c.id));
                 ui.close_menu();
             }

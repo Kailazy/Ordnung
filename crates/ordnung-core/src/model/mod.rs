@@ -739,16 +739,59 @@ impl SongPin {
     }
 }
 
+/// What a [`CrateSet`] is for. Both are named sets of [`SongPin`]s in the
+/// same two tables; the kind decides where the sidebar lists the set and
+/// how a song gets in. A **crate** is a selection put together for a
+/// night (drag songs in, add through a menu); a **tag** is a word the
+/// user marks songs with ("dub", "sunrise", "muddy") and toggles from a
+/// song's menu, so one song carries many tags and a tag reads back as
+/// every song marked with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CrateKind {
+    #[default]
+    Crate,
+    Tag,
+}
+
+impl CrateKind {
+    /// The stored form (`crates.kind`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CrateKind::Crate => "crate",
+            CrateKind::Tag => "tag",
+        }
+    }
+
+    /// Read the stored form; anything unknown is a crate, the kind every
+    /// set was before tags existed.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "tag" => CrateKind::Tag,
+            _ => CrateKind::Crate,
+        }
+    }
+
+    /// The word for one of these in status lines and errors.
+    pub fn noun(self) -> &'static str {
+        match self {
+            CrateKind::Crate => "crate",
+            CrateKind::Tag => "tag",
+        }
+    }
+}
+
 /// A crate: a named set of songs on records, the vinyl side's playlist
 /// (see the `crates` and `crate_songs` catalog tables). A playlist holds
 /// library tracks; a crate holds [`SongPin`]s, songs as they sit on
 /// records, so a set for a gig says which records to bring as well as
-/// which songs are on them. The counts are read with the row for the
-/// sidebar.
+/// which songs are on them. A tag is the same set with another
+/// [`kind`](CrateKind): a word marked on songs. The counts are read with
+/// the row for the sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrateSet {
     pub id: Id,
     pub name: String,
+    pub kind: CrateKind,
     /// Unix seconds when it was made.
     pub created_at: i64,
     /// How many songs it holds.

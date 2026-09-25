@@ -382,19 +382,17 @@ impl App {
         let song = t.song();
         let can_like = !song.is_empty();
         let liked = can_like && self.is_liked(&song.artist, &song.title, None, None);
-        let like_spec = crate::liked::LikeSpec {
-            artist: song.artist.clone(),
-            title: song.title.clone(),
-            release_id: self.track_releases.get(&id).copied(),
-            position: None,
-            rel_artist: t.tags.album_artist.clone().or_else(|| t.tags.artist.clone()),
-            rel_title: t.tags.album.clone(),
-            rel_label: t.tags.label.clone(),
-            rel_catno: t.tags.catalog_number.clone(),
-            rel_year: t.tags.year,
-            rel_thumb: None,
-            local_track_id: Some(id),
-        };
+        let like_spec =
+            crate::liked::LikeSpec::from_track(&t, self.track_releases.get(&id).copied());
+        // The song's tags, read before the panel closure borrows the editor.
+        let tagged: Vec<Id> = self.song_tag_ids(&song.key()).to_vec();
+        let tag_words = crate::crates::tag_words(&self.crate_sets, &tagged);
+        let tag_sets: Vec<(Id, String)> = self
+            .crate_sets
+            .iter()
+            .filter(|c| c.kind == CrateKind::Tag)
+            .map(|c| (c.id, c.name.clone()))
+            .collect();
 
         // --- Editable Core tags ------------------------------------------
         // The fields a user most often fixes or fills (e.g. from Discogs), plus
@@ -523,6 +521,46 @@ impl App {
                     }
                 });
             });
+
+            // The song's tags (see `crates`): the words it carries, and the
+            // same Tags menu every song row has, so a file is tagged from
+            // here as well as from its row.
+            if can_like {
+                let words = tag_words.clone();
+                ui.add_space(space::S2);
+                ui.horizontal(|ui| {
+                    ui.menu_button(
+                        egui::RichText::new("Tags")
+                            .font(crate::ui::tokens::font::caption())
+                            .color(color::LABEL_2),
+                        |ui| {
+                            let mut any = false;
+                            for (tid, name) in &tag_sets {
+                                any = true;
+                                let mut on = tagged.contains(tid);
+                                if ui.checkbox(&mut on, name).clicked() {
+                                    action = Some(InspectorAction::SetTag(*tid, on, like_spec.clone()));
+                                    ui.close_menu();
+                                }
+                            }
+                            if !any {
+                                ui.add_enabled(false, egui::Button::new("No tags yet"))
+                                    .on_disabled_hover_note("Make one with the + beside TAGS in the sidebar");
+                            }
+                        },
+                    )
+                    .response
+                    .on_hover_note("Mark this song with your tags");
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(if words.is_empty() { "none".to_string() } else { words })
+                                .font(crate::ui::tokens::font::caption())
+                                .color(color::LABEL_3),
+                        )
+                        .truncate(),
+                    );
+                });
+            }
 
             // Writeback action: imprint the fetched cover into the source file.
             // Mirrors the CLI's `tag --write --art` — explicit and source-mutating,

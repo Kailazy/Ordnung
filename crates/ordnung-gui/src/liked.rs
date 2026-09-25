@@ -58,6 +58,28 @@ impl LikeSpec {
         }
     }
 
+    /// What a library track carries to a like or a tag: the song as its
+    /// tags say it, on the record it is matched to (`release_id`, from
+    /// the app's track-to-release map), with this very file as the track
+    /// that is it. The inspector's heart and the library's Tags menu both
+    /// hand this over.
+    pub(crate) fn from_track(t: &Track, release_id: Option<u64>) -> LikeSpec {
+        let song = t.song();
+        LikeSpec {
+            artist: song.artist,
+            title: song.title,
+            release_id,
+            position: None,
+            rel_artist: t.tags.album_artist.clone().or_else(|| t.tags.artist.clone()),
+            rel_title: t.tags.album.clone(),
+            rel_label: t.tags.label.clone(),
+            rel_catno: t.tags.catalog_number.clone(),
+            rel_year: t.tags.year,
+            rel_thumb: None,
+            local_track_id: Some(t.id),
+        }
+    }
+
     /// The spec of a stored row, for carrying it on to another set.
     pub(crate) fn from_pin(s: &SongPin) -> LikeSpec {
         LikeSpec {
