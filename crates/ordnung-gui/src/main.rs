@@ -58,7 +58,7 @@ use ordnung_core::genredb;
 use ordnung_core::library_index::LibraryIndex;
 use ordnung_core::model::key::Camelot;
 use ordnung_core::model::{
-    Analysis, CrateKind, CrateSet, Cue, Format, Id, Playlist, SongPin, SellerListing, SellerShop, Tags, Track,
+    Analysis, CrateSet, Cue, Format, Id, Playlist, SongPin, SellerListing, SellerShop, Tags, Track,
     Tracklist, TracklistEntry, TranscodeVerdict, VinylList, VinylRecord,
 };
 use ordnung_core::search::{ScoredHit, SearchHit};
@@ -176,10 +176,6 @@ struct TrackRow {
     /// Free-text comment from the file's tag (ID3 COMM / Vorbis COMMENT), shown
     /// read-only in the Notes column. Empty string when the track has no comment.
     notes: String,
-    /// The user's tags on this song (see `crates`: the sets of kind
-    /// `CrateKind::Tag` the song is in), `dub, dark`, for the Tags column.
-    /// Empty when untagged.
-    tags: String,
     /// Pre-formatted relative age for the Added column ("today", "3d ago").
     added: String,
     /// Per-bin peak envelope (`Analysis::waveform_preview`) for the inline
@@ -243,7 +239,6 @@ impl TrackRow {
             TableColumn::Bitrate => &self.bitrate,
             TableColumn::Quality => self.quality.map_or("—", |v| quality_chip(v).0),
             TableColumn::Notes => &self.notes,
-            TableColumn::Tags => &self.tags,
             TableColumn::Added => &self.added,
         }
     }
@@ -290,8 +285,7 @@ enum LibraryView {
     /// not the flat track table. Backed by the local `vinyl_collection` cache.
     Vinyl,
     /// A crate (see `crates`): a named set of songs on records, the vinyl
-    /// side's playlist, shown as the records to bring or as its songs. A
-    /// tag (a set of kind `CrateKind::Tag`) opens through the same view.
+    /// side's playlist, shown as the records to bring or as its songs.
     CrateSet(Id),
     /// A mounted removable volume (USB stick / external drive), keyed by its
     /// mount path, showing either the whole device (`None`) or one playlist
@@ -458,7 +452,6 @@ enum SortColumn {
     Bitrate,
     Quality,
     Notes,
-    Tags,
     Added,
 }
 
@@ -488,10 +481,6 @@ enum TableColumn {
     /// Free-text notes — the file's comment tag (ID3 COMM / Vorbis COMMENT),
     /// surfaced read-only here. See `Tags::comment` in ordnung-core.
     Notes,
-    /// The user's own tags on the song ("dub", "sunrise"; see `crates`),
-    /// set from the row's menu. Sorts and filters like any text column, so
-    /// typing a tag in the column filter is the tag's view of the library.
-    Tags,
     /// When the track was first scanned into the catalog (`tracks.added_at`),
     /// shown as a relative age ("today", "3d ago"). Sort it descending to see
     /// the most recent import at the top.
@@ -503,13 +492,12 @@ impl TableColumn {
     /// truth for "which columns exist": the reorder menu lists these, and loading
     /// a saved layout appends any column missing from it (so a config written by
     /// an older build still shows columns added since).
-    const DEFAULT_ORDER: [TableColumn; 15] = [
+    const DEFAULT_ORDER: [TableColumn; 14] = [
         TableColumn::Cover,
         TableColumn::Artist,
         TableColumn::Title,
         TableColumn::Album,
         TableColumn::Genre,
-        TableColumn::Tags,
         TableColumn::Duration,
         TableColumn::Waveform,
         TableColumn::Added,
@@ -539,7 +527,6 @@ impl TableColumn {
             TableColumn::Bitrate => "bitrate",
             TableColumn::Quality => "quality",
             TableColumn::Notes => "notes",
-            TableColumn::Tags => "tags",
             TableColumn::Added => "added",
         }
     }
@@ -569,7 +556,6 @@ impl TableColumn {
             TableColumn::Bitrate => "kbps",
             TableColumn::Quality => "Qual",
             TableColumn::Notes => "Notes",
-            TableColumn::Tags => "Tags",
             TableColumn::Added => "Added",
         }
     }
@@ -591,7 +577,6 @@ impl TableColumn {
             TableColumn::Bitrate => SortColumn::Bitrate,
             TableColumn::Quality => SortColumn::Quality,
             TableColumn::Notes => SortColumn::Notes,
-            TableColumn::Tags => SortColumn::Tags,
             TableColumn::Added => SortColumn::Added,
         })
     }
@@ -614,7 +599,6 @@ impl TableColumn {
             TableColumn::Bitrate => 50.0,
             TableColumn::Quality => 48.0,
             TableColumn::Notes => 80.0,
-            TableColumn::Tags => 60.0,
             TableColumn::Added => 60.0,
         }
     }
@@ -637,7 +621,6 @@ impl TableColumn {
             TableColumn::Bitrate => 70.0,
             TableColumn::Quality => 66.0,
             TableColumn::Notes => 200.0,
-            TableColumn::Tags => 140.0,
             TableColumn::Added => 90.0,
         }
     }
@@ -790,8 +773,6 @@ enum InspectorAction {
     ViewRelease(Id),
     /// Put the track's song in the crate of liked songs, or take it out.
     Like(liked::LikeSpec),
-    /// Mark the track's song with a tag, or take it off (tag, on, the song).
-    SetTag(Id, bool, liked::LikeSpec),
 }
 
 /// State for the conversion modal. Also lets the user rename the track
@@ -1162,14 +1143,6 @@ struct App {
     vinyl_loaded: bool,
     rows: Vec<TrackRow>,
     filter: String,
-    /// When a pending search-box edit should be applied, if any.
-    ///
-    /// Rebuilding the rows means re-querying the catalog for every track, so
-    /// reloading on each keystroke made a typed word cost one full rebuild per
-    /// character — all but the last of them thrown away before a frame ever showed
-    /// them. Typing instead parks a deadline here and the reload happens once the
-    /// user pauses (see `SEARCH_DEBOUNCE`).
-    filter_apply_at: Option<std::time::Instant>,
     /// Ranked search suggestions for the current search box text, spanning the
     /// digital catalog and the vinyl collection/wantlist. Recomputed on the same
     /// debounce as the table filter; empty when the box is empty or the popup
@@ -1183,8 +1156,10 @@ struct App {
     /// and rebuilt it around meaningless prefixes. `filter` is still the table's
     /// own filter, set when a hit is chosen (or by the vinyl grid's jump).
     search_query: String,
-    /// When a parked search-box edit should rebuild the suggestions. Mirrors
-    /// `filter_apply_at`, but for the dropdown rather than the table.
+    /// When a parked search-box edit should rebuild the suggestions: typing
+    /// sets a deadline `SEARCH_DEBOUNCE` ahead and the dropdown rebuilds once
+    /// the user pauses. The table's filter box has no such deadline; it
+    /// narrows rows held in memory and applies on the keystroke.
     search_apply_at: Option<std::time::Instant>,
     /// Whether the suggestion popup is showing. Separate from `search_hits`
     /// being non-empty so Esc (and picking a hit) can dismiss the popup without
@@ -1363,13 +1338,8 @@ struct App {
     /// crate they belong to.
     crate_songs: Vec<SongPin>,
     crate_songs_for: Option<Id>,
-    /// Which layout the crate view shows, per kind of set: the records to
-    /// bring, or the songs (see `App::crate_layout` for the defaults).
-    crate_layouts: HashMap<CrateKind, crates::CrateLayout>,
-    /// Which tags each song carries: song key to the ids of the sets of
-    /// kind `CrateKind::Tag` it is in, in sidebar order. What every row's
-    /// Tags mark and menu asks; reloaded with `crate_sets`.
-    song_tags: HashMap<String, Vec<Id>>,
+    /// Which layout the crate view shows: the records to bring, or the songs.
+    crate_layout: crates::CrateLayout,
     /// The Tracklists window (see `tracklists`), opened from the tiny ≡
     /// button in the top bar.
     tracklist_open: bool,
@@ -2277,8 +2247,8 @@ struct Renaming {
 enum SidebarAction {
     /// Create a playlist under the given parent folder (`None` = top level).
     NewPlaylist(Option<Id>),
-    /// Make a crate, or a tag, and hand its row to the inline editor.
-    NewCrateSet(CrateKind),
+    /// Make a crate and hand its row to the inline editor.
+    NewCrateSet,
     RenameCrateSet(Id, String),
     DeleteCrateSet(Id),
     /// Songs dropped onto a crate (crate id, the dragged songs).
@@ -2366,9 +2336,6 @@ enum TrackMenuAction {
     Analyze(Vec<Id>),
     /// Link the target tracks into a playlist (playlist id, track ids).
     AddToPlaylist(Id, Vec<Id>),
-    /// Mark the target tracks' songs with a tag (`true`), or take the tag
-    /// off them (tag id, on, track ids). See `crates`.
-    SetTag(Id, bool, Vec<Id>),
     /// Unlink the target tracks from the viewed playlist; they stay in the catalog.
     RemoveFromPlaylist(Id, Vec<Id>),
     /// Permanently delete the target tracks from the catalog (every playlist + the

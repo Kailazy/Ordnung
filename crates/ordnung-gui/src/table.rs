@@ -204,7 +204,6 @@ impl App {
                 SortColumn::Duration => a.dur_ms.cmp(&b.dur_ms),
                 SortColumn::Bitrate => a.bitrate_val.cmp(&b.bitrate_val),
                 SortColumn::Notes => ci(&a.notes, &b.notes),
-                SortColumn::Tags => ci(&a.tags, &b.tags),
                 SortColumn::Added => a.added_at.cmp(&b.added_at),
                 SortColumn::Key => a.key_sort.cmp(&b.key_sort),
                 SortColumn::Bpm => fcmp(a.bpm_val, b.bpm_val),
@@ -689,7 +688,9 @@ impl App {
     /// only these rows" — the vinyl view has had exactly that as a second field
     /// beside its grid all along, so this is the same pattern for the table.
     ///
-    /// Live as you type behind the usual reload debounce. Per-column filters
+    /// Live as you type, applied on the keystroke: narrowing is an in-memory
+    /// pass over the rows the view holds (see `load_rows`), and the bar draws
+    /// before the rows, so they change in the same frame. Per-column filters
     /// (double-click a header) stack on top of it, and the toolbar's "Clear
     /// filters" clears both at once.
     pub(crate) fn draw_table_filter_bar(&mut self, ui: &mut egui::Ui) {
@@ -728,9 +729,7 @@ impl App {
                 }
             }
             if field.changed() {
-                // Every keystroke would otherwise re-query the catalog for the
-                // whole table; park it and rebuild once typing settles.
-                self.filter_apply_at = Some(std::time::Instant::now() + crate::app::SEARCH_DEBOUNCE);
+                self.reload();
             }
             // The ✖ keeps its slot while hidden so nothing right of it shifts as
             // a filter is typed or cleared — same as the vinyl toolbar's.
@@ -745,7 +744,7 @@ impl App {
                             .clicked()
                     {
                         self.filter.clear();
-                        self.filter_apply_at = Some(std::time::Instant::now());
+                        self.reload();
                     }
                 },
             );
@@ -917,16 +916,6 @@ impl App {
             .filter(|x| self.selection.contains(&x.id))
             .map(|x| x.id)
             .collect();
-        // The selection's song keys in the same order, for the Tags
-        // submenu: a tag is checked when every selected song carries it.
-        let selected_keys: Vec<String> = self
-            .rows
-            .iter()
-            .filter(|x| self.selection.contains(&x.id))
-            .map(|x| crate::crates::track_song_key(&x.artist, &x.title))
-            .collect();
-        let menu_sets = &self.crate_sets;
-        let song_tags = &self.song_tags;
         const ROW_H: f32 = 28.0;
         const COVER_PX: f32 = 24.0;
         /// Half-extent of the Discogs-match check painted in the cover's corner,
@@ -1568,7 +1557,6 @@ impl App {
                                     TableColumn::Format => &r.format_label,
                                     TableColumn::Bitrate => &r.bitrate,
                                     TableColumn::Notes => &r.notes,
-                                    TableColumn::Tags => &r.tags,
                                     TableColumn::Added => &r.added,
                                     _ => "",
                                 };
@@ -1836,24 +1824,6 @@ impl App {
                                                 }
                                             }
                                         });
-                                        // Tags ▸: a check per tag, on when every
-                                        // song the menu acts on carries it.
-                                        let tagged: Vec<Id> = {
-                                            let own = [crate::crates::track_song_key(&r.artist, &r.title)];
-                                            let keys: &[String] = if is_sel { &selected_keys } else { &own };
-                                            let mut common: Option<Vec<Id>> = None;
-                                            for k in keys {
-                                                let ids = song_tags.get(k).map(Vec::as_slice).unwrap_or(&[]);
-                                                common = Some(match common {
-                                                    None => ids.to_vec(),
-                                                    Some(c) => c.into_iter().filter(|i| ids.contains(i)).collect(),
-                                                });
-                                            }
-                                            common.unwrap_or_default()
-                                        };
-                                        if let Some((tag, on)) = crate::crates::tag_menu(ui, menu_sets, &tagged) {
-                                            menu_action = Some(TrackMenuAction::SetTag(tag, on, drag_ids.clone()));
-                                        }
                                         if let Some(pid) = menu_playlist_view {
                                             ui.separator();
                                             if ui.button("Remove from playlist").clicked() {
@@ -2397,10 +2367,6 @@ impl App {
                 }
                 self.reload();
             }
-            Some(TrackMenuAction::SetTag(tag, on, ids)) => {
-                let specs = self.track_specs(&ids);
-                self.set_tag(tag, on, specs);
-            }
             Some(TrackMenuAction::RemoveFromPlaylist(pid, ids)) => {
                 match Catalog::open(&self.db_path).and_then(|c| c.remove_tracks(pid, &ids)) {
                     Ok(n) => self.status = format!("Removed {n} track(s) from playlist."),
@@ -2675,10 +2641,15 @@ pub(crate) struct RowSources {
     /// Set by [`RowSources::invalidate`] when the catalog changed; the next
     /// [`load_rows`] re-reads everything before building rows.
     stale: bool,
-    /// The unfiltered Library listing, the one view whose row query is itself
-    /// a full-table read. Filled on the first unfiltered Library load after a
-    /// change; searches and playlists still query the catalog directly.
+    /// The unfiltered Library listing, read once per catalog change. A
+    /// search narrows it in memory (see [`load_rows`]) rather than
+    /// re-querying and re-decoding the whole table per keystroke.
     library: Option<Vec<Track>>,
+    /// The unfiltered listing of the playlist being viewed, keyed by its id
+    /// and narrowed the same way. Replaced when the view moves to another
+    /// playlist; dropped by [`RowSources::forget_playlist`] after an edit
+    /// that changed its membership without a full catalog change.
+    playlist: Option<(Id, Vec<Track>)>,
     /// Tracks with a successfully fetched external (Discogs) cover.
     ext_art: HashSet<Id>,
     /// Every track's `added_at` unix timestamp.
@@ -2704,6 +2675,7 @@ impl Default for RowSources {
         Self {
             stale: true,
             library: None,
+            playlist: None,
             ext_art: HashSet::new(),
             added_at: HashMap::new(),
             analyses: HashMap::new(),
@@ -2716,7 +2688,37 @@ impl RowSources {
     pub(crate) fn invalidate(&mut self) {
         self.stale = true;
         self.library = None;
+        self.playlist = None;
     }
+
+    /// Drop the held playlist listing so the next load re-reads it. For
+    /// playlist edits that bypass the change probe (see
+    /// `App::reload_after_playlist_edit`).
+    pub(crate) fn forget_playlist(&mut self) {
+        self.playlist = None;
+    }
+
+    /// The whole Library, unfiltered, reading it on the first call after a
+    /// change.
+    fn library_tracks(&mut self, catalog: &Catalog) -> Result<&[Track], String> {
+        if self.library.is_none() {
+            self.library = Some(catalog.list_tracks(None, 0).map_err(|e| e.to_string())?);
+        }
+        Ok(self.library.as_deref().unwrap_or_default())
+    }
+
+    /// Playlist `id`'s tracks in playlist order, unfiltered, reading them when
+    /// the view lands on a different playlist than the one held.
+    fn playlist_tracks(&mut self, catalog: &Catalog, id: Id) -> Result<&[Track], String> {
+        if self.playlist.as_ref().is_none_or(|(held, _)| *held != id) {
+            let tracks = catalog
+                .list_playlist_tracks(id, None)
+                .map_err(|e| e.to_string())?;
+            self.playlist = Some((id, tracks));
+        }
+        Ok(self.playlist.as_ref().map(|(_, t)| t.as_slice()).unwrap_or_default())
+    }
+
 
     /// Re-read the catalog-wide inputs from `catalog` if they are stale.
     fn ensure_fresh(&mut self, catalog: &Catalog) -> Result<(), String> {
@@ -2796,20 +2798,15 @@ pub(crate) fn load_rows(
     } else {
         Some(filter.trim())
     };
+    // The Library and the viewed playlist are held unfiltered and narrowed
+    // in memory: a search keystroke used to re-query the catalog and decode
+    // the whole listing again, which is why the filter box needed a
+    // debounce. `search_matches` is the SQL filter's twin, so both paths
+    // find the same rows.
     let tracks = match view {
-        // The whole, unfiltered library is the one listing worth keeping: it's
-        // a full read of the tracks table, and it's what every switch back
-        // from a playlist or the Vinyl section lands on.
-        LibraryView::Library if q.is_none() => match &sources.library {
-            Some(all) => Ok(all.clone()),
-            None => catalog.list_tracks(None, 0).map(|all| {
-                sources.library = Some(all.clone());
-                all
-            }),
-        },
-        LibraryView::Library => catalog.list_tracks(q, 0),
+        LibraryView::Library => Ok(narrow(sources.library_tracks(&catalog)?, q)),
+        LibraryView::Playlist(id) => Ok(narrow(sources.playlist_tracks(&catalog, *id)?, q)),
         LibraryView::RecentlyAdded => catalog.list_recently_added(q),
-        LibraryView::Playlist(id) => catalog.list_playlist_tracks(*id, q),
         // The Duplicates, Missing, Vinyl and USB views render from their own
         // caches (`dup_groups` / `missing_list` / `vinyl` / `usb_tracks`), not
         // the flat track table.
@@ -2833,33 +2830,8 @@ pub(crate) fn load_rows(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    // The user's tags per song, for the Tags column: the tag sets and
-    // which song keys are in them (see `crates`), read once per listing.
-    let (tag_sets, tagged): (Vec<CrateSet>, HashMap<String, Vec<Id>>) = if tracks.is_empty() {
-        (Vec::new(), HashMap::new())
-    } else {
-        let sets = catalog.list_crate_sets().map_err(|e| e.to_string())?;
-        let mut by_key: HashMap<String, Vec<Id>> = HashMap::new();
-        for (tag, key) in catalog
-            .crate_memberships(CrateKind::Tag)
-            .map_err(|e| e.to_string())?
-        {
-            by_key.entry(key).or_default().push(tag);
-        }
-        (sets, by_key)
-    };
     let mut rows = Vec::with_capacity(tracks.len());
     for t in tracks {
-        let tags = {
-            let key = crate::crates::track_song_key(
-                t.tags.artist.as_deref().unwrap_or(""),
-                t.tags.title.as_deref().unwrap_or(""),
-            );
-            tagged
-                .get(&key)
-                .map(|ids| crate::crates::tag_words(&tag_sets, ids))
-                .unwrap_or_default()
-        };
         let cached = analyses.get(&t.id);
         let analysis = cached.map(|c| &c.analysis);
         let bpm_val = analysis.as_ref().and_then(|a| a.bpm);
@@ -2927,7 +2899,6 @@ pub(crate) fn load_rows(
             format_label: format_label(t.format).into(),
             bitrate,
             notes: t.tags.comment.unwrap_or_default(),
-            tags,
             added: added_at
                 .get(&t.id)
                 .map(|&ts| fmt_added(ts, now))
@@ -2950,6 +2921,17 @@ pub(crate) fn load_rows(
         });
     }
     Ok(rows)
+}
+
+/// The tracks of `all` passing the free-text search `q`, in their given order.
+/// Blank `q` keeps every track. The matcher lives in core beside the SQL
+/// filter it mirrors.
+fn narrow(all: &[Track], q: Option<&str>) -> Vec<Track> {
+    let terms = ordnung_core::catalog::search_terms(q.unwrap_or(""));
+    all.iter()
+        .filter(|t| ordnung_core::catalog::search_matches(t, &terms))
+        .cloned()
+        .collect()
 }
 
 // --- worker thread bodies (mirror the CLI's command implementations) ---------

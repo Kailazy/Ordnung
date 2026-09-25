@@ -4,10 +4,12 @@ use crate::pick;
 use crate::ui::tokens::space;
 use ordnung_rbdb::edit;
 
-/// How long the search box waits for typing to stop before rebuilding the rows
-/// (see `App::filter_apply_at`). Short enough to feel immediate — comfortably
-/// under the ~200 ms gap that reads as a pause — while collapsing the keystrokes
-/// within a typed word into a single reload.
+/// How long the toolbar search box waits for typing to stop before rebuilding
+/// its suggestion list (see `App::search_apply_at`). Short enough to feel
+/// immediate — comfortably under the ~200 ms gap that reads as a pause — while
+/// collapsing the keystrokes within a typed word into a single rebuild. The
+/// table's own filter box needs no debounce: it narrows rows held in memory
+/// (see `load_rows`) and applies on the keystroke.
 pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 /// Decoder threads behind the vinyl cover wall; see `spawn_vinyl_cover_loader`.
 const VINYL_COVER_WORKERS: usize = 4;
@@ -112,7 +114,6 @@ impl App {
             vinyl_loaded: false,
             rows: Vec::new(),
             filter: String::new(),
-            filter_apply_at: None,
             search_hits: Vec::new(),
             search_query: String::new(),
             search_apply_at: None,
@@ -170,10 +171,9 @@ impl App {
             library_index_dirty: true,
             liked_to_get_only: false,
             crate_sets: Vec::new(),
-            song_tags: HashMap::new(),
             crate_songs: Vec::new(),
             crate_songs_for: None,
-            crate_layouts: HashMap::new(),
+            crate_layout: Default::default(),
             tracklists: Vec::new(),
             tracklist_current: None,
             tracklist_entries: Vec::new(),
@@ -630,6 +630,8 @@ impl App {
         if let Some(p) = self.catalog_probe.as_mut() {
             let _ = p.changed();
         }
+        // The held playlist listing is what the write changed.
+        self.row_sources.forget_playlist();
         (self.playlists, self.playlist_stats) = Catalog::open(&self.db_path)
             .and_then(|c| Ok((c.list_playlists()?, c.playlist_stats()?)))
             .unwrap_or_default();
@@ -1870,8 +1872,6 @@ impl App {
                         .map(|b| b.to_string())
                         .unwrap_or_else(|| "—".into()),
                     notes: t.tags.comment.clone().unwrap_or_default(),
-                    // Device tracks aren't in the catalog, so they carry no tags.
-                    tags: String::new(),
                     added: "—".into(),
                     added_at: 0,
                     // The stick's own ANLZ waveform first (free, matches what
@@ -2238,21 +2238,8 @@ impl App {
             }
         }
 
-        // Apply a parked search edit once typing has settled. Repainting on the
-        // deadline is what makes it fire while the user sits still — without it the
-        // rows would wait for whatever incidental event repainted next.
-        if let Some(at) = self.filter_apply_at {
-            let now = std::time::Instant::now();
-            if now >= at {
-                self.filter_apply_at = None;
-                self.reload();
-            } else {
-                ctx.request_repaint_after(at - now);
-            }
-        }
-        // The search box's own debounce. Separate from the table filter's above:
-        // this one only rebuilds the suggestion list, so it never touches the
-        // rows on screen.
+        // The search box's debounce: it only rebuilds the suggestion list, so
+        // it never touches the rows on screen.
         if let Some(at) = self.search_apply_at {
             let now = std::time::Instant::now();
             if now >= at {
@@ -2645,8 +2632,8 @@ impl App {
                                 .filter(|s| crate::song_rows::song_matches(s, &query))
                                 .count();
                             if n == 1 { "1 song".to_string() } else { format!("{n} songs") }
-                        } else if let LibraryView::CrateSet(id) = self.view {
-                            self.crate_count_words(id)
+                        } else if let LibraryView::CrateSet(_) = self.view {
+                            self.crate_count_words()
                         } else {
                             format!("{} tracks", self.rows.len())
                         };
@@ -3025,7 +3012,6 @@ impl App {
             Some(InspectorAction::WriteToFile(id, path)) => self.save_tags(id, Some(path)),
             Some(InspectorAction::ViewRelease(id)) => self.open_track_release_sheet(id, ctx),
             Some(InspectorAction::Like(spec)) => self.toggle_like(spec),
-            Some(InspectorAction::SetTag(tag, on, spec)) => self.set_tag(tag, on, vec![spec]),
             None => {}
         }
 
@@ -3394,13 +3380,13 @@ impl App {
                             .on_hover_note("New crate")
                             .clicked()
                         {
-                            *sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Crate));
+                            *sidebar_action = Some(SidebarAction::NewCrateSet);
                         }
                         ui.add_space(6.0);
                     } else if crate::sidebar::list_header(ui, "CRATES", "New crate: a set of songs on records to bring to a gig") {
-                        *sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Crate));
+                        *sidebar_action = Some(SidebarAction::NewCrateSet);
                     }
-                    if crate_sets.iter().any(|c| c.kind == CrateKind::Crate) {
+                    if !crate_sets.is_empty() {
                         egui::ScrollArea::vertical()
                             .id_salt("nav_crates_scroll")
                             .max_height(if lead { 260.0 } else { 180.0 })
@@ -3410,7 +3396,6 @@ impl App {
                                     ui,
                                     density,
                                     &crate_sets,
-                                    CrateKind::Crate,
                                     view,
                                     renaming,
                                     sidebar_action,
@@ -3544,35 +3529,6 @@ impl App {
                                         &mut drop_rects,
                                     );
                                     self.playlist_screen_rects = drop_rects;
-                                    // The tags, under the playlists: the
-                                    // words the user marks songs with, one
-                                    // row each in the playlist row's shape.
-                                    // A tag is a set of songs like a crate
-                                    // (see `crates`), so the rows, the
-                                    // rename and the drop target are the
-                                    // crate's.
-                                    ui.add_space(10.0);
-                                    if density.icons_only() {
-                                        if crate::sidebar::rail_add_tile(ui)
-                                            .on_hover_note("New tag")
-                                            .clicked()
-                                        {
-                                            sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Tag));
-                                        }
-                                        ui.add_space(6.0);
-                                    } else if crate::sidebar::list_header(ui, "TAGS", "New tag: a word to mark songs with, like dub or sunrise") {
-                                        sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Tag));
-                                    }
-                                    let crate_sets = self.crate_sets.clone();
-                                    crate::sidebar::draw_crate_rows(
-                                        ui,
-                                        density,
-                                        &crate_sets,
-                                        CrateKind::Tag,
-                                        &mut self.view,
-                                        &mut self.renaming,
-                                        &mut sidebar_action,
-                                    );
                                 }
                             });
                     });
@@ -3708,17 +3664,13 @@ impl App {
                     self.reload_after_playlist_edit();
                 }
             }
-            Some(SidebarAction::NewCrateSet(kind)) => {
-                let placeholder = match kind {
-                    CrateKind::Crate => "New crate",
-                    CrateKind::Tag => "New tag",
-                };
-                match Catalog::open(&self.db_path).and_then(|c| c.create_crate_set(placeholder, kind)) {
+            Some(SidebarAction::NewCrateSet) => {
+                match Catalog::open(&self.db_path).and_then(|c| c.create_crate_set("New crate")) {
                     Ok(id) => {
                         self.view = LibraryView::CrateSet(id);
                         // An empty buffer, like a new playlist: the hint shows
                         // the placeholder, and a blank name on blur discards
-                        // the set.
+                        // the crate.
                         self.renaming = Some(Renaming {
                             id,
                             tree: RenameTree::CrateSet,
@@ -3727,32 +3679,24 @@ impl App {
                             needs_focus: true,
                         });
                     }
-                    Err(e) => self.fail(format!("Couldn't make the {}: {e}", kind.noun())),
+                    Err(e) => self.fail(format!("Couldn't make the crate: {e}")),
                 }
                 self.load_crate_sets();
             }
             Some(SidebarAction::RenameCrateSet(id, name)) => {
-                let noun = self.crate_kind(id).noun();
                 if let Err(e) = Catalog::open(&self.db_path).and_then(|c| c.rename_crate_set(id, &name)) {
-                    self.fail(format!("Couldn't rename the {noun}: {e}"));
+                    self.fail(format!("Couldn't rename the crate: {e}"));
                 }
                 self.load_crate_sets();
-                // A renamed tag reads differently in the library's Tags column.
-                self.reload();
             }
             Some(SidebarAction::DeleteCrateSet(id)) => {
-                let kind = self.crate_kind(id);
                 if let Err(e) = Catalog::open(&self.db_path).and_then(|c| c.delete_crate_set(id)) {
-                    self.fail(format!("Couldn't delete the {}: {e}", kind.noun()));
+                    self.fail(format!("Couldn't delete the crate: {e}"));
                 }
                 if self.view == LibraryView::CrateSet(id) {
-                    self.view = match kind {
-                        CrateKind::Crate => LibraryView::Vinyl,
-                        CrateKind::Tag => LibraryView::Library,
-                    };
+                    self.view = LibraryView::Vinyl;
                 }
                 self.load_crate_sets();
-                self.reload();
             }
             Some(SidebarAction::AddSongs(id, songs)) => {
                 self.add_songs_to_crate(id, songs);

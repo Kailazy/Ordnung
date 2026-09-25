@@ -7,9 +7,9 @@
 use crate::error::{Error, Result};
 use crate::model::key::{Key, Mode, PitchClass};
 use crate::model::{
-    Analysis, AudioProperties, Beat, Beatgrid, ChosenBy, CrateKind, CrateSet, Cue, DugRelease,
-    Format, Id, Playlist, SellerListing, SellerShop, SongPin, Tags, Track, Tracklist,
-    TracklistEntry, TranscodeVerdict, VinylList, VinylRecord,
+    Analysis, AudioProperties, Beat, Beatgrid, ChosenBy, CrateSet, Cue, DugRelease, Format, Id,
+    Playlist, SellerListing, SellerShop, SongPin, Tags, Track, Tracklist, TracklistEntry,
+    TranscodeVerdict, VinylList, VinylRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashMap;
@@ -366,10 +366,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 ///
 /// Schema 22 adds the crates (`crates`, `crate_songs`): named sets of
 /// songs on records, the vinyl side's playlists (see [`CrateSet`]).
-///
-/// Schema 23 adds `crates.kind`: a set is a crate or a tag (see
-/// [`CrateKind`]). Every set that existed before is a crate.
-const SCHEMA_VERSION: i64 = 23;
+const SCHEMA_VERSION: i64 = 22;
 
 /// The columns of the two vinyl list tables (`vinyl_collection`,
 /// `vinyl_wantlist`), shared so both are created alike and so an older
@@ -850,8 +847,7 @@ impl Catalog {
             CREATE TABLE IF NOT EXISTS crates (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 name       TEXT NOT NULL,
-                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                kind       TEXT NOT NULL DEFAULT 'crate'
+                created_at INTEGER NOT NULL DEFAULT (unixepoch())
             );
             CREATE TABLE IF NOT EXISTS crate_songs (
                 crate_id       INTEGER NOT NULL REFERENCES crates(id) ON DELETE CASCADE,
@@ -888,8 +884,6 @@ impl Catalog {
         // Schema 14 — a playlist's own icon and colour (see `Playlist::icon`).
         self.add_column_if_missing("playlists", "icon", "TEXT")?;
         self.add_column_if_missing("playlists", "color", "INTEGER")?;
-        // Schema 23: a set is a crate or a tag (see `CrateKind`).
-        self.add_column_if_missing("crates", "kind", "TEXT NOT NULL DEFAULT 'crate'")?;
 
         // Full standardized tag set (added later — DBs created before now lose
         // these by default; rescanning fills them in).
@@ -4553,29 +4547,25 @@ impl Catalog {
 
     // --- Crates ------------------------------------------------------------
 
-    /// Make a crate, or a tag (see [`CrateKind`]). Returns its id.
-    pub fn create_crate_set(&self, name: &str, kind: CrateKind) -> Result<Id> {
+    /// Make a crate. Returns its id.
+    pub fn create_crate_set(&self, name: &str) -> Result<Id> {
         let name = name.trim();
         if name.is_empty() {
-            return Err(Error::Invalid(format!("a {} needs a name", kind.noun())));
+            return Err(Error::Invalid("a crate needs a name".into()));
         }
-        self.conn.execute(
-            "INSERT INTO crates (name, kind) VALUES (?1, ?2)",
-            params![name, kind.as_str()],
-        )?;
+        self.conn
+            .execute("INSERT INTO crates (name) VALUES (?1)", params![name])?;
         Ok(self.conn.last_insert_rowid() as Id)
     }
 
-    /// Every crate and tag with its counts, oldest first, so the sidebar
-    /// keeps a stable order as sets are added. The caller splits them by
-    /// kind.
+    /// Every crate with its counts, oldest first, so the sidebar keeps a
+    /// stable order as crates are added.
     pub fn list_crate_sets(&self) -> Result<Vec<CrateSet>> {
         let mut stmt = self.conn.prepare(
             "SELECT c.id, c.name, c.created_at,
                     (SELECT COUNT(*) FROM crate_songs s WHERE s.crate_id = c.id),
                     (SELECT COUNT(DISTINCT s.release_id) FROM crate_songs s
-                      WHERE s.crate_id = c.id AND s.release_id IS NOT NULL),
-                    c.kind
+                      WHERE s.crate_id = c.id AND s.release_id IS NOT NULL)
              FROM crates c
              ORDER BY c.created_at ASC, c.id ASC",
         )?;
@@ -4587,26 +4577,7 @@ impl Catalog {
                     created_at: r.get(2)?,
                     songs: r.get::<_, i64>(3)? as u32,
                     records: r.get::<_, i64>(4)? as u32,
-                    kind: CrateKind::parse(&r.get::<_, String>(5)?),
                 })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
-    }
-
-    /// Which songs are in which sets of `kind`, as `(set id, song key)`
-    /// pairs: the one read behind every "which tags does this song
-    /// carry?" mark, so a row asks a map instead of the catalog.
-    pub fn crate_memberships(&self, kind: CrateKind) -> Result<Vec<(Id, String)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT s.crate_id, s.song_key FROM crate_songs s
-             JOIN crates c ON c.id = s.crate_id
-             WHERE c.kind = ?1
-             ORDER BY c.created_at ASC, c.id ASC, s.ord ASC",
-        )?;
-        let rows = stmt
-            .query_map(params![kind.as_str()], |r| {
-                Ok((r.get::<_, i64>(0)? as Id, r.get::<_, String>(1)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
@@ -5392,22 +5363,65 @@ fn format_from_str(s: &str) -> Format {
     }
 }
 
-/// Every column row_to_track reads, in one place so list_tracks/get_track stay in sync.
-const SELECT_COLS: &str = "id, source_path, format, sample_rate, bit_depth, channels,
-    duration_ms, bitrate_kbps,
-    title, artist, album, genre, label, year, comment, rating,
-    track_number, track_total, disc_number, disc_total,
-    album_artist, composer, conductor, remixer, producer, lyricist, arranger,
-    performer, mix_dj, writer,
-    recording_date, release_date, original_release_date,
-    isrc, barcode, catalog_number, publisher, copyright, release_country,
-    bpm_tag, initial_key_tag, mood, grouping, compilation,
-    subtitle, description, language, script, lyrics, work, movement,
-    movement_number, movement_total,
-    encoded_by, encoder_software, encoder_settings, original_artist, original_album,
-    mb_recording_id, mb_track_id, mb_release_id, mb_release_group_id,
-    mb_artist_id, mb_release_artist_id, mb_work_id, mb_release_type, acoust_id,
-    rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak, has_cover";
+/// Every column `row_to_track` reads, in one place so `list_tracks` and
+/// `get_track` stay in sync. Declared once; the macro derives both the SQL
+/// column list and a `Col` index for each name, so the decoder reads by
+/// position: a by-name `Row::get` scans the statement's column names on every
+/// call, and across these ~76 columns that was most of a track listing's cost.
+macro_rules! track_cols {
+    ($first:ident $(, $rest:ident)* $(,)?) => {
+        /// Position of each column in [`SELECT_COLS`].
+        #[allow(non_camel_case_types, dead_code)]
+        #[derive(Clone, Copy)]
+        enum Col {
+            $first $(, $rest)*
+        }
+        const SELECT_COLS: &str = concat!(stringify!($first) $(, ", ", stringify!($rest))*);
+    };
+}
+track_cols!(
+    id, source_path, format, sample_rate, bit_depth, channels,
+    duration_ms, bitrate_kbps, title, artist, album, genre,
+    label, year, comment, rating, track_number, track_total,
+    disc_number, disc_total, album_artist, composer, conductor, remixer,
+    producer, lyricist, arranger, performer, mix_dj, writer,
+    recording_date, release_date, original_release_date, isrc, barcode, catalog_number,
+    publisher, copyright, release_country, bpm_tag, initial_key_tag, mood,
+    grouping, compilation, subtitle, description, language, script,
+    lyrics, work, movement, movement_number, movement_total, encoded_by,
+    encoder_software, encoder_settings, original_artist, original_album, mb_recording_id, mb_track_id,
+    mb_release_id, mb_release_group_id, mb_artist_id, mb_release_artist_id, mb_work_id, mb_release_type,
+    acoust_id, rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak, has_cover,
+);
+
+/// The terms a free-text query splits into, folded the way the SQL filter
+/// binds them (see [`fold_search`]). Empty for a blank query. Pair with
+/// [`search_matches`] to filter an already-loaded listing in memory instead of
+/// re-querying the catalog.
+pub fn search_terms(query: &str) -> Vec<String> {
+    query.split_whitespace().map(fold_search).collect()
+}
+
+/// True when `track` passes the free-text search for `terms` (from
+/// [`search_terms`]): every term must occur in at least one of the same
+/// columns the SQL filter scans (artist, title, album, genre, album artist),
+/// folded the same way. No terms matches everything. This is the in-memory
+/// twin of `search_filter`, so a view holding its unfiltered rows can narrow
+/// them per keystroke without a catalog round-trip.
+pub fn search_matches(track: &Track, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+    let t = &track.tags;
+    let fields = [&t.artist, &t.title, &t.album, &t.genre, &t.album_artist];
+    let folded: Vec<String> = fields
+        .iter()
+        .map(|f| fold_search(f.as_deref().unwrap_or("")))
+        .collect();
+    terms
+        .iter()
+        .all(|term| folded.iter().any(|f| f.contains(term.as_str())))
+}
 
 /// Build a SQL WHERE fragment (and its bound `%term%` params) for a flexible
 /// free-text search across the human-visible text columns
@@ -5423,10 +5437,9 @@ const SELECT_COLS: &str = "id, source_path, format, sample_rate, bit_depth, chan
 /// fragment uses positional `?` placeholders, so its params must be bound in
 /// order ahead of any params that follow it in the statement.
 fn search_filter(query: Option<&str>, prefix: &str) -> (String, Vec<String>) {
-    let terms: Vec<String> = query
+    let terms: Vec<String> = search_terms(query.unwrap_or(""))
         .into_iter()
-        .flat_map(|q| q.split_whitespace())
-        .map(|t| format!("%{}%", fold_search(t)))
+        .map(|t| format!("%{t}%"))
         .collect();
     if terms.is_empty() {
         return ("1".to_string(), Vec::new());
@@ -5466,85 +5479,84 @@ fn cue_from_row(r: &Row, base: usize) -> rusqlite::Result<Cue> {
 }
 
 fn row_to_track(r: &Row) -> rusqlite::Result<Track> {
-    let format: String = r.get("format")?;
+    let format: String = r.get(Col::format as usize)?;
     Ok(Track {
-        id: r.get::<_, i64>("id")? as Id,
-        source_path: r.get("source_path")?,
+        id: r.get::<_, i64>(Col::id as usize)? as Id,
+        source_path: r.get(Col::source_path as usize)?,
         format: format_from_str(&format),
         properties: Some(AudioProperties {
-            sample_rate_hz: r.get::<_, Option<i64>>("sample_rate")?.unwrap_or(0) as u32,
-            bit_depth: r.get::<_, Option<i64>>("bit_depth")?.map(|v| v as u8),
-            channels: r.get::<_, Option<i64>>("channels")?.unwrap_or(0) as u8,
-            duration_ms: r.get::<_, Option<i64>>("duration_ms")?.unwrap_or(0) as u64,
-            bitrate_kbps: r.get::<_, Option<i64>>("bitrate_kbps")?.map(|v| v as u32),
+            sample_rate_hz: r.get::<_, Option<i64>>(Col::sample_rate as usize)?.unwrap_or(0) as u32,
+            bit_depth: r.get::<_, Option<i64>>(Col::bit_depth as usize)?.map(|v| v as u8),
+            channels: r.get::<_, Option<i64>>(Col::channels as usize)?.unwrap_or(0) as u8,
+            duration_ms: r.get::<_, Option<i64>>(Col::duration_ms as usize)?.unwrap_or(0) as u64,
+            bitrate_kbps: r.get::<_, Option<i64>>(Col::bitrate_kbps as usize)?.map(|v| v as u32),
         }),
         tags: Tags {
-            title: r.get("title")?,
-            artist: r.get("artist")?,
-            album: r.get("album")?,
-            genre: r.get("genre")?,
-            label: r.get("label")?,
-            year: r.get::<_, Option<i64>>("year")?.map(|v| v as u16),
-            comment: r.get("comment")?,
-            rating: r.get::<_, Option<i64>>("rating")?.map(|v| v as u8),
-            track_number: r.get::<_, Option<i64>>("track_number")?.map(|v| v as u16),
-            track_total: r.get::<_, Option<i64>>("track_total")?.map(|v| v as u16),
-            disc_number: r.get::<_, Option<i64>>("disc_number")?.map(|v| v as u16),
-            disc_total: r.get::<_, Option<i64>>("disc_total")?.map(|v| v as u16),
-            album_artist: r.get("album_artist")?,
-            composer: r.get("composer")?,
-            conductor: r.get("conductor")?,
-            remixer: r.get("remixer")?,
-            producer: r.get("producer")?,
-            lyricist: r.get("lyricist")?,
-            arranger: r.get("arranger")?,
-            performer: r.get("performer")?,
-            mix_dj: r.get("mix_dj")?,
-            writer: r.get("writer")?,
-            recording_date: r.get("recording_date")?,
-            release_date: r.get("release_date")?,
-            original_release_date: r.get("original_release_date")?,
-            isrc: r.get("isrc")?,
-            barcode: r.get("barcode")?,
-            catalog_number: r.get("catalog_number")?,
-            publisher: r.get("publisher")?,
-            copyright: r.get("copyright")?,
-            release_country: r.get("release_country")?,
-            bpm_tag: r.get::<_, Option<f64>>("bpm_tag")?.map(|v| v as f32),
-            initial_key_tag: r.get("initial_key_tag")?,
-            mood: r.get("mood")?,
-            grouping: r.get("grouping")?,
-            compilation: r.get::<_, Option<i64>>("compilation")?.map(|v| v != 0),
-            subtitle: r.get("subtitle")?,
-            description: r.get("description")?,
-            language: r.get("language")?,
-            script: r.get("script")?,
-            lyrics: r.get("lyrics")?,
-            work: r.get("work")?,
-            movement: r.get("movement")?,
-            movement_number: r
-                .get::<_, Option<i64>>("movement_number")?
+            title: r.get(Col::title as usize)?,
+            artist: r.get(Col::artist as usize)?,
+            album: r.get(Col::album as usize)?,
+            genre: r.get(Col::genre as usize)?,
+            label: r.get(Col::label as usize)?,
+            year: r.get::<_, Option<i64>>(Col::year as usize)?.map(|v| v as u16),
+            comment: r.get(Col::comment as usize)?,
+            rating: r.get::<_, Option<i64>>(Col::rating as usize)?.map(|v| v as u8),
+            track_number: r.get::<_, Option<i64>>(Col::track_number as usize)?.map(|v| v as u16),
+            track_total: r.get::<_, Option<i64>>(Col::track_total as usize)?.map(|v| v as u16),
+            disc_number: r.get::<_, Option<i64>>(Col::disc_number as usize)?.map(|v| v as u16),
+            disc_total: r.get::<_, Option<i64>>(Col::disc_total as usize)?.map(|v| v as u16),
+            album_artist: r.get(Col::album_artist as usize)?,
+            composer: r.get(Col::composer as usize)?,
+            conductor: r.get(Col::conductor as usize)?,
+            remixer: r.get(Col::remixer as usize)?,
+            producer: r.get(Col::producer as usize)?,
+            lyricist: r.get(Col::lyricist as usize)?,
+            arranger: r.get(Col::arranger as usize)?,
+            performer: r.get(Col::performer as usize)?,
+            mix_dj: r.get(Col::mix_dj as usize)?,
+            writer: r.get(Col::writer as usize)?,
+            recording_date: r.get(Col::recording_date as usize)?,
+            release_date: r.get(Col::release_date as usize)?,
+            original_release_date: r.get(Col::original_release_date as usize)?,
+            isrc: r.get(Col::isrc as usize)?,
+            barcode: r.get(Col::barcode as usize)?,
+            catalog_number: r.get(Col::catalog_number as usize)?,
+            publisher: r.get(Col::publisher as usize)?,
+            copyright: r.get(Col::copyright as usize)?,
+            release_country: r.get(Col::release_country as usize)?,
+            bpm_tag: r.get::<_, Option<f64>>(Col::bpm_tag as usize)?.map(|v| v as f32),
+            initial_key_tag: r.get(Col::initial_key_tag as usize)?,
+            mood: r.get(Col::mood as usize)?,
+            grouping: r.get(Col::grouping as usize)?,
+            compilation: r.get::<_, Option<i64>>(Col::compilation as usize)?.map(|v| v != 0),
+            subtitle: r.get(Col::subtitle as usize)?,
+            description: r.get(Col::description as usize)?,
+            language: r.get(Col::language as usize)?,
+            script: r.get(Col::script as usize)?,
+            lyrics: r.get(Col::lyrics as usize)?,
+            work: r.get(Col::work as usize)?,
+            movement: r.get(Col::movement as usize)?,
+            movement_number: r.get::<_, Option<i64>>(Col::movement_number as usize)?
                 .map(|v| v as u16),
-            movement_total: r.get::<_, Option<i64>>("movement_total")?.map(|v| v as u16),
-            encoded_by: r.get("encoded_by")?,
-            encoder_software: r.get("encoder_software")?,
-            encoder_settings: r.get("encoder_settings")?,
-            original_artist: r.get("original_artist")?,
-            original_album: r.get("original_album")?,
-            musicbrainz_recording_id: r.get("mb_recording_id")?,
-            musicbrainz_track_id: r.get("mb_track_id")?,
-            musicbrainz_release_id: r.get("mb_release_id")?,
-            musicbrainz_release_group_id: r.get("mb_release_group_id")?,
-            musicbrainz_artist_id: r.get("mb_artist_id")?,
-            musicbrainz_release_artist_id: r.get("mb_release_artist_id")?,
-            musicbrainz_work_id: r.get("mb_work_id")?,
-            musicbrainz_release_type: r.get("mb_release_type")?,
-            acoust_id: r.get("acoust_id")?,
-            replay_gain_track_gain: r.get::<_, Option<f64>>("rg_track_gain")?.map(|v| v as f32),
-            replay_gain_track_peak: r.get::<_, Option<f64>>("rg_track_peak")?.map(|v| v as f32),
-            replay_gain_album_gain: r.get::<_, Option<f64>>("rg_album_gain")?.map(|v| v as f32),
-            replay_gain_album_peak: r.get::<_, Option<f64>>("rg_album_peak")?.map(|v| v as f32),
-            has_cover: r.get::<_, Option<i64>>("has_cover")?.unwrap_or(0) != 0,
+            movement_total: r.get::<_, Option<i64>>(Col::movement_total as usize)?.map(|v| v as u16),
+            encoded_by: r.get(Col::encoded_by as usize)?,
+            encoder_software: r.get(Col::encoder_software as usize)?,
+            encoder_settings: r.get(Col::encoder_settings as usize)?,
+            original_artist: r.get(Col::original_artist as usize)?,
+            original_album: r.get(Col::original_album as usize)?,
+            musicbrainz_recording_id: r.get(Col::mb_recording_id as usize)?,
+            musicbrainz_track_id: r.get(Col::mb_track_id as usize)?,
+            musicbrainz_release_id: r.get(Col::mb_release_id as usize)?,
+            musicbrainz_release_group_id: r.get(Col::mb_release_group_id as usize)?,
+            musicbrainz_artist_id: r.get(Col::mb_artist_id as usize)?,
+            musicbrainz_release_artist_id: r.get(Col::mb_release_artist_id as usize)?,
+            musicbrainz_work_id: r.get(Col::mb_work_id as usize)?,
+            musicbrainz_release_type: r.get(Col::mb_release_type as usize)?,
+            acoust_id: r.get(Col::acoust_id as usize)?,
+            replay_gain_track_gain: r.get::<_, Option<f64>>(Col::rg_track_gain as usize)?.map(|v| v as f32),
+            replay_gain_track_peak: r.get::<_, Option<f64>>(Col::rg_track_peak as usize)?.map(|v| v as f32),
+            replay_gain_album_gain: r.get::<_, Option<f64>>(Col::rg_album_gain as usize)?.map(|v| v as f32),
+            replay_gain_album_peak: r.get::<_, Option<f64>>(Col::rg_album_peak as usize)?.map(|v| v as f32),
+            has_cover: r.get::<_, Option<i64>>(Col::has_cover as usize)?.unwrap_or(0) != 0,
         },
         analysis: None,
         cues: Vec::new(),
@@ -7276,9 +7288,9 @@ mod tests {
             local_track_id: None,
             added_at: 5,
         };
-        assert!(cat.create_crate_set("  ", CrateKind::Crate).is_err());
-        let gig = cat.create_crate_set("Friday", CrateKind::Crate).unwrap();
-        let other = cat.create_crate_set("Sunday", CrateKind::Crate).unwrap();
+        assert!(cat.create_crate_set("  ").is_err());
+        let gig = cat.create_crate_set("Friday").unwrap();
+        let other = cat.create_crate_set("Sunday").unwrap();
         let n = cat
             .add_crate_songs(
                 gig,
@@ -7321,51 +7333,6 @@ mod tests {
         assert_eq!(cat.list_crate_sets().unwrap().len(), 1);
         assert!(cat.list_crate_songs(gig).unwrap().is_empty());
         assert!(cat.add_crate_songs(gig, &[pin("A", "B", None, "")]).is_err());
-    }
-
-    #[test]
-    fn tags_are_sets_of_their_own_kind_and_answer_membership() {
-        let path = temp_db_path("tags");
-        let cat = Catalog::open(&path).unwrap();
-        let pin = |artist: &str, title: &str| SongPin {
-            id: 0,
-            artist: artist.into(),
-            title: title.into(),
-            release_id: None,
-            position: None,
-            rel_artist: None,
-            rel_title: None,
-            rel_label: None,
-            rel_catno: None,
-            rel_year: None,
-            rel_thumb: None,
-            local_track_id: None,
-            added_at: 5,
-        };
-        let gig = cat.create_crate_set("Friday", CrateKind::Crate).unwrap();
-        let dub = cat.create_crate_set("dub", CrateKind::Tag).unwrap();
-        let dark = cat.create_crate_set("dark", CrateKind::Tag).unwrap();
-        cat.add_crate_songs(gig, &[pin("Rhythm & Sound", "Mango Drive")]).unwrap();
-        cat.add_crate_songs(dub, &[pin("Rhythm & Sound", "Mango Drive"), pin("Basic Channel", "Phylyps Trak")]).unwrap();
-        cat.add_crate_songs(dark, &[pin("Basic Channel", "Phylyps Trak")]).unwrap();
-        let sets = cat.list_crate_sets().unwrap();
-        assert_eq!(
-            sets.iter().map(|c| (c.name.as_str(), c.kind)).collect::<Vec<_>>(),
-            [("Friday", CrateKind::Crate), ("dub", CrateKind::Tag), ("dark", CrateKind::Tag)]
-        );
-        // Memberships of one kind only, in set order; the crate's song
-        // is not a tag membership.
-        let tagged = cat.crate_memberships(CrateKind::Tag).unwrap();
-        let phylyps = song_key("Basic Channel", "Phylyps Trak", None, None);
-        let mango = song_key("Rhythm & Sound", "Mango Drive", None, None);
-        assert_eq!(
-            tagged,
-            [(dub, mango.clone()), (dub, phylyps.clone()), (dark, phylyps.clone())]
-        );
-        assert_eq!(cat.crate_memberships(CrateKind::Crate).unwrap(), [(gig, mango)]);
-        // Untagging is taking the song out of the set.
-        assert!(cat.remove_crate_song(dub, "basic channel", "phylyps trak", None, None).unwrap());
-        assert_eq!(cat.crate_memberships(CrateKind::Tag).unwrap().len(), 2);
     }
 
     #[test]
@@ -7790,6 +7757,45 @@ mod tests {
             found.iter().any(|t| t.id == rid),
             "zero-width characters in tags must not defeat the search"
         );
+    }
+
+    /// The GUI narrows the Library it already holds with `search_matches`
+    /// instead of re-querying, so the in-memory matcher must pick exactly the
+    /// rows the SQL filter would: same columns, same folding, terms AND-ed
+    /// across fields, blank query keeps all.
+    #[test]
+    fn search_matches_agrees_with_the_sql_filter() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let mut a = scanned("/m/apple.mp3", "DJ Pear", "House", 1000);
+        a.tags.title = Some("Apple".into());
+        cat.upsert_scanned(&a).unwrap();
+        let mut b = scanned("/m/apple2.mp3", "Someone Else", "House", 1000);
+        b.tags.title = Some("Apple".into());
+        b.tags.album_artist = Some("Various Órchards".into());
+        cat.upsert_scanned(&b).unwrap();
+        let mut c = scanned("/m/attfalt.aiff", "Exos", "Techno", 1000);
+        c.tags.title = Some("Áttfalt".into());
+        c.tags.album = Some("Q\u{200b}-\u{200b}Box Remixed".into());
+        cat.upsert_scanned(&c).unwrap();
+        let d = scanned("/m/untitled.wav", "", "", 1000);
+        cat.upsert_scanned(&d).unwrap();
+
+        let all = cat.list_tracks(None, 0).unwrap();
+        assert_eq!(all.len(), 4);
+        for q in [
+            "", "   ", "apple", "apple dj pear", "pear apple", "DJ APPLE", "apple banana",
+            "orchards", "attfalt", "ÁTTFALT", "A\u{0301}ttfalt", "q-box", "house", "techno exos",
+            "untitled", "zzz",
+        ] {
+            let sql: Vec<Id> = cat.list_tracks(Some(q), 0).unwrap().iter().map(|t| t.id).collect();
+            let terms = search_terms(q);
+            let mem: Vec<Id> = all
+                .iter()
+                .filter(|t| search_matches(t, &terms))
+                .map(|t| t.id)
+                .collect();
+            assert_eq!(mem, sql, "query {q:?}: in-memory and SQL filters disagree");
+        }
     }
 
     /// Diacritics fold in fuzzy matching too, so an accented file links to an

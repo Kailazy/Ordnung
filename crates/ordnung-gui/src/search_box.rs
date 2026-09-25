@@ -84,7 +84,6 @@ impl App {
     pub(crate) fn clear_all_filters(&mut self) {
         self.filter.clear();
         self.col_filters.clear();
-        self.filter_apply_at = None;
         self.search_query.clear();
         self.search_apply_at = None;
         self.search_hits.clear();
@@ -110,7 +109,6 @@ impl App {
         // A stale column filter would silently cut into the set the user just
         // asked to see in full.
         self.col_filters.clear();
-        self.filter_apply_at = None;
         self.search_popup_open = false;
         self.search_cursor = None;
         // Put the caret in the filter bar, so the query can be refined where it
@@ -145,7 +143,6 @@ impl App {
         // Whatever narrowed the table before is cleared, so the row can't land
         // outside the visible set and silently fail to scroll to.
         self.filter.clear();
-        self.filter_apply_at = None;
         self.col_filters.clear();
         // Rebuild rows for the (possibly new) view first: `reload` prunes the
         // selection to live rows, so seed the selection after it.
@@ -173,7 +170,6 @@ impl App {
         // is left unfiltered — closing the sheet lands on the whole collection
         // rather than a one-record grid.
         self.filter.clear();
-        self.filter_apply_at = None;
         self.col_filters.clear();
         self.search_hits.clear();
         self.reload();
