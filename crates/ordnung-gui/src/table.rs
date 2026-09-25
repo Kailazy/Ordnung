@@ -775,6 +775,47 @@ impl App {
     pub(crate) fn draw_table(&mut self, ui: &mut egui::Ui) -> Option<Vec<PathBuf>> {
         let mut open_convert_for: Option<Id> = None;
         let mut open_inspector = false;
+        // Keyboard: ↑ ↓ (and W S) move the selection one row through the
+        // table as shown, ⏎ plays the selected song. The move is a plain
+        // click on that row, so the inspector and the sidebar follow the way
+        // they do for the pointer. Not while a record sheet is up (its own
+        // keys), nor while a field has focus. Before `scroll_to_track` is
+        // taken below, so the row it lands on is scrolled into view now.
+        if self.vinyl_sheet.is_none() && !ui.ctx().wants_keyboard_input() {
+            let (up, down, enter) = ui.ctx().input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                        | i.consume_key(egui::Modifiers::NONE, egui::Key::W),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                        | i.consume_key(egui::Modifiers::NONE, egui::Key::S),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                )
+            });
+            if up != down && !self.rows.is_empty() {
+                let last = self.rows.len() - 1;
+                let at = self
+                    .selected
+                    .and_then(|id| self.rows.iter().position(|r| r.id == id));
+                let next = match (at, down) {
+                    (None, true) => 0,
+                    (None, false) => last,
+                    (Some(i), true) => (i + 1).min(last),
+                    (Some(i), false) => i.saturating_sub(1),
+                };
+                let id = self.rows[next].id;
+                self.apply_click_selection(id, egui::Modifiers::NONE);
+                self.scroll_to_track = Some(id);
+            }
+            if enter {
+                let song = self
+                    .selected
+                    .and_then(|id| self.rows.iter().find(|r| r.id == id))
+                    .map(|r| (r.id, r.source_path.clone()));
+                if let Some((id, path)) = song {
+                    self.play_track(id, path);
+                }
+            }
+        }
         // A pending jump-to-row (e.g. from the vinyl grid's "in catalog" badge):
         // taken once so the table scrolls to it this frame and not forever after.
         // The table body is virtualized (only visible rows are built), so an

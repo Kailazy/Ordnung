@@ -2022,6 +2022,16 @@ impl App {
                     }
                 });
             });
+        // Escape closes the sheet. Not while a menu or popup in it is up:
+        // that Escape is theirs, and they close on it themselves. Asked after
+        // the window drew, so this pass's menus have had their say.
+        if !ctx.wants_keyboard_input()
+            && !crate::ui::menu::any_open(ctx)
+            && !ctx.memory(|m| m.any_popup_open())
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            open = false;
+        }
         // The transport talks straight to the engine that holds the record —
         // the panel for a video, the audio engine for a local file — nothing
         // here touches the sheet's own state. Play on a bar at rest is the

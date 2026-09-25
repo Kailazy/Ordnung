@@ -2096,6 +2096,56 @@ impl App {
         let mut action: Option<VinylGridAction> = None;
         // A record the dig strip asked to open, applied with `action` below.
         let mut open_sheet: Option<dig::DigOpen> = None;
+        // Keyboard on the shelf, with no sheet up to take the keys: arrows
+        // (and W S) move a cursor over the records, ⏎ opens the one it is
+        // on. In the wall ↑ ↓ move by a row of covers, ← → by one record;
+        // the list is one column. The first press lands on the first record.
+        self.vinyl_cursor_moved = false;
+        if self.vinyl_sheet.is_none() && !cells.is_empty() && !ctx.wants_keyboard_input() {
+            let cols: usize = if self.config.vinyl_view == "list" {
+                1
+            } else {
+                ctx.data(|d| d.get_temp(Self::vinyl_grid_cols_id())).unwrap_or(1)
+            };
+            let (up, down, left, right, enter) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                        | i.consume_key(egui::Modifiers::NONE, egui::Key::W),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                        | i.consume_key(egui::Modifiers::NONE, egui::Key::S),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                )
+            });
+            let at = self
+                .vinyl_cursor
+                .and_then(|k| cells.iter().position(|c| c.key == k));
+            let step: isize = if down {
+                cols as isize
+            } else if up {
+                -(cols as isize)
+            } else if right {
+                1
+            } else if left {
+                -1
+            } else {
+                0
+            };
+            if step != 0 {
+                let last = cells.len() as isize - 1;
+                let next = match at {
+                    None => 0,
+                    Some(i) => (i as isize + step).clamp(0, last),
+                };
+                self.vinyl_cursor = Some(cells[next as usize].key);
+                self.vinyl_cursor_moved = true;
+            } else if enter {
+                if let Some(i) = at {
+                    action = Some(VinylGridAction::Open(cells[i].key));
+                }
+            }
+        }
         // The dig strip sits above both shelves rather than inside the scroll
         // area: it's the thing you're steering, so it shouldn't scroll away
         // under the wall of covers you're steering past.
@@ -2153,8 +2203,12 @@ impl App {
                     } else {
                         self.vinyl_grid(ui, &cells)
                     };
+                    // The cursor card counts as hovered and so reports a
+                    // warm; a key action already set above outranks it.
                     if let Some(a) = acted {
-                        action = Some(a);
+                        if action.is_none() || !matches!(a, VinylGridAction::Warm(_)) {
+                            action = Some(a);
+                        }
                     }
                 }
                 ui.add_space(8.0);
@@ -2189,7 +2243,10 @@ impl App {
                     );
                 }
             }
-            Some(VinylGridAction::Open(key)) => self.open_vinyl_sheet(key, ctx),
+            Some(VinylGridAction::Open(key)) => {
+                self.vinyl_cursor = Some(key);
+                self.open_vinyl_sheet(key, ctx);
+            }
             Some(VinylGridAction::Dig(key)) => {
                 self.start_dig(key);
                 self.show_dig_window();
@@ -2204,6 +2261,7 @@ impl App {
             Some(VinylGridAction::Play(key)) => {
                 // The tracklist may still be loading; the sheet starts playback
                 // itself once it has one (see `pending_play`).
+                self.vinyl_cursor = Some(key);
                 self.open_vinyl_sheet(key, ctx);
                 if let Some(sheet) = self.vinyl_sheet.as_mut() {
                     sheet.pending_play = true;
@@ -2325,6 +2383,12 @@ impl App {
     /// Paint one wrapping grid of vinyl covers. Returns whatever the user asked
     /// for by clicking a cell's badge or picking from its right-click menu, for
     /// the caller to apply after the frame's borrows are released.
+    /// Where the wall leaves the column count it laid out with, so the
+    /// keyboard's ↑ ↓ move by exactly one row of covers.
+    fn vinyl_grid_cols_id() -> egui::Id {
+        egui::Id::new("vinyl-grid-cols")
+    }
+
     fn vinyl_grid(&self, ui: &mut egui::Ui, cells: &[VinylCell]) -> Option<VinylGridAction> {
         /// Gap between cells (and the width budget for the caption under each).
         const GAP: f32 = 14.0;
@@ -2338,6 +2402,8 @@ impl App {
         let cover_side = ((avail - GAP * (cols - 1.0)) / cols)
             .floor()
             .clamp(MIN_COVER.min(avail.max(1.0)), MAX_COVER);
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(Self::vinyl_grid_cols_id(), cols as usize));
 
         // The record whose video is playing in the mini-player, so its cover
         // keeps a visible pause disc while the wall scrolls.
@@ -2381,6 +2447,11 @@ impl App {
                             egui::Sense::click(),
                         );
                         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        // The keyboard cursor is a hover without the pointer.
+                        let on_cursor = self.vinyl_cursor == Some(c.key);
+                        if on_cursor && self.vinyl_cursor_moved {
+                            ui.scroll_to_rect(rect.expand(GAP), None);
+                        }
                         // Both corner discs claim their hit areas here, before
                         // anything is painted, so every element below can read
                         // every hover state. Registering each at its point of use
@@ -2429,8 +2500,11 @@ impl App {
                         // takes the hover away from it. Count the card as hovered
                         // whenever the pointer is on it at all, so the frame stays
                         // lit and the pair reveals and hides together.
-                        let card_hovered =
-                            resp.hovered() || play_hovered || dig_hovered || badge_hovered;
+                        let card_hovered = on_cursor
+                            || resp.hovered()
+                            || play_hovered
+                            || dig_hovered
+                            || badge_hovered;
                         match &tex {
                             Some(h) => {
                                 egui::Image::new(h)
@@ -2675,13 +2749,19 @@ impl App {
                 let avail = ui.available_width();
                 let (rect, resp) =
                     ui.allocate_exact_size(egui::vec2(avail, ROW_H), egui::Sense::click());
+                // The keyboard cursor is a hover without the pointer; a step
+                // onto a row scrolled away brings it back first.
+                let on_cursor = self.vinyl_cursor == Some(c.key);
+                if on_cursor && self.vinyl_cursor_moved {
+                    ui.scroll_to_rect(rect, None);
+                }
                 // Rows scrolled out of view still reserve their space (so the
                 // scrollbar is honest) but skip painting and interaction.
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
                 let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                if resp.hovered() {
+                if resp.hovered() || on_cursor {
                     ui.painter().rect_filled(
                         rect,
                         egui::Rounding::same(6.0),

@@ -237,6 +237,8 @@ impl App {
             confirm_vinyl_edit: None,
             collect_wanted: None,
             vinyl_sheet: None,
+            vinyl_cursor: None,
+            vinyl_cursor_moved: false,
             sheet_follows_dig: false,
             video_mid_started: None,
             sheet_rx: None,
@@ -2190,13 +2192,16 @@ impl App {
 
         // ← → and A D nudge the playhead of whatever is loaded, video or
         // file, by a few seconds each press. Same text-field gate as the
-        // space bar; the modifier-free check also leaves ⌘A alone.
+        // space bar; the modifier-free check also leaves ⌘A alone. On the
+        // vinyl shelf with no sheet up the arrows walk the records instead
+        // (see `draw_vinyl`), and only A D seek.
         if !ctx.wants_keyboard_input() {
+            let shelf_keys = self.view == LibraryView::Vinyl && self.vinyl_sheet.is_none();
             let (back, fwd) = ctx.input_mut(|i| {
                 (
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
+                    (!shelf_keys && i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft))
                         | i.consume_key(egui::Modifiers::NONE, egui::Key::A),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
+                    (!shelf_keys && i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight))
                         | i.consume_key(egui::Modifiers::NONE, egui::Key::D),
                 )
             });

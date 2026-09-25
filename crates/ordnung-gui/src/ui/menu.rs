@@ -56,6 +56,18 @@ const ROW_PAD: f32 = space::S3;
 /// `Area` the "available" width is the rest of the screen, so any row that
 /// filled it would drag the panel out to the window edge. A menu also shouldn't
 /// resize as rows come and go (a filter count appearing, a section toggling).
+/// Where a dropdown notes the pass it was open on, for [`any_open`].
+fn open_pass_id() -> egui::Id {
+    egui::Id::new("ord_dropdown_open_pass")
+}
+
+/// Whether any dropdown has drawn open this pass. For a window that closes
+/// on Escape: a menu up inside it closes on that same Escape itself, and the
+/// window must not go with it. Ask after the window's content has drawn.
+pub fn any_open(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<u64>(open_pass_id())) == Some(ctx.cumulative_pass_nr())
+}
+
 pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuUi)) {
     let ctx = anchor.ctx.clone();
     let id = anchor.id.with("ord_dropdown");
@@ -80,6 +92,9 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
     if open_t <= 0.0 {
         ctx.data_mut(|d| d.insert_temp(id, open));
         return;
+    }
+    if open {
+        ctx.data_mut(|d| d.insert_temp(open_pass_id(), ctx.cumulative_pass_nr()));
     }
 
     let opened_at: f64 = ctx.data(|d| d.get_temp(id.with("at")).unwrap_or(now));
