@@ -850,6 +850,25 @@ impl App {
                     .map(|ids| ids.into_iter().collect())
                     .unwrap_or_default();
             }
+            // The sidebar and the menus show these in every view, so they
+            // refresh here rather than in the Vinyl-only block below (where
+            // they used to live, and where a crate made elsewhere stayed
+            // invisible until the Vinyl section was opened).
+            // The crate of liked songs: one row per like, loads whole.
+            self.load_liked();
+            // The crates: a few rows each; the open one's songs load lazily.
+            self.load_crate_sets();
+            // Saved tracklists likewise: a few rows each; their lines load
+            // lazily in the Tracklists window.
+            self.tracklists = Catalog::open(&self.db_path)
+                .and_then(|c| c.list_tracklists())
+                .unwrap_or_default();
+            if self
+                .tracklist_current
+                .is_some_and(|id| !self.tracklists.iter().any(|t| t.id == id))
+            {
+                self.tracklist_current = None;
+            }
         }
         // The Vinyl section's lists load on the first visit and again whenever
         // the catalog changes; a plain switch back to the section reuses them.
@@ -958,21 +977,6 @@ impl App {
             self.sellers = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_sellers())
                 .unwrap_or_default();
-            // The crate of liked songs: one row per like, loads whole.
-            self.load_liked();
-            // The crates: a few rows each; the open one's songs load lazily.
-            self.load_crate_sets();
-            // Saved tracklists likewise: a few rows each; their lines load
-            // lazily in the Tracklists window.
-            self.tracklists = Catalog::open(&self.db_path)
-                .and_then(|c| c.list_tracklists())
-                .unwrap_or_default();
-            if self
-                .tracklist_current
-                .is_some_and(|id| !self.tracklists.iter().any(|t| t.id == id))
-            {
-                self.tracklist_current = None;
-            }
             // The auditioned-releases set is one row per record actually
             // listened to, so it loads whole alongside.
             self.viewed_releases = Catalog::open(&self.db_path)

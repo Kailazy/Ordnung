@@ -569,14 +569,14 @@ impl RowMark {
 // pattern rather than two sidebars that happen to share a panel.
 
 /// Tile height of a playlist row at the captioned tier.
-pub(crate) const PLAYLIST_ROW_H: f32 = 34.0;
+pub(crate) const PLAYLIST_ROW_H: f32 = 30.0;
 /// Label point size of a playlist row.
 pub(crate) const PLAYLIST_TEXT_SIZE: f32 = 13.5;
 /// Inset of the track count from the tile's right edge.
 const PLAYLIST_COUNT_INSET: f32 = 12.0;
 /// Gap under a playlist row. The rail's square targets need slightly more
 /// separation to read as distinct than full-width bars do.
-const PLAYLIST_ROW_GAP: f32 = 3.0;
+const PLAYLIST_ROW_GAP: f32 = 2.0;
 const PLAYLIST_ROW_GAP_RAIL: f32 = 4.0;
 
 /// One playlist row, shared by both trees: a "♪" tile with the name truncated
