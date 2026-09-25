@@ -36,7 +36,11 @@ CLAUDE.md). Then:
 2. `cargo check -p ordnung-gui` — refreshes `Cargo.lock` with the new
    version and proves the workspace still builds.
 3. Commit exactly these two files with the message
-   `release: bump workspace version to X.Y.Z` and push.
+   `release: bump workspace version to X.Y.Z`. Working in a per-session
+   worktree (see CLAUDE.md), first `git fetch && git rebase origin/main`,
+   compile the rebased head, then fast-forward push; if the rebase pulled
+   in a peer's feature, re-judge the bump (the highest-ranking change in
+   the roll-up wins).
 4. Tag and push the tag:
    `git tag vX.Y.Z && git push origin vX.Y.Z`
 5. CI takes over: the `Release` workflow builds the universal DMG
