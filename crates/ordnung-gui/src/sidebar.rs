@@ -1230,6 +1230,22 @@ pub(crate) fn draw_crate_rows(
                 *action = Some(SidebarAction::AddSongs(c.id, payload.0.clone()));
             }
         }
+        // A tag takes library tracks too, dragged from the table the way
+        // a playlist does.
+        if kind == CrateKind::Tag {
+            if resp.dnd_hover_payload::<DraggedTracks>().is_some() {
+                ui.painter().rect_stroke(
+                    resp.rect.shrink(1.0),
+                    egui::Rounding::same(6.0),
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 150, 220)),
+                );
+            }
+            if let Some(payload) = resp.dnd_release_payload::<DraggedTracks>() {
+                if !payload.0.is_empty() {
+                    *action = Some(SidebarAction::TagTracks(c.id, payload.0.clone()));
+                }
+            }
+        }
         if resp.clicked() {
             *view = LibraryView::CrateSet(c.id);
         }

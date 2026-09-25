@@ -547,11 +547,9 @@ impl App {
     fn draw_playlist_info_glyph(&self, ui: &egui::Ui, pid: Id) {
         /// Glyph diameter.
         const D: f32 = 16.0;
-        /// Width of the inspector pull tab this sits beside (`draw_inspector_tab`).
-        const TAB_W: f32 = 18.0;
         let stats = self.playlist_stats.get(&pid).copied().unwrap_or_default();
         let content = ui.max_rect();
-        let pos = egui::pos2(content.right() - TAB_W - 8.0 - D, content.top() + 6.0);
+        let pos = egui::pos2(content.right() - INSPECTOR_TAB_W - 8.0 - D, content.top() + 6.0);
         egui::Area::new(egui::Id::new("playlist_info_glyph"))
             .order(egui::Order::Middle)
             .fixed_pos(pos)
@@ -1969,6 +1967,10 @@ const MIN_UI_ZOOM: f32 = 0.8;
 /// fit side by side on a 13-inch screen.
 const MAX_UI_ZOOM: f32 = 1.5;
 
+/// Width of the inspector's pull tab (`draw_inspector_tab`), which overlays
+/// the content's top-right corner: chrome drawn up there keeps clear of it.
+pub(crate) const INSPECTOR_TAB_W: f32 = 18.0;
+
 impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         // Snappier wheel scrolling: front-load part of each coarse wheel step
@@ -2461,7 +2463,8 @@ impl App {
                     // catalog tracks, so the group hides there rather than
                     // offering actions on rows that aren't visible. A crate is
                     // the vinyl side too: songs on records.
-                    if !matches!(self.view, LibraryView::Vinyl | LibraryView::CrateSet(_)) {
+                    // A tag showing its tracks is the library table again.
+                    if !matches!(self.view, LibraryView::Vinyl | LibraryView::CrateSet(_)) || self.tag_table_view() {
                         ui.add_enabled_ui(!busy, |ui| {
                             // When rows are selected, the toolbar buttons act on just that
                             // selection (in visible order); otherwise they fall back to the
@@ -3024,7 +3027,7 @@ impl App {
         let inspector_applies = !matches!(
             self.view,
             LibraryView::Vinyl | LibraryView::Liked | LibraryView::CrateSet(_)
-        );
+        ) || self.tag_table_view();
         // The slide is for the pull tab. On a view switch the drawer snaps:
         // the new view is laid out once, at its final width, rather than
         // re-flowed every frame of the slide (the vinyl wall went from six
@@ -3844,6 +3847,10 @@ impl App {
             Some(SidebarAction::AddSongs(id, songs)) => {
                 self.add_songs_to_crate(id, songs);
             }
+            Some(SidebarAction::TagTracks(id, ids)) => {
+                let specs = self.track_specs(&ids);
+                self.set_tag(id, true, specs);
+            }
             Some(SidebarAction::OpenHealth) => {
                 let tab = self.health_tab.clone();
                 self.open_health_tab(tab, ctx);
@@ -3901,7 +3908,7 @@ impl App {
                 } else if self.view == LibraryView::Vinyl {
                     self.draw_vinyl(ui, ctx);
                 } else if let LibraryView::CrateSet(id) = self.view {
-                    self.draw_crate_set(ui, ctx, id);
+                    native_drag = self.draw_crate_set(ui, ctx, id);
                 } else if let LibraryView::Usb(vol, _) = self.view.clone() {
                     native_drag = self.draw_usb(ui, &vol);
                 } else if self.rows.is_empty()

@@ -37,9 +37,13 @@ use ordnung_core::model::{CrateKind, CrateSet, SongPin};
 
 /// Which layout the crate view shows. Remembered per kind (see
 /// [`App::crate_layout`]): a crate opens on the records to bring, a tag on
-/// its songs, since most of a tag's songs are files rather than records.
+/// its tracks, since a tag is mostly a word on library files.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CrateLayout {
+    /// The library table of the files that are the set's songs (tags
+    /// only): every column, the inspector and the row menu, as in the
+    /// library. Songs no file is don't show here; Songs has them.
+    Tracks,
     /// One row per record: what to bring.
     Records,
     /// One row per song, like the Liked view.
@@ -50,7 +54,16 @@ impl CrateLayout {
     fn default_for(kind: CrateKind) -> Self {
         match kind {
             CrateKind::Crate => CrateLayout::Records,
-            CrateKind::Tag => CrateLayout::Songs,
+            CrateKind::Tag => CrateLayout::Tracks,
+        }
+    }
+
+    /// The layouts a set of `kind` offers, in the segmented control's
+    /// order.
+    fn offered(kind: CrateKind) -> &'static [CrateLayout] {
+        match kind {
+            CrateKind::Crate => &[CrateLayout::Records, CrateLayout::Songs],
+            CrateKind::Tag => &[CrateLayout::Tracks, CrateLayout::Records, CrateLayout::Songs],
         }
     }
 }
@@ -325,7 +338,20 @@ impl App {
         self.crate_layouts
             .get(&kind)
             .copied()
+            .filter(|l| CrateLayout::offered(kind).contains(l))
             .unwrap_or_else(|| CrateLayout::default_for(kind))
+    }
+
+    /// Whether the view is a tag showing its tracks: the library table,
+    /// so the table's toolbar, inspector and count apply as in a playlist.
+    pub(crate) fn tag_table_view(&self) -> bool {
+        match self.view {
+            LibraryView::CrateSet(id) => {
+                let kind = self.crate_kind(id);
+                kind == CrateKind::Tag && self.crate_layout(kind) == CrateLayout::Tracks
+            }
+            _ => false,
+        }
     }
 
     /// The top bar's count for the open crate: records or songs, whichever
@@ -334,6 +360,7 @@ impl App {
         let query = self.filter.trim().to_lowercase();
         let shown = self.crate_songs.iter().filter(|s| song_matches(s, &query));
         match self.crate_layout(self.crate_kind(id)) {
+            CrateLayout::Tracks => format!("{} tracks", self.rows.len()),
             CrateLayout::Songs => {
                 let n = shown.count();
                 if n == 1 { "1 song".to_string() } else { format!("{n} songs") }
@@ -348,13 +375,14 @@ impl App {
         }
     }
 
-    /// The crate view: its name and counts over the records to bring, or
-    /// the songs.
-    pub(crate) fn draw_crate_set(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, id: Id) {
+    /// The crate view: its name and counts over the records to bring, the
+    /// songs, or (a tag) the library table of its tracks. Hands back the
+    /// files of a native drag from that table, like `draw_table`.
+    pub(crate) fn draw_crate_set(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, id: Id) -> Option<Vec<PathBuf>> {
         self.ensure_crate_songs(id);
         self.ensure_library_index();
         let Some(set) = self.crate_sets.iter().find(|c| c.id == id).cloned() else {
-            return;
+            return None;
         };
         let songs = self.crate_songs.clone();
         let in_library: Vec<Option<Id>> = songs
@@ -395,33 +423,34 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 use crate::ui::button::{segmented, Segment};
-                let picked = segmented(
-                    ui,
-                    Some(match layout {
-                        CrateLayout::Records => 0,
-                        CrateLayout::Songs => 1,
-                    }),
-                    &match set.kind {
-                        CrateKind::Crate => [
-                            Segment { label: "Records", tip: "The records to bring, with the songs the crate takes from each" },
-                            Segment { label: "Songs", tip: "Every song in the crate" },
-                        ],
-                        CrateKind::Tag => [
-                            Segment { label: "Records", tip: "The records the tagged songs sit on" },
-                            Segment { label: "Songs", tip: "Every song with this tag" },
-                        ],
-                    },
-                );
-                match picked {
-                    Some(0) => { self.crate_layouts.insert(set.kind, CrateLayout::Records); }
-                    Some(1) => { self.crate_layouts.insert(set.kind, CrateLayout::Songs); }
-                    _ => {}
+                // With the inspector along (a tag's tracks), its pull tab
+                // overlays this corner: keep the control clear of it.
+                if self.tag_table_view() {
+                    ui.add_space(crate::app::INSPECTOR_TAB_W + 8.0);
+                }
+                let offered = CrateLayout::offered(set.kind);
+                let segments: Vec<Segment> = offered
+                    .iter()
+                    .map(|l| match (set.kind, l) {
+                        (_, CrateLayout::Tracks) => Segment { label: "Tracks", tip: "The files in your library with this tag, as the library shows them" },
+                        (CrateKind::Crate, CrateLayout::Records) => Segment { label: "Records", tip: "The records to bring, with the songs the crate takes from each" },
+                        (CrateKind::Tag, CrateLayout::Records) => Segment { label: "Records", tip: "The records the tagged songs sit on" },
+                        (CrateKind::Crate, CrateLayout::Songs) => Segment { label: "Songs", tip: "Every song in the crate" },
+                        (CrateKind::Tag, CrateLayout::Songs) => Segment { label: "Songs", tip: "Every song with this tag, files or not" },
+                    })
+                    .collect();
+                let picked = segmented(ui, offered.iter().position(|l| *l == layout), &segments);
+                if let Some(l) = picked.and_then(|i| offered.get(i)) {
+                    self.crate_layouts.insert(set.kind, *l);
                 }
             });
         });
         ui.add_space(space::S2);
 
-        if songs.is_empty() {
+        let mut native_drag = None;
+        if layout == CrateLayout::Tracks {
+            native_drag = self.draw_tag_tracks(ui, &set);
+        } else if songs.is_empty() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| match set.kind {
                 CrateKind::Crate => {
@@ -443,6 +472,8 @@ impl App {
             });
         } else {
             match layout {
+                // Drawn above, before the song-based empty states.
+                CrateLayout::Tracks => {}
                 CrateLayout::Songs => {
                     let set = SongSet::CrateSet(id);
                     if let Some(act) = self.song_rows(ui, ctx, set, &songs, &shown, &in_library) {
@@ -508,6 +539,35 @@ impl App {
                 }
             }
         }
+        native_drag
+    }
+
+    /// The Tracks layout of a tag: the library table over the files that
+    /// carry it (`rows`, loaded for the view by `load_rows` through
+    /// `Catalog::list_crate_tracks`), with the table's own filter bar. An
+    /// empty tag, or one whose songs are all off the library, says so.
+    fn draw_tag_tracks(&mut self, ui: &mut egui::Ui, set: &CrateSet) -> Option<Vec<PathBuf>> {
+        let unfiltered = self.load_error.is_none()
+            && self.filter.trim().is_empty()
+            && self.col_filters.values().all(|v| v.trim().is_empty());
+        if self.rows.is_empty() && unfiltered {
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                if set.songs == 0 {
+                    ui.heading(format!("No song is tagged {} yet", set.name));
+                    ui.label("Right-click a track in the library and check the tag under Tags, or drag tracks onto the tag in the sidebar.");
+                } else {
+                    ui.heading(format!("No file in your library is tagged {}", set.name));
+                    ui.label(match set.songs {
+                        1 => "The tagged song is on a record, not in your library; Songs shows it.".to_string(),
+                        n => format!("The {n} tagged songs are on records, not in your library; Songs shows them."),
+                    });
+                }
+            });
+            return None;
+        }
+        self.draw_table_filter_bar(ui);
+        self.draw_table(ui)
     }
 
     /// The Records layout: one row per record, the songs the crate takes

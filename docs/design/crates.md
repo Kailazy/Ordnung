@@ -92,10 +92,14 @@ sets).
   them (`crates::track_song_key`) and carry the same `LikeSpec` a like
   does (`LikeSpec::from_track`, now shared with the inspector's heart).
 - Reading: the library table has a **Tags** column (`dub, dark`; sorts
-  and filters like any text column, so typing a tag in the column filter
-  is that tag's view of the library); the song table shows the tags after
-  the artist; a tag in the sidebar opens through the crate view, on its
-  Songs layout by default (the layout is remembered per kind).
+  and filters like any text column); the song table shows the tags after
+  the artist. A tag in the sidebar opens through the crate view on a
+  **Tracks** layout (v0.160.0): the library table itself over the files
+  that carry the tag (`Catalog::list_crate_tracks`, fed to `load_rows`
+  like a playlist), with every column, the toolbar, the inspector and the
+  row menu; Records and Songs stay for the tagged songs that aren't files.
+  The layout is remembered per kind. Tracks dragged from the table onto a
+  tag row get the tag (`SidebarAction::TagTracks`).
 
 ## 6. Open
 

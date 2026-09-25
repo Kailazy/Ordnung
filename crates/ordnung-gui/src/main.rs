@@ -2313,6 +2313,8 @@ enum SidebarAction {
     DeleteCrateSet(Id),
     /// Songs dropped onto a crate (crate id, the dragged songs).
     AddSongs(Id, Vec<liked::LikeSpec>),
+    /// Library tracks dropped onto a tag (tag id, dragged track ids).
+    TagTracks(Id, Vec<Id>),
     Rename(Id, String),
     Delete(Id),
     /// Right-click on a local playlist/folder: open the icon-and-colour

@@ -2881,6 +2881,9 @@ pub(crate) fn load_rows(
         LibraryView::Library => Ok(narrow(sources.library_tracks(&catalog)?, q)),
         LibraryView::Playlist(id) => Ok(narrow(sources.playlist_tracks(&catalog, *id)?, q)),
         LibraryView::RecentlyAdded => catalog.list_recently_added(q),
+        // A tag's Tracks layout is the library table over the files that
+        // carry it (a crate's layouts don't use rows; the listing is small).
+        LibraryView::CrateSet(id) => catalog.list_crate_tracks(*id, q),
         // The Duplicates, Missing, Vinyl and USB views render from their own
         // caches (`dup_groups` / `missing_list` / `vinyl` / `usb_tracks`), not
         // the flat track table.
@@ -2888,7 +2891,6 @@ pub(crate) fn load_rows(
         | LibraryView::Missing
         | LibraryView::Liked
         | LibraryView::Vinyl
-        | LibraryView::CrateSet(_)
         | LibraryView::Usb(..) => Ok(Vec::new()),
     }
     .map_err(|e| e.to_string())?;

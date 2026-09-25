@@ -4717,6 +4717,39 @@ impl Catalog {
         Ok(rows)
     }
 
+    /// The library tracks that are a crate's (or tag's) songs, in the
+    /// set's order: the track a pin was put in with, else the one the
+    /// library index says is that song; a song no file is, is left out.
+    /// `query` narrows like the other listings. The tag view's table.
+    pub fn list_crate_tracks(&self, crate_id: Id, query: Option<&str>) -> Result<Vec<Track>> {
+        let pins = self.list_crate_songs(crate_id)?;
+        if pins.is_empty() {
+            return Ok(Vec::new());
+        }
+        let index = self.library_index()?;
+        let terms = search_terms(query.unwrap_or(""));
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for p in &pins {
+            let Some(id) = index.resolve(&p.song(), p.local_track_id) else {
+                continue;
+            };
+            if !seen.insert(id) {
+                continue;
+            }
+            match self.get_track(id) {
+                Ok(t) => {
+                    if search_matches(&t, &terms) {
+                        out.push(t);
+                    }
+                }
+                Err(Error::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
     /// The library by song (see [`crate::library_index`]), so every view
     /// can tell which songs a track here already is. One pass over the
     /// tagged tracks; a track missing an artist or a title can't be keyed
@@ -7407,6 +7440,52 @@ mod tests {
         // Untagging is taking the song out of the set.
         assert!(cat.remove_crate_song(dub, "basic channel", "phylyps trak", None, None).unwrap());
         assert_eq!(cat.crate_memberships(CrateKind::Tag).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn crate_tracks_are_the_files_that_are_its_songs() {
+        let path = temp_db_path("crate_tracks");
+        let cat = Catalog::open(&path).unwrap();
+        let mut a = scanned("/m/miura.flac", "Metro Area", "House", 1000);
+        a.tags.title = Some("Miura".into());
+        let (miura, _) = cat.upsert_scanned(&a).unwrap();
+        let mut b = scanned("/m/untitled.flac", "Leafar Legov", "House", 1001);
+        b.tags.title = Some("Untitled".into());
+        let (untitled, _) = cat.upsert_scanned(&b).unwrap();
+        let pin = |artist: &str, title: &str, release: Option<u64>, local: Option<Id>| SongPin {
+            id: 0,
+            artist: artist.into(),
+            title: title.into(),
+            release_id: release,
+            position: None,
+            rel_artist: None,
+            rel_title: None,
+            rel_label: None,
+            rel_catno: None,
+            rel_year: None,
+            rel_thumb: None,
+            local_track_id: local,
+            added_at: 5,
+        };
+        let dub = cat.create_crate_set("dub", CrateKind::Tag).unwrap();
+        cat.add_crate_songs(
+            dub,
+            &[
+                // Tagged from a record: found through the index by song.
+                pin("Metro Area", "Miura", Some(42), None),
+                // Tagged from the library, on its matched record: found by
+                // the track it was tagged with, generic title and all.
+                pin("Leafar Legov", "Untitled", Some(7), Some(untitled)),
+                // Not a file at all.
+                pin("Theo Parrish", "Solitary Flight", None, None),
+            ],
+        )
+        .unwrap();
+        let tracks = cat.list_crate_tracks(dub, None).unwrap();
+        assert_eq!(tracks.iter().map(|t| t.id).collect::<Vec<_>>(), [miura, untitled]);
+        let narrowed = cat.list_crate_tracks(dub, Some("legov")).unwrap();
+        assert_eq!(narrowed.iter().map(|t| t.id).collect::<Vec<_>>(), [untitled]);
+        assert!(cat.list_crate_tracks(999, None).unwrap().is_empty());
     }
 
     #[test]
