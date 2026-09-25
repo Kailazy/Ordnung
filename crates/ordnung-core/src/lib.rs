@@ -18,6 +18,7 @@ pub mod scan;
 pub mod search;
 pub mod stretch;
 pub mod tag;
+pub mod tools;
 pub mod tracklist;
 pub mod update;
 pub mod usb;

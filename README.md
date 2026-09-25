@@ -61,20 +61,14 @@ no runtimes, no rekordbox.
   built and being tested on real CDJs, but it is not in the downloadable
   builds yet. It will switch on once it has proven itself on more hardware.
 
-## Optional: converting audio
+## Converting audio
 
-Ordnung reads and analyses audio on its own with nothing extra installed.
-The one thing it hands off is the **Convert** action (turning a file into
-another format), which currently uses [ffmpeg](https://ffmpeg.org). If you
-never convert, skip this. If you do, install ffmpeg once with
-[Homebrew](https://brew.sh):
-
-```bash
-brew install ffmpeg
-```
-
-Ordnung finds it automatically. Making conversion work without any install is
-on the list.
+The **Convert** action (turning a file into another format) runs on
+[ffmpeg](https://ffmpeg.org). You don't install it: the first time Ordnung
+opens it quietly downloads its own copy, about 30 MB, into its data folder
+and keeps it there across app updates. It only downloads again when a new
+Ordnung version ships with a newer ffmpeg. If the download fails, Settings →
+Conversion shows why and has a Download button.
 
 ## Discogs
 

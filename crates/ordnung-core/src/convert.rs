@@ -3,7 +3,10 @@
 //! NEW file by default; in-place replacement is opt-in and handled by the caller.
 //!
 //! `ffmpeg` is the one subprocess Ordnung shells out to (see `ordnung-architecture`);
-//! all DSP/format parsing elsewhere is pure Rust. Engine functions take inputs +
+//! all DSP/format parsing elsewhere is pure Rust. The binary itself is the
+//! one [`crate::tools`] installs under `~/.ordnung/bin` (a Homebrew or
+//! MacPorts copy is the fallback), and it also does the output check that
+//! used to need `ffprobe`, so one managed program covers conversion. Engine functions take inputs +
 //! config and return data — they never print or prompt.
 
 use crate::error::{Error, Result};
@@ -52,8 +55,9 @@ pub fn target_extension(f: Format) -> &'static str {
     }
 }
 
-/// The ffprobe `codec_name` we expect in a correctly-converted file. Used to
-/// verify the output actually matches the requested target.
+/// The codec name ffmpeg reports for a correctly-converted file (the word
+/// after `Audio:` in its stream table). Used to verify the output actually
+/// matches the requested target.
 fn expected_codec(f: Format) -> &'static str {
     match f {
         Format::Mp3 => "mp3",
@@ -173,7 +177,7 @@ fn sanitize_filename(s: &str) -> String {
 ///   then atomically replaces: the new file takes `dest`'s path and the original
 ///   source is removed if its path differs. The catalog is the caller's concern.
 ///
-/// The output is verified with `ffprobe` to actually carry the target codec.
+/// The output is verified with `ffmpeg -i` to actually carry the target codec.
 pub fn convert_file(
     src: &Path,
     spec: &ConvertSpec,
@@ -273,14 +277,21 @@ pub fn convert_file_resampled(
     }
 }
 
-/// Resolve a tool binary (`ffmpeg`/`ffprobe`) to an absolute path.
+/// Resolve a tool binary (`ffmpeg`) to an absolute path.
 ///
-/// macOS apps launched from Finder/Dock inherit a minimal `PATH`
+/// The copy Ordnung installed itself ([`crate::tools`]) wins: it is the
+/// version this build was tested with and it is there without Homebrew.
+/// Otherwise, macOS apps launched from Finder/Dock inherit a minimal `PATH`
 /// (`/usr/bin:/bin:/usr/sbin:/sbin`) that excludes Homebrew, so a bare
 /// `Command::new("ffmpeg")` fails with ENOENT even when the tool is installed.
 /// We probe the common install locations and fall back to the bare name (which
-/// still works when `PATH` is inherited, e.g. CLI use from a shell).
+/// still works when `PATH` is inherited, e.g. a run from a shell).
 fn resolve_tool(name: &str) -> PathBuf {
+    if let Some(managed) = crate::tools::tool_dir().map(|d| d.join(name)) {
+        if managed.is_file() {
+            return managed;
+        }
+    }
     const DIRS: &[&str] = &[
         "/opt/homebrew/bin", // Apple Silicon Homebrew
         "/usr/local/bin",    // Intel Homebrew
@@ -335,27 +346,23 @@ fn run_ffmpeg(
 }
 
 /// Confirm the produced file carries an audio stream of the expected codec.
+///
+/// `ffmpeg -i <file>` with no output prints the file's stream table to
+/// stderr (and exits non-zero complaining about the missing output, which
+/// is fine); the codec is the word after `Audio:` on the first audio stream
+/// line. Asking ffmpeg rather than ffprobe keeps the converter one binary.
 fn verify_codec(path: &Path, target: Format) -> Result<()> {
-    let output = Command::new(resolve_tool("ffprobe"))
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-select_streams",
-            "a:0",
-            "-show_entries",
-            "stream=codec_name",
-            "-of",
-            "default=nw=1:nk=1",
-        ])
+    let output = Command::new(resolve_tool("ffmpeg"))
+        .args(["-hide_banner", "-i"])
         .arg(path)
         .output()
         .map_err(|e| Error::Convert {
             path: path.to_path_buf(),
-            msg: format!("could not run ffprobe to verify output: {e}"),
+            msg: format!("could not run ffmpeg to verify output: {e}"),
         })?;
 
-    let codec = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let codec = audio_codec_from_streams(&String::from_utf8_lossy(&output.stderr))
+        .unwrap_or_default();
     if codec.is_empty() {
         return Err(Error::Convert {
             path: path.to_path_buf(),
@@ -372,10 +379,39 @@ fn verify_codec(path: &Path, target: Format) -> Result<()> {
     Ok(())
 }
 
+/// The codec name of the first audio stream in ffmpeg's stream table, e.g.
+/// `mp3` from `Stream #0:0: Audio: mp3 (mp3f / 0x66337066), 44100 Hz, …`.
+/// The name ends at the first space, comma or parenthesis.
+fn audio_codec_from_streams(stderr: &str) -> Option<String> {
+    let line = stderr.lines().find(|l| l.contains("Audio: "))?;
+    let rest = &line[line.find("Audio: ")? + "Audio: ".len()..];
+    let name: String = rest
+        .chars()
+        .take_while(|c| !matches!(c, ' ' | ',' | '('))
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn audio_codec_is_the_word_after_audio() {
+        let table = "Input #0, mp3, from 'x.mp3':\n  Duration: 00:05:00.00\n  \
+             Stream #0:0: Audio: mp3 (mp3f / 0x66337066), 44100 Hz, stereo, fltp, 320 kb/s\n";
+        assert_eq!(audio_codec_from_streams(table).as_deref(), Some("mp3"));
+        let aac = "  Stream #0:0[0x1](und): Audio: aac (LC) (mp4a / 0x6134706D), 44100 Hz";
+        assert_eq!(audio_codec_from_streams(aac).as_deref(), Some("aac"));
+        let wav = "  Stream #0:0: Audio: pcm_s16le ([1][0][0][0] / 0x0001), 44100 Hz, 2 channels";
+        assert_eq!(audio_codec_from_streams(wav).as_deref(), Some("pcm_s16le"));
+        let flac = "  Stream #0:0: Audio: flac, 44100 Hz, stereo, s16";
+        assert_eq!(audio_codec_from_streams(flac).as_deref(), Some("flac"));
+        // A video-only file, or garbage, has no audio line.
+        assert_eq!(audio_codec_from_streams("  Stream #0:0: Video: h264"), None);
+        assert_eq!(audio_codec_from_streams(""), None);
+    }
 
     #[test]
     fn extensions_and_default_bitrates() {

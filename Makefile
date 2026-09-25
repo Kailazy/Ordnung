@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help app app-only run prune prune-install genredb-publish
+.PHONY: help app app-only run prune prune-install genredb-publish ffmpeg-publish
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -22,6 +22,9 @@ prune: ## Delete target/debug when it exceeds PRUNE_LIMIT_GB (default 50); relea
 
 prune-install: ## Install a launchd job that runs `make prune` daily at 04:00
 	@bash tools/prune-target.sh --install
+
+ffmpeg-publish: ## Fetch the latest static macOS ffmpeg builds (both CPU architectures) and publish them to the rolling `ffmpeg` release that the app downloads on first launch. Then set FFMPEG_VERSION in crates/ordnung-core/src/tools.rs to the printed version.
+	@bash tools/publish-ffmpeg.sh
 
 genredb-publish: ## Rebuild the prebuilt genre DB from the Discogs dump (~10 GB stream) and publish it to the rolling `genredb` release. Needs a residential connection; Cloudflare blocks datacenter IPs (see .github/workflows/genredb.yml).
 	@cargo run --release -p ordnung-core --example build_genredb -- /tmp/discogs-genres.db

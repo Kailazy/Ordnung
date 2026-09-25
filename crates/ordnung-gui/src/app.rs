@@ -382,6 +382,8 @@ impl App {
             cue_rename: None,
             update_rx: None,
             update_available: None,
+            tools_rx: None,
+            ffmpeg_state: FfmpegState::Unknown,
         };
         let config = Config::load();
         app.token_input = config.discogs_token.clone();
@@ -426,6 +428,9 @@ impl App {
         // Refresh anything we always want current (Discogs vinyl collection)
         // in the background as soon as the catalog is loaded.
         app.spawn_startup_refresh(startup_ctx.clone());
+        // Make sure the converter is there (first launch, or a build that
+        // pins a newer ffmpeg): a quiet background download, see `jobs.rs`.
+        app.ensure_ffmpeg(startup_ctx.clone());
         // Ask GitHub once, off-thread, whether a newer release is out. The result
         // drives a dismissible banner; a network failure is swallowed (no banner).
         app.spawn_update_check(startup_ctx);
@@ -2286,6 +2291,41 @@ impl App {
             if let Ok(found) = rx.try_recv() {
                 self.update_available = found;
                 self.update_rx = None;
+            }
+        }
+
+        // The managed ffmpeg download: progress on the status line while it
+        // runs, one line when it lands or fails (Settings → Conversion has
+        // the retry).
+        if let Some(rx) = &self.tools_rx {
+            let msgs: Vec<ToolMsg> = rx.try_iter().collect();
+            for msg in msgs {
+                match msg {
+                    ToolMsg::Progress(read, total) => {
+                        self.ffmpeg_state = FfmpegState::Downloading { read, total };
+                        self.status = if total > 0 {
+                            format!(
+                                "Setting up the audio converter… {} of {} MB",
+                                read >> 20,
+                                total >> 20
+                            )
+                        } else {
+                            format!("Setting up the audio converter… {} MB", read >> 20)
+                        };
+                    }
+                    ToolMsg::Done(version) => {
+                        self.status = format!("Audio converter ready (ffmpeg {version}).");
+                        self.ffmpeg_state = FfmpegState::Ready(version);
+                        self.tools_rx = None;
+                    }
+                    ToolMsg::Failed(e) => {
+                        self.status = format!(
+                            "Couldn't download the audio converter ({e}). Retry in Settings → Conversion."
+                        );
+                        self.ffmpeg_state = FfmpegState::Failed(e);
+                        self.tools_rx = None;
+                    }
+                }
             }
         }
 

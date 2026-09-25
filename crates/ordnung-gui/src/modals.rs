@@ -1634,6 +1634,35 @@ impl App {
                     .weak(),
                 );
                                         ui.add_space(4.0);
+                                        // The converter itself: Ordnung fetches its own
+                                        // ffmpeg at startup (`ordnung_core::tools`), so this
+                                        // row is where a failed download shows and where it
+                                        // can be retried.
+                                        ui.horizontal(|ui| {
+                                            ui.label("Converter:");
+                                            let (text, retry) = match &self.ffmpeg_state {
+                                                FfmpegState::Unknown => ("checking…".to_string(), false),
+                                                FfmpegState::Ready(v) => {
+                                                    (format!("ffmpeg {v}, installed by Ordnung"), false)
+                                                }
+                                                FfmpegState::Downloading { read, total } if *total > 0 => (
+                                                    format!("downloading… {} of {} MB", read >> 20, total >> 20),
+                                                    false,
+                                                ),
+                                                FfmpegState::Downloading { .. } => {
+                                                    ("downloading…".to_string(), false)
+                                                }
+                                                FfmpegState::Failed(e) => (format!("download failed: {e}"), true),
+                                                FfmpegState::Absent => ("not installed".to_string(), true),
+                                            };
+                                            ui.label(egui::RichText::new(text).weak());
+                                            if retry && crate::ui::button::button(ui, "Download").clicked() {
+                                                self.ffmpeg_state = FfmpegState::Unknown;
+                                                let ctx = ui.ctx().clone();
+                                                self.ensure_ffmpeg(ctx);
+                                            }
+                                        });
+                                        ui.add_space(4.0);
                                         let mut convert_dirty = false;
                                         let mut target =
                                             format_from_key(&self.config.convert_format)

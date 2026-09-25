@@ -2086,6 +2086,34 @@ struct App {
     /// A published release newer than this build, surfaced as a dismissible
     /// banner above the toolbar until the user downloads or dismisses it.
     update_available: Option<ordnung_core::update::UpdateInfo>,
+    /// Progress of the managed ffmpeg download (`ordnung_core::tools`) off
+    /// its worker. Its own channel, not the job slot: it runs at startup
+    /// underneath whatever the user does next. See [`App::ensure_ffmpeg`].
+    tools_rx: Option<Receiver<ToolMsg>>,
+    /// What Settings → Conversion says about the converter.
+    ffmpeg_state: FfmpegState,
+}
+
+/// Messages from the managed ffmpeg download worker.
+enum ToolMsg {
+    /// Compressed bytes read so far, and the total when the server said.
+    Progress(u64, u64),
+    /// Installed; carries the version.
+    Done(String),
+    Failed(String),
+}
+
+/// The converter's state as the Conversion settings tab shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FfmpegState {
+    /// Not looked yet (the first frame).
+    Unknown,
+    /// Managed ffmpeg of this version is in place.
+    Ready(String),
+    Downloading { read: u64, total: u64 },
+    Failed(String),
+    /// Not installed and not being fetched (`ORDNUNG_NO_TOOL_DOWNLOAD`).
+    Absent,
 }
 
 /// What the bottom player bar needs to render the current track.
@@ -2383,8 +2411,7 @@ enum TrackMenuAction {
 }
 
 fn default_db_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let dir = PathBuf::from(home).join(".ordnung");
+    let dir = ordnung_core::tools::data_dir()?;
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("catalog.db"))
 }

@@ -11,8 +11,10 @@ the [README](README.md) has the download.
 - **Xcode command-line tools** (`xcode-select --install`).
 - **librsvg** for icon rendering when building the `.app` bundle:
   `brew install librsvg`.
-- **ffmpeg** only if you work on conversion or USB export for older players:
-  `brew install ffmpeg`. Decoding, analysis and SQLite are pure Rust or bundled.
+- **ffmpeg** is not a build requirement. The app downloads a static build
+  into `~/.ordnung/bin` on first launch (see `ordnung_core::tools`), and a
+  Homebrew copy is only a fallback. Decoding, analysis and SQLite are pure
+  Rust or bundled.
 - **Linux:** `libdbus-1-dev` for media-key integration. Linux builds compile
   but the app is only packaged and tested on macOS.
 
@@ -60,7 +62,22 @@ cp .env.example .env
 
 A token saved in the app's Settings window (`~/.ordnung/config.toml`) takes
 priority over the env var. Keep a scratch `HOME` for testing anything that
-scans or analyses, so you never point a dev build at your real library.
+scans or analyses, so you never point a dev build at your real library; set
+`ORDNUNG_NO_TOOL_DOWNLOAD=1` there so each scratch run doesn't re-fetch
+ffmpeg.
+
+### The managed ffmpeg
+
+Users never install ffmpeg. `ordnung_core::tools` pins `FFMPEG_VERSION`,
+and the app downloads `ffmpeg-<version>-macos-<arch>.gz` from the rolling
+`ffmpeg` GitHub release into `~/.ordnung/bin`, proves it runs, and stamps
+the version. To move to a newer ffmpeg: run `make ffmpeg-publish` (fetches
+the latest static builds from ffmpeg.martin-riedl.de for both
+architectures and uploads them), set `FFMPEG_VERSION` to the version it
+prints, and ship a release. Older app versions keep downloading their own
+pinned asset, so never delete assets from that release. To test the
+download flow without publishing, serve a `.gz` locally and point
+`ORDNUNG_FFMPEG_URL` at it.
 
 ## Workspace layout
 

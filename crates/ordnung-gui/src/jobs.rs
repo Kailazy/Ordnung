@@ -4900,3 +4900,55 @@ mod drop_import_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+impl App {
+    /// Make sure the managed ffmpeg is present and current, fetching it on a
+    /// worker when it isn't (`ordnung_core::tools`). Called once at startup
+    /// and by the Conversion tab's Download button. A download already in
+    /// flight is left alone. `ORDNUNG_NO_TOOL_DOWNLOAD=1` skips the fetch,
+    /// for test harnesses that run under a scratch HOME.
+    pub(crate) fn ensure_ffmpeg(&mut self, ctx: egui::Context) {
+        use ordnung_core::tools::{self, FfmpegStatus};
+        if self.tools_rx.is_some() {
+            return;
+        }
+        if tools::ffmpeg_status() == FfmpegStatus::Current {
+            self.ffmpeg_state = FfmpegState::Ready(tools::FFMPEG_VERSION.to_string());
+            return;
+        }
+        if std::env::var_os("ORDNUNG_NO_TOOL_DOWNLOAD").is_some() {
+            self.ffmpeg_state = FfmpegState::Absent;
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.tools_rx = Some(rx);
+        self.ffmpeg_state = FfmpegState::Downloading { read: 0, total: 0 };
+        thread::spawn(move || run_ffmpeg_install(tx, ctx));
+    }
+}
+
+/// Worker for [`App::ensure_ffmpeg`]: download, prove and stamp the managed
+/// ffmpeg. Progress is throttled to four updates a second.
+fn run_ffmpeg_install(tx: Sender<ToolMsg>, ctx: egui::Context) {
+    use ordnung_core::tools;
+    let cancel = AtomicBool::new(false);
+    let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let result = tools::install_ffmpeg(
+        &mut |p| {
+            if last.elapsed() < std::time::Duration::from_millis(250) {
+                return;
+            }
+            last = std::time::Instant::now();
+            let _ = tx.send(ToolMsg::Progress(p.read_bytes, p.total_bytes));
+            ctx.request_repaint();
+        },
+        &cancel,
+    );
+    let msg = match result {
+        Ok(Some(_)) => ToolMsg::Done(tools::FFMPEG_VERSION.to_string()),
+        Ok(None) => ToolMsg::Failed("cancelled".to_string()),
+        Err(e) => ToolMsg::Failed(e.to_string()),
+    };
+    let _ = tx.send(msg);
+    ctx.request_repaint();
+}

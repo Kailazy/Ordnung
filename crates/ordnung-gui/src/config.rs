@@ -871,8 +871,7 @@ impl Config {
 
 /// `~/.ordnung/config.toml` — same directory as the catalog database.
 pub fn config_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".ordnung").join("config.toml"))
+    Some(ordnung_core::tools::data_dir()?.join("config.toml"))
 }
 
 #[cfg(test)]
