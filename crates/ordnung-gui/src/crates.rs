@@ -98,26 +98,29 @@ pub(crate) fn add_to_crate_menu(
     pick
 }
 
-/// The "Tags" submenu of a song's context menu: a check per tag, on for
-/// the tags in `on` (the song's, or with several songs the tags every one
-/// of them carries). Returns the tag toggled and its new state. Shown
-/// even with no tags, saying so, so the way in is found.
+/// The "Tags" submenu of a song's context menu: one ✓ row per tag
+/// (`ui::menu` rows, the whole row toggles), checked for the tags in `on`
+/// (the song's, or with several songs the tags every one of them
+/// carries). Returns the tag toggled and its new state. The menu stays up
+/// so several tags can be set in one visit. Shown even with no tags,
+/// saying so, so the way in is found.
 pub(crate) fn tag_menu(ui: &mut egui::Ui, sets: &[CrateSet], on: &[Id]) -> Option<(Id, bool)> {
     let mut pick = None;
     ui.menu_button("Tags", |ui| {
-        let mut any = false;
-        for t in sets.iter().filter(|c| c.kind == CrateKind::Tag) {
-            any = true;
-            let mut checked = on.contains(&t.id);
-            if ui.checkbox(&mut checked, &t.name).clicked() {
-                pick = Some((t.id, checked));
-                ui.close_menu();
+        crate::ui::menu::embedded(ui, |m| {
+            let mut any = false;
+            for t in sets.iter().filter(|c| c.kind == CrateKind::Tag) {
+                any = true;
+                let checked = on.contains(&t.id);
+                if m.selectable(checked, &t.name) {
+                    pick = Some((t.id, !checked));
+                }
             }
-        }
-        if !any {
-            ui.add_enabled(false, egui::Button::new("No tags yet"))
-                .on_disabled_hover_note("Make one with the + beside TAGS in the sidebar");
-        }
+            if !any {
+                m.note("No tags yet");
+                m.note("Make one with the + beside TAGS in the sidebar");
+            }
+        });
     });
     pick
 }

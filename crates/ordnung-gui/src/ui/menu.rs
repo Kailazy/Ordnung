@@ -171,6 +171,27 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
     ctx.data_mut(|d| d.insert_temp(id, open));
 }
 
+/// The same rows inside a native egui menu (a context menu's submenu),
+/// where the panel is egui's and only the rows are ours: a `menu_button`
+/// submenu that offers a multi-select (the Tags submenu of a song's menu)
+/// draws its ✓ rows through this so they look and toggle the way a
+/// [`dropdown`]'s do. No entrance cascade: the native menu has none, and
+/// the rows should not unroll after the panel has popped. A `close()`
+/// from within closes the native menu.
+pub fn embedded(ui: &mut egui::Ui, add: impl FnOnce(&mut MenuUi)) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    let mut m = MenuUi {
+        ui,
+        since_open: f32::MAX,
+        row: 0,
+        close: false,
+    };
+    add(&mut m);
+    if m.close {
+        ui.close_menu();
+    }
+}
+
 /// The builder handed to a [`dropdown`]'s content closure. Rows are drawn in
 /// call order and each times its entrance off its position in that order.
 pub struct MenuUi<'u> {

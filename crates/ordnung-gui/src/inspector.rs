@@ -529,28 +529,24 @@ impl App {
                 let words = tag_words.clone();
                 ui.add_space(space::S2);
                 ui.horizontal(|ui| {
-                    ui.menu_button(
-                        egui::RichText::new("Tags")
-                            .font(crate::ui::tokens::font::caption())
-                            .color(color::LABEL_2),
-                        |ui| {
-                            let mut any = false;
-                            for (tid, name) in &tag_sets {
-                                any = true;
-                                let mut on = tagged.contains(tid);
-                                if ui.checkbox(&mut on, name).clicked() {
-                                    action = Some(InspectorAction::SetTag(*tid, on, like_spec.clone()));
-                                    ui.close_menu();
-                                }
+                    // The app's dropdown with ✓ rows: a row toggles the tag
+                    // and the menu stays up for the next one.
+                    let btn = crate::ui::button::menu_button(ui, "Tags")
+                        .on_hover_note("Mark this song with your tags");
+                    crate::ui::menu::dropdown(&btn, 200.0, |m| {
+                        let mut any = false;
+                        for (tid, name) in &tag_sets {
+                            any = true;
+                            let on = tagged.contains(tid);
+                            if m.selectable(on, name) {
+                                action = Some(InspectorAction::SetTag(*tid, !on, like_spec.clone()));
                             }
-                            if !any {
-                                ui.add_enabled(false, egui::Button::new("No tags yet"))
-                                    .on_disabled_hover_note("Make one with the + beside TAGS in the sidebar");
-                            }
-                        },
-                    )
-                    .response
-                    .on_hover_note("Mark this song with your tags");
+                        }
+                        if !any {
+                            m.note("No tags yet");
+                            m.note("Make one with the + beside TAGS in the sidebar");
+                        }
+                    });
                     ui.add(
                         egui::Label::new(
                             egui::RichText::new(if words.is_empty() { "none".to_string() } else { words })
