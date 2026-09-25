@@ -1937,7 +1937,8 @@ impl App {
                         .selectable_label(self.show_watch, label)
                         .on_hover_note(
                             "Wantlist records for sale at your saved sellers, \
-                             cheapest first (update a shop to refresh its stock)",
+                             grouped by shop so one order covers the most records \
+                             (update a shop to refresh its stock)",
                         )
                         .clicked()
                     {

@@ -502,6 +502,119 @@ pub struct SellerListing {
     pub posted: Option<String>,
 }
 
+/// One saved seller's basket of the user's wants: every wantlist record they
+/// stock, folded to the cheapest copy per release, with what the whole basket
+/// costs. The answer to "which shop covers the most of my wantlist in one
+/// order?" — the more wants one seller holds, the fewer shipping charges the
+/// wantlist costs to clear. Built by [`seller_baskets`] from the wantlist
+/// watch's `(seller, listing)` rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SellerBasket {
+    pub seller: String,
+    /// The cheapest copy of each wanted release this seller stocks, by artist
+    /// then title. One row per release: a second copy of the same record
+    /// doesn't make the basket bigger.
+    pub offers: Vec<SellerListing>,
+    /// Asking prices summed per currency (a shop quoting in one currency,
+    /// which is nearly all of them, has one entry). Never summed across
+    /// currencies.
+    pub subtotal: Vec<(String, f64)>,
+    /// The cheapest per-record shipping quoted on any listing in the basket,
+    /// as `(price, currency)`. `None` when the seller publishes only a
+    /// free-text policy — which reads as "not quoted", never "free".
+    pub shipping: Option<(f64, String)>,
+}
+
+impl SellerBasket {
+    /// How many distinct wanted records the basket holds.
+    pub fn wants(&self) -> usize {
+        self.offers.len()
+    }
+
+    /// The basket's landed cost per record if the whole basket ships as one
+    /// order paying shipping once: `(subtotal + shipping) / wants`. Only
+    /// computable when the prices and the shipping quote share one currency;
+    /// `None` otherwise. An estimate — sellers add a smaller per-item charge
+    /// on combined orders, which Discogs doesn't quote through the API.
+    pub fn landed_per_record(&self) -> Option<(f64, String)> {
+        let [(currency, subtotal)] = self.subtotal.as_slice() else {
+            return None;
+        };
+        let (ship, ship_currency) = self.shipping.as_ref()?;
+        if !ship_currency.eq_ignore_ascii_case(currency) || self.offers.is_empty() {
+            return None;
+        }
+        Some(((subtotal + ship) / self.offers.len() as f64, currency.clone()))
+    }
+}
+
+/// Fold wantlist offers into one basket per seller, ranked so the shop worth
+/// ordering from comes first: most wants held, then the cheapest subtotal
+/// (compared as a bare number, which is approximate across currencies but
+/// keeps the ranking stable), then the seller's name.
+pub fn seller_baskets(offers: &[(String, SellerListing)]) -> Vec<SellerBasket> {
+    use std::collections::BTreeMap;
+    // seller -> release -> cheapest listing
+    let mut by_seller: BTreeMap<&str, BTreeMap<u64, &SellerListing>> = BTreeMap::new();
+    for (seller, l) in offers {
+        let slot = by_seller
+            .entry(seller.as_str())
+            .or_default()
+            .entry(l.release_id)
+            .or_insert(l);
+        if l.price < slot.price {
+            *slot = l;
+        }
+    }
+    let mut baskets: Vec<SellerBasket> = by_seller
+        .into_iter()
+        .map(|(seller, by_release)| {
+            let mut offers: Vec<SellerListing> = by_release.into_values().cloned().collect();
+            offers.sort_by(|a, b| {
+                a.artist
+                    .to_lowercase()
+                    .cmp(&b.artist.to_lowercase())
+                    .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+            });
+            let mut subtotal: BTreeMap<String, f64> = BTreeMap::new();
+            for l in &offers {
+                *subtotal.entry(l.currency.trim().to_uppercase()).or_default() += l.price;
+            }
+            let shipping = offers
+                .iter()
+                .filter_map(|l| {
+                    l.shipping_price.map(|p| {
+                        (
+                            p,
+                            l.shipping_currency
+                                .clone()
+                                .unwrap_or_else(|| l.currency.clone())
+                                .trim()
+                                .to_uppercase(),
+                        )
+                    })
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            SellerBasket {
+                seller: seller.to_string(),
+                offers,
+                subtotal: subtotal.into_iter().collect(),
+                shipping,
+            }
+        })
+        .collect();
+    baskets.sort_by(|a, b| {
+        b.wants()
+            .cmp(&a.wants())
+            .then_with(|| {
+                let sub = |x: &SellerBasket| x.subtotal.iter().map(|(_, v)| v).sum::<f64>();
+                sub(a).total_cmp(&sub(b))
+            })
+            .then_with(|| a.seller.to_lowercase().cmp(&b.seller.to_lowercase()))
+    });
+    baskets
+}
+
 /// Conversion target chosen explicitly by the user. Never applied automatically.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConvertRule {
@@ -728,5 +841,61 @@ impl TracklistEntry {
             (None, Some(t)) => t.to_string(),
             (None, None) => self.raw.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod basket_tests {
+    use super::*;
+
+    fn listing(id: u64, release_id: u64, artist: &str, price: f64, ship: Option<f64>) -> SellerListing {
+        SellerListing {
+            listing_id: id,
+            release_id,
+            title: format!("Title {release_id}"),
+            artist: artist.into(),
+            year: None,
+            label: None,
+            catalog_number: None,
+            format: None,
+            thumb_url: None,
+            price,
+            currency: "EUR".into(),
+            condition: None,
+            sleeve_condition: None,
+            ships_from: None,
+            shipping_price: ship,
+            shipping_currency: ship.map(|_| "EUR".into()),
+            allow_offers: false,
+            uri: None,
+            posted: None,
+        }
+    }
+
+    #[test]
+    fn baskets_rank_by_wants_then_subtotal_and_fold_copies() {
+        let offers = vec![
+            ("juno".to_string(), listing(1, 100, "Basic Channel", 10.0, Some(8.0))),
+            ("juno".to_string(), listing(2, 100, "Basic Channel", 9.0, Some(8.0))), // cheaper copy
+            ("hardwax".to_string(), listing(3, 100, "Basic Channel", 12.0, Some(6.0))),
+            ("hardwax".to_string(), listing(4, 101, "Maurizio", 20.0, None)),
+            ("hardwax".to_string(), listing(5, 102, "Vainqueur", 15.0, Some(7.0))),
+            ("cheap".to_string(), listing(6, 101, "Maurizio", 5.0, None)),
+        ];
+        let b = seller_baskets(&offers);
+        assert_eq!(b.iter().map(|x| x.seller.as_str()).collect::<Vec<_>>(), ["hardwax", "cheap", "juno"]);
+        let hw = &b[0];
+        assert_eq!(hw.wants(), 3);
+        assert_eq!(hw.subtotal, vec![("EUR".to_string(), 47.0)]);
+        assert_eq!(hw.shipping, Some((6.0, "EUR".to_string())));
+        let (per, cur) = hw.landed_per_record().unwrap();
+        assert!((per - 53.0 / 3.0).abs() < 1e-9);
+        assert_eq!(cur, "EUR");
+        // The second copy folded to the cheaper one.
+        let juno = &b[2];
+        assert_eq!(juno.offers.len(), 1);
+        assert_eq!(juno.offers[0].listing_id, 2);
+        // No shipping quote: no landed figure.
+        assert_eq!(b[1].landed_per_record(), None);
     }
 }

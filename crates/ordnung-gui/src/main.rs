@@ -1439,6 +1439,11 @@ struct App {
     /// Whether the wantlist watch window is open. Session state, toggled by
     /// the wantlist tab's "In stock" button.
     show_watch: bool,
+    /// How the watch lays its offers out: grouped into one basket per
+    /// seller, ranked by how many wants the shop holds (the default: one
+    /// order from the top shop pays shipping once for the most records), or
+    /// as a flat list, cheapest copy first. Session state.
+    watch_by_seller: bool,
     /// Free-text filter for the vinyl view's search bar. Narrows both shelves by
     /// artist, title, year and format as you type. Not persisted: a search is
     /// about the record you're looking for right now, not a saved view.

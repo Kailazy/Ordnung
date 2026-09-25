@@ -204,6 +204,7 @@ impl App {
             seller_shipping: HashMap::new(),
             wantlist_watch: Vec::new(),
             show_watch: false,
+            watch_by_seller: true,
             browse_panel: None,
             browse_tx,
             browse_rx,
