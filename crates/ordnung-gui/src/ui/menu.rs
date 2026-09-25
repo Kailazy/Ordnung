@@ -94,7 +94,11 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
         return;
     }
     if open {
-        ctx.data_mut(|d| d.insert_temp(open_pass_id(), ctx.cumulative_pass_nr()));
+        // Read the pass before taking the write: the context is one
+        // read-write lock, and a read inside `data_mut` deadlocks the app
+        // on the first frame a menu is open (seen 2026-09-25, v0.159.0).
+        let pass = ctx.cumulative_pass_nr();
+        ctx.data_mut(|d| d.insert_temp(open_pass_id(), pass));
     }
 
     let opened_at: f64 = ctx.data(|d| d.get_temp(id.with("at")).unwrap_or(now));
@@ -447,5 +451,44 @@ impl MenuUi<'_> {
             );
         }
         resp.clicked()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An open dropdown must draw without touching the context's lock from
+    /// inside one of its own write closures: that deadlocks the UI thread
+    /// forever. Run the passes on a worker so a regression fails instead of
+    /// hanging the test run.
+    #[test]
+    fn open_dropdown_draws_a_second_pass_without_deadlock() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ctx = egui::Context::default();
+            let id = egui::Id::new("anchor").with("ord_dropdown");
+            // Open it the way a click on the anchor would: the flag is the
+            // dropdown's own state.
+            ctx.data_mut(|d| d.insert_temp(id, true));
+            for _ in 0..3 {
+                let _ = ctx.run(Default::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let anchor = ui.push_id("anchor", |ui| ui.label("Sort")).response;
+                        let anchor = egui::Response { id: egui::Id::new("anchor"), ..anchor };
+                        dropdown(&anchor, 120.0, |m| {
+                            m.selectable(true, "Artist");
+                            m.item("Reset");
+                        });
+                    });
+                });
+            }
+            assert!(any_open(&ctx) || !any_open(&ctx));
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok(),
+            "drawing an open dropdown deadlocked"
+        );
     }
 }
