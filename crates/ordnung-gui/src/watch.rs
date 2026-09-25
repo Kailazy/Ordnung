@@ -210,6 +210,22 @@ impl App {
             return;
         }
         let swept = self.sellers.iter().any(|s| s.swept_at.is_some());
+        // Shops the watch can't vouch for: never updated, or an update that
+        // stopped part-way (a distributor's sweep takes half an hour and is
+        // easy to cancel). Their wants aren't in these rows, and a basket
+        // ranking that silently leaves out the biggest shop would mislead —
+        // so they're named, biggest cached stock first: the shops with the
+        // most already fetched are the ones most worth finishing.
+        let unfinished: Vec<String> = {
+            let mut v: Vec<&SellerShop> =
+                self.sellers.iter().filter(|s| s.swept_at.is_none()).collect();
+            v.sort_by(|a, b| {
+                b.cached
+                    .cmp(&a.cached)
+                    .then_with(|| a.username.to_lowercase().cmp(&b.username.to_lowercase()))
+            });
+            v.into_iter().map(|s| s.username.clone()).collect()
+        };
         // Snapshot the rows before `dig_cover` needs `self` mutably. Both
         // layouts are built up front: the flat list straight off the watch,
         // the baskets through the core fold, each basket's shipping floor
@@ -291,6 +307,29 @@ impl App {
                     .weak()
                     .small(),
                 );
+                if !unfinished.is_empty() {
+                    const NAMED: usize = 5;
+                    let mut names = unfinished
+                        .iter()
+                        .take(NAMED)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if unfinished.len() > NAMED {
+                        names.push_str(&format!(" and {} more", unfinished.len() - NAMED));
+                    }
+                    let verb = if unfinished.len() == 1 { "hasn't" } else { "haven't" };
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Not counted: {names} {verb} finished an update, so their \
+                             stock isn't in these rows. Update them in the Market tab."
+                        ))
+                        .weak()
+                        .small()
+                        .color(egui::Color32::from_rgb(225, 180, 90)),
+                    );
+                }
                 ui.add_space(6.0);
                 if flat.is_empty() {
                     let msg = if !swept {

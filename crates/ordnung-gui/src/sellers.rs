@@ -257,13 +257,29 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(cur) = self.seller_current.clone() {
+                    // The note sizes the job once the shop's size is known
+                    // (stamped by the first page of any earlier update): a
+                    // distributor takes half an hour, and saying so up front
+                    // is what makes the wait reasonable rather than a hang.
+                    let size_note = self
+                        .sellers
+                        .iter()
+                        .find(|s| s.username == cur)
+                        .and_then(|s| s.reported)
+                        .map(|n| {
+                            format!(
+                                "; this shop lists {n} items, about {} min",
+                                crate::jobs::seller_sweep_minutes(n)
+                            )
+                        })
+                        .unwrap_or_else(|| "; large shops take a while".to_string());
                     ui.add_enabled_ui(!busy, |ui| {
                         if ui
                             .button("⟲ Update")
-                            .on_hover_note(
+                            .on_hover_note(format!(
                                 "Pull this seller's for-sale inventory from Discogs \
-                                 (runs in the background; large shops take minutes)",
-                            )
+                                 (runs in the background{size_note})"
+                            ))
                             .clicked()
                         {
                             sweep = Some(cur.clone());
@@ -447,9 +463,20 @@ impl App {
                 (true, n) => format!("{n} records in the crates"),
                 (false, _) => format!("{} of {} records match", filtered.len(), shop.cached),
             };
-            match shop.swept_at {
-                Some(t) => meta.push_str(&format!(" · updated {}", fmt_ago(t))),
-                None => meta.push_str(" · never updated"),
+            // The freshness stamp says what the crates are a picture of. A
+            // shop whose update never finished has a head of its stock, not
+            // the stock: the watch can't count wants the sweep never reached,
+            // so that gap is named (with the shop's size when the first page
+            // stamped it) instead of reading as "never updated".
+            match (shop.swept_at, shop.cached, shop.reported) {
+                (Some(t), _, _) => meta.push_str(&format!(" · updated {}", fmt_ago(t))),
+                (None, 0, _) => meta.push_str(" · never updated"),
+                (None, n, Some(total)) if total > n => meta.push_str(&format!(
+                    " · the last update stopped at {n} of {total} listings, update again to finish"
+                )),
+                (None, _, _) => {
+                    meta.push_str(" · the last update stopped early, update again to finish")
+                }
             }
             if highlight_hidden {
                 meta.push_str(" · the record you picked is hidden by the search or filters");

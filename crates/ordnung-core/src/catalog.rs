@@ -3793,6 +3793,19 @@ impl Catalog {
         Ok(rows)
     }
 
+    /// Record how many for-sale listings Discogs reports for a seller, without
+    /// touching the completed-sweep stamp. Called from a sweep's first page,
+    /// so a sweep that is cancelled or fails part-way still leaves the shop's
+    /// true size behind — the tab can then say "7,535 of 159,004 cached"
+    /// instead of pretending the cached head is the whole shop.
+    pub fn set_seller_reported(&self, username: &str, reported_items: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sellers SET reported_items=?2 WHERE username=?1",
+            params![username, reported_items as i64],
+        )?;
+        Ok(())
+    }
+
     /// Stamp a completed sweep: when it finished and how many for-sale listings
     /// Discogs reported in total (all formats — see
     /// [`SellerShop::reported`]). Called only when a sweep ran to the end, so
@@ -6934,6 +6947,13 @@ mod tests {
         let rows = cat.list_seller_listings("hardwax").unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].price, 9.5);
+
+        // A sweep's first page leaves the shop's size behind even when the
+        // sweep never completes: the size stamps, the completion doesn't.
+        cat.set_seller_reported("hardwax", 240).unwrap();
+        let shop = &cat.list_sellers().unwrap()[0];
+        assert_eq!(shop.reported, Some(240));
+        assert!(shop.swept_at.is_none());
 
         // Completed-sweep bookkeeping.
         cat.set_seller_swept("hardwax", 250).unwrap();

@@ -2678,11 +2678,27 @@ fn analyze_tracks(
 /// [`Catalog::vinyl_prices_to_refresh`].
 const VINYL_PRICE_MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
 
-/// Page cap for a seller sweep: 100 listings per page, so 200 pages = 20,000
-/// listings ≈ 3½ minutes at the shared throttle. Inventory is fetched
-/// newest-listed first, so a capped sweep of a mega-distributor keeps the
-/// freshest slice of the crates; the Done message says when it was cut short.
-const SELLER_SWEEP_MAX_PAGES: u32 = 200;
+/// Page cap for a seller sweep: 100 listings per page, so 2,000 pages =
+/// 200,000 listings ≈ 37 minutes at the background pace. High enough to
+/// cover the big distributors whole (hhv.de lists ~160,000): the wantlist
+/// watch can only count a want a shop stocks if the sweep reached it, and a
+/// 20,000-listing head of a 160,000-listing shop missed most of them. Still
+/// a cap, so a runaway shop is bounded; inventory is fetched newest-listed
+/// first, so what a capped sweep keeps is the freshest slice, and the Done
+/// message says when it was cut short.
+const SELLER_SWEEP_MAX_PAGES: u32 = 2_000;
+
+/// Seconds one inventory page costs at the background pace (the client's
+/// minimum request interval), for the sweep's time-left estimate and the
+/// Update button's "about N min" note. See [`seller_sweep_minutes`].
+const SELLER_SWEEP_SECS_PER_PAGE: f64 = 1.1;
+
+/// About how many minutes a sweep of a shop reporting `items` listings takes,
+/// at 100 listings per page and the cap applied. At least 1.
+pub(crate) fn seller_sweep_minutes(items: u64) -> u64 {
+    let pages = items.div_ceil(100).min(SELLER_SWEEP_MAX_PAGES as u64);
+    ((pages as f64 * SELLER_SWEEP_SECS_PER_PAGE) / 60.0).ceil().max(1.0) as u64
+}
 
 /// Sweep one seller's for-sale inventory into the `seller_listings` cache:
 /// page through `/users/{u}/inventory` newest first, upsert every vinyl
@@ -2736,14 +2752,25 @@ pub(crate) fn run_sweep_seller(
         };
         pages = fetched.pages;
         reported = fetched.items;
+        if page == 1 {
+            // The shop's size is known from the first page: stamp it now, so
+            // a sweep that stops early still leaves an honest "N of M cached"
+            // behind rather than a head that reads as the whole shop.
+            let _ = catalog.set_seller_reported(&username, reported as u64);
+        }
         for l in &fetched.listings {
             let _ = catalog.upsert_seller_listing(&username, l);
             keep.push(l.listing_id);
         }
         kept += fetched.listings.len();
         let total = pages.min(SELLER_SWEEP_MAX_PAGES) as usize;
+        let left_secs = (total.saturating_sub(page as usize)) as f64 * SELLER_SWEEP_SECS_PER_PAGE;
+        let left = match left_secs as u64 {
+            0..=59 => "under a minute left".to_string(),
+            s => format!("about {} min left", (s as f64 / 60.0).ceil() as u64),
+        };
         let _ = tx.send(JobMsg::Status(format!(
-            "Updating {username}'s crates… (page {page}/{total}, {kept} records)"
+            "Updating {username}'s crates… (page {page}/{total}, {kept} records, {left})"
         )));
         let _ = tx.send(JobMsg::Progress {
             done: page as usize,
@@ -2764,7 +2791,7 @@ pub(crate) fn run_sweep_seller(
     }
     let note = match (stopped, capped) {
         (true, _) => " (stopped early — fetched so far kept, nothing pruned)",
-        (false, true) => " (large shop — capped at the newest 20,000 listings)",
+        (false, true) => " (large shop — capped at the newest 200,000 listings)",
         (false, false) => "",
     };
     let _ = tx.send(JobMsg::Done(format!(
