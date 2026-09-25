@@ -44,6 +44,37 @@ pub fn control_h(ui: &egui::Ui) -> f32 {
     ui.text_style_height(&egui::TextStyle::Body).round() + field::MARGIN.sum().y
 }
 
+/// A label that leads with an icon: the glyph from the app's icon face, a
+/// gap, then the text in `font`, both centred on one line. For a button or
+/// a menu item whose label carries a mark ("Analyze" behind its bolt), so
+/// the mark is set in the icon face rather than left to the text chain,
+/// where Inter's private-use glyphs would claim some of the codepoints.
+/// Colours are left to the widget, so the label still answers hover.
+pub fn icon_text(glyph: &str, text: &str, font: egui::FontId) -> egui::WidgetText {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        glyph,
+        0.0,
+        egui::TextFormat {
+            font_id: tokens::font::icon(font.size + 2.0),
+            color: egui::Color32::PLACEHOLDER,
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    job.append(
+        text,
+        tokens::space::S3,
+        egui::TextFormat {
+            font_id: font,
+            color: egui::Color32::PLACEHOLDER,
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    job.into()
+}
+
 /// The chip that floats at the pointer while something is dragged inside
 /// the app ("3 track(s)", "1 song"), so it's clear something is being
 /// carried toward a drop target. Painted in the tooltip layer, above all.

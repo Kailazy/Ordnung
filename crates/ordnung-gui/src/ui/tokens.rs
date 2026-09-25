@@ -208,6 +208,21 @@ pub mod font {
     pub fn mono() -> FontId {
         FontId::monospace(12.5)
     }
+
+    /// Name of the family that holds only the Phosphor icon face (installed
+    /// by [`super::super::theme`]). Icons are set in *this* family, never in
+    /// the proportional chain: Inter carries its own private-use glyphs at
+    /// some of the codepoints Phosphor uses (its heart came out as a
+    /// diacritic), and Phosphor cannot lead the chain because it also
+    /// carries a space and lowercase letters of its own.
+    pub const ICON_FAMILY: &str = "icons";
+
+    /// An icon from the app's icon face at `size`. Beside text, set it two
+    /// points over the text's size: a Phosphor glyph fills about four fifths
+    /// of its em, so that is what brings it to the cap height.
+    pub fn icon(size: f32) -> FontId {
+        FontId::new(size, FontFamily::Name(ICON_FAMILY.into()))
+    }
     /// Small monospace — transport timecodes and other tabular numerals that sit
     /// beside `footnote`-sized copy. Matched to `footnote` so a clock next to a
     /// label shares its baseline weight rather than looking a step larger.

@@ -1548,3 +1548,51 @@ pub fn glyph(name: &str) -> Option<&'static str> {
         .ok()
         .map(|i| ICONS[i].1)
 }
+
+/// The glyph for an icon the app itself names (a compile-time literal such
+/// as `"vinyl-record"`), so the sidebar's own marks come out of the same face
+/// as the icons a user picks for a playlist. A misspelt name renders as the
+/// replacement character rather than panicking, and the test below keeps
+/// every name the app uses in the table.
+pub fn named(name: &str) -> &'static str {
+    glyph(name).unwrap_or("\u{FFFD}")
+}
+
+/// Every icon name the app reaches for by itself, in one place so the test
+/// can check them and the next feature can see what is already in use.
+pub mod app {
+    pub const MUSIC_NOTE: &str = "music-note";
+    pub const VINYL: &str = "vinyl-record";
+    pub const HEART: &str = "heart";
+    pub const SPARKLE: &str = "sparkle";
+    pub const WARNING: &str = "warning";
+    pub const EJECT: &str = "eject";
+    pub const LIGHTNING: &str = "lightning";
+    pub const PLUS: &str = "plus";
+    pub const PACKAGE: &str = "package";
+    pub const TAG: &str = "tag";
+    pub const FOLDER: &str = "folder";
+    pub const FILE_AUDIO: &str = "file-audio";
+
+    pub const ALL: &[&str] = &[
+        MUSIC_NOTE, VINYL, HEART, SPARKLE, WARNING, EJECT, LIGHTNING, PLUS, PACKAGE, TAG, FOLDER,
+        FILE_AUDIO,
+    ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_app_icon_is_in_the_table() {
+        for name in app::ALL {
+            assert!(glyph(name).is_some(), "{name} is not a Phosphor icon");
+        }
+    }
+
+    #[test]
+    fn table_is_sorted_for_binary_search() {
+        assert!(ICONS.windows(2).all(|w| w[0].0 <= w[1].0));
+    }
+}

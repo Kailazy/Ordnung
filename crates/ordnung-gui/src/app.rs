@@ -1,7 +1,8 @@
 //! Split out of `main.rs`; part of the GUI `App`.
 use super::*;
 use crate::pick;
-use crate::ui::tokens::space;
+use crate::ui::phosphor_icons::{app as icons, named};
+use crate::ui::tokens::{color, font, space};
 use ordnung_rbdb::edit;
 
 /// How long the toolbar search box waits for typing to stop before rebuilding
@@ -2338,7 +2339,7 @@ impl App {
             egui::TopBottomPanel::top("update_banner")
                 .frame(
                     egui::Frame::none()
-                        .fill(egui::Color32::from_rgb(64, 110, 180))
+                        .fill(crate::sidebar::NAV_ACCENT)
                         .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
                 )
                 .show(ctx, |ui| {
@@ -2408,11 +2409,15 @@ impl App {
                         let add_btn = egui::Button::new(
                             egui::RichText::new("Add songs…").color(egui::Color32::WHITE),
                         )
-                        .fill(egui::Color32::from_rgb(64, 110, 180))
+                        .fill(crate::sidebar::NAV_ACCENT)
                         .stroke(egui::Stroke::NONE);
                         let add = egui::menu::menu_custom_button(ui, add_btn, |ui| {
                             if ui
-                                .button("🎵  Choose files…")
+                                .button(crate::ui::icon_text(
+                                    named(icons::FILE_AUDIO),
+                                    "Choose files…",
+                                    font::body(),
+                                ))
                                 .on_hover_note("Add audio files")
                                 .clicked()
                             {
@@ -2429,7 +2434,11 @@ impl App {
                                 ui.close_menu();
                             }
                             if ui
-                                .button("📁  Choose folder…")
+                                .button(crate::ui::icon_text(
+                                    named(icons::FOLDER),
+                                    "Choose folder…",
+                                    font::body(),
+                                ))
                                 .on_hover_note("Add a folder, subfolders included")
                                 .clicked()
                             {
@@ -2441,7 +2450,6 @@ impl App {
                             "Add files or a folder to the catalog. Source files are never modified",
                         );
                     });
-                    ui.separator();
                     // Every other button in this left group acts on the rows of
                     // the digital library: analysis, conversion, tag writeback,
                     // relocation. The vinyl view shows Discogs records, not
@@ -2471,12 +2479,16 @@ impl App {
                             // fetches were dropped — the per-track ↻ re-pick covers the
                             // metadata case, and re-analysis is rarely wanted in bulk.
                             let analyze_label = if sel_ids.is_empty() {
-                                "⚡ Analyze".to_string()
+                                "Analyze".to_string()
                             } else {
-                                format!("⚡ Analyze {} selected", sel_ids.len())
+                                format!("Analyze {} selected", sel_ids.len())
                             };
                             if ui
-                                .button(analyze_label)
+                                .button(crate::ui::icon_text(
+                                    named(icons::LIGHTNING),
+                                    &analyze_label,
+                                    font::body(),
+                                ))
                                 .on_hover_note(
                                     "Detect BPM, key, beatgrid, and quality. Skips tracks \
                              already analyzed.",
@@ -3086,22 +3098,16 @@ impl App {
         let nav_panel = crate::ui::nav::Nav::left("library_nav", &mut nav_state)
             .shown(density)
             .show(ctx, |panel| panel, |ui| {
-                // Header for a section: a small dimmed all-caps caption that sets
-                // the playlist / collection groups apart without competing with
-                // the big nav tiles below it.
+                // Header for a section: the small-caps caption every panel in
+                // the app uses (see `sidebar::section_caption`).
                 let section_caption = |ui: &mut egui::Ui, text: &str| {
                     // An all-caps caption has no legible short form, so the
-                    // icon tier drops it entirely and lets the spacing and
-                    // rules do the grouping.
+                    // icon tier drops it entirely and lets the spacing do the
+                    // grouping.
                     if density.icons_only() {
                         return;
                     }
-                    ui.label(
-                        egui::RichText::new(text)
-                            .font(crate::ui::tokens::font::footnote())
-                            .color(egui::Color32::from_gray(140))
-                            .strong(),
-                    );
+                    crate::sidebar::section_caption(ui, text);
                 };
 
                 // Which library leads the sidebar. A vinyl-first collector puts
@@ -3154,24 +3160,19 @@ impl App {
                         if recent_count == 0 && *view == LibraryView::RecentlyAdded && rows_empty {
                             *view = LibraryView::Library;
                         }
-                        // One size at every remaining tier: the taller 46pt
-                        // variant existed for the retired wide layout, where the
-                        // tile shared its row with "New".
-                        let tile = nav_button_painted(
+                        let tile = source_tile(
                             ui,
                             density,
-                            crate::ui::icon::library,
+                            SourceMark::Painted(crate::ui::icon::library),
                             "Library",
                             *view == LibraryView::Library,
-                            44.0,
-                            16.5,
                         );
                         let mut tile_clicked = tile.clicked();
                         if inline_badge {
                             let badge = crate::sidebar::nav_tile_badge(
                                 ui,
                                 tile.rect,
-                                &format!("✦ {recent_count}"),
+                                &recent_count.to_string(),
                                 *view == LibraryView::RecentlyAdded,
                             )
                             .on_hover_note(RECENT_NOTE);
@@ -3190,15 +3191,15 @@ impl App {
                         // At the icon tier the pill has nowhere to go, so the
                         // inbox falls back to its own glyph tile below.
                         if recent_count > 0 && density == NavDensity::Icon {
-                            ui.add_space(4.0);
+                            ui.add_space(space::S2);
                             if nav_button_dense(
                                 ui,
                                 density,
-                                "✦",
+                                named(icons::SPARKLE),
                                 &format!("New  {recent_count}"),
                                 *view == LibraryView::RecentlyAdded,
-                                36.0,
-                                14.0,
+                                PLAYLIST_ROW_H,
+                                font::body(),
                             )
                             .on_hover_note(RECENT_NOTE)
                             .clicked()
@@ -3211,16 +3212,21 @@ impl App {
                         // points at that are no longer on disk. Clicking it opens
                         // the Library Health window (Duplicates / Missing tabs).
                         // A clean catalog gets no row at all.
+                        // The rows under the tile are playlist rows: the same
+                        // shape, mark and count lane as the tree below, so the
+                        // group reads as one list.
                         if missing_count > 0 {
-                            ui.add_space(4.0);
-                            if nav_button_dense(
+                            ui.add_space(space::S2);
+                            if playlist_row(
                                 ui,
                                 density,
-                                "⚠",
-                                &format!("{missing_count} missing"),
+                                "Missing",
+                                RowMark {
+                                    glyph: named(icons::WARNING),
+                                    tint: Some(color::ORANGE),
+                                },
                                 *view == LibraryView::Duplicates || *view == LibraryView::Missing,
-                                24.0,
-                                12.0,
+                                missing_count as usize,
                             )
                             .on_hover_note("Library health: missing files and duplicate copies")
                             .clicked()
@@ -3237,15 +3243,16 @@ impl App {
                             *view = LibraryView::Library;
                         }
                         if liked_count > 0 {
-                            ui.add_space(4.0);
-                            if nav_button_dense(
+                            if missing_count == 0 {
+                                ui.add_space(space::S2);
+                            }
+                            if playlist_row(
                                 ui,
                                 density,
-                                "♥",
-                                &format!("Liked  {liked_count}"),
+                                "Liked",
+                                RowMark::plain(icons::HEART),
                                 *view == LibraryView::Liked,
-                                24.0,
-                                12.0,
+                                liked_count,
                             )
                             .on_hover_note("Songs you liked on records, tracklists and the radio")
                             .clicked()
@@ -3253,7 +3260,7 @@ impl App {
                                 *view = LibraryView::Liked;
                             }
                         }
-                        ui.add_space(10.0);
+                        ui.add_space(space::S3);
                         if density.icons_only() {
                             // In the rail the caption is gone, so right-aligning
                             // the "+" left it floating in an empty row with
@@ -3268,7 +3275,7 @@ impl App {
                                 *sidebar_action = Some(SidebarAction::NewPlaylist(None));
                             }
                             ui.add_space(6.0);
-                        } else if crate::sidebar::list_header(ui, "PLAYLISTS", "New playlist") {
+                        } else if crate::sidebar::list_header(ui, "Playlists", "New playlist") {
                             *sidebar_action = Some(SidebarAction::NewPlaylist(None));
                         }
                     };
@@ -3325,14 +3332,12 @@ impl App {
                                 // strip already names the stick, so naming it
                                 // again here would just be a second button
                                 // for the same thing.
-                                if nav_button_painted(
+                                if source_tile(
                                     ui,
                                     density,
-                                    crate::ui::icon::library,
+                                    SourceMark::Painted(crate::ui::icon::library),
                                     "Library",
                                     *view == LibraryView::Usb(v.path.clone(), None),
-                                    44.0,
-                                    16.5,
                                 )
                                 .on_hover_note(if v.is_rekordbox_export {
                                     "Everything on this USB. Files are browsed in \
@@ -3345,7 +3350,7 @@ impl App {
                                 {
                                     *view = LibraryView::Usb(v.path.clone(), None);
                                 }
-                                ui.add_space(10.0);
+                                ui.add_space(space::S3);
                                 // Header for the stick's rekordbox tree (drawn
                                 // in the scrolling middle panel). On a
                                 // rekordbox export the "+" creates a playlist
@@ -3362,15 +3367,14 @@ impl App {
                                     if v.is_rekordbox_export {
                                         if crate::sidebar::list_header(
                                             ui,
-                                            "PLAYLISTS",
+                                            "Playlists",
                                             "New playlist, written to this device",
                                         ) {
                                             *sidebar_action =
                                                 Some(SidebarAction::NewUsbPlaylist(0));
                                         }
                                     } else {
-                                        section_caption(ui, "PLAYLISTS");
-                                        ui.add_space(4.0);
+                                        section_caption(ui, "Playlists");
                                     }
                                 }
                             }
@@ -3388,26 +3392,16 @@ impl App {
                                        sidebar_action: &mut Option<SidebarAction>,
                                        renaming: &mut Option<Renaming>| {
                     // The vinyl shelf is a top-level library whether or not it
-                    // leads the sidebar, so at the icon tier it keeps the taller
-                    // tile that earns the bigger glyph; only the captioned tiers
-                    // shrink it when it sits below the digital group.
-                    let (h, size) = match (lead, density) {
-                        (true, _) => (46.0, 17.0),
-                        (false, NavDensity::Icon) => (40.0, 14.0),
-                        (false, _) => (34.0, 14.0),
-                    };
-                    if nav_button_dense(
+                    // leads the sidebar, so it is the same tile as "Library"
+                    // in either slot. Just "Vinyl", at every tier and with no
+                    // count: the shelf is a place you go, not a number you
+                    // track.
+                    if source_tile(
                         ui,
                         density,
-                        "💿",
-                        // Just "Vinyl", at every tier and with no count. The
-                        // shelf is a place you go, not a number you track, and
-                        // dropping the count also retires the longest string
-                        // the sidebar had to fit.
+                        SourceMark::Glyph(named(icons::VINYL)),
                         "Vinyl",
                         *view == LibraryView::Vinyl,
-                        h,
-                        size,
                     )
                     .on_hover_note("Your Discogs vinyl collection")
                     .clicked()
@@ -3418,7 +3412,7 @@ impl App {
                     // under the library: a caption with its +, then a row per
                     // crate. Capped in height so a long list of crates
                     // never squeezes the playlist tree out.
-                    ui.add_space(6.0);
+                    ui.add_space(space::S3);
                     if density.icons_only() {
                         if crate::sidebar::rail_add_tile(ui)
                             .on_hover_note("New crate")
@@ -3427,7 +3421,7 @@ impl App {
                             *sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Crate));
                         }
                         ui.add_space(6.0);
-                    } else if crate::sidebar::list_header(ui, "CRATES", "New crate: a set of songs on records to bring to a gig") {
+                    } else if crate::sidebar::list_header(ui, "Crates", "New crate: a set of songs on records to bring to a gig") {
                         *sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Crate));
                     }
                     if crate_sets.iter().any(|c| c.kind == CrateKind::Crate) {
@@ -3465,11 +3459,10 @@ impl App {
                             }
                             NavPrimary::Vinyl => {
                                 draw_vinyl_tile(ui, &mut self.view, true, &mut sidebar_action, &mut self.renaming);
-                                ui.add_space(10.0);
-                                ui.separator();
-                                ui.add_space(8.0);
-                                section_caption(ui, "DIGITAL LIBRARY");
-                                ui.add_space(4.0);
+                                // Groups are parted by space alone, never by
+                                // a rule: one policy for the whole panel.
+                                ui.add_space(space::S4);
+                                section_caption(ui, "Digital library");
                                 draw_library_group(ui, &mut self.view, &mut sidebar_action);
                             }
                         }
@@ -3477,17 +3470,15 @@ impl App {
 
                 // ── Pinned bottom views (no captions) ─────────────────────────
                 // External sources — mounted USB devices and the Discogs vinyl
-                // collection — separated from the playlist tree by spacing and a
-                // rule rather than a text header. Library health isn't here: it
+                // collection — separated from the playlist tree by spacing
+                // rather than a rule or a text header. Library health isn't here: it
                 // only surfaces as a small tab under "Library", and only when
                 // the catalog actually has something wrong with it.
                 egui::TopBottomPanel::bottom("nav_collections")
                     .frame(egui::Frame::none())
                     .show_separator_line(false)
                     .show_inside(ui, |ui| {
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(6.0);
+                        ui.add_space(space::S5);
                         // ── Devices (rail tier only) ──
                         // At the captioned tier, mounted volumes live in the
                         // source-tab strip at the top of the library group;
@@ -3501,7 +3492,15 @@ impl App {
                             for v in self.usb_volumes.clone() {
                                 let active =
                                     matches!(&self.view, LibraryView::Usb(p, _) if *p == v.path);
-                                if nav_button_dense(ui, density, "⏏", &v.name, active, 34.0, 14.0)
+                                if nav_button_dense(
+                                    ui,
+                                    density,
+                                    named(icons::EJECT),
+                                    &v.name,
+                                    active,
+                                    PLAYLIST_ROW_H,
+                                    font::body(),
+                                )
                                     .on_hover_note(if v.is_rekordbox_export {
                                         "Removable volume with a rekordbox export. \
                                          Browse and edit its files directly."
@@ -3512,22 +3511,17 @@ impl App {
                                 {
                                     self.view = LibraryView::Usb(v.path.clone(), None);
                                 }
-                                ui.add_space(3.0);
+                                ui.add_space(space::S2);
                             }
-                            ui.add_space(3.0);
-                            ui.separator();
-                            ui.add_space(6.0);
+                            ui.add_space(space::S4);
                         }
                         // ── Sources ──
                         // Only when the digital library leads; if vinyl is the
                         // primary library its tile lives at the top instead.
                         if nav_primary == NavPrimary::Digital {
                             draw_vinyl_tile(ui, &mut self.view, false, &mut sidebar_action, &mut self.renaming);
-                            ui.add_space(6.0);
-                            ui.separator();
-                            ui.add_space(6.0);
                         }
-                        ui.add_space(8.0);
+                        ui.add_space(space::S3);
                     });
 
                 // ── Playlist tree (middle, scrolls) ───────────────────────────
@@ -3581,7 +3575,7 @@ impl App {
                                     // (see `crates`), so the rows, the
                                     // rename and the drop target are the
                                     // crate's.
-                                    ui.add_space(10.0);
+                                    ui.add_space(space::S3);
                                     if density.icons_only() {
                                         if crate::sidebar::rail_add_tile(ui)
                                             .on_hover_note("New tag")
@@ -3590,7 +3584,7 @@ impl App {
                                             sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Tag));
                                         }
                                         ui.add_space(6.0);
-                                    } else if crate::sidebar::list_header(ui, "TAGS", "New tag: a word to mark songs with, like dub or sunrise") {
+                                    } else if crate::sidebar::list_header(ui, "Tags", "New tag: a word to mark songs with, like dub or sunrise") {
                                         sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Tag));
                                     }
                                     let crate_sets = self.crate_sets.clone();

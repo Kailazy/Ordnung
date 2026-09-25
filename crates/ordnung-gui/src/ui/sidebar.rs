@@ -140,8 +140,10 @@ pub fn section_with_action(
 
 /// The caption, small capitals in the tertiary ink, and the action at the
 /// row's right end. One row for the header and every section, so the
-/// panel's title is set the way its sections are.
-fn caption_row(ui: &mut egui::Ui, title: &str, add_action: impl FnOnce(&mut egui::Ui)) {
+/// panel's title is set the way its sections are. The library nav's list
+/// headers ("Playlists", "Crates") are this row too, with the "+" as the
+/// action, so both edges of the app set a caption the same way.
+pub fn caption_row(ui: &mut egui::Ui, title: &str, add_action: impl FnOnce(&mut egui::Ui)) {
     let h = ui.spacing().interact_size.y.max(window::CLOSE_SIDE);
     let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::hover());
     // The action first, from the right, so the caption is capped to what

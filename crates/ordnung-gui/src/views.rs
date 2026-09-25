@@ -802,7 +802,11 @@ impl App {
                 if !unanalyzed.is_empty() {
                     let n = unanalyzed.len();
                     if ui
-                        .button(format!("⚡ Analyze {n} for quality"))
+                        .button(crate::ui::icon_text(
+                            crate::ui::phosphor_icons::named(crate::ui::phosphor_icons::app::LIGHTNING),
+                            &format!("Analyze {n} for quality"),
+                            crate::ui::tokens::font::body(),
+                        ))
                         .on_hover_note("Scan unchecked copies for lossy transcodes")
                         .clicked()
                     {

@@ -100,24 +100,39 @@ impl App {
     }
 }
 
-/// The sidebar/toolbar accent — matches the "Add songs…" primary button so the
-/// active navigation target reads as part of the same visual language.
+use crate::ui::phosphor_icons::{app as icons, named};
+use crate::ui::tokens::{color, font, radius, space};
+
+/// The primary-action blue: the "Add songs…" button, the onboarding and
+/// token buttons. The one saturated element on screen. The sidebar's
+/// selected tile does *not* share it any more: it sits on the muted
+/// `color::ACCENT_SOFT`, so where you are never competes with what to do.
 pub(crate) const NAV_ACCENT: egui::Color32 = egui::Color32::from_rgb(64, 110, 180);
 
-/// A large, full-width rectangular navigation button for the sidebar. `height`
-/// sizes the tile (Library is tallest, playlists / collection views a bit
-/// shorter) and `text_size` its label; `selected` paints the accent fill. The
-/// `Response` is returned so callers can wire clicks, drag-and-drop drop targets
-/// and context menus on top of it.
+/// Height of a top-level source tile ("Library", "Vinyl"). One number for
+/// both, because they are peers: two sizes for two siblings was the loudest
+/// tell that the panel was several parts rather than one system.
+pub(crate) const SOURCE_TILE_H: f32 = 40.0;
+
+/// The label face of a source tile: the headline size at SemiBold. Weight
+/// is the hierarchy tool here, not a larger size.
+pub(crate) fn source_font() -> egui::FontId {
+    font::strong(font::headline().size)
+}
+
+/// A full-width rectangular navigation button for the sidebar. `height`
+/// sizes the tile and `font` its label; `selected` paints the muted accent
+/// fill. The `Response` is returned so callers can wire clicks, drag-and-drop
+/// drop targets and context menus on top of it.
 pub(crate) fn nav_button(
     ui: &mut egui::Ui,
     label: &str,
     selected: bool,
     height: f32,
-    text_size: f32,
+    font: egui::FontId,
 ) -> egui::Response {
     let w = ui.available_width();
-    nav_button_sized(ui, label, selected, w, height, text_size)
+    nav_button_sized(ui, label, selected, w, height, font)
 }
 
 /// Like [`nav_button`] but with an explicit tile `width` instead of filling the
@@ -129,18 +144,31 @@ pub(crate) fn nav_button_sized(
     selected: bool,
     width: f32,
     height: f32,
-    text_size: f32,
+    font: egui::FontId,
+) -> egui::Response {
+    let mut text = egui::RichText::new(label).font(font);
+    if selected {
+        text = text.color(color::LABEL);
+    }
+    nav_button_text_sized(ui, text.into(), selected, width, height)
+}
+
+/// The tile under every nav button: `text` already set (a plain label, or
+/// an icon-and-label from `ui::icon_text`), the muted accent fill when
+/// selected, the hover fill otherwise.
+pub(crate) fn nav_button_text_sized(
+    ui: &mut egui::Ui,
+    text: egui::WidgetText,
+    selected: bool,
+    width: f32,
+    height: f32,
 ) -> egui::Response {
     let w = width;
-    let mut text = egui::RichText::new(label).size(text_size);
-    if selected {
-        text = text.color(egui::Color32::WHITE).strong();
-    }
     let mut btn = egui::Button::new(text)
         .min_size(egui::vec2(w, height))
-        .rounding(egui::Rounding::same(6.0));
+        .rounding(egui::Rounding::same(radius::SM));
     if selected {
-        btn = btn.fill(NAV_ACCENT);
+        btn = btn.fill(color::ACCENT_SOFT);
     }
     // Indent the label off the left edge so it reads as a roomy nav tile rather
     // than text crammed against the border. `button_padding` is the left inset
@@ -161,9 +189,9 @@ pub(crate) fn nav_button_sized(
         let w = &mut ui.visuals_mut().widgets;
         w.inactive.bg_stroke = egui::Stroke::NONE;
         w.hovered.bg_stroke = egui::Stroke::NONE;
-        w.hovered.weak_bg_fill = egui::Color32::from_gray(64);
+        w.hovered.weak_bg_fill = color::SURFACE_HOVER;
         w.active.bg_stroke = egui::Stroke::NONE;
-        w.active.weak_bg_fill = egui::Color32::from_gray(74);
+        w.active.weak_bg_fill = color::SURFACE_ACTIVE;
     }
     let resp = ui.add(btn);
     ui.visuals_mut().widgets = prev_widgets;
@@ -181,7 +209,7 @@ pub(crate) fn nav_button_sized(
 pub(crate) fn nav_tile_badge(
     ui: &mut egui::Ui,
     host: egui::Rect,
-    label: &str,
+    count: &str,
     selected: bool,
 ) -> egui::Response {
     // Sized off the tile so the pill stays visually inset at every tier: a
@@ -189,12 +217,14 @@ pub(crate) fn nav_tile_badge(
     // tile's fill visible above and below.
     const GUTTER: f32 = 8.0;
     let height = (host.height() - 16.0).clamp(18.0, 24.0);
-    let font = egui::FontId::proportional(12.0);
-    let text_w = ui
-        .fonts(|f| f.layout_no_wrap(label.to_string(), font.clone(), egui::Color32::WHITE))
-        .size()
-        .x;
-    let width = text_w + 16.0;
+    // The sparkle and the count, the sparkle in the icon face.
+    let galley = crate::ui::icon_text(named(icons::SPARKLE), count, font::callout()).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Small,
+    );
+    let width = galley.size().x + 16.0;
     let rect = egui::Rect::from_min_size(
         egui::pos2(
             host.right() - GUTTER - width,
@@ -208,21 +238,16 @@ pub(crate) fn nav_tile_badge(
     // Selected: solid accent. Otherwise a muted chip that lifts on hover, so it
     // reads as a control rather than a static count.
     let fill = if selected {
-        NAV_ACCENT
+        color::ACCENT_SOFT
     } else if resp.hovered() {
-        egui::Color32::from_gray(96)
+        color::SURFACE_ACTIVE
     } else {
-        egui::Color32::from_gray(76)
+        color::SURFACE_HOVER
     };
     ui.painter()
         .rect_filled(rect, egui::Rounding::same(height / 2.0), fill);
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        label,
-        font,
-        egui::Color32::WHITE,
-    );
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, color::LABEL);
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -285,8 +310,8 @@ pub(crate) fn draw_playlist_nodes(
                         mark.glyph,
                         0.0,
                         egui::TextFormat {
-                            font_id: egui::FontId::proportional(PLAYLIST_TEXT_SIZE + 1.5),
-                            color: mark.tint.unwrap_or(egui::Color32::from_gray(190)),
+                            font_id: row_mark_font(),
+                            color: mark.tint.unwrap_or(color::LABEL_2),
                             valign: egui::Align::Center,
                             ..Default::default()
                         },
@@ -529,11 +554,23 @@ pub(crate) struct RowMark {
 }
 
 impl RowMark {
-    /// The stock mark every playlist starts with.
-    pub const DEFAULT: RowMark = RowMark {
-        glyph: "♪",
-        tint: None,
-    };
+    /// The stock mark every playlist starts with: a note, from the same
+    /// Phosphor face as every icon a user can pick, so a row that was never
+    /// customised sits in the same weight as one that was.
+    pub fn stock() -> RowMark {
+        RowMark {
+            glyph: named(icons::MUSIC_NOTE),
+            tint: None,
+        }
+    }
+
+    /// A mark in the app's own icon set with no tint of its own.
+    pub fn plain(name: &str) -> RowMark {
+        RowMark {
+            glyph: named(name),
+            tint: None,
+        }
+    }
 
     /// A catalog playlist's mark: its chosen icon and colour, each falling
     /// back to the default half when unset (or when the icon name is one this
@@ -544,8 +581,8 @@ impl RowMark {
                 .icon
                 .as_deref()
                 .and_then(crate::ui::phosphor_icons::glyph)
-                .unwrap_or(RowMark::DEFAULT.glyph),
-            tint: p.color.map(crate::ui::tokens::color::from_packed),
+                .unwrap_or_else(|| RowMark::stock().glyph),
+            tint: p.color.map(color::from_packed),
         }
     }
 
@@ -562,9 +599,8 @@ impl RowMark {
                 .icon
                 .as_deref()
                 .and_then(crate::ui::phosphor_icons::glyph)
-                .or_else(|| crate::ui::phosphor_icons::glyph("folder"))
-                .unwrap_or(RowMark::DEFAULT.glyph),
-            tint: p.color.map(crate::ui::tokens::color::from_packed),
+                .unwrap_or_else(|| named(icons::FOLDER)),
+            tint: p.color.map(color::from_packed),
         })
     }
 }
@@ -576,8 +612,11 @@ impl RowMark {
 
 /// Tile height of a playlist row at the captioned tier.
 pub(crate) const PLAYLIST_ROW_H: f32 = 30.0;
-/// Label point size of a playlist row.
-pub(crate) const PLAYLIST_TEXT_SIZE: f32 = 13.5;
+/// The face of a playlist row's mark: one step up the ramp from the body
+/// label beside it, since an icon at the text's own size reads a touch small.
+pub(crate) fn row_mark_font() -> egui::FontId {
+    font::icon(font::headline().size)
+}
 /// Inset of the track count from the tile's right edge.
 const PLAYLIST_COUNT_INSET: f32 = 12.0;
 /// Gap under a playlist row. The rail's square targets need slightly more
@@ -585,13 +624,14 @@ const PLAYLIST_COUNT_INSET: f32 = 12.0;
 const PLAYLIST_ROW_GAP: f32 = 2.0;
 const PLAYLIST_ROW_GAP_RAIL: f32 = 4.0;
 
-/// One playlist row, shared by both trees: a "♪" tile with the name truncated
+/// One playlist row, shared by both trees: a marked tile with the name truncated
 /// clear of the count lane and the track count painted inside the right end.
 /// At the rail tier the row collapses to a glyph square and the name moves to
 /// the tooltip. The trailing row gap is added here so every tree spaces its
 /// rows identically. Returns the tile's response so callers wire clicks, drag-and-drop and
-/// context menus on top of it.
-fn playlist_row(
+/// context menus on top of it. The Liked and Missing rows under the Library
+/// tile are this row too.
+pub(crate) fn playlist_row(
     ui: &mut egui::Ui,
     density: NavDensity,
     name: &str,
@@ -624,40 +664,34 @@ fn playlist_row(
             name,
             selected,
             PLAYLIST_ROW_H,
-            PLAYLIST_TEXT_SIZE,
+            font::body(),
             COUNT_LANE,
         )
         .on_hover_note(name)
     };
-    let (mark_pos, mark_size) = if density.icons_only() {
-        (resp.rect.center(), RAIL_GLYPH)
+    let (mark_pos, mark_font) = if density.icons_only() {
+        (resp.rect.center(), font::icon(RAIL_GLYPH))
     } else {
         (
             egui::pos2(resp.rect.left() + 12.0 + 7.5, resp.rect.center().y),
-            PLAYLIST_TEXT_SIZE + 1.5,
+            row_mark_font(),
         )
     };
-    let ink = mark.tint.unwrap_or(if selected {
-        egui::Color32::WHITE
-    } else {
-        egui::Color32::from_gray(190)
-    });
+    let ink = mark
+        .tint
+        .unwrap_or(if selected { color::LABEL } else { color::LABEL_2 });
     ui.painter().text(
         mark_pos,
         egui::Align2::CENTER_CENTER,
         mark.glyph,
-        egui::FontId::proportional(mark_size),
+        mark_font,
         ink,
     );
     if !density.icons_only() {
         // Small right-aligned track count inside the tile. Muted so the name
         // stays the focus; brighter on the accent fill so it's still readable
         // when selected.
-        let count_color = if selected {
-            egui::Color32::from_white_alpha(170)
-        } else {
-            egui::Color32::from_gray(130)
-        };
+        let count_color = if selected { color::LABEL_2 } else { color::LABEL_3 };
         ui.painter().text(
             egui::pos2(
                 resp.rect.right() - PLAYLIST_COUNT_INSET,
@@ -665,7 +699,7 @@ fn playlist_row(
             ),
             egui::Align2::RIGHT_CENTER,
             count.to_string(),
-            crate::ui::tokens::font::footnote(),
+            font::callout(),
             count_color,
         );
     }
@@ -716,8 +750,8 @@ pub(crate) fn draw_playlist_leaf(
         // (drawn on the edge, not floating outside it) and the corners stay round.
         ui.painter().rect_stroke(
             resp.rect.shrink(1.0),
-            egui::Rounding::same(6.0),
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 150, 220)),
+            egui::Rounding::same(radius::SM),
+            egui::Stroke::new(1.5, color::ACCENT),
         );
     }
     if let Some(payload) = resp.dnd_release_payload::<DraggedTracks>() {
@@ -858,7 +892,7 @@ pub(crate) fn draw_usb_playlist_nodes(
                 ui,
                 density,
                 &p.name,
-                RowMark::DEFAULT,
+                RowMark::stock(),
                 selected,
                 tracks_by_playlist.get(&p.id).map(Vec::len).unwrap_or(0),
             );
@@ -870,8 +904,8 @@ pub(crate) fn draw_usb_playlist_nodes(
             {
                 ui.painter().rect_stroke(
                     resp.rect.shrink(1.0),
-                    egui::Rounding::same(6.0),
-                    egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 150, 220)),
+                    egui::Rounding::same(radius::SM),
+                    egui::Stroke::new(1.5, color::ACCENT),
                 );
             }
             if let Some(payload) = resp.dnd_release_payload::<crate::DraggedUsbTracks>() {
@@ -929,40 +963,30 @@ pub(crate) fn draw_usb_playlist_nodes(
     }
 }
 
-/// A list's caption row ("PLAYLISTS", "CRATES") with its right-aligned "+"
-/// button, shared by the catalog group, the device group and the crates so
-/// every list carries the same affordance. Returns `true` when "+" was
-/// clicked; `tip` is its hover note.
+/// A list's caption row ("Playlists", "Crates") with its "+" at the right
+/// end, shared by the catalog group, the device group, the crates and the
+/// tags so every list carries the same affordance. The row is the inspector
+/// drawer's caption row (see `ui::sidebar::caption_row`), so both edges of
+/// the app set a heading the same way; the "+" is the square glyph button.
+/// Returns `true` when "+" was clicked; `tip` is its hover note.
 pub(crate) fn list_header(ui: &mut egui::Ui, caption: &str, tip: &str) -> bool {
     let mut clicked = false;
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(caption)
-                .font(crate::ui::tokens::font::footnote())
-                .color(egui::Color32::from_gray(140))
-                .strong(),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Hold the button off the panel's right clip edge so its hover
-            // outline isn't cut off.
-            ui.add_space(3.0);
-            // Compact square button — without an explicit min_size the "+"
-            // reads as a stretched pill.
-            if ui
-                .add(
-                    egui::Button::new("+")
-                        .min_size(egui::vec2(22.0, 22.0))
-                        .rounding(egui::Rounding::same(6.0)),
-                )
-                .on_hover_note(tip)
-                .clicked()
-            {
-                clicked = true;
-            }
-        });
+    crate::ui::sidebar::caption_row(ui, caption, |ui| {
+        if crate::ui::button::square(ui, named(icons::PLUS))
+            .on_hover_note(tip)
+            .clicked()
+        {
+            clicked = true;
+        }
     });
-    ui.add_space(4.0);
+    ui.add_space(space::S2);
     clicked
+}
+
+/// A caption on its own, for a group that has no "+" ("Digital library").
+pub(crate) fn section_caption(ui: &mut egui::Ui, caption: &str) {
+    crate::ui::sidebar::caption_row(ui, caption, |_| {});
+    ui.add_space(space::S2);
 }
 
 /// The sidebar's source tabs: the local catalog ("Library") and each mounted
@@ -983,8 +1007,6 @@ pub(crate) fn source_tabs(
     volumes: &[ordnung_core::usb::UsbVolume],
     active_vol: Option<&Path>,
 ) -> SourceTabsResponse {
-    use crate::ui::tokens::{color, font, radius, space};
-
     let n = (volumes.len() + 1) as f32;
     // Each tab's outer budget: an equal share of the strip, minus the seams.
     let budget = ((ui.available_width() - space::S1 * (n - 1.0)) / n).max(44.0);
@@ -1131,14 +1153,8 @@ pub(crate) fn draw_crate_rows(
     action: &mut Option<SidebarAction>,
 ) {
     let mark = match kind {
-        CrateKind::Crate => RowMark {
-            glyph: crate::ui::phosphor_icons::glyph("package").unwrap_or("▤"),
-            tint: None,
-        },
-        CrateKind::Tag => RowMark {
-            glyph: crate::ui::phosphor_icons::glyph("tag").unwrap_or("#"),
-            tint: None,
-        },
+        CrateKind::Crate => RowMark::plain(icons::PACKAGE),
+        CrateKind::Tag => RowMark::plain(icons::TAG),
     };
     let delete_note = match kind {
         CrateKind::Crate => "Remove the crate. Its songs stay liked if they were",
@@ -1153,8 +1169,8 @@ pub(crate) fn draw_crate_rows(
         if resp.dnd_hover_payload::<DraggedSongs>().is_some() {
             ui.painter().rect_stroke(
                 resp.rect.shrink(1.0),
-                egui::Rounding::same(6.0),
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 150, 220)),
+                egui::Rounding::same(radius::SM),
+                egui::Stroke::new(1.5, color::ACCENT),
             );
         }
         if let Some(payload) = resp.dnd_release_payload::<DraggedSongs>() {
@@ -1317,7 +1333,7 @@ pub(crate) fn nav_button_dense(
     label: &str,
     selected: bool,
     height: f32,
-    text_size: f32,
+    font: egui::FontId,
 ) -> egui::Response {
     if density.icons_only() {
         // The wide tiers rank tiles by height and text size; the rail has only
@@ -1330,8 +1346,56 @@ pub(crate) fn nav_button_dense(
         };
         rail_tile_sized(ui, icon, selected, glyph)
     } else {
-        nav_button(ui, &format!("{icon}  {label}"), selected, height, text_size)
+        // Icon and label as one line, the icon set in the icon face (see
+        // `ui::icon_text`), inset like every other tile's label.
+        let w = ui.available_width();
+        nav_button_text_sized(ui, crate::ui::icon_text(icon, label, font), selected, w, height)
     }
+}
+
+/// The mark of a top-level source tile: drawn by hand (the library's card
+/// box, see `ui::icon`) or a glyph from the app's icon face.
+#[derive(Clone, Copy)]
+pub(crate) enum SourceMark {
+    Painted(fn(&egui::Painter, egui::Pos2, egui::Color32, f32)),
+    Glyph(&'static str),
+}
+
+/// A top-level source tile: "Library" and "Vinyl", the two libraries the
+/// sidebar is organised under. One function, one height, one face, so the
+/// two read as peers wherever `nav_primary` puts them; only the mark and
+/// the label differ. Collapses to its mark at the rail tier, where it takes
+/// the larger glyph that ranks it above the playlists.
+pub(crate) fn source_tile(
+    ui: &mut egui::Ui,
+    density: NavDensity,
+    mark: SourceMark,
+    label: &str,
+    selected: bool,
+) -> egui::Response {
+    nav_button_painted(
+        ui,
+        density,
+        move |p, c, col, r| match mark {
+            SourceMark::Painted(draw) => draw(p, c, col, r),
+            // A Phosphor glyph fills about four fifths of its em, so it is
+            // set a little over the painted mark's height to come out the
+            // same optical size.
+            SourceMark::Glyph(glyph) => {
+                p.text(
+                    c,
+                    egui::Align2::CENTER_CENTER,
+                    glyph,
+                    font::icon(r * 2.5),
+                    col,
+                );
+            }
+        },
+        label,
+        selected,
+        SOURCE_TILE_H,
+        source_font(),
+    )
 }
 
 /// Width reserved at the right end of a playlist tile for its track count, so
@@ -1350,14 +1414,13 @@ pub(crate) fn nav_button_truncated(
     label: &str,
     selected: bool,
     height: f32,
-    text_size: f32,
+    font: egui::FontId,
     reserve: f32,
 ) -> egui::Response {
     let w = ui.available_width();
     // Budget for the text itself: the tile minus its left gutter, the glyph and
     // the reserved lane.
     let budget = (w - 12.0 - 18.0 - reserve).max(24.0);
-    let font = egui::FontId::proportional(text_size);
     let text_w = |s: &str| ui.fonts(|f| s.chars().map(|c| f.glyph_width(&font, c)).sum::<f32>());
     let shown = if text_w(label) <= budget {
         label.to_string()
@@ -1375,7 +1438,7 @@ pub(crate) fn nav_button_truncated(
         selected,
         w,
         height,
-        text_size,
+        font,
     )
 }
 
@@ -1394,7 +1457,7 @@ pub(crate) fn nav_button_painted(
     label: &str,
     selected: bool,
     height: f32,
-    text_size: f32,
+    font: egui::FontId,
 ) -> egui::Response {
     // Radius of the painted mark. The rail gets the larger one for the same
     // reason its lead glyphs are larger: it is the only ranking left once the
@@ -1406,20 +1469,16 @@ pub(crate) fn nav_button_painted(
         // Indent the label with spaces to clear the mark, which is painted over
         // the tile afterwards. Crude, but it keeps every nav tile going through
         // the one `nav_button` path rather than forking the layout.
-        nav_button(ui, &format!("       {label}"), selected, height, text_size)
+        nav_button(ui, &format!("       {label}"), selected, height, font)
     };
     let cx = if density.icons_only() {
         resp.rect.center().x
     } else {
         resp.rect.left() + 12.0 + r
     };
-    // The mark follows the label's colour: white on the accent fill when this
-    // tile is the current view, dimmer otherwise.
-    let col = if selected {
-        egui::Color32::WHITE
-    } else {
-        egui::Color32::from_gray(190)
-    };
+    // The mark follows the label's ink: primary on the selected tile, the
+    // secondary label ink otherwise, the same as a playlist row's mark.
+    let col = if selected { color::LABEL } else { color::LABEL_2 };
     draw(ui.painter(), egui::pos2(cx, resp.rect.center().y), col, r);
     resp
 }
@@ -1448,7 +1507,6 @@ pub(crate) const RAIL_GLYPH_LEAD: f32 = 24.0;
 /// not yet there, so it reads as "make one" instead. Hover solidifies the
 /// outline in the accent and brightens the glyph so it still feels pressable.
 pub(crate) fn rail_add_tile(ui: &mut egui::Ui) -> egui::Response {
-    use crate::ui::tokens::color;
     let side = NavDensity::RAIL_TILE;
     let indent = ((ui.available_width() - side) / 2.0).max(0.0);
     ui.horizontal(|ui| {
@@ -1459,7 +1517,7 @@ pub(crate) fn rail_add_tile(ui: &mut egui::Ui) -> egui::Response {
             return resp;
         }
         let hovered = resp.hovered();
-        let rounding = egui::Rounding::same(6.0);
+        let rounding = egui::Rounding::same(radius::SM);
         // Inset by half the stroke so the outline sits fully inside the square.
         let outline = rect.shrink(1.0);
         let painter = ui.painter();
@@ -1487,8 +1545,8 @@ pub(crate) fn rail_add_tile(ui: &mut egui::Ui) -> egui::Response {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "+",
-            egui::FontId::proportional(RAIL_GLYPH + 3.0),
+            named(icons::PLUS),
+            font::icon(RAIL_GLYPH + 3.0),
             glyph,
         );
         resp
@@ -1509,7 +1567,14 @@ pub(crate) fn rail_tile_sized(
     let indent = ((ui.available_width() - side) / 2.0).max(0.0);
     ui.horizontal(|ui| {
         ui.add_space(indent);
-        nav_button_sized(ui, icon, selected, side, side, glyph)
+        nav_button_sized(
+            ui,
+            icon,
+            selected,
+            side,
+            side,
+            font::icon(glyph),
+        )
     })
     .inner
 }

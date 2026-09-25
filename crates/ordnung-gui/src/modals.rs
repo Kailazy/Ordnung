@@ -3597,9 +3597,13 @@ impl App {
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
-                        current_glyph.unwrap_or(if p.is_folder { "" } else { "♪" }),
-                        egui::FontId::proportional(18.0),
-                        tint.unwrap_or(egui::Color32::from_gray(190)),
+                        current_glyph.unwrap_or(if p.is_folder {
+                            ""
+                        } else {
+                            crate::sidebar::RowMark::stock().glyph
+                        }),
+                        font::icon(18.0),
+                        tint.unwrap_or(color::LABEL_2),
                     );
                     ui.add_space(space::S2);
                     ui.label(egui::RichText::new(&p.name).font(font::body()).strong());
@@ -3686,7 +3690,7 @@ impl App {
                                 for (name, glyph) in matches.iter().skip(row * cols).take(cols) {
                                     let chosen = p.icon.as_deref() == Some(name);
                                     let mut btn = egui::Button::new(
-                                        egui::RichText::new(*glyph).size(18.0).color(
+                                        egui::RichText::new(*glyph).font(font::icon(18.0)).color(
                                             if chosen {
                                                 egui::Color32::WHITE
                                             } else {

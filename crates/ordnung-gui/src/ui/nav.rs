@@ -304,9 +304,8 @@ impl<'a, T: Tier> Nav<'a, T> {
     }
 }
 
-/// The ghost's landing marker: the nav accent, shared with the library
-/// nav's selected tile.
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(64, 110, 180);
+/// The ghost's landing marker: the app's accent.
+const ACCENT: egui::Color32 = super::tokens::color::ACCENT;
 
 #[cfg(test)]
 mod tests {

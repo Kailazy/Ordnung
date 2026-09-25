@@ -37,6 +37,25 @@ pub fn button_enabled(
     ui.add_enabled(enabled, egui::Button::new(label))
 }
 
+/// A square push button holding one glyph from the app's icon face (see
+/// `phosphor_icons::named`): the "+" at the end of a list's caption, and
+/// any other action that is one mark rather than a word. The standard
+/// interact height on both sides, the theme's frame, the glyph at the body
+/// size, so a row of them and the buttons beside them come out one family. Without the explicit square a one-character label lands in the
+/// theme's 10 × 6 padding and reads as a stretched pill.
+pub fn square(ui: &mut egui::Ui, glyph: &str) -> egui::Response {
+    let side = ui.spacing().interact_size.y;
+    let prev = ui.spacing().button_padding;
+    ui.spacing_mut().button_padding = egui::Vec2::ZERO;
+    let resp = ui.add(
+        egui::Button::new(egui::RichText::new(glyph).font(font::icon(font::body().size + 2.0)))
+            .min_size(egui::vec2(side, side))
+            .rounding(egui::Rounding::same(radius::SM)),
+    );
+    ui.spacing_mut().button_padding = prev;
+    resp
+}
+
 /// The anchor of a [`super::menu::dropdown`]: a [`button`] whose label ends
 /// in a chevron, so it says before the click that it opens a list rather
 /// than doing something.

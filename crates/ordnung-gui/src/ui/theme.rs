@@ -69,6 +69,13 @@ fn install_fonts(ctx: &egui::Context) {
     // the private-use area, so it can sit right behind Inter without ever
     // shadowing a real character in any face after it.
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    // The icon face on its own, for the glyphs the app sets itself (see
+    // `tokens::font::icon`); DejaVu behind it only for the replacement
+    // character an unknown icon name falls back to.
+    fonts.families.insert(
+        FontFamily::Name(super::tokens::font::ICON_FAMILY.into()),
+        vec!["phosphor".to_owned(), "DejaVuSans".to_owned()],
+    );
     fonts.families.insert(
         FontFamily::Name(super::hover::SERIF_FAMILY.into()),
         vec!["SourceSerif".to_owned(), "DejaVuSans".to_owned()],
@@ -311,3 +318,4 @@ fn apply_style(ctx: &egui::Context) {
 
     ctx.set_style(style);
 }
+
