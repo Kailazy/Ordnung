@@ -1543,6 +1543,10 @@ struct App {
     /// chase the strip with the pointer to hear the next find. Cleared when the
     /// step lands, when it fails, or when the sheet closes.
     sheet_follows_dig: bool,
+    /// The YouTube id of the video "start mid-song" last jumped, so each
+    /// video is jumped once and a scrub back to its top is left alone. See
+    /// [`App::mid_start_video`].
+    video_mid_started: Option<String>,
     /// Receives the release detail (tracklist + videos) fetched for the open
     /// sheet. One release per lookup, off the UI thread; results for a record
     /// the user has since closed are dropped.

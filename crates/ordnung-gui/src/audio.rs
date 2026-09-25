@@ -678,6 +678,14 @@ pub struct AudioEngine {
     pcm_buf: Option<Arc<StreamingPcm>>,
     /// The current track's decode has run to completion; `pcm_buf` is final.
     decode_done: bool,
+    /// Where a new track starts, as a fraction of its length: `None` for
+    /// the top. Set from the "start mid-song" setting.
+    start_fraction: Option<f32>,
+    /// A start point (seconds) the decoder hasn't reached yet. The sink is
+    /// held back until it has, so the listener hears the drop and not a
+    /// blip of intro first; `poll` starts it the moment the frontier passes.
+    /// The track reads as loading meanwhile.
+    pending_start: Option<f32>,
     /// Cancels the in-flight decode thread when the track is superseded, so a
     /// skipped-past long file doesn't keep a core busy for minutes.
     load_cancel: Option<Arc<AtomicBool>>,
@@ -762,6 +770,8 @@ impl AudioEngine {
             pitch: Arc::new(PitchState::default()),
             pitch_pct: 0.0,
             scrub_resume: None,
+            start_fraction: None,
+            pending_start: None,
             sample_rate: 0,
             channels: 1,
             duration: 0.0,
@@ -781,7 +791,7 @@ impl AudioEngine {
 
     /// How the play control for `id` should render right now.
     pub fn state_for(&self, id: Id) -> PlayState {
-        if self.loading == Some(id) {
+        if self.loading == Some(id) || (self.current == Some(id) && self.pending_start.is_some()) {
             PlayState::Loading
         } else if self.current == Some(id) && self.is_playing() {
             PlayState::Playing
@@ -799,7 +809,23 @@ impl AudioEngine {
     /// keep repainting so `poll` runs, the scrubber animates, and end-of-track is
     /// noticed promptly.
     pub fn is_active(&self) -> bool {
-        self.loading.is_some() || self.is_playing()
+        self.loading.is_some() || self.pending_start.is_some() || self.is_playing()
+    }
+
+    /// Where new tracks start: `Some(fraction)` of the length, `None` for
+    /// the top. Takes effect from the next track loaded.
+    pub fn set_start_fraction(&mut self, fraction: Option<f32>) {
+        self.start_fraction = fraction.map(|f| f.clamp(0.0, 0.95));
+    }
+
+    /// Give up on a held-back start: the sink comes up at the requested
+    /// point if the decoder has reached it, else at the top. Any control
+    /// that needs a running sink (pause, seek, scrub) calls this first.
+    fn settle_pending_start(&mut self) {
+        if let Some(t) = self.pending_start.take() {
+            let at = if self.decoded_secs() >= t { t } else { 0.0 };
+            self.start_sink_at(at);
+        }
     }
 
     /// True when a sink exists and is running (not paused, not finished). While
@@ -845,6 +871,7 @@ impl AudioEngine {
         if self.current.is_none() || self.pcm_buf.is_none() || self.scrub_resume.is_some() {
             return;
         }
+        self.settle_pending_start();
         let was_playing = self.is_playing();
         let now = self.position();
         self.scrub_resume = Some(was_playing);
@@ -1074,6 +1101,7 @@ impl AudioEngine {
             self.status_dirty = true;
             return;
         }
+        self.settle_pending_start();
         if self.is_playing() {
             // Freeze the clock at the current position and pause the sink.
             self.base_secs = self.position();
@@ -1107,7 +1135,9 @@ impl AudioEngine {
             self.scrub_to(secs);
             return;
         }
-        let was_playing = self.is_playing();
+        // A seek while the start is still held back is the listener taking
+        // over: the track was on its way to playing, so it plays from here.
+        let was_playing = self.is_playing() || self.pending_start.take().is_some();
         let target = secs.clamp(0.0, self.decoded_secs());
         if let Some((a, b)) = self.loop_secs {
             if target < a || target >= b {
@@ -1229,6 +1259,7 @@ impl AudioEngine {
         self.loading = None;
         self.pcm_buf = None;
         self.decode_done = false;
+        self.pending_start = None;
         self.started_at = None;
         self.base_secs = 0.0;
         self.duration = 0.0;
@@ -1373,7 +1404,20 @@ impl AudioEngine {
                     self.loop_region.set(None);
                     self.scrub.active.store(false, Ordering::Release);
                     self.scrub_resume = None;
-                    self.start_sink_at(0.0);
+                    // Mid-song start: only with a header-supplied length to
+                    // take the fraction of. A headerless stream starts at
+                    // the top, as it can't know where its middle is.
+                    let start = match self.start_fraction {
+                        Some(f) if self.duration > 0.0 => self.duration * f,
+                        _ => 0.0,
+                    };
+                    if start <= self.decoded_secs() {
+                        self.pending_start = None;
+                        self.start_sink_at(start);
+                    } else {
+                        self.pending_start = Some(start);
+                        self.base_secs = start;
+                    }
                     // A provisional duration is known now — refresh the OS
                     // panel so its scrubber shows the track length.
                     self.push_metadata();
@@ -1406,6 +1450,14 @@ impl AudioEngine {
             if let Some(pcm) = &self.pcm_buf {
                 let frames = pcm.published_len() as f32 / self.channels.max(1) as f32;
                 self.duration = self.duration.max(frames / self.sample_rate.max(1) as f32);
+            }
+        }
+        // The decoder has reached a held-back start point (or finished short
+        // of it): the sink comes up there now.
+        if let Some(t) = self.pending_start {
+            if self.decode_done || self.decoded_secs() >= t {
+                self.pending_start = None;
+                self.start_sink_at(t.min(self.decoded_secs()));
             }
         }
         // Track ran to its end on its own — freeze the scrubber at the end and

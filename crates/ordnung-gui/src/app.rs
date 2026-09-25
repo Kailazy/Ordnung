@@ -235,6 +235,7 @@ impl App {
             collect_wanted: None,
             vinyl_sheet: None,
             sheet_follows_dig: false,
+            video_mid_started: None,
             sheet_rx: None,
             sheet_price_rx: None,
             versions: None,
@@ -391,6 +392,7 @@ impl App {
             a.set_volume(app.config.volume);
             a.set_key_lock(app.config.key_lock);
         }
+        app.apply_mid_start();
         // Same for the video player. It has no panel yet — that's built on the
         // first video — but the level is recorded now so the first one to play
         // comes in at the saved volume rather than at full.
@@ -2172,6 +2174,24 @@ impl App {
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
         {
             self.toggle_play_pause();
+        }
+
+        // ← → and A D nudge the playhead of whatever is loaded, video or
+        // file, by a few seconds each press. Same text-field gate as the
+        // space bar; the modifier-free check also leaves ⌘A alone.
+        if !ctx.wants_keyboard_input() {
+            let (back, fwd) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
+                        | i.consume_key(egui::Modifiers::NONE, egui::Key::A),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
+                        | i.consume_key(egui::Modifiers::NONE, egui::Key::D),
+                )
+            });
+            if back != fwd {
+                let step = crate::playback::NUDGE_SECS;
+                self.nudge_playhead(if fwd { step } else { -step });
+            }
         }
 
         // Menu-bar commands. Each arm runs the same code the in-app shortcut

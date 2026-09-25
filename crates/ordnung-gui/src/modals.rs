@@ -841,6 +841,38 @@ impl App {
                                         ui.add_space(14.0);
                                         ui.separator();
                                         ui.add_space(10.0);
+                                        ui.label(egui::RichText::new("Playback").strong());
+                                        ui.label(
+                    egui::RichText::new(
+                        "Start each track part-way in, past the intro and the build, \
+                         when previewing. Applies to files in the player and to a \
+                         record's videos. ← → or A D nudge the playhead either way.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                                        ui.add_space(4.0);
+                                        if ui
+                                            .checkbox(
+                                                &mut self.config.mid_start,
+                                                "Start tracks mid-song",
+                                            )
+                                            .on_hover_note("Skip the intro when a track starts")
+                                            .changed()
+                                        {
+                                            self.apply_mid_start();
+                                            // The video already on air keeps
+                                            // its place: the setting is for
+                                            // the next track, not a jump now.
+                                            self.video_mid_started = webview::on_air();
+                                            if let Err(e) = self.config.save() {
+                                                self.status =
+                                                    format!("Couldn't save settings: {e}");
+                                            }
+                                        }
+                                        ui.add_space(14.0);
+                                        ui.separator();
+                                        ui.add_space(10.0);
                                         ui.label(egui::RichText::new("Tags").strong());
                                         ui.label(
                     egui::RichText::new(

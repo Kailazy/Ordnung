@@ -223,6 +223,12 @@ pub struct Config {
     /// like a turntable's and shifts both. Remembered like a deck setting.
     #[serde(default)]
     pub key_lock: bool,
+    /// Start every track part-way in rather than at the top, so a preview
+    /// lands past the intro and the build. Applies to both engines: a local
+    /// file in the player and a record's video in the mini-player. The
+    /// fraction is `playback::MID_START_FRACTION`.
+    #[serde(default)]
+    pub mid_start: bool,
     /// How the player's waveform is colored: `"energy"` (cool→hot gradient by
     /// each section's energy — perceived loudness × spectral occupancy) or
     /// `"spectrum"` (additive RGB from the low/mid/high band balance, like
@@ -737,6 +743,7 @@ impl Default for Config {
             auto_convert_sources: Vec::new(),
             volume: default_volume(),
             key_lock: false,
+            mid_start: false,
             waveform_color_mode: default_waveform_color_mode(),
             waveform_height_exp: default_waveform_height_exp(),
             waveform_band_gain: default_waveform_band_gain(),

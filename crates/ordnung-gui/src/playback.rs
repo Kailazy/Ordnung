@@ -71,3 +71,72 @@ impl App {
         }
     }
 }
+
+/// How far into a track "start mid-song" lands, as a fraction of its length.
+/// Past a 32-bar intro and the first build on a club record, but before the
+/// breakdown: the part a preview is usually skipping forward to find.
+pub(crate) const MID_START_FRACTION: f32 = 0.4;
+
+/// How far one arrow or A/D press moves the playhead, in seconds.
+pub(crate) const NUDGE_SECS: f32 = 10.0;
+
+impl App {
+    /// Push the mid-start setting to the file player. The video side reads
+    /// the config directly (see [`App::mid_start_video`]); the audio engine
+    /// starts its sink off the UI thread's poll, so it holds the fraction.
+    pub(crate) fn apply_mid_start(&mut self) {
+        let fraction = self.config.mid_start.then_some(MID_START_FRACTION);
+        if let Some(a) = self.audio.as_mut() {
+            a.set_start_fraction(fraction);
+        }
+    }
+
+    /// Jump a freshly loaded video part-way in, once per video, when the
+    /// setting is on. The mini-player is a web page, so a start position
+    /// can't be handed over with the play call: the video is seeked the
+    /// first poll that reports it ready with a length. Keyed on the YouTube
+    /// id on air, so the queue's next video gets its own jump and a manual
+    /// scrub back to the top on the same one is left alone.
+    pub(crate) fn mid_start_video(&mut self) {
+        if !webview::is_open() {
+            self.video_mid_started = None;
+            return;
+        }
+        if !self.config.mid_start {
+            return;
+        }
+        let t = webview::transport();
+        if !t.ready || t.duration <= 0.0 {
+            return;
+        }
+        let Some(id) = webview::on_air() else {
+            return;
+        };
+        if self.video_mid_started.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        self.video_mid_started = Some(id);
+        webview::seek(t.duration * MID_START_FRACTION);
+    }
+
+    /// Move whatever is loaded by `delta` seconds: the video if the
+    /// mini-player is up, else the track in the player bar, paused or not.
+    /// Nothing loaded, nothing happens.
+    pub(crate) fn nudge_playhead(&mut self, delta: f32) {
+        if webview::is_open() {
+            let t = webview::transport();
+            if !t.ready {
+                return;
+            }
+            let end = if t.duration > 0.0 { t.duration } else { f32::MAX };
+            webview::seek((t.position + delta).clamp(0.0, end));
+            return;
+        }
+        if let Some(a) = self.audio.as_mut() {
+            if a.current().is_some() {
+                let target = (a.position() + delta).max(0.0);
+                a.seek(target);
+            }
+        }
+    }
+}

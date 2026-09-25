@@ -163,6 +163,10 @@ pub(crate) struct VinylSheet {
     /// it: the line a tracklist row was opened from. Matched to a row the
     /// way the matcher reads titles, so a spelling difference still lands.
     pub mark: Option<String>,
+    /// The row the keyboard is on, for stepping through the tracklist
+    /// without the pointer: ↑ ↓ or W S move it, ⏎ plays it. `None` until
+    /// the first step, which starts from the playing or marked row.
+    pub cursor: Option<usize>,
 }
 
 /// One seller's concrete offer of the open record — see [`VinylSheet::offer`].
@@ -417,6 +421,7 @@ impl App {
             offer: None,
             stocked: self.sheet_stocked(record.release_id),
             mark: None,
+            cursor: None,
         });
         self.spawn_sheet_fetch(record.release_id, ctx.clone());
         self.spawn_sheet_price(record.release_id, ctx.clone());
@@ -470,6 +475,7 @@ impl App {
             offer: None,
             stocked: self.sheet_stocked(release_id),
             mark: None,
+            cursor: None,
         });
         self.spawn_sheet_fetch(release_id, ctx.clone());
         self.spawn_sheet_price(release_id, ctx.clone());
@@ -954,6 +960,7 @@ impl App {
     /// the styling un-refreshed until some unrelated event happens to tick.
     pub(crate) fn drive_video_player(&mut self, ctx: &egui::Context) {
         webview::poll();
+        self.mid_start_video();
         if let Some(next) = webview::next_poll_in() {
             ctx.request_repaint_after(next);
         }
@@ -1355,6 +1362,82 @@ impl App {
             Pressings,
         }
         let mut act: Option<Act> = None;
+        // The tracklist row a hover-less mark sits on: the line the sheet was
+        // opened from, matched the way the matcher reads titles.
+        let marked = {
+            let s = self.vinyl_sheet.as_ref().unwrap();
+            s.mark.as_deref().and_then(|m| {
+                let d = s.detail.as_ref()?;
+                let hit = d
+                    .matching_track_title(m)
+                    .or_else(|| d.matching_track_title_any_version(m))?;
+                d.tracklist.iter().position(|t| t.title == hit)
+            })
+        };
+        // The row whose track is on air, by the same test the row painter
+        // uses to light its play mark.
+        let playing_row = {
+            let s = self.vinyl_sheet.as_ref().unwrap();
+            s.rows.iter().position(|r| match r.source {
+                SheetSource::Local(l) => s.local.get(l).is_some_and(|t| Some(t.id) == sounding_id),
+                SheetSource::Video(v) => playing_video == Some(v),
+                SheetSource::None => false,
+            })
+        };
+        // Keyboard: ↑ ↓ / W S step the cursor through the playable rows, ⏎
+        // plays the row it is on, Q toggles the wantlist and E digs from the
+        // record. While the record is on air a step plays the new row at
+        // once, so going through a record is one key per track; from
+        // silence the first listen takes ⏎, so a stray press doesn't start
+        // the music. Skipped while a text field has focus, like every other
+        // single-key shortcut.
+        let mut cursor_moved = false;
+        if !ctx.wants_keyboard_input() {
+            let (up, down, enter, want, dig) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                        | i.consume_key(egui::Modifiers::NONE, egui::Key::W),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                        | i.consume_key(egui::Modifiers::NONE, egui::Key::S),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Q),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::E),
+                )
+            });
+            let s = self.vinyl_sheet.as_mut().unwrap();
+            if up != down {
+                let playable =
+                    |i: &usize| s.rows.get(*i).is_some_and(|r| !matches!(r.source, SheetSource::None));
+                // The first step starts from where the listener's attention
+                // already is: the row playing, else the row the sheet was
+                // opened on.
+                let anchor = s.cursor.or(playing_row).or(marked);
+                let next = if down {
+                    (anchor.map_or(0, |a| a + 1)..s.rows.len()).find(playable)
+                } else {
+                    (0..anchor.unwrap_or(s.rows.len())).rev().find(playable)
+                };
+                if let Some(n) = next {
+                    s.cursor = Some(n);
+                    cursor_moved = true;
+                    if !matches!(record_play, RecordPlay::Stopped) {
+                        act = Some(Act::Play(n));
+                    }
+                }
+            }
+            if enter {
+                if let Some(c) = s.cursor {
+                    act = Some(Act::Play(c));
+                }
+            }
+            if want && want_pending.is_none() {
+                act = Some(Act::ToggleList(VinylList::Wantlist));
+            }
+            if dig && can_dig && branch.is_none() {
+                act = Some(Act::Dig);
+            }
+        }
+        let cursor = self.vinyl_sheet.as_ref().and_then(|s| s.cursor);
         // The transport bar's own action, kept apart from `act` so a scrub and
         // a row click in the same frame don't shadow each other.
         let mut video_act: Option<VideoAct> = None;
@@ -1700,9 +1783,9 @@ impl App {
                                 Some(pending) => (pending, "Waiting on Discogs"),
                                 None if in_wantlist => (
                                     "In wantlist",
-                                    "Remove this record from your Discogs wantlist",
+                                    "Remove this record from your Discogs wantlist (Q)",
                                 ),
-                                None => ("Wantlist", "Add this record to your Discogs wantlist"),
+                                None => ("Wantlist", "Add this record to your Discogs wantlist (Q)"),
                             };
                             if crate::ui::icon::shelf_button_reserving(
                                 ui,
@@ -1730,7 +1813,7 @@ impl App {
                                 && crate::ui::button::button(ui, "🔍  Dig")
                                     .on_hover_note(
                                         "Find records like this one on Discogs that aren't \
-                                         in your collection",
+                                         in your collection (E)",
                                     )
                                     .clicked()
                             {
@@ -1827,13 +1910,6 @@ impl App {
                     .max_height(360.0)
                     .show(ui, |ui| {
                         ui.add_space(4.0);
-                        let marked = sheet.mark.as_deref().and_then(|m| {
-                            let d = sheet.detail.as_ref()?;
-                            let hit = d
-                                .matching_track_title(m)
-                                .or_else(|| d.matching_track_title_any_version(m))?;
-                            d.tracklist.iter().position(|t| t.title == hit)
-                        });
                         for (i, row) in sheet.rows.iter().enumerate() {
                             let playing = match row.source {
                                 SheetSource::Local(l) => sheet
@@ -1855,7 +1931,22 @@ impl App {
                                 Some(sheet.release_id),
                                 Some(&row.position),
                             );
-                            match sheet_row_ui(ui, sheet, row, i, playing, running, marked == Some(i), liked, &self.crate_sets) {
+                            // The keyboard cursor lights a row the way the
+                            // mark does: it is the pointer's hover without
+                            // the pointer.
+                            let lit = marked == Some(i) || cursor == Some(i);
+                            let top = ui.cursor().top();
+                            let hit = sheet_row_ui(ui, sheet, row, i, playing, running, lit, liked, &self.crate_sets);
+                            // A step off the visible part of the list brings
+                            // the row it landed on into view.
+                            if cursor_moved && cursor == Some(i) {
+                                let span = egui::Rect::from_x_y_ranges(
+                                    ui.max_rect().x_range(),
+                                    top..=ui.cursor().top(),
+                                );
+                                ui.scroll_to_rect(span, None);
+                            }
+                            match hit {
                                 Some(RowHit::Play) => act = Some(Act::Play(i)),
                                 Some(RowHit::Like) => act = Some(Act::Like(i)),
                                 Some(RowHit::Artist(id, name)) => {
