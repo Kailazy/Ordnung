@@ -964,7 +964,7 @@ impl App {
             .rows
             .iter()
             .filter(|x| self.selection.contains(&x.id))
-            .map(|x| crate::crates::track_song_key(&x.artist, &x.title))
+            .map(|x| crate::crates::track_song_key(&x.artist, &x.title, self.track_releases.get(&x.id).copied()))
             .collect();
         let menu_sets = &self.crate_sets;
         let song_tags = &self.song_tags;
@@ -1880,7 +1880,7 @@ impl App {
                                         // Tags ▸: a check per tag, on when every
                                         // song the menu acts on carries it.
                                         let tagged: Vec<Id> = {
-                                            let own = [crate::crates::track_song_key(&r.artist, &r.title)];
+                                            let own = [crate::crates::track_song_key(&r.artist, &r.title, track_releases.get(&r.id).copied())];
                                             let keys: &[String] = if is_sel { &selected_keys } else { &own };
                                             let mut common: Option<Vec<Id>> = None;
                                             for k in keys {
@@ -2906,6 +2906,18 @@ pub(crate) fn load_rows(
         .unwrap_or(0);
     // The user's tags per song, for the Tags column: the tag sets and
     // which song keys are in them (see `crates`), read once per listing.
+    // The tags are keyed on the record a track is matched to (see
+    // `crates::track_song_key`), so the links come along.
+    let track_release: HashMap<Id, u64> = if tracks.is_empty() {
+        HashMap::new()
+    } else {
+        catalog
+            .release_track_links()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(rid, tid)| (tid, rid))
+            .collect()
+    };
     let (tag_sets, tagged): (Vec<CrateSet>, HashMap<String, Vec<Id>>) = if tracks.is_empty() {
         (Vec::new(), HashMap::new())
     } else {
@@ -2925,6 +2937,7 @@ pub(crate) fn load_rows(
             let key = crate::crates::track_song_key(
                 t.tags.artist.as_deref().unwrap_or(""),
                 t.tags.title.as_deref().unwrap_or(""),
+                track_release.get(&t.id).copied(),
             );
             tagged
                 .get(&key)

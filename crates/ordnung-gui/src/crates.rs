@@ -632,15 +632,41 @@ pub(crate) fn tag_words(sets: &[CrateSet], ids: &[Id]) -> String {
         .join(", ")
 }
 
-/// The key a library track's song is tagged under: the song as its tags
-/// say it (see `Track::song`), the same key the library index uses.
-pub(crate) fn track_song_key(artist: &str, title: &str) -> String {
-    song_key(artist, title, None, None)
+/// The key a library track's song is liked and tagged under: the song as
+/// its tags say it, on the Discogs record the track is matched to
+/// (`release`, from the app's track-to-release map), which is what
+/// [`LikeSpec::from_track`] stores. The record only enters the key for a
+/// title that names nothing ("Untitled", see `song_key`), so a lookup
+/// without it missed every tag on such a song while the store said it
+/// was already tagged.
+pub(crate) fn track_song_key(artist: &str, title: &str, release: Option<u64>) -> String {
+    song_key(artist, title, release, None)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A library track is stored (liked, tagged) as a pin on the record it
+    /// is matched to, with no position; the library must read it back under
+    /// that same key, which differs from the recordless one exactly for a
+    /// title that names nothing.
+    #[test]
+    fn library_lookup_key_matches_the_stored_pin_key() {
+        let stored = |release: Option<u64>| {
+            ordnung_core::model::SongRef::new("Leafar Legov", "Untitled")
+                .at(release, None)
+                .key()
+        };
+        assert_eq!(track_song_key("Leafar Legov", "Untitled", Some(123)), stored(Some(123)));
+        assert_eq!(track_song_key("Leafar Legov", "Untitled", None), stored(None));
+        assert_ne!(track_song_key("Leafar Legov", "Untitled", Some(123)), stored(None));
+        // A real title ignores the record either way.
+        assert_eq!(
+            track_song_key("Leafar Legov", "Mandarine Girl", Some(123)),
+            track_song_key("Leafar Legov", "Mandarine Girl", None)
+        );
+    }
 
     #[test]
     fn tag_words_follow_sidebar_order_and_skip_crates() {

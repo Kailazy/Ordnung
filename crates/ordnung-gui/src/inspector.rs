@@ -381,11 +381,14 @@ impl App {
         // on a record shows its heart on the file too.
         let song = t.song();
         let can_like = !song.is_empty();
-        let liked = can_like && self.is_liked(&song.artist, &song.title, None, None);
-        let like_spec =
-            crate::liked::LikeSpec::from_track(&t, self.track_releases.get(&id).copied());
-        // The song's tags, read before the panel closure borrows the editor.
-        let tagged: Vec<Id> = self.song_tag_ids(&song.key()).to_vec();
+        let release = self.track_releases.get(&id).copied();
+        let liked = can_like && self.is_liked(&song.artist, &song.title, release, None);
+        let like_spec = crate::liked::LikeSpec::from_track(&t, release);
+        // The song's tags, read before the panel closure borrows the editor,
+        // under the key the like above stores (the record counts for a
+        // title that names nothing).
+        let song_key = crate::crates::track_song_key(&song.artist, &song.title, release);
+        let tagged: Vec<Id> = self.song_tag_ids(&song_key).to_vec();
         let tag_words = crate::crates::tag_words(&self.crate_sets, &tagged);
         let tag_sets: Vec<(Id, String)> = self
             .crate_sets
