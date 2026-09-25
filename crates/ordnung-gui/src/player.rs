@@ -12,6 +12,19 @@ impl App {
     /// has the track in `rows` — the table is showing something else entirely, or
     /// nothing — so without it every linked track announced itself by filename.
     pub(crate) fn play_track(&mut self, id: Id, path: PathBuf) {
+        let start = self
+            .config
+            .mid_start_files
+            .then_some(crate::playback::MID_START_FRACTION);
+        self.play_track_from(id, path, start);
+    }
+
+    /// [`play_track`](Self::play_track) starting at `start` of the track's
+    /// length (`None` for the top) instead of where the library setting
+    /// says. A record sheet plays the files it owns this way, under the
+    /// records switch, so stepping through a record lands every track at
+    /// the same point whether it plays from a file or from YouTube.
+    pub(crate) fn play_track_from(&mut self, id: Id, path: PathBuf, start: Option<f32>) {
         let toggling = self.audio.as_ref().and_then(|a| a.current()) == Some(id);
         let display = self
             .rows
@@ -38,7 +51,7 @@ impl App {
         // player starts, wherever this click came from.
         self.claim_sound(Sound::Player);
         if let Some(a) = self.audio.as_mut() {
-            a.play_or_toggle(id, path.clone());
+            a.play_or_toggle_from(id, path.clone(), start);
         }
         // Only (re)seed the bar when switching to a different track; a same-track
         // click is just a pause/resume and keeps the existing display + scrub.
@@ -190,12 +203,13 @@ impl App {
 
         let np_path = self.now_playing.as_ref().unwrap().source_path.clone();
         let art = self.cover_full_texture(ctx, np_id, &np_path);
-        let (pos, dur, loading, playing, pitch_pct, key_lock) = {
+        let (pos, dur, loading, held, playing, pitch_pct, key_lock) = {
             let a = self.audio.as_ref().unwrap();
             (
                 a.position(),
                 a.duration(),
                 matches!(a.state_for(np_id), PlayState::Loading),
+                a.held_start(),
                 a.state_for(np_id) == PlayState::Playing,
                 a.pitch(),
                 a.key_lock(),
@@ -270,8 +284,11 @@ impl App {
         // before release. Shared by the zoom lane and the overview strip so both
         // track the same playhead. Computed once up front (the panel closure below
         // mutably borrows `self.scrub`).
+        // While the track is on its way in, the playhead waits where it will
+        // start rather than sitting at the top until the sink comes up.
         let shown_frac = self
             .scrub
+            .or(held)
             .unwrap_or(if dur > 0.0 { pos / dur } else { 0.0 })
             .clamp(0.0, 1.0);
 
@@ -636,14 +653,20 @@ impl App {
                     // Elapsed time. Fixed-width so the digits changing during a
                     // scrub (e.g. "0:05" → "0:00", or crossing "10:00") can't shift
                     // the waveform that follows it — that shift was the scrub jitter.
-                    ui.add_sized(
-                        egui::vec2(46.0, 18.0),
-                        egui::Label::new(
-                            egui::RichText::new(fmt_time(shown_frac * dur))
-                                .font(crate::ui::tokens::font::mono_small())
-                                .color(egui::Color32::from_gray(170)),
-                        ),
-                    );
+                    if loading && self.scrub.is_none() {
+                        // Nothing to count yet: the track is loading. The
+                        // playhead already waits at its start point.
+                        ui.add_sized(egui::vec2(46.0, 18.0), egui::Spinner::new().size(14.0));
+                    } else {
+                        ui.add_sized(
+                            egui::vec2(46.0, 18.0),
+                            egui::Label::new(
+                                egui::RichText::new(fmt_time(shown_frac * dur))
+                                    .font(crate::ui::tokens::font::mono_small())
+                                    .color(egui::Color32::from_gray(170)),
+                            ),
+                        );
+                    }
 
                     // Scrubber — fills the space left after the trailing time label
                     // and close button.

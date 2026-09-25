@@ -679,8 +679,13 @@ pub struct AudioEngine {
     /// The current track's decode has run to completion; `pcm_buf` is final.
     decode_done: bool,
     /// Where a new track starts, as a fraction of its length: `None` for
-    /// the top. Set from the "start mid-song" setting.
+    /// the top. Set from the "start mid-song" setting; a load may name its
+    /// own point instead ([`play_or_toggle_from`](Self::play_or_toggle_from)).
     start_fraction: Option<f32>,
+    /// The point the track now loading (or held back, see `pending_start`)
+    /// was asked to start at, as a fraction of its length. Fixed at the
+    /// load so a settings change mid-decode doesn't move it.
+    load_start: Option<f32>,
     /// A start point (seconds) the decoder hasn't reached yet. The sink is
     /// held back until it has, so the listener hears the drop and not a
     /// blip of intro first; `poll` starts it the moment the frontier passes.
@@ -771,6 +776,7 @@ impl AudioEngine {
             pitch_pct: 0.0,
             scrub_resume: None,
             start_fraction: None,
+            load_start: None,
             pending_start: None,
             sample_rate: 0,
             channels: 1,
@@ -803,6 +809,24 @@ impl AudioEngine {
     /// The track that's loaded in the player (playing or paused), if any.
     pub fn current(&self) -> Option<Id> {
         self.current
+    }
+
+    /// The track being decoded, before it has begun to play, if any.
+    pub fn loading(&self) -> Option<Id> {
+        self.loading
+    }
+
+    /// Where the track on its way in will start, as a fraction of its
+    /// length, while it is still loading or held back for the decoder to
+    /// reach that point. `None` once it plays (or nothing is loading). A
+    /// scrubber holds its playhead here meanwhile instead of showing the
+    /// top, which is where the clock sits until the sink comes up.
+    pub fn held_start(&self) -> Option<f32> {
+        if self.loading.is_some() || self.pending_start.is_some() {
+            Some(self.load_start.unwrap_or(0.0))
+        } else {
+            None
+        }
     }
 
     /// True while audio is loading or actively playing — the caller uses this to
@@ -993,9 +1017,18 @@ impl AudioEngine {
         Some((self.pcm_buf.clone()?, self.channels, self.sample_rate))
     }
 
-    /// Play control click for a row: start `id` from the top, or — if it's already
-    /// the loaded track — toggle pause/resume.
+    /// Play control click for a row: start `id` (at the engine's start
+    /// point, see [`set_start_fraction`](Self::set_start_fraction)), or — if
+    /// it's already the loaded track — toggle pause/resume.
     pub fn play_or_toggle(&mut self, id: Id, path: PathBuf) {
+        let start = self.start_fraction;
+        self.play_or_toggle_from(id, path, start);
+    }
+
+    /// [`play_or_toggle`](Self::play_or_toggle) with the start point named
+    /// by the caller: `Some(fraction)` of the length, `None` for the top.
+    /// This load alone; the engine's own setting stands for the next.
+    pub fn play_or_toggle_from(&mut self, id: Id, path: PathBuf, start: Option<f32>) {
         if self.current == Some(id) {
             self.toggle_pause();
             return;
@@ -1007,6 +1040,7 @@ impl AudioEngine {
         }
         self.stop();
         self.loading = Some(id);
+        self.load_start = start.map(|f| f.clamp(0.0, 0.95));
         self.last_error = None;
         let tx = self.tx.clone();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1260,6 +1294,7 @@ impl AudioEngine {
         self.pcm_buf = None;
         self.decode_done = false;
         self.pending_start = None;
+        self.load_start = None;
         self.started_at = None;
         self.base_secs = 0.0;
         self.duration = 0.0;
@@ -1407,7 +1442,7 @@ impl AudioEngine {
                     // Mid-song start: only with a header-supplied length to
                     // take the fraction of. A headerless stream starts at
                     // the top, as it can't know where its middle is.
-                    let start = match self.start_fraction {
+                    let start = match self.load_start {
                         Some(f) if self.duration > 0.0 => self.duration * f,
                         _ => 0.0,
                     };

@@ -136,6 +136,10 @@ pub struct Transport {
     /// True once a video element has been found at all. Until then the sheet
     /// shows the bar in its loading state rather than a bogus 0:00 / 0:00.
     pub ready: bool,
+    /// True when `position` comes from the page's own answer since this
+    /// side last wrote to it (a seek, a pause flip). False while it is still
+    /// what that write assumed: the seek's target, not yet seen honoured.
+    pub reported: bool,
 }
 
 /// The mini-player's playback position, for drawing a scrubber.
@@ -351,6 +355,12 @@ mod imp {
         position: f32,
         duration: f32,
         reported_at: Instant,
+        /// When this side last wrote the page's state itself (a seek, a
+        /// pause flip, a load). An answer the page was asked for *before*
+        /// that write describes the state it replaced, so [`ask_state`]
+        /// drops it: the scrubber otherwise snaps back to where the video
+        /// was for one tick after every seek.
+        local_at: Instant,
         /// When the current video was loaded, for the stuck check.
         loaded_at: Instant,
         /// When the page was last asked.
@@ -372,6 +382,7 @@ mod imp {
                 position: 0.0,
                 duration: 0.0,
                 reported_at: Instant::now(),
+                local_at: Instant::now(),
                 loaded_at: Instant::now(),
                 polled_at: Instant::now(),
             }
@@ -404,6 +415,7 @@ mod imp {
             self.position = 0.0;
             self.duration = 0.0;
             self.reported_at = Instant::now();
+            self.local_at = Instant::now();
             self.loaded_at = Instant::now();
             // Due immediately: the same tick that reads the player's state also
             // injects the styling, and waiting a full period would show
@@ -422,6 +434,7 @@ mod imp {
             self.state.clear();
             self.position = 0.0;
             self.duration = 0.0;
+            self.local_at = Instant::now();
             blank(&self.web);
         }
     }
@@ -642,6 +655,9 @@ mod imp {
                 duration,
                 playing,
                 ready: matches!(page.state.as_str(), "playing" | "paused" | "ended"),
+                // A local write stamps both clocks alike; only an answer
+                // taken since moves `reported_at` past `local_at`.
+                reported: page.reported_at > page.local_at,
             }
         })
     }
@@ -656,6 +672,7 @@ mod imp {
                 "playing".into()
             };
             page.reported_at = Instant::now();
+            page.local_at = page.reported_at;
         });
     }
 
@@ -666,6 +683,7 @@ mod imp {
             // was dropped, not snap back until the page catches up.
             page.position = secs;
             page.reported_at = Instant::now();
+            page.local_at = page.reported_at;
         });
     }
 
@@ -982,6 +1000,7 @@ mod imp {
         }
         page.position = 0.0;
         page.reported_at = Instant::now();
+        page.local_at = page.reported_at;
         // Ask at once, so the transport reads the real state within a tick.
         page.polled_at = Instant::now()
             .checked_sub(POLL_EVERY)
@@ -1117,6 +1136,10 @@ mod imp {
             inject = inject_js()
         );
         let js: &str = &js;
+        // When the question went out. An answer is only as new as its
+        // question: one asked before a seek or a pause flip landed here
+        // reports the state that write replaced, and must not undo it.
+        let asked = Instant::now();
         let handler = block2::RcBlock::new(move |res: *mut AnyObject, _err: *mut NSError| {
             let state = if res.is_null() {
                 String::new()
@@ -1145,13 +1168,18 @@ mod imp {
                     mini.next.as_mut().filter(|n| n.serial == serial)
                 };
                 if let Some(page) = page {
+                    // The length is a fact about the video, not about where
+                    // it is, so even a stale answer may supply it.
+                    if let Some(d) = dur {
+                        page.duration = d;
+                    }
+                    if asked < page.local_at {
+                        return;
+                    }
                     page.state = word;
                     if let Some(p) = pos {
                         page.position = p;
                         page.reported_at = Instant::now();
-                    }
-                    if let Some(d) = dur {
-                        page.duration = d;
                     }
                 }
             });

@@ -879,8 +879,15 @@ impl App {
                     return;
                 };
                 let (id, path) = (local.id, local.path.clone());
-                // `play_track` claims the floor: a video under it goes off.
-                self.play_track(id, path);
+                // A file played from a record is the record being listened
+                // to, so it starts where the record's videos do: under the
+                // records switch, not the library one. `play_track_from`
+                // claims the floor: a video under it goes off.
+                let start = self
+                    .config
+                    .mid_start_videos
+                    .then_some(crate::playback::MID_START_FRACTION);
+                self.play_track_from(id, path, start);
             }
             SheetSource::Video(_) => {
                 let ids = self.sheet_video_queue(row);
@@ -1182,7 +1189,14 @@ impl App {
         // Whether the marked video row's bars should move: the transport is
         // running, not merely open on a paused video.
         let video_running = video_open && webview::transport().playing;
-        let now_playing_id = self.audio.as_ref().and_then(|a| a.current());
+        // The track loaded in the player, or the one on its way in: a row
+        // just stepped to counts as this record's from the key press, so the
+        // transport holds its playhead through the load instead of dropping
+        // to rest for the second the decoder takes.
+        let now_playing_id = self
+            .audio
+            .as_ref()
+            .and_then(|a| a.current().or(a.loading()));
         // The track that is actually *sounding*, as against the one merely
         // loaded in the player. `current()` survives a pause and a stop, so a
         // row keyed on it alone keeps showing its pause icon long after the
@@ -1229,9 +1243,22 @@ impl App {
                     duration: a.duration(),
                     playing: matches!(record_play, RecordPlay::Playing(_)),
                     ready: true,
+                    // The engine's own clock: nothing assumed.
+                    reported: true,
                 })
             }
             _ => None,
+        };
+        // Where the track on its way in will start, while it is still
+        // getting there: the transport parks its playhead at that point and
+        // shows a spinner for the clock, rather than following the engine
+        // from the top to the jump.
+        let held_start = if video_open {
+            self.video_held_start()
+        } else {
+            audio_transport
+                .and(self.audio.as_ref())
+                .and_then(|a| a.held_start())
         };
         // Digging is offered for any record with something to search on: a
         // shelf record digs by its cached row, and a keyless one (a seller's
@@ -1874,7 +1901,7 @@ impl App {
                             None => (false, webview::Transport::default()),
                         }
                     };
-                    video_act = video_transport_ui(ui, &mut scrub, live, transport);
+                    video_act = video_transport_ui(ui, &mut scrub, live, transport, held_start);
                     if let Some(s) = self.vinyl_sheet.as_mut() {
                         s.video_scrub = scrub;
                     }
@@ -2039,7 +2066,11 @@ impl App {
         // playable track.
         match video_act {
             Some(VideoAct::TogglePause) if video_open => webview::toggle_pause(),
-            Some(VideoAct::Seek(secs)) if video_open => webview::seek(secs),
+            Some(VideoAct::Seek(secs)) if video_open => {
+                webview::seek(secs);
+                // Their scrub, their place: the mid-song jump stops watching.
+                self.video_mid_start_settle();
+            }
             Some(VideoAct::TogglePause) => {
                 self.claim_sound(Sound::Player);
                 if let Some(a) = self.audio.as_mut() {
@@ -2348,12 +2379,15 @@ enum VideoAct {
 /// `scrub` is the in-flight drag fraction, borrowed mutably so the drag can own
 /// the playhead until it's released. `live` says an engine is playing this
 /// record and `t` is where it's got to; otherwise the bar is at rest, a play
-/// button and an empty track, and play starts the record.
+/// button and an empty track, and play starts the record. `held` is where
+/// a track still on its way in will start, as a fraction: the playhead waits
+/// there and the elapsed clock spins until the engine reports it playing.
 fn video_transport_ui(
     ui: &mut egui::Ui,
     scrub: &mut Option<f32>,
     live: bool,
     t: webview::Transport,
+    held: Option<f32>,
 ) -> Option<VideoAct> {
     use crate::ui::tokens::space;
 
@@ -2362,6 +2396,7 @@ fn video_transport_ui(
     /// total clock aren't flush against its rounded corners.
     const EDGE: f32 = space::S4;
     let t = if live { t } else { webview::Transport::default() };
+    let held = held.filter(|_| live);
     let mut act = None;
 
     // The bar fills the sheet, so its own width is the width it's offered.
@@ -2403,24 +2438,31 @@ fn video_transport_ui(
                 ui.add_space(space::S4);
 
                 // The fraction the bar paints: the drag while one is in flight,
-                // the video's real position otherwise.
+                // the start point a loading track is headed for, the real
+                // position otherwise.
                 let real = if t.duration > 0.0 {
                     (t.position / t.duration).clamp(0.0, 1.0)
                 } else {
                     0.0
                 };
-                let shown = scrub.unwrap_or(real);
+                let shown = scrub.or(held).unwrap_or(real);
 
                 // Elapsed. Fixed width, so digits changing mid-scrub can't shift
                 // the scrubber that follows them (same reason as the player bar).
-                ui.add_sized(
-                    egui::vec2(CLOCK_W, 18.0),
-                    egui::Label::new(
-                        egui::RichText::new(fmt_time(shown * t.duration))
-                            .font(crate::ui::tokens::font::mono_small())
-                            .color(egui::Color32::from_gray(170)),
-                    ),
-                );
+                // A track still loading has nothing to count: a spinner in the
+                // clock's place says so, while the playhead waits at its start.
+                if held.is_some() && scrub.is_none() {
+                    ui.add_sized(egui::vec2(CLOCK_W, 18.0), egui::Spinner::new().size(14.0));
+                } else {
+                    ui.add_sized(
+                        egui::vec2(CLOCK_W, 18.0),
+                        egui::Label::new(
+                            egui::RichText::new(fmt_time(shown * t.duration))
+                                .font(crate::ui::tokens::font::mono_small())
+                                .color(egui::Color32::from_gray(170)),
+                        ),
+                    );
+                }
                 ui.add_space(space::S4);
 
                 // Scrubber: the width left over once the controls that follow

@@ -240,7 +240,7 @@ impl App {
             vinyl_cursor: None,
             vinyl_cursor_moved: false,
             sheet_follows_dig: false,
-            video_mid_started: None,
+            video_mid_start: None,
             sheet_rx: None,
             sheet_price_rx: None,
             versions: None,

@@ -859,13 +859,14 @@ impl App {
                                                 &mut self.config.mid_start_videos,
                                                 "Start records and YouTube videos mid-song",
                                             )
-                                            .on_hover_note("Skip the intro when a record's video starts")
+                                            .on_hover_note("Skip the intro when a record starts, on its video or on a file you own")
                                             .changed()
                                         {
                                             // The video already on air keeps
                                             // its place: the setting is for
                                             // the next track, not a jump now.
-                                            self.video_mid_started = webview::on_air();
+                                            self.video_mid_start = webview::on_air()
+                                                .map(crate::playback::VideoMidStart::settled);
                                             if let Err(e) = self.config.save() {
                                                 self.status =
                                                     format!("Couldn't save settings: {e}");
