@@ -2459,6 +2459,17 @@ fn sheet_row_ui(
     let mut like_rect = egui::Rect::NOTHING;
     // The guessed-video chip's slot and its note, when the row has one.
     let mut guess_note: Option<(egui::Rect, String)> = None;
+    // Keyed by index, not by text: Discogs releases regularly repeat a
+    // position or a title, and two rows sharing an id share hover state — one
+    // cursor would light up both.
+    let id = ui.id().with(("sheet-row", index));
+    // Whether the guess chip was under the pointer last frame: decided
+    // before the row lays out, since the chip's own target is registered
+    // only after the row's hit (see below).
+    let guess_hovered = ui
+        .ctx()
+        .read_response(id.with("guess"))
+        .is_some_and(|r| r.hovered());
     // The names in the row's credit, likewise: laid out now, drawn as links
     // after the row's hit target.
     let mut links: Vec<RowLink> = Vec::new();
@@ -2629,13 +2640,18 @@ fn sheet_row_ui(
                             ui.label(egui::RichText::new("♪ your copy").small().color(ACCENT));
                         }
                         SheetSource::Video(v) => {
-                            // A guessed video says how sure it is, and
-                            // names the video it would play on hover: the
-                            // row shows the track's title, not the
-                            // video's, and the two can differ.
+                            // A guessed video reads like a matched one
+                            // until the pointer asks: hovering the chip
+                            // appends how sure the guess is, and the note
+                            // names the video it would play (the row
+                            // shows the track's title, not the video's,
+                            // and the two can differ). The chip sits at
+                            // the left end of a right-to-left run, so the
+                            // wider text grows into the empty middle and
+                            // nothing beside it shifts.
                             let text = match row.guess {
-                                Some(c) => format!("▶ video {c}%"),
-                                None => "▶ video".to_string(),
+                                Some(c) if guess_hovered => format!("▶ video {c}%"),
+                                _ => "▶ video".to_string(),
                             };
                             let chip = ui.label(
                                 egui::RichText::new(text)
@@ -2689,10 +2705,6 @@ fn sheet_row_ui(
 
     // The whole row is the hit target, so there's no small glyph to aim at.
     let rect = resp.rect;
-    // Keyed by index, not by text: Discogs releases regularly repeat a
-    // position or a title, and two rows sharing an id share hover state — one
-    // cursor would light up both.
-    let id = ui.id().with(("sheet-row", index));
     // Click plays; a drag carries the song to a crate.
     let hit = ui.interact(rect, id, egui::Sense::click_and_drag());
     let like = crate::ui::button::like_mark_at(ui, like_rect, id.with("like"), liked);
