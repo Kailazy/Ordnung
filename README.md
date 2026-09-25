@@ -1,106 +1,92 @@
 # Ordnung
 
-A fast, self-sufficient DJ music catalog, analyzer, and rekordbox/CDJ USB
-exporter — written in Rust.
+A DJ music library for macOS that does its own analysis and writes USB sticks
+your CDJs can read. No rekordbox required.
 
-Ordnung scans your music, builds a SQLite catalog, analyzes tempo, beatgrids,
-musical key (Camelot), waveforms and loudness, optionally converts and enriches
-tracks, and (in progress) exports a native rekordbox USB the CDJs can read — all
-without rekordbox itself. It is **not** a rekordbox plugin: it generates every
-piece of metadata and analysis on its own.
+Point it at your music folder and it builds a catalog, works out the BPM,
+beatgrid, musical key (in Camelot), waveform and loudness of every track, and
+keeps it all in one place. When it's time to play, pick your crates and export
+a stick.
 
-The front-end is a native desktop app (`Ordnung`, built on egui). The engine
-underneath is a plain library crate, so it stays scriptable and testable on its own.
+## Download
 
-## Product rules
-
-These are enforced design constraints, not preferences:
-
-- **Explicit-only.** `scan`, `analyze`, `tag`, `convert`, `export` are separate
-  actions; none silently does another's work.
-- **Source files are sacred.** Tag writes and conversions are opt-in.
-  Conversions create new files unless you pass `--in-place`. Deletes go to the
-  OS Trash, never a hard `rm`.
-- **The catalog is the truth.** The SQLite catalog plus analysis cache is
-  authoritative; a USB export is a derived artifact.
-- **Camelot is the contract.** Keys are stored canonically (pitch class + mode)
-  and rendered as Camelot by default.
-
-## Workspace layout
-
-A Cargo workspace with three crates:
-
-| Crate          | Kind   | Responsibility |
-|----------------|--------|----------------|
-| `ordnung-core` | lib    | Domain model, catalog (SQLite), scan, tag (lofty), analysis (BPM / key / beatgrid / waveform / loudness), conversion (ffmpeg), Discogs enrichment |
-| `ordnung-rbdb` | lib    | rekordbox/CDJ export — `export.pdb` (DeviceSQL) + ANLZ writers (in progress) |
-| `ordnung-gui`  | bin    | `Ordnung` — the desktop app; the only policy/UI layer over the engine |
-
-See [PLAN.md](PLAN.md) and [HANDOFF.md](HANDOFF.md) for the full architecture and
-phased roadmap.
-
-## Requirements
-
-- **Rust** (stable; pinned via [rust-toolchain.toml](rust-toolchain.toml) — `rustup`
-  installs it automatically).
-- **ffmpeg** — only needed for audio conversion. Decoding/analysis use pure-Rust
-  crates; SQLite is bundled. `brew install ffmpeg` / `apt install ffmpeg`.
-- **macOS app build only:** `librsvg` (provides `rsvg-convert`) for icon
-  rendering, plus Xcode command-line tools. `brew install librsvg`.
-- **Linux:** `libdbus` for media-key integration (`apt install libdbus-1-dev`).
-
-## Download (macOS)
-
-Grab the latest universal `.dmg` from the
-[**Releases**](../../releases/latest) page (Apple Silicon + Intel in one build):
+**[Download the latest release](../../releases/latest)** — one `.dmg` for both
+Apple Silicon and Intel Macs. Requires macOS 11 or newer.
 
 1. Open the `.dmg` and drag **Ordnung** into **Applications**.
-2. First launch only: right-click `Ordnung.app` → **Open** → **Open**.
-   (Or run `xattr -dr com.apple.quarantine /Applications/Ordnung.app`.)
+2. Double-click Ordnung. macOS will say it can't verify the app — click **Done**.
+3. Open **System Settings → Privacy & Security**, scroll down, and click
+   **Open Anyway** next to the Ordnung message. Confirm once more.
 
-The one-time right-click is needed because the build is ad-hoc signed, not
-notarized by Apple — Gatekeeper warns once on apps from unidentified developers,
-then trusts it. Releases are cut by pushing a `vX.Y.Z` tag, which runs
-[.github/workflows/release.yml](.github/workflows/release.yml) to build and
-attach the DMG.
+That's a one-time step. From then on Ordnung opens like any other app, and it
+tells you in-app when a newer version is out.
 
-## Build & run
+<details>
+<summary>Why the extra step, and the Terminal shortcut</summary>
 
-```bash
-# Run the GUI from source (debug)
-make run                 # == cargo run -p ordnung-gui
-
-# Build the release binary
-cargo build --release -p ordnung-gui    # -> target/release/Ordnung
-```
-
-### macOS app bundle
+Ordnung isn't yet notarized with Apple, so Gatekeeper treats it as an app from
+an unidentified developer the first time it runs. If you'd rather skip the
+Settings trip, run this once after copying the app to Applications:
 
 ```bash
-make app        # build → sign → install to /Applications → pin to Dock → relaunch
-make app-only   # build + ad-hoc sign the local Ordnung.app, don't touch /Applications
+xattr -dr com.apple.quarantine /Applications/Ordnung.app
 ```
+</details>
 
-`make app` rasterizes the icon, assembles `Ordnung.app`, and ad-hoc codesigns it
-with a stable identity so file-access/media-key permissions and the custom icon
-persist across rebuilds. See [tools/build-app.sh](tools/build-app.sh), which also
-takes `--universal` (fat arm64+x86_64 binary), `--dmg` (package a
-drag-to-Applications `Ordnung.dmg`), and `--version=X.Y.Z`. The release CI runs
-`build-app.sh --no-install --no-launch --universal --dmg --version=<tag>`.
+Nothing else to install. Ordnung is a single self-contained app: no Homebrew,
+no runtimes, no rekordbox.
 
-## Configuration
+## What it does
 
-Ordnung reads an optional `.env` from the repo root on startup (for dev
-launches). The only variable today is a Discogs token used for metadata
-enrichment:
+- **Library.** Scan a folder of music into a catalog and rescan whenever you
+  add files. Search, sort and filter by anything, and see every track's
+  waveform in the player.
+- **Analysis.** BPM, beatgrid, Camelot key, waveform and loudness are computed
+  by Ordnung itself, offline, and cached so they only run once.
+- **Cues and loops.** Eight hot cues, memory cues and a beat loop on the player
+  bar. Everything you set rides along on the next USB export.
+- **Liked songs and crates.** Heart a song anywhere it appears, and organise
+  your sets in crates.
+- **Tracklists.** Paste a mix tracklist and every line gets matched to a record.
+- **Vinyl.** Sync your Discogs collection and wantlist, browse each record's
+  sheet, and listen to what you only own on wax through the built-in
+  mini-player. Dig outward from a record through its artists and labels, let
+  the radio dig for you, and watch saved sellers for wantlist records in stock.
+- **USB export.** Write a native rekordbox stick: `export.pdb`, analysis files,
+  cues, playlists. Plug it into a CDJ and it just works. Tracks that need
+  converting for older players go through ffmpeg (see below).
+
+## Optional: ffmpeg
+
+Ordnung reads and analyses audio on its own. The one thing it hands off is
+**converting** files to another format, which matters in two cases: the
+Convert action, and USB exports for older players that can't play your
+originals. Both need [ffmpeg](https://ffmpeg.org):
 
 ```bash
-cp .env.example .env
-# then set DISCOGS_TOKEN — https://www.discogs.com/settings/developers
+brew install ffmpeg
 ```
 
-A token saved in the GUI Settings window (`~/.ordnung/config.toml`) takes
-priority over the env var.
+Ordnung finds a Homebrew or MacPorts install automatically. Without ffmpeg,
+everything else works as normal.
+
+## Discogs
+
+The vinyl features talk to Discogs and need a free personal access token.
+Create one at [discogs.com/settings/developers](https://www.discogs.com/settings/developers)
+and paste it into **Settings → Discogs** inside the app.
+
+## Where your data lives
+
+Everything Ordnung knows is kept in `~/.ordnung/`: the catalog database, the
+analysis cache and your settings. Your music files are never modified unless
+you explicitly ask for a tag write or an in-place conversion, and anything
+deleted goes to the Trash.
+
+## Contributing
+
+Want to build from source, hack on the engine or cut a release? See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

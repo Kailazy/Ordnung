@@ -74,9 +74,10 @@ jobs:
 
             ### Install
             1. Open the `.dmg` and drag **Ordnung** into **Applications**.
-            2. First launch only: right-click `Ordnung.app` → **Open** → **Open**.
-               (Or run `xattr -dr com.apple.quarantine /Applications/Ordnung.app`.)
+            2. Double-click Ordnung. macOS says it can't verify the app: click **Done**.
+            3. Open **System Settings → Privacy & Security**, scroll down and click
+               **Open Anyway** next to the Ordnung message. Confirm once more.
 
-            The right-click step is needed because this build isn't notarized by
-            Apple — macOS Gatekeeper warns once on apps from unidentified
-            developers, then trusts it from then on.
+            That's a one-time step: the build isn't notarized by Apple, so
+            Gatekeeper asks the first time and trusts the app from then on.
+            Terminal shortcut: `xattr -dr com.apple.quarantine /Applications/Ordnung.app`.
