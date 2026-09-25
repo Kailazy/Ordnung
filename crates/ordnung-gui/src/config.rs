@@ -223,12 +223,17 @@ pub struct Config {
     /// like a turntable's and shifts both. Remembered like a deck setting.
     #[serde(default)]
     pub key_lock: bool,
-    /// Start every track part-way in rather than at the top, so a preview
-    /// lands past the intro and the build. Applies to both engines: a local
-    /// file in the player and a record's video in the mini-player. The
-    /// fraction is `playback::MID_START_FRACTION`.
+    /// Start a record's videos part-way in rather than at the top, so a
+    /// preview of a release lands past the intro and the build. The
+    /// fraction is `playback::MID_START_FRACTION`. Carries the old single
+    /// `mid_start` key forward, which covered both engines.
+    #[serde(default, alias = "mid_start")]
+    pub mid_start_videos: bool,
+    /// The same for library files in the player, on its own switch: a
+    /// record you are sizing up wants the drop, a track you own is one you
+    /// may want to hear whole.
     #[serde(default)]
-    pub mid_start: bool,
+    pub mid_start_files: bool,
     /// How the player's waveform is colored: `"energy"` (cool→hot gradient by
     /// each section's energy — perceived loudness × spectral occupancy) or
     /// `"spectrum"` (additive RGB from the low/mid/high band balance, like
@@ -743,7 +748,8 @@ impl Default for Config {
             auto_convert_sources: Vec::new(),
             volume: default_volume(),
             key_lock: false,
-            mid_start: false,
+            mid_start_videos: false,
+            mid_start_files: false,
             waveform_color_mode: default_waveform_color_mode(),
             waveform_height_exp: default_waveform_height_exp(),
             waveform_band_gain: default_waveform_band_gain(),
@@ -952,6 +958,24 @@ mod tests {
             back.library_root,
             Some(PathBuf::from("/Users/dj/Music/seeker"))
         );
+    }
+
+    /// The one-switch `mid_start` of v0.153 carries over to the records
+    /// switch, and the files switch starts off; both round-trip once set.
+    #[test]
+    fn mid_start_splits_into_two_switches_and_keeps_the_old_key() {
+        let old: Config = toml::from_str("mid_start = true").unwrap();
+        assert!(old.mid_start_videos);
+        assert!(!old.mid_start_files);
+
+        let cfg = Config {
+            mid_start_videos: false,
+            mid_start_files: true,
+            ..Config::default()
+        };
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert!(!back.mid_start_videos);
+        assert!(back.mid_start_files);
     }
 
     /// Proves the token survives a save → fresh-load cycle (the whole point of

@@ -85,7 +85,7 @@ impl App {
     /// the config directly (see [`App::mid_start_video`]); the audio engine
     /// starts its sink off the UI thread's poll, so it holds the fraction.
     pub(crate) fn apply_mid_start(&mut self) {
-        let fraction = self.config.mid_start.then_some(MID_START_FRACTION);
+        let fraction = self.config.mid_start_files.then_some(MID_START_FRACTION);
         if let Some(a) = self.audio.as_mut() {
             a.set_start_fraction(fraction);
         }
@@ -102,7 +102,7 @@ impl App {
             self.video_mid_started = None;
             return;
         }
-        if !self.config.mid_start {
+        if !self.config.mid_start_videos {
             return;
         }
         let t = webview::transport();
