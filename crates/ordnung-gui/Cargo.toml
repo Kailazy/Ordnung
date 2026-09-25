@@ -15,9 +15,11 @@ path = "src/main.rs"
 
 [features]
 default = ["usb-export"]
-# The native rekordbox USB export and the whole device surface. On by
-# default since 0.109.0 (hardware-validated, cues, merge, golden-diffed);
-# `--no-default-features` builds a catalog-only app. See `crate::USB_EXPORT`.
+# Writing a native rekordbox export to a stick (beta). On by default so
+# `make run` / `make app` keep it for hardware testing; the release build
+# (`tools/build-app.sh --dist`) passes `--no-default-features`, which hides
+# the export menus and "Set up for rekordbox" but keeps device browsing and
+# the in-place playlist / cue / grid edits. See `crate::USB_EXPORT`.
 usb-export = []
 
 [dependencies]

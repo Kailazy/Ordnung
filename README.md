@@ -10,8 +10,9 @@ a stick.
 
 ## Download
 
-**[Download the latest release](../../releases/latest)** — one `.dmg` for both
-Apple Silicon and Intel Macs. Requires macOS 11 or newer.
+**[Download Ordnung for macOS](../../releases/latest/download/Ordnung-macos-universal.dmg)**
+— one `.dmg` for both Apple Silicon and Intel Macs. Requires macOS 11 or
+newer. All versions are on the [Releases](../../releases) page.
 
 1. Open the `.dmg` and drag **Ordnung** into **Applications**.
 2. Double-click Ordnung. macOS will say it can't verify the app — click **Done**.
@@ -52,23 +53,28 @@ no runtimes, no rekordbox.
   sheet, and listen to what you only own on wax through the built-in
   mini-player. Dig outward from a record through its artists and labels, let
   the radio dig for you, and watch saved sellers for wantlist records in stock.
-- **USB export.** Write a native rekordbox stick: `export.pdb`, analysis files,
-  cues, playlists. Plug it into a CDJ and it just works. Tracks that need
-  converting for older players go through ffmpeg (see below).
+- **USB sticks.** Plug in a rekordbox stick and browse it, play from it, pull
+  tracks into your library, and edit its playlists, cues and beatgrids in
+  place. The originals are backed up on the stick before the first edit.
+- **USB export — BETA, in the works.** Writing a complete native rekordbox
+  stick from your library (`export.pdb`, analysis files, cues, playlists) is
+  built and being tested on real CDJs, but it is not in the downloadable
+  builds yet. It will switch on once it has proven itself on more hardware.
 
-## Optional: ffmpeg
+## Optional: converting audio
 
-Ordnung reads and analyses audio on its own. The one thing it hands off is
-**converting** files to another format, which matters in two cases: the
-Convert action, and USB exports for older players that can't play your
-originals. Both need [ffmpeg](https://ffmpeg.org):
+Ordnung reads and analyses audio on its own with nothing extra installed.
+The one thing it hands off is the **Convert** action (turning a file into
+another format), which currently uses [ffmpeg](https://ffmpeg.org). If you
+never convert, skip this. If you do, install ffmpeg once with
+[Homebrew](https://brew.sh):
 
 ```bash
 brew install ffmpeg
 ```
 
-Ordnung finds a Homebrew or MacPorts install automatically. Without ffmpeg,
-everything else works as normal.
+Ordnung finds it automatically. Making conversion work without any install is
+on the list.
 
 ## Discogs
 

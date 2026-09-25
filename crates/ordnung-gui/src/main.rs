@@ -83,10 +83,16 @@ use ui::hover::HoverNoteExt;
 use util::*;
 use vinyl_sheet::{SheetFetched, VinylSheet};
 
-/// Compile-time switch for the native rekordbox USB export. On in every
-/// default build since 0.109.0; a `--no-default-features` build hides the
-/// whole device surface (Devices section, device view, export menus) and
-/// leaves rekordbox drag-and-drop as the way to the players.
+/// Compile-time switch for *writing* a native rekordbox export: the
+/// "Export to <device>" menus and the device view's "Set up for rekordbox"
+/// button. The export is in beta, so distribution builds compile it out
+/// (`tools/build-app.sh --dist` passes `--no-default-features`) while
+/// `make run` / `make app` keep it for hardware testing.
+///
+/// Everything else on a plugged-in stick stays available in every build:
+/// browsing and playing its tracks, importing them to the library, and the
+/// in-place edits (`ordnung_rbdb::edit`) that touch only playlist tables or
+/// one track's analysis files and back up the pristine files first.
 pub(crate) const USB_EXPORT: bool = cfg!(feature = "usb-export");
 
 /// Smallest the main window can be resized to, in points. The layout is
@@ -99,16 +105,12 @@ pub(crate) const USB_EXPORT: bool = cfg!(feature = "usb-export");
 const MIN_WINDOW_W: f32 = 1000.0;
 const MIN_WINDOW_H: f32 = 640.0;
 
-/// [`ordnung_core::usb::detect_volumes`], but always empty when the USB
-/// export is compiled out. Every device entry point keys off the mounted
-/// volume list, so "no volumes, ever" erases the Devices section, the device
-/// view, and the export menus in one place.
+/// The mounted volumes every device entry point keys off. One wrapper so the
+/// GUI has a single place to filter what counts as a device; today it is
+/// exactly [`ordnung_core::usb::detect_volumes`] in every build (see
+/// [`USB_EXPORT`] for what a beta-off build hides instead).
 pub(crate) fn detect_usb_volumes() -> Vec<ordnung_core::usb::UsbVolume> {
-    if USB_EXPORT {
-        ordnung_core::usb::detect_volumes()
-    } else {
-        Vec::new()
-    }
+    ordnung_core::usb::detect_volumes()
 }
 
 fn main() -> eframe::Result<()> {

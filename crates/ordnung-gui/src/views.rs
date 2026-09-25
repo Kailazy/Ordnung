@@ -3078,10 +3078,11 @@ impl App {
                 })
                 .weak(),
             )
-            .on_hover_note(if is_rb {
-                "Carries a rekordbox export. CDJs read it, and library exports can target it"
-            } else {
-                "Just files. Exports never touch it unless you set it up for rekordbox"
+            .on_hover_note(match (is_rb, crate::USB_EXPORT) {
+                (true, true) => "Carries a rekordbox export. CDJs read it, and library exports can target it",
+                (true, false) => "Carries a rekordbox export. CDJs read it",
+                (false, true) => "Just files. Exports never touch it unless you set it up for rekordbox",
+                (false, false) => "Just files. Nothing on it is changed",
             });
             if !self.usb_loading {
                 ui.label(egui::RichText::new(format!("{} track(s)", self.rows.len())).weak());

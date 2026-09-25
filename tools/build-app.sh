@@ -8,7 +8,7 @@
 #   tools/build-app.sh --universal    # build a fat arm64+x86_64 binary (runs on any Mac)
 #   tools/build-app.sh --dmg          # also package Ordnung.dmg (drag-to-Applications)
 #   tools/build-app.sh --version=X.Y.Z  # stamp this version into Info.plist / DMG name
-#   tools/build-app.sh --dist         # distribution build (same features; kept for CI)
+#   tools/build-app.sh --dist         # distribution build: compiles out the beta USB export
 #   # The release CI uses: --no-install --no-launch --universal --dmg --dist --version=<tag>
 #
 # What it does:
@@ -41,13 +41,15 @@ for arg in "$@"; do
   esac
 done
 
-# Extra cargo features for the build. The rekordbox USB export is a default
-# feature since 0.109.0, so local and --dist builds are the same; this stays
-# as the hook for a future dev-only feature. A plain string (expanded
-# unquoted below) because macOS bash 3.2 chokes on empty arrays under `set -u`.
+# Extra cargo flags for the build. The rekordbox USB export (`usb-export`,
+# a default feature) is in beta: local builds keep it for hardware testing,
+# the --dist build that ships to users compiles it out (device browsing and
+# in-place stick edits stay; see `crate::USB_EXPORT`). A plain string
+# (expanded unquoted below) because macOS bash 3.2 chokes on empty arrays
+# under `set -u`.
 features=""
 if [[ "$dist" -eq 1 ]]; then
-  features=""
+  features="--no-default-features"
 fi
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
