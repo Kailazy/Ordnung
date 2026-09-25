@@ -318,6 +318,19 @@ fn paint_name_link(
 /// (look this up again, refresh), the way the track table's Discogs release
 /// line keeps its ↻. Disabled, it fades and takes no click.
 pub fn glyph(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    glyph_in(ui, glyph, font_id, enabled)
+}
+
+/// [`glyph`] with the mark from the app's icon face (see
+/// `phosphor_icons::named`): the chevron that folds a sidebar list shut,
+/// and any other one-mark control drawn from the icon set rather than
+/// from the text face.
+pub fn icon(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
+    glyph_in(ui, glyph, font::icon(font::body().size + 2.0), enabled)
+}
+
+fn glyph_in(ui: &mut egui::Ui, glyph: &str, font_id: egui::FontId, enabled: bool) -> egui::Response {
     let side = ui.spacing().interact_size.y;
     let (rect, resp) = ui.allocate_exact_size(
         egui::vec2(side, side),
@@ -343,7 +356,7 @@ pub fn glyph(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
             rect.center(),
             egui::Align2::CENTER_CENTER,
             glyph,
-            egui::TextStyle::Button.resolve(ui.style()),
+            font_id,
             ink,
         );
     }

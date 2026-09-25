@@ -2,6 +2,16 @@
 use super::*;
 
 impl App {
+    /// Open a folded sidebar list (see `Config::nav_collapsed`), so a row
+    /// just created in it is on screen for its inline rename.
+    pub(crate) fn nav_unfold(&mut self, key: &str) {
+        let folded = &mut self.config.nav_collapsed;
+        if let Some(i) = folded.iter().position(|c| c == key) {
+            folded.remove(i);
+            let _ = self.config.save();
+        }
+    }
+
     /// Reorder `ids` to the front (`to_top`) or back of playlist `pid`. The full
     /// playlist order is read from the catalog (not the possibly-filtered table)
     /// so hidden tracks are never dropped; the moved tracks keep their relative
@@ -963,6 +973,15 @@ pub(crate) fn draw_usb_playlist_nodes(
     }
 }
 
+/// What a list's caption row reported this frame.
+#[derive(Default)]
+pub(crate) struct ListHeader {
+    /// The "+" was clicked.
+    pub add: bool,
+    /// The chevron was clicked: fold the list, or open it again.
+    pub toggle: bool,
+}
+
 /// A list's caption row ("Playlists", "Crates") with its "+" at the right
 /// end, shared by the catalog group, the device group, the crates and the
 /// tags so every list carries the same affordance. The row is the inspector
@@ -970,17 +989,50 @@ pub(crate) fn draw_usb_playlist_nodes(
 /// the app set a heading the same way; the "+" is the square glyph button.
 /// Returns `true` when "+" was clicked; `tip` is its hover note.
 pub(crate) fn list_header(ui: &mut egui::Ui, caption: &str, tip: &str) -> bool {
-    let mut clicked = false;
+    list_header_at(ui, caption, tip, None).add
+}
+
+/// [`list_header`] for a list that folds: a chevron beside the "+" points
+/// up while the list is `open` and down while it is shut, and the space
+/// under the caption is only laid down while there is a list beneath it.
+pub(crate) fn list_header_folding(
+    ui: &mut egui::Ui,
+    caption: &str,
+    tip: &str,
+    open: bool,
+) -> ListHeader {
+    list_header_at(ui, caption, tip, Some(open))
+}
+
+fn list_header_at(ui: &mut egui::Ui, caption: &str, tip: &str, open: Option<bool>) -> ListHeader {
+    let mut out = ListHeader::default();
     crate::ui::sidebar::caption_row(ui, caption, |ui| {
+        // Laid out right to left: the "+" takes the end of the row, the
+        // chevron sits inside it.
         if crate::ui::button::square(ui, named(icons::PLUS))
             .on_hover_note(tip)
             .clicked()
         {
-            clicked = true;
+            out.add = true;
+        }
+        if let Some(open) = open {
+            let (glyph, note) = if open {
+                (icons::CARET_UP, "Hide this list")
+            } else {
+                (icons::CARET_DOWN, "Show this list")
+            };
+            if crate::ui::button::icon(ui, named(glyph), true)
+                .on_hover_note(note)
+                .clicked()
+            {
+                out.toggle = true;
+            }
         }
     });
-    ui.add_space(space::S2);
-    clicked
+    if open != Some(false) {
+        ui.add_space(space::S2);
+    }
+    out
 }
 
 /// A caption on its own, for a group that has no "+" ("Digital library").
@@ -1386,7 +1438,7 @@ pub(crate) fn source_tile(
                     c,
                     egui::Align2::CENTER_CENTER,
                     glyph,
-                    font::icon(r * 2.5),
+                    font::icon(r * 2.4),
                     col,
                 );
             }
@@ -1462,7 +1514,7 @@ pub(crate) fn nav_button_painted(
     // Radius of the painted mark. The rail gets the larger one for the same
     // reason its lead glyphs are larger: it is the only ranking left once the
     // captions are gone.
-    let r = if density.icons_only() { 9.0 } else { 7.5 };
+    let r = if density.icons_only() { 10.0 } else { 7.5 };
     let resp = if density.icons_only() {
         rail_tile(ui, "", selected)
     } else {
@@ -1476,10 +1528,11 @@ pub(crate) fn nav_button_painted(
     } else {
         resp.rect.left() + 12.0 + r
     };
-    // The mark follows the label's ink: primary on the selected tile, the
-    // secondary label ink otherwise, the same as a playlist row's mark.
-    let col = if selected { color::LABEL } else { color::LABEL_2 };
-    draw(ui.painter(), egui::pos2(cx, resp.rect.center().y), col, r);
+    // A source tile's mark is in the primary ink whether or not it is the
+    // current view; a playlist row's is in the secondary. With the captions
+    // gone at the rail tier, size and ink are what rank the two libraries
+    // above the lists under them.
+    draw(ui.painter(), egui::pos2(cx, resp.rect.center().y), color::LABEL, r);
     resp
 }
 
@@ -1492,7 +1545,7 @@ pub(crate) fn rail_tile(ui: &mut egui::Ui, icon: &str, selected: bool) -> egui::
 }
 
 /// Glyph point size for an ordinary rail tile (a playlist, a USB volume).
-pub(crate) const RAIL_GLYPH: f32 = 17.0;
+pub(crate) const RAIL_GLYPH: f32 = 16.0;
 
 /// Glyph point size for the rail's primary destinations — "Library" and the
 /// vinyl shelf. At the icon tier every tile is the same square with no caption
@@ -1546,7 +1599,7 @@ pub(crate) fn rail_add_tile(ui: &mut egui::Ui) -> egui::Response {
             rect.center(),
             egui::Align2::CENTER_CENTER,
             named(icons::PLUS),
-            font::icon(RAIL_GLYPH + 3.0),
+            font::icon(RAIL_GLYPH),
             glyph,
         );
         resp

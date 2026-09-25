@@ -1573,10 +1573,12 @@ pub mod app {
     pub const TAG: &str = "tag";
     pub const FOLDER: &str = "folder";
     pub const FILE_AUDIO: &str = "file-audio";
+    pub const CARET_UP: &str = "caret-up";
+    pub const CARET_DOWN: &str = "caret-down";
 
     pub const ALL: &[&str] = &[
         MUSIC_NOTE, VINYL, HEART, SPARKLE, WARNING, EJECT, LIGHTNING, PLUS, PACKAGE, TAG, FOLDER,
-        FILE_AUDIO,
+        FILE_AUDIO, CARET_UP, CARET_DOWN,
     ];
 }
 

@@ -11,7 +11,6 @@
 //! The fader only reports; how the rate is applied (turntable or key lock)
 //! is the engine's business (see `audio::PitchState`).
 
-use super::hover::HoverNoteExt;
 use super::tokens::{color, font, radius};
 
 /// Footprint: as tall as the transport's hand-drawn controls beside it.
@@ -136,9 +135,6 @@ pub fn pitch(ui: &mut egui::Ui, value: f32, range: f32, bpm: Option<f32>) -> Opt
     if active {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
-    resp.on_hover_note(format!(
-        "Pitch {shown:+.1}%. Drag to set, scroll to nudge, double-click for zero"
-    ));
     changed
 }
 

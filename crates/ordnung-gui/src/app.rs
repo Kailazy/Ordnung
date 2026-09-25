@@ -3103,6 +3103,21 @@ impl App {
         let nav_panel = crate::ui::nav::Nav::left("library_nav", &mut nav_state)
             .shown(density)
             .show(ctx, |panel| panel, |ui| {
+                // The nav's scroll bars stay hairlines under the pointer too.
+                // egui's floating bar grows to `bar_width` on hover and paints
+                // over the content, which in the rail cut the tiles' right
+                // edges off; at the width of a hairline it sits in the gutter.
+                {
+                    let scroll = &mut ui.spacing_mut().scroll;
+                    scroll.bar_width = 4.0;
+                    scroll.floating_width = 3.0;
+                    scroll.bar_inner_margin = 2.0;
+                    scroll.bar_outer_margin = 0.0;
+                }
+                // Which lists are folded shut (see `Config::nav_collapsed`);
+                // the rail has no captions to fold, so it shows every list.
+                let collapsed = self.config.nav_collapsed.clone();
+                let open = move |key: &str| density.icons_only() || !collapsed.iter().any(|c| c == key);
                 // Header for a section: the small-caps caption every panel in
                 // the app uses (see `sidebar::section_caption`).
                 let section_caption = |ui: &mut egui::Ui, text: &str| {
@@ -3280,8 +3295,19 @@ impl App {
                                 *sidebar_action = Some(SidebarAction::NewPlaylist(None));
                             }
                             ui.add_space(6.0);
-                        } else if crate::sidebar::list_header(ui, "Playlists", "New playlist") {
-                            *sidebar_action = Some(SidebarAction::NewPlaylist(None));
+                        } else {
+                            let h = crate::sidebar::list_header_folding(
+                                ui,
+                                "Playlists",
+                                "New playlist",
+                                open("playlists"),
+                            );
+                            if h.add {
+                                *sidebar_action = Some(SidebarAction::NewPlaylist(None));
+                            }
+                            if h.toggle {
+                                *sidebar_action = Some(SidebarAction::ToggleSection("playlists"));
+                            }
                         }
                     };
 
@@ -3426,10 +3452,21 @@ impl App {
                             *sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Crate));
                         }
                         ui.add_space(6.0);
-                    } else if crate::sidebar::list_header(ui, "Crates", "New crate: a set of songs on records to bring to a gig") {
-                        *sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Crate));
+                    } else {
+                        let h = crate::sidebar::list_header_folding(
+                            ui,
+                            "Crates",
+                            "New crate: a set of songs on records to bring to a gig",
+                            open("crates"),
+                        );
+                        if h.add {
+                            *sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Crate));
+                        }
+                        if h.toggle {
+                            *sidebar_action = Some(SidebarAction::ToggleSection("crates"));
+                        }
                     }
-                    if crate_sets.iter().any(|c| c.kind == CrateKind::Crate) {
+                    if open("crates") && crate_sets.iter().any(|c| c.kind == CrateKind::Crate) {
                         egui::ScrollArea::vertical()
                             .id_salt("nav_crates_scroll")
                             .max_height(if lead { 260.0 } else { 180.0 })
@@ -3561,17 +3598,19 @@ impl App {
                                     let all = self.playlists.clone();
                                     let volumes = self.usb_volumes.clone();
                                     let mut drop_rects = Vec::new();
-                                    draw_playlist_nodes(
-                                        ui,
-                                        density,
-                                        &all,
-                                        None,
-                                        &volumes,
-                                        &mut self.view,
-                                        &mut self.renaming,
-                                        &mut sidebar_action,
-                                        &mut drop_rects,
-                                    );
+                                    if open("playlists") {
+                                        draw_playlist_nodes(
+                                            ui,
+                                            density,
+                                            &all,
+                                            None,
+                                            &volumes,
+                                            &mut self.view,
+                                            &mut self.renaming,
+                                            &mut sidebar_action,
+                                            &mut drop_rects,
+                                        );
+                                    }
                                     self.playlist_screen_rects = drop_rects;
                                     // The tags, under the playlists: the
                                     // words the user marks songs with, one
@@ -3589,19 +3628,32 @@ impl App {
                                             sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Tag));
                                         }
                                         ui.add_space(6.0);
-                                    } else if crate::sidebar::list_header(ui, "Tags", "New tag: a word to mark songs with, like dub or sunrise") {
-                                        sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Tag));
+                                    } else {
+                                        let h = crate::sidebar::list_header_folding(
+                                            ui,
+                                            "Tags",
+                                            "New tag: a word to mark songs with, like dub or sunrise",
+                                            open("tags"),
+                                        );
+                                        if h.add {
+                                            sidebar_action = Some(SidebarAction::NewCrateSet(CrateKind::Tag));
+                                        }
+                                        if h.toggle {
+                                            sidebar_action = Some(SidebarAction::ToggleSection("tags"));
+                                        }
                                     }
-                                    let crate_sets = self.crate_sets.clone();
-                                    crate::sidebar::draw_crate_rows(
-                                        ui,
-                                        density,
-                                        &crate_sets,
-                                        CrateKind::Tag,
-                                        &mut self.view,
-                                        &mut self.renaming,
-                                        &mut sidebar_action,
-                                    );
+                                    if open("tags") {
+                                        let crate_sets = self.crate_sets.clone();
+                                        crate::sidebar::draw_crate_rows(
+                                            ui,
+                                            density,
+                                            &crate_sets,
+                                            CrateKind::Tag,
+                                            &mut self.view,
+                                            &mut self.renaming,
+                                            &mut sidebar_action,
+                                        );
+                                    }
                                 }
                             });
                     });
@@ -3680,6 +3732,8 @@ impl App {
                 self.usb_playlist_add_tracks(pid, ids);
             }
             Some(SidebarAction::NewPlaylist(parent)) => {
+                // A row you can't see can't be named: a folded list opens.
+                self.nav_unfold("playlists");
                 if let Ok(cat) = Catalog::open(&self.db_path) {
                     if let Ok(id) = cat.create_playlist("New playlist", parent, false) {
                         self.view = LibraryView::Playlist(id);
@@ -3738,6 +3792,10 @@ impl App {
                 }
             }
             Some(SidebarAction::NewCrateSet(kind)) => {
+                self.nav_unfold(match kind {
+                    CrateKind::Crate => "crates",
+                    CrateKind::Tag => "tags",
+                });
                 let placeholder = match kind {
                     CrateKind::Crate => "New crate",
                     CrateKind::Tag => "New tag",
@@ -3789,6 +3847,16 @@ impl App {
             Some(SidebarAction::OpenHealth) => {
                 let tab = self.health_tab.clone();
                 self.open_health_tab(tab, ctx);
+            }
+            Some(SidebarAction::ToggleSection(key)) => {
+                let folded = &mut self.config.nav_collapsed;
+                match folded.iter().position(|c| c == key) {
+                    Some(i) => {
+                        folded.remove(i);
+                    }
+                    None => folded.push(key.to_string()),
+                }
+                let _ = self.config.save();
             }
             None => {}
         }

@@ -2321,6 +2321,9 @@ enum SidebarAction {
     AddTracks(Id, Vec<Id>),
     /// Open the Library Health window on whichever tab was last used.
     OpenHealth,
+    /// The chevron on a list's caption: fold the list shut, or open it
+    /// again (`"playlists"`, `"crates"`, `"tags"`; see `Config::nav_collapsed`).
+    ToggleSection(&'static str),
     /// Device rows dropped on the Library source tab: copy their files into
     /// the library and import them.
     ImportUsbTracks(Vec<Id>),

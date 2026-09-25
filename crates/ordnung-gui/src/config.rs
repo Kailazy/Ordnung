@@ -129,6 +129,11 @@ pub struct Config {
     /// not a pixel width. Unknown values fall back to `"wide"`. See `NavDensity`.
     #[serde(default = "default_nav_density")]
     pub nav_density: String,
+    /// The sidebar lists folded shut by their caption's chevron:
+    /// `"playlists"`, `"crates"`, `"tags"`. Stored as what is hidden so the
+    /// default, and every older config, shows every list.
+    #[serde(default)]
+    pub nav_collapsed: Vec<String>,
     /// Which of the inspector drawer's two width tiers is in force:
     /// `"compact"` (the default) or `"expanded"`. Like `nav_density`, a tier
     /// rather than a pixel width. See `InspectorDensity`.
@@ -732,6 +737,7 @@ impl Default for Config {
             nav_primary: default_nav_primary(),
             export_convert_for_older_players: false,
             nav_density: default_nav_density(),
+            nav_collapsed: Vec::new(),
             inspector_density: default_inspector_density(),
             inspector_open: false,
             startup_view: default_startup_view(),
