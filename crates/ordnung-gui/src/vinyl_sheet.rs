@@ -169,6 +169,32 @@ pub(crate) struct VinylSheet {
     pub cursor: Option<usize>,
 }
 
+impl VinylSheet {
+    /// The tracklist row `mark` sits on, matched the way the matcher reads
+    /// titles. `rows` mirrors the tracklist, so it indexes both.
+    fn marked_row(&self) -> Option<usize> {
+        let m = self.mark.as_deref()?;
+        let d = self.detail.as_ref()?;
+        let hit = d
+            .matching_track_title(m)
+            .or_else(|| d.matching_track_title_any_version(m))?;
+        d.tracklist.iter().position(|t| t.title == hit)
+    }
+
+    fn playable(&self, row: usize) -> bool {
+        self.rows.get(row).is_some_and(|r| !matches!(r.source, SheetSource::None))
+    }
+
+    /// Where Play starts a stopped record: the keyboard cursor, else the
+    /// row the sheet was opened on, else the first row that can play.
+    fn start_row(&self) -> Option<usize> {
+        self.cursor
+            .or_else(|| self.marked_row())
+            .filter(|&r| self.playable(r))
+            .or_else(|| (0..self.rows.len()).find(|&r| self.playable(r)))
+    }
+}
+
 /// One seller's concrete offer of the open record — see [`VinylSheet::offer`].
 #[derive(Clone)]
 pub(crate) struct SellerOffer {
@@ -1059,13 +1085,10 @@ impl App {
         }
     }
 
-    /// Start the whole record: the first row that can play anything.
+    /// Start a stopped record from [`VinylSheet::start_row`]: the song it was
+    /// opened on when that one can play, else the first row that can.
     fn play_sheet_from_start(&mut self, frame: &eframe::Frame) {
-        let first = self.vinyl_sheet.as_ref().and_then(|s| {
-            s.rows
-                .iter()
-                .position(|r| !matches!(r.source, SheetSource::None))
-        });
+        let first = self.vinyl_sheet.as_ref().and_then(|s| s.start_row());
         if let Some(row) = first {
             self.play_sheet_row(row, frame);
         }
@@ -1406,16 +1429,7 @@ impl App {
         let mut act: Option<Act> = None;
         // The tracklist row a hover-less mark sits on: the line the sheet was
         // opened from, matched the way the matcher reads titles.
-        let marked = {
-            let s = self.vinyl_sheet.as_ref().unwrap();
-            s.mark.as_deref().and_then(|m| {
-                let d = s.detail.as_ref()?;
-                let hit = d
-                    .matching_track_title(m)
-                    .or_else(|| d.matching_track_title_any_version(m))?;
-                d.tracklist.iter().position(|t| t.title == hit)
-            })
-        };
+        let marked = self.vinyl_sheet.as_ref().unwrap().marked_row();
         // The row whose track is on air, by the same test the row painter
         // uses to light its play mark.
         let playing_row = {
@@ -1468,7 +1482,7 @@ impl App {
                 }
             }
             if enter {
-                if let Some(c) = s.cursor {
+                if let Some(c) = s.cursor.or(marked) {
                     act = Some(Act::Play(c));
                 }
             }
@@ -1719,9 +1733,7 @@ impl App {
                             let play_tip = match record_play {
                                 RecordPlay::Playing(_) => "Pause this record",
                                 RecordPlay::Paused(_) => "Resume this record",
-                                RecordPlay::Stopped => {
-                                    "Play from the first track that has a source"
-                                }
+                                RecordPlay::Stopped => "Play this record",
                             };
                             // Exactly as tall as the text buttons beside it.
                             // A hardcoded height drifts from whatever the font
@@ -2432,7 +2444,7 @@ fn video_transport_ui(
                 } else if live {
                     "Play"
                 } else {
-                    "Play from the first track that has a source"
+                    "Play this record"
                 });
                 if btn.clicked() {
                     act = Some(if live {
