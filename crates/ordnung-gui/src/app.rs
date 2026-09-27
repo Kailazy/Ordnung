@@ -243,6 +243,7 @@ impl App {
             video_mid_start: None,
             sheet_rx: None,
             sheet_price_rx: None,
+            sheet_bandcamp_rx: None,
             versions: None,
             versions_rx: None,
             egui_ctx: egui_ctx.clone(),
@@ -2088,6 +2089,7 @@ impl App {
         self.poll_metadata_preview();
         self.poll_vinyl_sheet();
         self.poll_sheet_price();
+        self.poll_sheet_bandcamp();
         self.poll_versions();
         self.poll_browse_page();
         self.poll_dig();

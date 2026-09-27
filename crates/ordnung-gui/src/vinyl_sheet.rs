@@ -12,6 +12,7 @@
 //! catalog's `release_cache` — so a record opened once needs no network again.
 
 use super::*;
+use ordnung_core::bandcamp;
 
 /// One release detail fetched for the sheet: which record it was for, and either
 /// the detail or the error to show in its place.
@@ -148,6 +149,11 @@ pub(crate) struct VinylSheet {
     /// `Loading` while the request is out, `Ready(None)` when nothing is for
     /// sale (or Discogs blocks the release from sale).
     pub price: PriceState,
+    /// The record's Bandcamp page and what it sells, once found. Looked up
+    /// when the release detail lands (its artist and label names make the
+    /// search) and never cached: stock and prices are the point. `None`
+    /// while looking, and for a record Bandcamp doesn't have.
+    pub bandcamp: Option<bandcamp::Album>,
     /// The concrete copy this sheet was opened on, when it came from a seller
     /// card: that seller's price, grading and listing link. Shown alongside
     /// the market floor, because "£14 VG+ from this shop" is the number the
@@ -209,6 +215,36 @@ pub(crate) struct SellerOffer {
     pub shipping: Option<discogs::MarketPrice>,
     /// The listing's own discogs.com page; the release page is the fallback.
     pub uri: Option<String>,
+}
+
+/// What the Bandcamp lookup needs from a release, taken off the detail so the
+/// worker owns it.
+struct BandcampAsk {
+    artists: Vec<String>,
+    labels: Vec<String>,
+    title: String,
+    /// The primary artist and label on Discogs, whose profile links name
+    /// their Bandcamp accounts.
+    artist_id: Option<u64>,
+    label_id: Option<u64>,
+}
+
+impl BandcampAsk {
+    /// `header_artist` stands in when the detail credits no one by name (a
+    /// row cached before names were kept).
+    fn from_detail(d: &discogs::ReleaseDetail, header_artist: &str) -> Self {
+        let mut artists: Vec<String> = d.artists.iter().map(|a| a.name.clone()).collect();
+        if artists.is_empty() && !header_artist.trim().is_empty() {
+            artists.push(header_artist.trim().to_string());
+        }
+        BandcampAsk {
+            artists,
+            labels: d.label.iter().filter(|l| !l.trim().is_empty()).cloned().collect(),
+            title: d.title.clone(),
+            artist_id: d.artist_ids.first().copied(),
+            label_id: d.label_ids.first().copied(),
+        }
+    }
 }
 
 /// The sheet's marketplace price lookup.
@@ -399,6 +435,88 @@ pub(crate) fn fmt_market_price(p: &discogs::MarketPrice) -> String {
     }
 }
 
+/// The record's Bandcamp page on one line: the vinyl first (this is a record
+/// sheet), else whatever physical format it has, then the download.
+/// `Vinyl £17.99 · 3 left · Digital £7.99`, `Vinyl sold out · Digital £7.99`.
+fn bandcamp_line(a: &bandcamp::Album) -> String {
+    use bandcamp::{Availability, Medium};
+    let mut parts: Vec<String> = Vec::new();
+    let physical = [
+        (Medium::Vinyl, "Vinyl"),
+        (Medium::Cd, "CD"),
+        (Medium::Cassette, "Cassette"),
+        (Medium::Other, "Physical"),
+    ];
+    for (medium, word) in physical {
+        if let Some(o) = a.cheapest(medium) {
+            let pre = if o.availability == Availability::PreOrder {
+                " preorder"
+            } else {
+                ""
+            };
+            let mut part = format!("{word}{pre} {}", fmt_market_price(&o.price));
+            if let Some(n) = o.remaining.filter(|n| *n <= bandcamp::FEW_LEFT) {
+                part.push_str(&format!(" · {n} left"));
+            }
+            parts.push(part);
+            break;
+        }
+        // Say so when the vinyl is gone, rather than quietly offering the CD
+        // as if that were the record.
+        if medium == Medium::Vinyl && a.has(Medium::Vinyl) {
+            parts.push("Vinyl sold out".to_string());
+            break;
+        }
+    }
+    if let Some(o) = a.cheapest(Medium::Digital) {
+        parts.push(if o.price.value <= 0.0 {
+            "Digital, name your price".to_string()
+        } else {
+            format!("Digital {}", fmt_market_price(&o.price))
+        });
+    }
+    if parts.is_empty() {
+        "Sold out".to_string()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+/// One dropdown row per format the Bandcamp page sells: its name, what it
+/// costs or that it's gone, and its buy link.
+fn bandcamp_rows(a: &bandcamp::Album) -> Vec<(String, String, String)> {
+    use bandcamp::{Availability, Medium};
+    a.offers
+        .iter()
+        .map(|o| {
+            let mut name = if o.medium == Medium::Digital {
+                "Digital album".to_string()
+            } else {
+                o.name.trim().to_string()
+            };
+            // Package titles run to whole descriptions ("2xLP / Heavyweight
+            // 350 gram Outer, PVC spot gloss ...").
+            if name.chars().count() > 44 {
+                name = name.chars().take(43).collect::<String>().trim_end().to_string() + "…";
+            }
+            let price = if o.medium == Medium::Digital && o.price.value <= 0.0 {
+                "Name your price".to_string()
+            } else {
+                fmt_market_price(&o.price)
+            };
+            let detail = match o.availability {
+                Availability::SoldOut => "Sold out".to_string(),
+                Availability::PreOrder => format!("Preorder · {price}"),
+                Availability::InStock => match o.remaining.filter(|n| *n <= bandcamp::FEW_LEFT) {
+                    Some(n) => format!("{price} · {n} left"),
+                    None => price,
+                },
+            };
+            (name, detail, o.url.clone())
+        })
+        .collect()
+}
+
 impl App {
     /// Open the record sheet for a grid cell, fetching its tracklist and videos
     /// if they aren't cached yet. Re-opening the record that's already open is a
@@ -454,6 +572,7 @@ impl App {
                 }
                 _ => PriceState::Idle,
             },
+            bandcamp: None,
             offer: None,
             stocked: self.sheet_stocked(record.release_id),
             mark: None,
@@ -508,6 +627,7 @@ impl App {
             video_scrub: None,
             pending_play: false,
             price: PriceState::Idle,
+            bandcamp: None,
             offer: None,
             stocked: self.sheet_stocked(release_id),
             mark: None,
@@ -773,6 +893,7 @@ impl App {
         let Ok(msg) = rx.try_recv() else { return };
         self.sheet_rx = None;
         self.ensure_library_index();
+        let mut bandcamp_ask = None;
         let Some(sheet) = self.vinyl_sheet.as_mut() else {
             return;
         };
@@ -896,9 +1017,65 @@ impl App {
                 // A release with no tracklist at all (Discogs has plenty) still
                 // has its videos — show them as the record's only contents
                 // rather than an empty sheet.
+                bandcamp_ask = Some(BandcampAsk::from_detail(&detail, &sheet.artist));
                 sheet.detail = Some(detail);
             }
             Err(e) => sheet.error = Some(e),
+        }
+        if let Some(ask) = bandcamp_ask {
+            self.spawn_sheet_bandcamp(msg.release_id, ask);
+        }
+    }
+
+    /// Look the open record up on Bandcamp, off the UI thread: a site search
+    /// and one album page, plus a Discogs request or two for the artist's and
+    /// label's own links only when two Bandcamp pages claim the record.
+    fn spawn_sheet_bandcamp(&mut self, release_id: u64, ask: BandcampAsk) {
+        if let Some(s) = self.vinyl_sheet.as_mut() {
+            s.bandcamp = None;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.sheet_bandcamp_rx = Some(rx);
+        let token = self.discogs_token();
+        let ctx = self.egui_ctx.clone();
+        thread::spawn(move || {
+            const UA: &str = "Ordnung/0.1 +https://kailazy.github.io/Ordnung/";
+            let official = || {
+                if token.trim().is_empty() {
+                    return Vec::new();
+                }
+                let client = discogs::Client::new(token.clone(), UA);
+                let mut urls = Vec::new();
+                if let Some(id) = ask.label_id {
+                    urls.extend(client.fetch_label(id).map(|l| l.urls).unwrap_or_default());
+                }
+                if let Some(id) = ask.artist_id {
+                    urls.extend(client.fetch_artist(id).map(|a| a.urls).unwrap_or_default());
+                }
+                bandcamp::bandcamp_hosts(&urls)
+            };
+            let album = bandcamp::Client::new(UA)
+                .find_album(&ask.artists, &ask.labels, &ask.title, official)
+                .ok()
+                .flatten();
+            let _ = tx.send((release_id, album));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Adopt a finished Bandcamp lookup onto the sheet it was asked for.
+    pub(crate) fn poll_sheet_bandcamp(&mut self) {
+        let Some(rx) = &self.sheet_bandcamp_rx else {
+            return;
+        };
+        let Ok((release_id, album)) = rx.try_recv() else {
+            return;
+        };
+        self.sheet_bandcamp_rx = None;
+        if let Some(sheet) = self.vinyl_sheet.as_mut() {
+            if sheet.release_id == release_id {
+                sheet.bandcamp = album;
+            }
         }
     }
 
@@ -1390,6 +1567,12 @@ impl App {
         // in flight (or queued behind one) the button says so and waits,
         // rather than showing the old state and taking a second click against
         // it. Other records' edits don't hold these up.
+        // The record on Bandcamp, once found. Snapshot for the same reason.
+        let bandcamp = self
+            .vinyl_sheet
+            .as_ref()
+            .and_then(|s| s.bandcamp.as_ref())
+            .map(|a| (bandcamp_line(a), bandcamp_rows(a), a.url.clone()));
         let col_pending = self.vinyl_pending(VinylList::Collection, release_id);
         let want_pending = self.vinyl_pending(VinylList::Wantlist, release_id);
 
@@ -1673,6 +1856,33 @@ impl App {
                                         }
                                     });
                                 }
+                            });
+                        }
+                        // The same record new from the artist or label, on
+                        // Bandcamp: the line says what can be bought, the
+                        // dropdown lists every format with its buy link.
+                        if let Some((line, rows, page)) = &bandcamp {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                let btn = crate::ui::button::menu_button(ui, "Bandcamp")
+                                    .on_hover_note("Formats on Bandcamp");
+                                crate::ui::menu::dropdown(&btn, 360.0, |m| {
+                                    for (name, detail, url) in rows {
+                                        if m.item_detail(name, detail) {
+                                            open_url(url);
+                                            m.close();
+                                        }
+                                    }
+                                    m.separator();
+                                    if m.item("Open album page") {
+                                        open_url(page);
+                                        m.close();
+                                    }
+                                });
+                                ui.label(
+                                    egui::RichText::new(line)
+                                        .color(egui::Color32::from_rgb(120, 200, 140)),
+                                );
                             });
                         }
                         // The copy the user was actually looking at, when the
@@ -3088,5 +3298,66 @@ mod tests {
         assert_eq!(rows[0].uri.as_deref(), Some("https://www.discogs.com/sell/item/2"));
         assert!(stocked_rows(&stocked, None).len() == 4);
     }
-}
 
+    fn bc_offer(
+        name: &str,
+        medium: bandcamp::Medium,
+        value: f64,
+        availability: bandcamp::Availability,
+        remaining: Option<u32>,
+    ) -> bandcamp::Offer {
+        bandcamp::Offer {
+            name: name.into(),
+            medium,
+            price: discogs::MarketPrice {
+                value,
+                currency: "GBP".into(),
+            },
+            availability,
+            remaining,
+            url: format!("https://x.bandcamp.com/album/y#{name}"),
+        }
+    }
+
+    fn bc_album(offers: Vec<bandcamp::Offer>) -> bandcamp::Album {
+        bandcamp::Album {
+            url: "https://x.bandcamp.com/album/y".into(),
+            title: "Y".into(),
+            artist: "X".into(),
+            offers,
+        }
+    }
+
+    #[test]
+    fn bandcamp_line_leads_with_the_vinyl_and_counts_only_the_last_few() {
+        use bandcamp::{Availability::*, Medium::*};
+        let a = bc_album(vec![
+            bc_offer("Y", Digital, 7.99, InStock, None),
+            bc_offer("Marble", Vinyl, 21.99, SoldOut, Some(0)),
+            bc_offer("Black", Vinyl, 17.99, InStock, Some(3)),
+            bc_offer("CD", Cd, 7.99, InStock, Some(113)),
+        ]);
+        assert_eq!(bandcamp_line(&a), "Vinyl £17.99 · 3 left · Digital £7.99");
+        let rows = bandcamp_rows(&a);
+        assert_eq!(rows[0].0, "Digital album");
+        assert_eq!(rows[1].1, "Sold out");
+        assert_eq!(rows[2].1, "£17.99 · 3 left");
+        // Plenty left isn't news.
+        assert_eq!(rows[3].1, "£7.99");
+    }
+
+    #[test]
+    fn bandcamp_line_says_when_the_vinyl_is_gone() {
+        use bandcamp::{Availability::*, Medium::*};
+        let a = bc_album(vec![
+            bc_offer("Y", Digital, 0.0, InStock, None),
+            bc_offer("LP", Vinyl, 18.0, SoldOut, Some(0)),
+            bc_offer("CD", Cd, 8.0, InStock, None),
+        ]);
+        assert_eq!(bandcamp_line(&a), "Vinyl sold out · Digital, name your price");
+        let only_cd = bc_album(vec![bc_offer("CD", Cd, 8.0, PreOrder, None)]);
+        assert_eq!(bandcamp_line(&only_cd), "CD preorder £8.00");
+        let gone = bc_album(vec![bc_offer("CD", Cd, 8.0, SoldOut, Some(0))]);
+        assert_eq!(bandcamp_line(&gone), "Sold out");
+    }
+}

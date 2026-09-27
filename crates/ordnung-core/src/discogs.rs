@@ -517,6 +517,11 @@ pub struct ArtistDetail {
     pub groups: Vec<NamedRef>,
     /// The members, when this artist is a group.
     pub members: Vec<NamedRef>,
+    /// The artist's own links (site, Bandcamp, SoundCloud), as the profile
+    /// lists them — how [`crate::bandcamp`] tells the artist's account from
+    /// a re-upload.
+    #[serde(default)]
+    pub urls: Vec<String>,
 }
 
 /// What a label page (`GET /labels/{id}`) says about the label's family.
@@ -526,6 +531,9 @@ pub struct LabelDetail {
     pub name: String,
     pub parent: Option<NamedRef>,
     pub sublabels: Vec<NamedRef>,
+    /// The label's own links, like [`ArtistDetail::urls`].
+    #[serde(default)]
+    pub urls: Vec<String>,
 }
 
 /// One entry from a release's track listing.
@@ -1293,7 +1301,7 @@ static FOREGROUND_WAITING: AtomicUsize = AtomicUsize::new(0);
 /// handshake for every detail fetch, price lookup and cover download. One pool
 /// keeps the connection to `api.discogs.com` (and the image CDN) open across
 /// workers, and a request that follows another reuses it.
-fn shared_agent() -> ureq::Agent {
+pub(crate) fn shared_agent() -> ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT
         .get_or_init(|| {
@@ -2386,6 +2394,7 @@ impl Client {
             aliases: refs(body.aliases),
             groups: refs(body.groups),
             members: refs(body.members),
+            urls: body.urls,
         })
     }
 
@@ -2411,6 +2420,7 @@ impl Client {
                 .into_iter()
                 .filter_map(RefEntry::into_ref)
                 .collect(),
+            urls: body.urls,
         })
     }
 
@@ -3801,6 +3811,8 @@ struct ArtistResponse {
     groups: Vec<RefEntry>,
     #[serde(default, deserialize_with = "null_as_default")]
     members: Vec<RefEntry>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    urls: Vec<String>,
 }
 
 /// `GET /labels/{id}`: the family fields only.
@@ -3814,6 +3826,8 @@ struct LabelResponse {
     parent_label: Option<RefEntry>,
     #[serde(default, deserialize_with = "null_as_default")]
     sublabels: Vec<RefEntry>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    urls: Vec<String>,
 }
 
 /// An `{id, name}` reference as artist and label pages list their kin.

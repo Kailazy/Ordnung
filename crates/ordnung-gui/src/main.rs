@@ -1592,6 +1592,11 @@ struct App {
             )>,
         )>,
     >,
+    /// Receives the open sheet's Bandcamp lookup as `(release_id, album)`,
+    /// dropped when it answers for a record the user has since left. `None`
+    /// album: not on Bandcamp, or the lookup failed, which the sheet shows the
+    /// same way (by saying nothing).
+    sheet_bandcamp_rx: Option<Receiver<(u64, Option<ordnung_core::bandcamp::Album>)>>,
     /// The open browse page — one label's or one artist's discography as a
     /// paged list, with the user's shelves marked on every row. `None` when
     /// closed. See [`browse_page`].

@@ -7,6 +7,7 @@
 //! (`scan`, `analysis`, `tag`, `convert`, `catalog`) arrive in later phases.
 
 pub mod analysis;
+pub mod bandcamp;
 pub mod catalog;
 pub mod convert;
 pub mod discogs;
