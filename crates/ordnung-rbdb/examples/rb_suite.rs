@@ -1035,7 +1035,11 @@ fn run(names: Vec<String>, legs: Option<String>, examples: usize) -> Res<bool> {
 
 fn capture(stick: &Path, name: &str, stage: Option<&str>, audio: bool, replace: bool) -> Res<()> {
     if !pdb_of(stick).is_file() {
-        return Err(format!("{}: no PIONEER/rekordbox/export.pdb — not a rekordbox stick", stick.display()));
+        return Err(format!(
+            "{}: no PIONEER/rekordbox/export.pdb here. Point STICK at the folder that holds \
+             PIONEER/ (a mounted stick or a copy of one)",
+            stick.display()
+        ));
     }
     let running = std::process::Command::new("pgrep").args(["-x", "rekordbox"]).output().map(|o| o.status.success()).unwrap_or(false);
     if running {
@@ -1127,6 +1131,13 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |f: &str| args.iter().any(|a| a == f);
     let value = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
+    // Paths arrive unexpanded from `make STICK=~/…` (zsh leaves a `~` after
+    // `=` alone, and the Makefile quotes it), so expand a leading `~` here.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let expand = |a: &str| match a.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("{home}{rest}"),
+        _ => a.to_string(),
+    };
     let positional: Vec<String> = {
         let mut v = Vec::new();
         let mut skip = false;
@@ -1140,7 +1151,7 @@ fn main() -> ExitCode {
                 continue;
             }
             if !a.starts_with("--") {
-                v.push(a.clone());
+                v.push(expand(a));
             }
         }
         v

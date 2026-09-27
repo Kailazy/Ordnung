@@ -18,6 +18,10 @@ make rb-accept NAME=stop126        # pin the numbers after reviewing a run
 make rb-capture STICK=/Volumes/EYEBAGS NAME=ops
 ```
 
+`STICK` is any folder that holds `PIONEER/`: a mounted USB, or a copy of
+one on disk. For example, the stop126 reference comes from
+`make rb-capture STICK=~/Desktop/EYEBAGS-rekordbox-stop126-2026-09-21 NAME=stop126`.
+
 ## Layout
 
 | Path | Tracked | What |
