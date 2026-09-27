@@ -251,6 +251,17 @@ fn sheet_alternative(
 
 /// Render a marketplace price for the sheet header — symbol where there is
 /// one, and always the exact figure: this is the number the user decides on.
+/// The header's version line: `1993 · Vinyl, 12"` or `CD, Mixed`, whichever
+/// halves are known. `released` may be a full date; only its year is kept.
+pub(crate) fn sub_line(released: &str, format: &str) -> String {
+    let year = released.split('-').next().unwrap_or("").trim();
+    [year, format.trim()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// The header's label line: `Warp · WAP42`, or whichever half is known.
 pub(crate) fn imprint_line(label: Option<&str>, catno: Option<&str>) -> Option<String> {
     let l = label.unwrap_or("").trim();
@@ -381,11 +392,10 @@ impl App {
         // otherwise play on under a tracklist it doesn't belong to (and
         // `playing_video` indexes the old release's videos).
         self.stop_sheet_video();
-        let sub = [record.year.map(|y| y.to_string()), record.format.clone()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" · ");
+        let sub = sub_line(
+            &record.year.map(|y| y.to_string()).unwrap_or_default(),
+            record.format.as_deref().unwrap_or(""),
+        );
         let label = imprint_line(record.label.as_deref(), record.catalog_number.as_deref());
 
         self.vinyl_sheet = Some(VinylSheet {
@@ -522,16 +532,7 @@ impl App {
         // own header line once the detail lands (which, cached, is at once).
         let sub = cached
             .as_ref()
-            .map(|d| {
-                [
-                    d.year.map(|y| y.to_string()).unwrap_or_default(),
-                    d.format.trim().to_string(),
-                ]
-                .into_iter()
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join(" · ")
-            })
+            .map(|d| sub_line(&d.year.map(|y| y.to_string()).unwrap_or_default(), &d.format))
             .unwrap_or_default();
         let cover_url = cat
             .as_ref()
@@ -853,6 +854,18 @@ impl App {
                 if sheet.label.is_none() {
                     sheet.label =
                         imprint_line(detail.label.as_deref(), detail.catalog_number.as_deref());
+                }
+                // Same for the version line: a sheet opened from a dig row or
+                // a link often knows neither the year nor the format (CD,
+                // Vinyl 12", File) until the release itself arrives, and the
+                // detail is this exact pressing's own reading.
+                // A detail cached before formats were kept reads "", which
+                // means unknown, so it never blanks a line the opener had.
+                if !detail.format.trim().is_empty() {
+                    sheet.sub = sub_line(
+                        &detail.year.map(|y| y.to_string()).unwrap_or_default(),
+                        &detail.format,
+                    );
                 }
                 // A release with no tracklist at all (Discogs has plenty) still
                 // has its videos — show them as the record's only contents
@@ -2119,14 +2132,7 @@ impl App {
                     _ => None,
                 });
                 if let Some((v, artist)) = alt {
-                    // `released` is a date only sometimes; the header line
-                    // wants just the year either way.
-                    let year = v.released.split('-').next().unwrap_or("").trim();
-                    let sub = [year, v.format.trim()]
-                        .into_iter()
-                        .filter(|s| !s.is_empty())
-                        .collect::<Vec<_>>()
-                        .join(" · ");
+                    let sub = sub_line(&v.released, &v.format);
                     let cover = (!v.thumb_url.trim().is_empty()).then(|| v.thumb_url.clone());
                     let label = imprint_line(Some(&v.label), Some(&v.catno));
                     self.open_release_sheet(v.release_id, artist, v.title.clone(), sub, cover, ctx);

@@ -2192,12 +2192,10 @@ impl App {
                 return;
             }
         }
-        let sub = match (record.year, record.format.as_deref()) {
-            (Some(y), Some(f)) => format!("{y} · {f}"),
-            (Some(y), None) => y.to_string(),
-            (None, Some(f)) => f.to_string(),
-            (None, None) => String::new(),
-        };
+        let sub = crate::vinyl_sheet::sub_line(
+            &record.year.map(|y| y.to_string()).unwrap_or_default(),
+            record.format.as_deref().unwrap_or(""),
+        );
         self.begin_dig(
             record.release_id,
             record.artist.clone(),
@@ -3777,12 +3775,7 @@ impl App {
         if to == from || to == 0 {
             return;
         }
-        let year = v.released.split('-').next().unwrap_or("").trim();
-        let sub = [year, v.format.trim()]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" · ");
+        let sub = crate::vinyl_sheet::sub_line(&v.released, &v.format);
         let thumb = (!v.thumb_url.trim().is_empty()).then(|| v.thumb_url.clone());
         let label = (!v.label.trim().is_empty()).then(|| v.label.clone());
         let title = if v.title.trim().is_empty() {
