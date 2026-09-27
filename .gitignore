@@ -6,6 +6,9 @@ Cargo.lock.orig
 /testdata/*.db
 /testdata/*.db-*
 /testdata/seeker-sample/
+# rekordbox reference stick images for the rb_suite (audio + PIONEER); the
+# tracked testdata/rekordbox-suite/<name>/MANIFEST.sha256 pins their bytes.
+/testdata/rekordbox-reference/
 *.db-wal
 *.db-shm
 

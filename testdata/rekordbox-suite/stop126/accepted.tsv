@@ -1,0 +1,45 @@
+# Accepted rb_suite baseline. analysis rows are scores (a drop fails);
+# every other row counts unexplained divergences (a rise or a new row fails).
+# Rewrite with `make rb-accept NAME=<name>` after a run you've reviewed.
+analysis	bpm exact	56
+analysis	bpm half/double	0
+analysis	bpm within 0.05	86
+analysis	grid in phase	54
+analysis	grid in phase, downbeat right	31
+analysis	key exact	40
+analysis	key exact or neighbour	59
+analysis	tracks graded	94
+mirror	anlz 2EX.PWV6.shape	85
+mirror	anlz 2EX.PWV7.header	85
+mirror	anlz 2EX.PWV7.shape	53
+mirror	anlz 2EX.PWVC.bytes	94
+mirror	anlz DAT.PQTZ.beats	86
+mirror	anlz DAT.PQTZ.header	9
+mirror	anlz DAT.PVBR	6
+mirror	anlz DAT.PWAV.shape	38
+mirror	anlz DAT.PWV2.shape	48
+mirror	anlz EXT.PQT2.bytes	94
+mirror	anlz EXT.PWV3.header	85
+mirror	anlz EXT.PWV3.shape	5
+mirror	anlz EXT.PWV4.shape	34
+mirror	anlz EXT.PWV5.header	85
+mirror	anlz EXT.PWV5.shape	94
+mirror	dlp album.rows	1
+mirror	dlp artist.rows	1
+mirror	dlp image.rows	1
+mirror	dlp myTag.rows	1
+mirror	dlp.content artist_id_composer	5
+mirror	dlp.content bitrate	5
+mirror	dlp.content isrc	3
+mirror	dlp.content length	4
+mirror	dlp.content releaseYear	18
+mirror	dlp.content titleForSearch	94
+mirror	ext table3.rows	1
+mirror	ext table7.rows	1
+mirror	files present	1
+mirror	pdb header.const_5	1
+mirror	pdb.track bitrate	5
+mirror	pdb.track composer	5
+mirror	pdb.track composer_id	5
+mirror	pdb.track duration	4
+mirror	pdb.track isrc	3

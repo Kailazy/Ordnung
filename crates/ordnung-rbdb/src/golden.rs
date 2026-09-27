@@ -12,6 +12,9 @@
 
 use std::collections::BTreeMap;
 
+pub mod anlz;
+pub mod stick;
+
 use crate::pdb::{self, dsql_string, page_rows, table_pages, u16_at, u32_at, ReadError};
 
 /// One field that differs between the two files.
@@ -141,6 +144,19 @@ impl PdbDiff {
         s.push_str(&format!("{n} unexplained difference(s)\n"));
         s
     }
+}
+
+/// Whether two key names are in different notations (Camelot "8A" vs
+/// classic "Am"), which explains a mismatch; two Camelot names that differ
+/// are a different key.
+pub(crate) fn key_notation_differs(a: &str, b: &str) -> bool {
+    let camelot = |k: &str| {
+        let k = k.trim();
+        k.len() >= 2
+            && matches!(k.chars().last(), Some('A' | 'B'))
+            && k[..k.len() - 1].chars().all(|c| c.is_ascii_digit())
+    };
+    camelot(a) != camelot(b)
 }
 
 fn trunc(s: &str) -> String {
@@ -300,6 +316,25 @@ fn delta(field: &str, golden: impl ToString, ours: impl ToString, explained: Opt
     }
 }
 
+/// Pages of `before` whose bytes differ in `after`, as `(page index, table
+/// type of the page in before)`; page 0 (the file header) reports type
+/// `u32::MAX`. Pages `after` appended past `before`'s end are not listed.
+/// An in-place edit proves it was surgical by touching only the pages of
+/// the tables it owns.
+pub fn changed_pages(before: &[u8], after: &[u8]) -> Result<Vec<(u32, u32)>, ReadError> {
+    let t = header(before)?;
+    let mut out = Vec::new();
+    for (i, page) in before.chunks(t.page_size).enumerate() {
+        let off = i * t.page_size;
+        if after.get(off..off + page.len()) == Some(page) {
+            continue;
+        }
+        let ty = if i == 0 { u32::MAX } else { u32_at(before, off + 8).unwrap_or(u32::MAX) };
+        out.push((i as u32, ty));
+    }
+    Ok(out)
+}
+
 /// Diff two `export.pdb` images. `golden` is rekordbox's, `ours` Ordnung's.
 pub fn diff_pdb(golden: &[u8], ours: &[u8]) -> Result<PdbDiff, ReadError> {
     let g = header(golden)?;
@@ -333,6 +368,7 @@ pub fn diff_pdb(golden: &[u8], ours: &[u8]) -> Result<PdbDiff, ReadError> {
     // Intern tables may legitimately carry rows nothing exported references
     // (rekordbox never garbage-collects them).
     let intern_table = |ty: u32| matches!(ty, 1..=5 | 13);
+    let history_table = |ty: u32| matches!(ty, 11 | 12);
     for ty in 0..20u32 {
         let (gp, gr) = table_rows(golden, &g, ty);
         let (op, or) = table_rows(ours, &o, ty);
@@ -342,12 +378,21 @@ pub fn diff_pdb(golden: &[u8], ours: &[u8]) -> Result<PdbDiff, ReadError> {
         let rewritten = |data: &[u8], off: usize| data.get(off + 0x1B).is_some_and(|f| f & 0x10 != 0);
         let golden_rewritten = gp.iter().any(|&a| rewritten(golden, a));
         if gp.len() != op.len() {
-            let why = golden_rewritten.then_some("golden chain grew through rewrites");
+            let why = if history_table(ty) && op.is_empty() {
+                Some("play history, filled in by players at runtime")
+            } else {
+                golden_rewritten.then_some("golden chain grew through rewrites")
+            };
             deltas.push(delta("pages", gp.len(), op.len(), why));
         }
         if gr.len() != or.len() {
-            let why = (intern_table(ty) && gr.len() > or.len())
-                .then_some("golden intern table carries rows no exported track references");
+            let why = if intern_table(ty) && gr.len() > or.len() {
+                Some("golden intern table carries rows no exported track references")
+            } else if history_table(ty) && or.is_empty() {
+                Some("play history, filled in by players at runtime")
+            } else {
+                None
+            };
             deltas.push(delta("rows", gr.len(), or.len(), why));
         }
         // Per data page: flags and the heap accounting, in chain order.
@@ -416,7 +461,7 @@ pub fn diff_pdb(golden: &[u8], ours: &[u8]) -> Result<PdbDiff, ReadError> {
     // Resolved interned names via the reader (id → name is per file).
     let g_read = pdb::read_export_bytes(golden)?;
     let o_read = pdb::read_export_bytes(ours)?;
-    let named = |ex: &pdb::RbExport, row_id: u32| -> [String; 5] {
+    let named = |ex: &pdb::RbExport, row_id: u32| -> [String; 8] {
         let t = ex.tracks.get(&row_id);
         let f = |v: Option<&String>| v.cloned().unwrap_or_default();
         [
@@ -425,6 +470,9 @@ pub fn diff_pdb(golden: &[u8], ours: &[u8]) -> Result<PdbDiff, ReadError> {
             f(t.and_then(|t| t.genre.as_ref())),
             f(t.and_then(|t| t.label.as_ref())),
             f(t.and_then(|t| t.key.as_ref())),
+            f(t.and_then(|t| t.remixer.as_ref())),
+            f(t.and_then(|t| t.composer.as_ref())),
+            f(t.and_then(|t| t.original_artist.as_ref())),
         ]
     };
     for (name, &gr) in &g_by {
@@ -436,7 +484,10 @@ pub fn diff_pdb(golden: &[u8], ours: &[u8]) -> Result<PdbDiff, ReadError> {
         for &(off, width, field, why) in ROW_FIELDS {
             let (x, y) = (raw(golden, gr + off, width), raw(ours, or + off, width));
             if x != y {
-                deltas.push(delta(field, x, y, why));
+                // An interned id is renumbered per export, but one side having
+                // none at all means the value itself went missing.
+                let renumbered = why.is_some_and(|w| w.starts_with("interned")) && (x == 0) != (y == 0);
+                deltas.push(delta(field, x, y, if renumbered { None } else { why }));
             }
         }
         for (i, (field, why)) in ROW_STRINGS.iter().enumerate() {
@@ -448,9 +499,11 @@ pub fn diff_pdb(golden: &[u8], ours: &[u8]) -> Result<PdbDiff, ReadError> {
         let gid = u32_at(golden, gr + 0x48).unwrap_or(0);
         let oid = u32_at(ours, or + 0x48).unwrap_or(0);
         let (gn, on) = (named(&g_read, gid), named(&o_read, oid));
-        for (i, field) in ["artist", "album", "genre", "label", "key"].iter().enumerate() {
+        let names = ["artist", "album", "genre", "label", "key", "remixer", "composer", "original_artist"];
+        for (i, field) in names.iter().enumerate() {
             if gn[i] != on[i] {
-                let why = (*field == "key").then_some("key notation is a rekordbox display setting; Ordnung writes Camelot");
+                let why = (*field == "key" && key_notation_differs(&gn[i], &on[i]))
+                    .then_some("key notation is a rekordbox display setting; Ordnung writes Camelot");
                 deltas.push(delta(field, &gn[i], &on[i], why));
             }
         }

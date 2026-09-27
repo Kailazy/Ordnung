@@ -179,11 +179,16 @@ fn u16_at(b: &[u8], i: usize) -> Option<u16> {
 
 /// Walk the fixed-size `PCPT` entries of every classic cue list.
 fn parse_pcob_lists(data: &[u8]) -> Vec<Cue> {
+    find_sections(data, b"PCOB").into_iter().flat_map(parse_pcob_body).collect()
+}
+
+/// The cues of one `PCOB` section body (past its 12-byte prelude).
+pub(crate) fn parse_pcob_body(body: &[u8]) -> Vec<Cue> {
     let mut out = Vec::new();
-    for body in find_sections(data, b"PCOB") {
+    {
         // Body: u32 type, u16 0, u16 count, u32 memory_count; then entries,
         // each a `PCPT` section of its own (len_tag at +8).
-        let Some(count) = u16_at(body, 6) else { continue };
+        let Some(count) = u16_at(body, 6) else { return out };
         let mut off = 12;
         for _ in 0..count {
             let Some(len) = u32_at(body, off + 8).map(|v| v as usize) else { break };
@@ -210,10 +215,15 @@ fn parse_pcob_lists(data: &[u8]) -> Vec<Cue> {
 
 /// Walk the variable-size `PCP2` entries of every nxs2 cue list.
 fn parse_pco2_lists(data: &[u8]) -> Vec<Cue> {
+    find_sections(data, b"PCO2").into_iter().flat_map(parse_pco2_body).collect()
+}
+
+/// The cues of one `PCO2` section body (past its 12-byte prelude).
+pub(crate) fn parse_pco2_body(body: &[u8]) -> Vec<Cue> {
     let mut out = Vec::new();
-    for body in find_sections(data, b"PCO2") {
+    {
         // Body: u32 type, u16 count, u16 0; then `PCP2` entries.
-        let Some(count) = u16_at(body, 4) else { continue };
+        let Some(count) = u16_at(body, 4) else { return out };
         let mut off = 8;
         for _ in 0..count {
             let Some(len) = u32_at(body, off + 8).map(|v| v as usize) else { break };

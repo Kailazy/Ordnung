@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help app app-only run prune prune-install genredb-publish ffmpeg-publish
+.PHONY: help app app-only run prune prune-install genredb-publish ffmpeg-publish rb-suite rb-capture rb-accept
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -16,6 +16,15 @@ app-only: ## Build + sign the local Ordnung.app, don't touch /Applications
 
 run: ## Run the GUI from source (debug, no bundle)
 	@cargo run -p ordnung-gui
+
+rb-suite: ## rekordbox reference suite: replay every song operation on Ordnung, export, diff against rekordbox's stick (NAME=… LEG=mirror|analysis|edit|edit-mirror)
+	@cargo run --release -q -p ordnung-rbdb --example rb_suite -- run $(NAME) $(if $(LEG),--leg $(LEG))
+
+rb-capture: ## Snapshot a rekordbox stick as a suite reference (STICK=/Volumes/X NAME=… [STAGE=before|after])
+	@cargo run --release -q -p ordnung-rbdb --example rb_suite -- capture "$(STICK)" $(NAME) $(if $(STAGE),--stage $(STAGE))
+
+rb-accept: ## Pin the last rb-suite run as the accepted baseline (NAME=…)
+	@cargo run --release -q -p ordnung-rbdb --example rb_suite -- accept $(NAME)
 
 prune: ## Delete target/debug when it exceeds PRUNE_LIMIT_GB (default 50); release build is kept
 	@bash tools/prune-target.sh

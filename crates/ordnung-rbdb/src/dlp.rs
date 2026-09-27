@@ -39,9 +39,8 @@ pub struct DlpPlaylists {
     pub entries_by_path: HashMap<u32, Vec<String>>,
 }
 
-/// Open `db_path` (an `exportLibrary.db`) read-only and pull the playlist
-/// tree and memberships out of it.
-pub fn read_playlists(db_path: &Path) -> Result<DlpPlaylists, ReadError> {
+/// Open an `exportLibrary.db` read-only with the Device Library Plus key.
+pub(crate) fn open_read_only(db_path: &Path) -> Result<rusqlite::Connection, ReadError> {
     let conn = rusqlite::Connection::open_with_flags(
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -51,6 +50,13 @@ pub fn read_playlists(db_path: &Path) -> Result<DlpPlaylists, ReadError> {
         "PRAGMA key = '{DLP_KEY}'; PRAGMA cipher_compatibility = 4;"
     ))
     .map_err(|e| ReadError::Dlp(e.to_string()))?;
+    Ok(conn)
+}
+
+/// Open `db_path` (an `exportLibrary.db`) read-only and pull the playlist
+/// tree and memberships out of it.
+pub fn read_playlists(db_path: &Path) -> Result<DlpPlaylists, ReadError> {
+    let conn = open_read_only(db_path)?;
 
     let mut out = DlpPlaylists::default();
 

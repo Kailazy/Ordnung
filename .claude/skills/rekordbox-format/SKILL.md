@@ -116,7 +116,16 @@ write only under `/Contents`; the library file is never touched.
    `cargo run -p ordnung-rbdb --example golden_diff -- GOLDEN.pdb OURS.pdb`
    (`golden::diff_pdb`; every delta is marked explained or `!!`, exit 1 on
    any `!!`). `tests/golden_diff.rs` keeps the demo fixture fully explained.
-3. Load on real CDJ/XDJ (or rekordbox in export mode) and confirm tracks, waveforms,
+3. Whole-stick check against a real rekordbox export: `make rb-suite`
+   (`examples/rb_suite.rs`, `golden::stick::diff_stick`). It replays every
+   song operation a reference stick shows on Ordnung (tags, key, BPM,
+   grid, cues, playlists), exports, and diffs every pdb field, ANLZ
+   section, DLP column and playlist; it also grades analysis and proves
+   in-place edits surgical. A run fails on any divergence beyond
+   `testdata/rekordbox-suite/<name>/accepted.tsv`. Run it before and after
+   any writer change; see `testdata/rekordbox-suite/README.md` for
+   capturing new references.
+4. Load on real CDJ/XDJ (or rekordbox in export mode) and confirm tracks, waveforms,
    beatgrids, cues, and playlists appear.
 
 Keep a `fixtures/` set of small rekordbox-produced exports as golden references.

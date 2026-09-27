@@ -84,6 +84,18 @@ pub struct RbTrack {
     pub sample_rate_hz: u32,
     /// Release year, as stored. `0` when unknown.
     pub year: u16,
+    /// Star rating 0–5, as stored.
+    pub rating: u8,
+    /// Track colour id 0–8 (0 = none, 1 pink … 8 purple, the Colors table).
+    pub color_id: u8,
+    /// Track and disc number, as stored. `0` when unknown.
+    pub track_number: u32,
+    pub disc_number: u16,
+    /// Remixer, composer and original artist, resolved through the Artists
+    /// table like `artist`.
+    pub remixer: Option<String>,
+    pub composer: Option<String>,
+    pub original_artist: Option<String>,
     /// The track's ANLZ analysis file (beatgrid, cues, waveforms), as stored —
     /// e.g. `/PIONEER/USBANLZ/P016/0000B5/ANLZ0000.DAT`. Not parsed here yet;
     /// carried so a caller (or the Phase 5 round-trip) can find it.
@@ -214,8 +226,9 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
     let mut genre_names: HashMap<u32, String> = HashMap::new();
     let mut label_names: HashMap<u32, String> = HashMap::new();
     let mut artwork_paths: HashMap<u32, String> = HashMap::new();
-    // track id → (key_id, artist_id, album_id, genre_id, artwork_id, label_id).
-    let mut track_refs: HashMap<u32, [u32; 6]> = HashMap::new();
+    // track id → (key_id, artist_id, album_id, genre_id, artwork_id, label_id,
+    // remixer_id, composer_id, original_artist_id).
+    let mut track_refs: HashMap<u32, [u32; 9]> = HashMap::new();
 
     for t in 0..num_tables {
         let base = 0x1C + t * 16;
@@ -268,6 +281,9 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
                                 u32_at(data, row + 0x3C).unwrap_or(0), // genre
                                 u32_at(data, row + 0x1C).unwrap_or(0), // artwork
                                 u32_at(data, row + 0x28).unwrap_or(0), // label
+                                u32_at(data, row + 0x2C).unwrap_or(0), // remixer
+                                u32_at(data, row + 0x0C).unwrap_or(0), // composer
+                                u32_at(data, row + 0x24).unwrap_or(0), // original artist
                             ],
                         );
                         let string_at = |idx: usize| {
@@ -292,6 +308,13 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
                                 bitrate_kbps: u32_at(data, row + 0x30).unwrap_or(0),
                                 sample_rate_hz: u32_at(data, row + 0x08).unwrap_or(0),
                                 year: u16_at(data, row + 0x50).unwrap_or(0),
+                                rating: data.get(row + 0x59).copied().unwrap_or(0),
+                                color_id: data.get(row + 0x58).copied().unwrap_or(0),
+                                track_number: u32_at(data, row + 0x34).unwrap_or(0),
+                                disc_number: u16_at(data, row + 0x4C).unwrap_or(0),
+                                remixer: None,
+                                composer: None,
+                                original_artist: None,
                                 analyze_path: string_at(14).filter(|s| !s.is_empty()),
                             },
                         );
@@ -413,13 +436,18 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
             .filter(|s| !s.is_empty())
             .cloned()
     };
-    for (track_id, [key, artist, album, genre, artwork, label]) in track_refs {
+    for (track_id, [key, artist, album, genre, artwork, label, remixer, composer, original]) in
+        track_refs
+    {
         if let Some(track) = out.tracks.get_mut(&track_id) {
             track.key = lookup(&key_names, key);
             track.artist = lookup(&artist_names, artist);
             track.album = lookup(&album_names, album);
             track.genre = lookup(&genre_names, genre);
             track.label = lookup(&label_names, label);
+            track.remixer = lookup(&artist_names, remixer);
+            track.composer = lookup(&artist_names, composer);
+            track.original_artist = lookup(&artist_names, original);
             track.artwork_path = lookup(&artwork_paths, artwork);
             track.artwork_id = if track.artwork_path.is_some() { artwork } else { 0 };
         }
