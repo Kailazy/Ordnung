@@ -893,6 +893,8 @@ impl App {
         crate::ui::window::Window::new("Beatgrid")
             .id(egui::Id::new("grid_edit_panel"))
             .title_bar(false)
+            // Its GRID tab is its way out; Escape is the other.
+            .dismiss_on_escape(&mut self.grid_edit_open)
             .fixed_at(egui::Align2::RIGHT_BOTTOM, egui::pos2(lane.right(), lane.top() - 6.0))
             .show(ui.ctx(), |ui| {
                 const W: f32 = 200.0;

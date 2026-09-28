@@ -93,6 +93,7 @@ pub struct Window<'o> {
     title: egui::WidgetText,
     id: Option<egui::Id>,
     open: Option<&'o mut bool>,
+    escape: Option<&'o mut bool>,
     title_bar: bool,
     resizable: [bool; 2],
     grips: Option<Grips>,
@@ -112,6 +113,7 @@ impl<'o> Window<'o> {
             title: title.into(),
             id: None,
             open: None,
+            escape: None,
             title_bar: true,
             resizable: [false, false],
             grips: None,
@@ -141,9 +143,19 @@ impl<'o> Window<'o> {
     }
 
     /// Show a close button (in the title bar, or the corner without one);
-    /// it clears the flag.
+    /// it clears the flag, and so does Escape while this is the top
+    /// surface (see `escape`).
     pub fn open(mut self, open: &'o mut bool) -> Self {
         self.open = Some(open);
+        self
+    }
+
+    /// Escape clears the flag while this is the top surface, with no close
+    /// button: for a popover that carries its own way out (a card with a
+    /// Cancel, a panel its tab toggles). A window with [`Self::open`]
+    /// already closes on Escape.
+    pub fn dismiss_on_escape(mut self, open: &'o mut bool) -> Self {
+        self.escape = Some(open);
         self
     }
 
@@ -324,6 +336,7 @@ impl<'o> Window<'o> {
             .frame(frame)
             .resizable(self.resizable);
         let open = self.open;
+        let escape = self.escape;
         let close = open.is_some();
         if self.auto_sized {
             w = w.auto_sized();
@@ -473,9 +486,20 @@ impl<'o> Window<'o> {
                 ctx.data_mut(|d| d.insert_temp(family, corner));
             }
         }
+        // Escape, once the content has had its say (a menu in it that
+        // closed on this press has consumed it).
+        let escapable = close || escape.is_some();
+        if let (Some(shown), true) = (&shown, escapable) {
+            if super::escape::take(ctx, shown.response.layer_id, false) {
+                closed = true;
+            }
+        }
         if closed {
             if let Some(open) = open {
                 *open = false;
+            }
+            if let Some(escape) = escape {
+                *escape = false;
             }
         }
         shown

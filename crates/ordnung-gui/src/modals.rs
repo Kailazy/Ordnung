@@ -2753,9 +2753,7 @@ files elsewhere on the device stay plain storage.",
         let mut no_match = false;
         // Esc closes the picker — cancels the whole review queue (but never
         // interrupts an in-flight save, so the worker isn't left dangling).
-        if !self.artwork_saving && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            skip_all = true;
-        }
+        let mut stays = true;
         let saving = self.artwork_saving;
         let enrich = self.artwork_enrich;
         let mut overwrite = self.artwork_overwrite;
@@ -2815,6 +2813,7 @@ files elsewhere on the device stay plain storage.",
         let reserve = if enrich { 320.0 } else { 200.0 };
         let list_h = (max_h - reserve).clamp(100.0, 360.0);
         crate::ui::window::Window::new(picker_title)
+            .dismiss_on_escape(&mut stays)
             .resizable(true)
             .default_width(460.0)
             .max_width(max_w)
@@ -3154,6 +3153,9 @@ files elsewhere on the device stay plain storage.",
         self.artwork_set_cover = set_cover;
         self.artwork_apply_album = apply_album;
         self.artwork_album_overwrite = album_overwrite;
+        if !stays && !saving {
+            skip_all = true;
+        }
 
         // Song-data picker: make sure the highlighted release's field preview is
         // loading/loaded (no-op once cached). Done here so it picks up a row the

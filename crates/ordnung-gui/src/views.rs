@@ -249,13 +249,15 @@ fn vinyl_tabs(
 /// the user clicked the action), the dialog opens right there so the confirm
 /// button lands under the cursor — no swipe across the window. Without a
 /// position it falls back to centered.
+/// Escape clears `stays`.
 fn confirm_window(
     title: &str,
     pos: Option<egui::Pos2>,
+    stays: &mut bool,
     ctx: &egui::Context,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
-    let win = crate::ui::window::Window::new(title);
+    let win = crate::ui::window::Window::new(title).dismiss_on_escape(stays);
     let win = match pos {
         // Nudge up-left so the cursor sits inside the dialog body, a short hop
         // from the confirm button row.
@@ -1214,16 +1216,15 @@ impl App {
         if let Some(batch) = self.dup_pending_bulk.clone() {
             let n = batch.len();
             let mut close = false;
-            // Esc anywhere cancels — no need to aim at the Cancel button.
-            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                close = true;
-            }
+            // Esc cancels (see `confirm_window`) — no need to aim at Cancel.
+            let mut stays = true;
             // Copies staged self-referencing (keeper == drop) belong to groups where
             // every copy was marked — those remove the track entirely, so warn.
             let whole_track = batch.iter().filter(|(k, d, _)| k == d).count();
             confirm_window(
                 "Delete marked duplicates",
                 self.dup_confirm_pos,
+                &mut stays,
                 ui.ctx(),
                 |ui| {
                     ui.label(format!(
@@ -1286,7 +1287,7 @@ impl App {
                     );
                 },
             );
-            if close {
+            if close || !stays {
                 self.dup_pending_bulk = None;
                 self.dup_confirm_pos = None;
             }
@@ -3062,7 +3063,9 @@ impl App {
         if let Some(ids) = self.missing_pending_remove.clone() {
             let n = ids.len();
             let mut close = false;
+            let mut stays = true;
             crate::ui::window::Window::new("Remove missing tracks")
+                .dismiss_on_escape(&mut stays)
                 .show(ui.ctx(), |ui| {
                     ui.label(format!(
                         "Remove {n} missing track{} from the catalog? Their source file{} \
@@ -3103,7 +3106,7 @@ impl App {
                         }
                     });
                 });
-            if close {
+            if close || !stays {
                 self.missing_pending_remove = None;
             }
         }

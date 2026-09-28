@@ -11,6 +11,7 @@
 
 pub mod button;
 pub mod chip;
+pub mod escape;
 pub mod fader;
 pub mod field;
 pub mod frost;

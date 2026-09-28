@@ -1993,6 +1993,9 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.update_inner(ctx, frame);
+        // Where the keyboard ended up, for the next pass's Escape (see
+        // `ui::escape`).
+        crate::ui::escape::end_pass(ctx);
         // Every surface has painted: make this frame's frosted backdrops
         // from what lies under each, before egui draws the frame.
         crate::ui::glass::render(ctx);

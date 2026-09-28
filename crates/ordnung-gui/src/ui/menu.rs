@@ -56,18 +56,6 @@ const ROW_PAD: f32 = space::S3;
 /// `Area` the "available" width is the rest of the screen, so any row that
 /// filled it would drag the panel out to the window edge. A menu also shouldn't
 /// resize as rows come and go (a filter count appearing, a section toggling).
-/// Where a dropdown notes the pass it was open on, for [`any_open`].
-fn open_pass_id() -> egui::Id {
-    egui::Id::new("ord_dropdown_open_pass")
-}
-
-/// Whether any dropdown has drawn open this pass. For a window that closes
-/// on Escape: a menu up inside it closes on that same Escape itself, and the
-/// window must not go with it. Ask after the window's content has drawn.
-pub fn any_open(ctx: &egui::Context) -> bool {
-    ctx.data(|d| d.get_temp::<u64>(open_pass_id())) == Some(ctx.cumulative_pass_nr())
-}
-
 pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuUi)) {
     let ctx = anchor.ctx.clone();
     let id = anchor.id.with("ord_dropdown");
@@ -93,14 +81,6 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
         ctx.data_mut(|d| d.insert_temp(id, open));
         return;
     }
-    if open {
-        // Read the pass before taking the write: the context is one
-        // read-write lock, and a read inside `data_mut` deadlocks the app
-        // on the first frame a menu is open (seen 2026-09-25, v0.159.0).
-        let pass = ctx.cumulative_pass_nr();
-        ctx.data_mut(|d| d.insert_temp(open_pass_id(), pass));
-    }
-
     let opened_at: f64 = ctx.data(|d| d.get_temp(id.with("at")).unwrap_or(now));
     let since_open = (now - opened_at) as f32;
     // Dismissal context, sampled before the content draws so this frame's own
@@ -172,7 +152,9 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
         open = false;
     }
     if open {
-        if !field_focused && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // The menu is a surface Escape closes, above the window it opened
+        // in (see `escape`); a field being typed in keeps the press.
+        if super::escape::take(&ctx, area.response.layer_id, field_focused) {
             open = false;
         } else if !anchor.clicked() && !nested_popup_open && area.response.clicked_elsewhere() {
             // The anchor guard matters on the frame the menu opens: that click
@@ -483,7 +465,9 @@ mod tests {
                     });
                 });
             }
-            assert!(any_open(&ctx) || !any_open(&ctx));
+            // And an open dropdown stands in Escape's stack, above the
+            // window it may have opened in.
+            assert!(super::super::escape::pending(&ctx));
             let _ = tx.send(());
         });
         assert!(

@@ -313,10 +313,6 @@ impl App {
     /// Escape, or "Reset to default".
     pub(crate) fn show_column_menu(&mut self, ctx: &egui::Context) {
         let Some(pos) = self.column_menu else { return };
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.column_menu = None;
-            return;
-        }
         // Work on clones so the window closure can borrow these freely; write back
         // to `self` (and persist) only if something actually changed.
         let mut order = self.column_order.clone();
@@ -325,9 +321,11 @@ impl App {
         let mut changed = false;
         let mut reset = false;
 
+        let mut stays = true;
         crate::ui::window::Window::new("Columns")
             .id(egui::Id::new("column_reorder_popup"))
             .title_bar(false)
+            .dismiss_on_escape(&mut stays)
             .inner_margin(egui::Margin::symmetric(12.0, 10.0))
             .at(egui::Align2::LEFT_TOP, pos)
             .auto_sized()
@@ -551,7 +549,7 @@ impl App {
             self.hidden_columns = hidden;
             self.save_column_layout();
         }
-        if !open {
+        if !open || !stays {
             self.column_menu = None;
         }
     }
@@ -566,9 +564,6 @@ impl App {
             return;
         };
         let ColFilterPopup { col, pos, focus } = popup;
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            return; // dropped (already `take`n) — bar closes, filter stays.
-        }
         // Edit a clone of the column's current filter text; write back only if it
         // changed, mirroring `show_column_menu`'s clone-then-commit pattern.
         let mut text = self.col_filters.get(&col).cloned().unwrap_or_default();
@@ -578,9 +573,12 @@ impl App {
         // Remember the bar's rect so a click anywhere else this frame closes it.
         let mut bar_rect = egui::Rect::NOTHING;
 
+        // Escape closes the bar; the filter stays.
+        let mut stays = true;
         crate::ui::window::Window::new(format!("Filter · {}", col.label()))
             .id(egui::Id::new("col_filter_popup"))
             .title_bar(false)
+            .dismiss_on_escape(&mut stays)
             .at(egui::Align2::LEFT_TOP, pos)
             .show(ctx, |ui| {
                 // The Quality column filters by verdict, so offer one-click presets
@@ -668,7 +666,7 @@ impl App {
             self.reload();
         }
         // Re-arm the open state for next frame unless something closed the bar.
-        if open && !clicked_away {
+        if open && stays && !clicked_away {
             self.col_filter_open = Some(ColFilterPopup {
                 col,
                 pos,
@@ -2299,6 +2297,7 @@ impl App {
         if (!self.selection.is_empty() || self.selected.is_some())
             && !ctx_clone.wants_keyboard_input()
             && !self.escape_consumed_elsewhere()
+            && !crate::ui::escape::pending(&ctx_clone)
             && ctx_clone.input(|i| i.key_pressed(egui::Key::Escape))
         {
             self.clear_selection();
