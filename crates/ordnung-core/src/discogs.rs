@@ -2881,7 +2881,8 @@ struct InventoryItem {
     #[serde(default, deserialize_with = "null_as_default")]
     ships_from: String,
     /// Per-record shipping as Discogs quotes it for the requesting account's
-    /// location. Absent when the seller only publishes a free-text policy.
+    /// location. Absent, or an empty `{}`, when there is no quote: the seller
+    /// only publishes a free-text policy or doesn't ship there.
     #[serde(default)]
     shipping_price: Option<StatsPrice>,
     #[serde(default, deserialize_with = "null_as_default")]
@@ -2942,6 +2943,9 @@ impl InventoryItem {
             return None;
         }
         let r = self.release;
+        // No quote for this account comes back as an empty `{}`, which
+        // deserializes to 0.0 with no currency: absent, never free.
+        let shipping = self.shipping_price.filter(|p| !p.currency.trim().is_empty());
         Some(SellerListing {
             listing_id: self.id,
             release_id: r.id,
@@ -2957,8 +2961,8 @@ impl InventoryItem {
             condition: none_if_empty(self.condition),
             sleeve_condition: none_if_empty(self.sleeve_condition),
             ships_from: none_if_empty(self.ships_from),
-            shipping_price: self.shipping_price.as_ref().map(|p| p.value),
-            shipping_currency: self.shipping_price.and_then(|p| none_if_empty(p.currency)),
+            shipping_price: shipping.as_ref().map(|p| p.value),
+            shipping_currency: shipping.map(|p| p.currency),
             allow_offers: self.allow_offers,
             uri: none_if_empty(self.uri),
             posted: none_if_empty(self.posted),
@@ -5609,5 +5613,27 @@ mod tests {
             descriptions: vec!["Album".into()],
         }];
         assert!(item.into_record().is_none());
+    }
+
+    /// Discogs sends `shipping_price: {}` when it has no quote for this
+    /// account (the seller doesn't ship there, or only has a free-text
+    /// policy). That is no quote, not free shipping.
+    #[test]
+    fn empty_shipping_quote_is_absent() {
+        let item = |shipping: &str| -> InventoryItem {
+            serde_json::from_str(&format!(
+                r#"{{"id": 1, "price": {{"value": 16.5, "currency": "EUR"}},
+                    "shipping_price": {shipping},
+                    "release": {{"id": 9, "format": "12\"", "title": "Whispers"}}}}"#
+            ))
+            .unwrap()
+        };
+        let quoted = item(r#"{"value": 25.0, "currency": "EUR"}"#).into_listing().unwrap();
+        assert_eq!(quoted.shipping_price, Some(25.0));
+        assert_eq!(quoted.shipping_currency.as_deref(), Some("EUR"));
+        for none in ["{}", "null"] {
+            let l = item(none).into_listing().unwrap();
+            assert_eq!((l.shipping_price, l.shipping_currency), (None, None), "{none}");
+        }
     }
 }

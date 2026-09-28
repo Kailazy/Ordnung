@@ -79,6 +79,16 @@ fn mode_from_int(v: i64) -> Mode {
     }
 }
 
+/// A cached listing's shipping quote from columns `i` (price) and `i + 1`
+/// (currency). A price without a currency is the empty `{}` Discogs sends
+/// when it has no quote for this account, which older sweeps stored as 0.0;
+/// it reads as no quote, never as free shipping.
+fn shipping_quote(r: &rusqlite::Row, i: usize) -> rusqlite::Result<Option<(f64, String)>> {
+    let price: Option<f64> = r.get(i)?;
+    let currency: Option<String> = r.get(i + 1)?;
+    Ok(price.zip(currency))
+}
+
 /// Build an [`Analysis`] from a row selecting [`Catalog::ANALYSIS_COLS`], whose
 /// first column sits at `base` (0 when the row is exactly those columns, 1 when a
 /// `track_id` is selected ahead of them). Shared by the single-track load and the
@@ -3937,8 +3947,8 @@ impl Catalog {
                     condition: r.get(11)?,
                     sleeve_condition: r.get(12)?,
                     ships_from: r.get(13)?,
-                    shipping_price: r.get(14)?,
-                    shipping_currency: r.get(15)?,
+                    shipping_price: shipping_quote(r, 14)?.map(|(p, _)| p),
+                    shipping_currency: shipping_quote(r, 14)?.map(|(_, c)| c),
                     allow_offers: r.get::<_, i64>(16)? != 0,
                     uri: r.get(17)?,
                     posted: r.get(18)?,
@@ -4014,8 +4024,8 @@ impl Catalog {
                         condition: r.get(12)?,
                         sleeve_condition: r.get(13)?,
                         ships_from: r.get(14)?,
-                        shipping_price: r.get(15)?,
-                        shipping_currency: r.get(16)?,
+                        shipping_price: shipping_quote(r, 15)?.map(|(p, _)| p),
+                        shipping_currency: shipping_quote(r, 15)?.map(|(_, c)| c),
                         allow_offers: r.get::<_, i64>(17)? != 0,
                         uri: r.get(18)?,
                         posted: r.get(19)?,
@@ -4063,8 +4073,8 @@ impl Catalog {
                         condition: r.get(12)?,
                         sleeve_condition: r.get(13)?,
                         ships_from: r.get(14)?,
-                        shipping_price: r.get(15)?,
-                        shipping_currency: r.get(16)?,
+                        shipping_price: shipping_quote(r, 15)?.map(|(p, _)| p),
+                        shipping_currency: shipping_quote(r, 15)?.map(|(_, c)| c),
                         allow_offers: r.get::<_, i64>(17)? != 0,
                         uri: r.get(18)?,
                         posted: r.get(19)?,
@@ -4112,8 +4122,8 @@ impl Catalog {
                         condition: r.get(12)?,
                         sleeve_condition: r.get(13)?,
                         ships_from: r.get(14)?,
-                        shipping_price: r.get(15)?,
-                        shipping_currency: r.get(16)?,
+                        shipping_price: shipping_quote(r, 15)?.map(|(p, _)| p),
+                        shipping_currency: shipping_quote(r, 15)?.map(|(_, c)| c),
                         allow_offers: r.get::<_, i64>(17)? != 0,
                         uri: r.get(18)?,
                         posted: r.get(19)?,
@@ -4885,10 +4895,9 @@ impl Catalog {
     /// publishing only a free-text shipping policy has no row here.
     pub fn seller_shipping_floor(&self) -> Result<Vec<(String, f64, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT seller, MIN(shipping_price),
-                    COALESCE(shipping_currency, currency)
+            "SELECT seller, MIN(shipping_price), shipping_currency
              FROM seller_listings
-             WHERE shipping_price IS NOT NULL
+             WHERE shipping_price IS NOT NULL AND shipping_currency IS NOT NULL
              GROUP BY seller",
         )?;
         let rows = stmt
@@ -8370,5 +8379,52 @@ mod tests {
         assert_eq!(env.len(), 1);
         assert_eq!(env[&b], (vec![1, 2, 3], vec![4, 5, 6, 7]));
         assert!(cat.analysis_envelopes(&[]).unwrap().is_empty());
+    }
+
+    /// Sweeps before v0.162.1 stored Discogs' empty `{}` shipping quote as
+    /// 0.0 with no currency. Those rows read as unquoted everywhere, so a shop
+    /// that won't ship to this account never shows as free shipping.
+    #[test]
+    fn currencyless_shipping_reads_as_unquoted() {
+        let listing = |id: u64, ship: Option<f64>, ship_currency: Option<&str>| SellerListing {
+            listing_id: id,
+            release_id: 9001,
+            title: "Whispers".into(),
+            artist: "Jamaica Suk".into(),
+            year: None,
+            label: None,
+            catalog_number: None,
+            format: None,
+            thumb_url: None,
+            price: 13.0,
+            currency: "EUR".into(),
+            condition: None,
+            sleeve_condition: None,
+            ships_from: None,
+            shipping_price: ship,
+            shipping_currency: ship_currency.map(String::from),
+            allow_offers: false,
+            uri: None,
+            posted: None,
+        };
+        let cat = Catalog::open(":memory:").unwrap();
+        cat.add_seller("black.round.twelve").unwrap();
+        cat.add_seller("hardwax").unwrap();
+        cat.upsert_seller_listing("black.round.twelve", &listing(1, Some(0.0), None))
+            .unwrap();
+        cat.upsert_seller_listing("hardwax", &listing(2, Some(0.0), None))
+            .unwrap();
+        cat.upsert_seller_listing("hardwax", &listing(3, Some(8.0), Some("EUR")))
+            .unwrap();
+
+        let brt = cat.list_seller_listings("black.round.twelve").unwrap();
+        assert_eq!((brt[0].shipping_price, brt[0].shipping_currency.clone()), (None, None));
+        let rows = cat.seller_listings_for_release(9001).unwrap();
+        assert!(rows.iter().all(|(_, l)| l.shipping_price != Some(0.0)));
+        assert_eq!(
+            cat.seller_shipping_floor().unwrap(),
+            vec![("hardwax".to_string(), 8.0, "EUR".to_string())],
+            "a currencyless 0.0 is neither a floor nor a free shop"
+        );
     }
 }
