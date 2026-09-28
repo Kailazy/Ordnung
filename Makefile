@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help app app-only run prune prune-install genredb-publish ffmpeg-publish rb-suite rb-capture rb-accept
+.PHONY: help app app-only run prune prune-install genredb-publish ffmpeg-publish rb-suite rb-capture rb-accept promote
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -25,6 +25,10 @@ rb-capture: ## Snapshot a rekordbox stick as a suite reference (STICK=/Volumes/X
 
 rb-accept: ## Pin the last rb-suite run as the accepted baseline (NAME=…)
 	@cargo run --release -q -p ordnung-rbdb --example rb_suite -- accept $(NAME)
+
+promote: ## Promote a dev build to prod: it becomes releases/latest (website button, README, in-app update). V=X.Y.Z, default newest
+	@gh workflow run promote.yml $(if $(V),-f version=$(V))
+	@echo "Promote started: gh run list --workflow=promote.yml --limit 1"
 
 prune: ## Delete target/debug when it exceeds PRUNE_LIMIT_GB (default 50); release build is kept
 	@bash tools/prune-target.sh

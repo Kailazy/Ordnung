@@ -1,7 +1,10 @@
 name: Release
 
 # Push a version tag (e.g. `git tag v0.0.2 && git push origin v0.0.2`) to build a
-# universal macOS DMG and publish it as a GitHub Release that DJs can download.
+# universal macOS DMG and publish it as a GitHub **prerelease**: the dev channel.
+# Prereleases never become `releases/latest`, so the website button, the README
+# link and the in-app update check keep pointing at the last prod release until
+# a dev build is promoted with the Promote workflow (`make promote`).
 # `workflow_dispatch` lets you dry-run a build (artifact only, no Release) by hand.
 on:
   push:
@@ -74,6 +77,7 @@ jobs:
         with:
           files: Ordnung-*.dmg
           name: Ordnung ${{ github.ref_name }}
+          prerelease: true
           body: |
             **Universal macOS build** (Apple Silicon + Intel), ad-hoc signed.
             The rekordbox USB export is in beta and not included in this build;

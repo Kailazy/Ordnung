@@ -1,0 +1,37 @@
+name: Promote
+
+# Promote a dev build (a prerelease published by the Release workflow) to prod:
+# it becomes `releases/latest`, which the website download button, the README
+# link and the in-app update check all follow. No rebuild, the DMG is the one
+# the dev build shipped. Run with `make promote` (newest dev build) or
+# `make promote V=X.Y.Z`.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to promote (e.g. 0.165.0). Empty = newest release.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark the release as latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$VER" ]; then
+            tag="v${VER#v}"
+          else
+            # Newest v* release (skips the rolling ffmpeg/genredb assets).
+            tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 \
+              --json tagName,createdAt --jq '[.[] | select(.tagName | startswith("v"))] | sort_by(.createdAt) | last | .tagName')
+          fi
+          echo "Promoting $tag"
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest

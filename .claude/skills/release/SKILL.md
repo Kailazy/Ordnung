@@ -11,6 +11,19 @@ the root `Cargo.toml`. Everything else derives from it or from the git tag:
 workflow (`.github/workflows/release.yml`) builds the universal DMG and
 publishes a GitHub Release whenever a `v*` tag is pushed.
 
+## Channels: dev and prod
+
+Every pushed tag publishes a **prerelease**: the dev channel. GitHub never
+makes a prerelease `releases/latest`, and everything users install from
+follows `latest` (the website download button in `docs/index.html`, the
+README link, the in-app update check in `ordnung-core/src/update.rs`). So
+dev builds ship as often as we like and users stay on the last prod build.
+
+Prod is a promotion, not a rebuild: `make promote V=X.Y.Z` (or bare
+`make promote` for the newest build) runs `.github/workflows/promote.yml`,
+which flips that release to non-prerelease and `latest`. Only Kai decides
+when a build goes prod; never promote unasked.
+
 ## Semver contract
 
 `MAJOR.MINOR.PATCH`, judged by what a DJ using the app would notice:
@@ -47,7 +60,8 @@ CLAUDE.md). Then:
    (`Ordnung-X.Y.Z-macos-universal.dmg`) and publishes the GitHub Release.
    Confirm it started with `gh run list --workflow=release.yml --limit 1`
    and report the outcome; if it fails, read the log with
-   `gh run view <id> --log-failed` and fix before re-tagging.
+   `gh run view <id> --log-failed` and fix before re-tagging. The result
+   is a dev prerelease; it reaches users only when promoted (see Channels).
 
 Never re-use or move a tag that has already been pushed; a botched release
 gets a new patch version.
