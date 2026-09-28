@@ -875,45 +875,12 @@ impl App {
             egui::pos2(lane.right() - 46.0, lane.top() + 3.0),
             egui::vec2(42.0, 15.0),
         );
-        let tab = ui
-            .interact(
-                tab_rect,
-                ui.id().with("grid_edit_tab"),
-                egui::Sense::click(),
-            )
-            .on_hover_note("Adjust the beatgrid");
-        if tab.clicked() {
+        if lane_tab(ui, tab_rect, "grid_edit_tab", "GRID", self.grid_edit_open)
+            .on_hover_note("Adjust the beatgrid")
+            .clicked()
+        {
             self.grid_edit_open = !self.grid_edit_open;
         }
-        if tab.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        let (fill, text) = match (self.grid_edit_open, tab.hovered()) {
-            (true, _) => (
-                crate::ui::tokens::color::ACCENT,
-                crate::ui::tokens::color::LABEL,
-            ),
-            (false, true) => (
-                egui::Color32::from_rgba_unmultiplied(150, 150, 150, 120),
-                crate::ui::tokens::color::LABEL,
-            ),
-            (false, false) => (
-                egui::Color32::from_rgba_unmultiplied(150, 150, 150, 70),
-                crate::ui::tokens::color::LABEL_2,
-            ),
-        };
-        ui.painter().rect_filled(
-            tab_rect,
-            egui::Rounding::same(crate::ui::tokens::radius::XS),
-            fill,
-        );
-        ui.painter().text(
-            tab_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "GRID",
-            crate::ui::tokens::font::caption(),
-            text,
-        );
         if !self.grid_edit_open {
             return false;
         }
@@ -1435,8 +1402,54 @@ impl App {
                     }
                 }
             }
+            // A grab outlives its gesture when the lane changes under the hand
+            // (the grid editor opening turns the drag into a grid slide, the
+            // cue bar opening moves the lane and its id), and the release then
+            // never reaches the branch above. Let go here instead, or the
+            // record stays held: the clock frozen and play/pause dead.
+            if self.wave_grab.is_some() && (editing || !resp.dragged()) {
+                self.wave_grab = None;
+                let f = self.scrub.take().unwrap_or(shown_frac);
+                if let Some(a) = self.audio.as_mut() {
+                    a.end_scrub(f * dur);
+                }
+            }
         });
     }
+}
+
+/// A pill tab on the zoom lane's top edge ("GRID", "CUES"): quiet until
+/// hovered, lit while what it opens is showing. It senses drags as well as
+/// clicks so a press on it never falls through to the lane underneath,
+/// which would grab the record and hold the playhead.
+pub(crate) fn lane_tab(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    salt: &str,
+    label: &str,
+    lit: bool,
+) -> egui::Response {
+    use crate::ui::tokens::{color, font, radius};
+    let tab = ui.interact(rect, ui.id().with(salt), egui::Sense::click_and_drag());
+    if tab.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let (fill, text) = match (lit, tab.hovered()) {
+        (true, _) => (color::ACCENT, color::LABEL),
+        (false, true) => (
+            egui::Color32::from_rgba_unmultiplied(150, 150, 150, 120),
+            color::LABEL,
+        ),
+        (false, false) => (
+            egui::Color32::from_rgba_unmultiplied(150, 150, 150, 70),
+            color::LABEL_2,
+        ),
+    };
+    ui.painter()
+        .rect_filled(rect, egui::Rounding::same(radius::XS), fill);
+    ui.painter()
+        .text(rect.center(), egui::Align2::CENTER_CENTER, label, font::caption(), text);
+    tab
 }
 
 /// Draw the beatgrid over the zoom lane: a vertical line at every beat inside the
@@ -1783,6 +1796,17 @@ mod segmented_tests {
             }
         }
         assert!(repeats > 5, "expected a run of repeats, got {repeats}");
+
+        // And it keeps going for as long as the button is down, well past
+        // egui's click timeout (0.8 s), where a click-only press is dropped.
+        let mut late = 0;
+        while t < 3.0 {
+            t += 0.016;
+            if frame(&ctx, t, vec![], true, true, &rect).is_some() {
+                late += 1;
+            }
+        }
+        assert!(late > 40, "a long hold must keep repeating, got {late}");
 
         // Release, then hold the pointer still: nothing more fires.
         frame(&ctx, t + 0.016, vec![release(p)], true, true, &rect);
@@ -2265,8 +2289,16 @@ pub(crate) fn segmented(
             egui::pos2(rect.left() + w * i as f32, rect.top()),
             egui::vec2(w, rect.height()),
         );
+        // A repeating cell senses drags too: egui forgets a click-only press
+        // once it outlasts `max_click_duration` (0.8 s), which stopped a held
+        // nudge dead a moment after it got going.
+        let sense = if repeat {
+            egui::Sense::click_and_drag()
+        } else {
+            egui::Sense::click()
+        };
         let resp = ui
-            .interact(cell, ui.id().with((salt, i)), egui::Sense::click())
+            .interact(cell, ui.id().with((salt, i)), sense)
             .on_hover_note(*note);
         // Only the pill's end cells carry the outer curve; inner cells stay square
         // so their hover fill butts up against its neighbours.

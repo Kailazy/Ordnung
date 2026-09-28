@@ -518,42 +518,13 @@ impl App {
             egui::pos2(lane.right() - 94.0, lane.top() + 3.0),
             egui::vec2(42.0, 15.0),
         );
-        let tab = ui
-            .interact(tab_rect, ui.id().with("cue_edit_tab"), egui::Sense::click())
-            .on_hover_note("Hot cues, loop and memory cues");
-        if tab.clicked() {
+        if crate::player::lane_tab(ui, tab_rect, "cue_edit_tab", "CUES", self.config.cue_bar_open)
+            .on_hover_note("Hot cues, loop and memory cues")
+            .clicked()
+        {
             self.config.cue_bar_open = !self.config.cue_bar_open;
             let _ = self.config.save();
         }
-        if tab.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        let (fill, text) = match (self.config.cue_bar_open, tab.hovered()) {
-            (true, _) => (
-                crate::ui::tokens::color::ACCENT,
-                crate::ui::tokens::color::LABEL,
-            ),
-            (false, true) => (
-                egui::Color32::from_rgba_unmultiplied(150, 150, 150, 120),
-                crate::ui::tokens::color::LABEL,
-            ),
-            (false, false) => (
-                egui::Color32::from_rgba_unmultiplied(150, 150, 150, 70),
-                crate::ui::tokens::color::LABEL_2,
-            ),
-        };
-        ui.painter().rect_filled(
-            tab_rect,
-            egui::Rounding::same(crate::ui::tokens::radius::XS),
-            fill,
-        );
-        ui.painter().text(
-            tab_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "CUES",
-            crate::ui::tokens::font::caption(),
-            text,
-        );
     }
 
     /// The cue bar: a strip the lane's width, above the zoom lane. Left to
