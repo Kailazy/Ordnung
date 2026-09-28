@@ -154,7 +154,10 @@ use std::path::Path;
 ///     the floor and parked every line at the bump's PEAK (~40 ms late) on
 ///     48 kHz tracks at round tempos (120/125/150…). The fold now uses bins
 ///     no narrower than a hop and interpolates any bin nothing landed in.
-pub const ANALYZER_VERSION: u32 = 27;
+/// v28: metrical correction also tests the slower non-octave folds (3/4, 2/3,
+///     4/5). A dotted-eighth percussion line put the comb on a 4/3 period, so
+///     121 BPM deep techno read 161.4 (and Elevation 166.7 for 125).
+pub const ANALYZER_VERSION: u32 = 28;
 
 /// First analyzer version whose `waveform_preview`/`waveform_bands` span the
 /// **full track**. Earlier versions only covered the first 150 s (the key

@@ -129,7 +129,8 @@ pub fn detect(spec: &Spectrogram) -> TempoResult {
     // the true tempo (2/3× → a "3:2/triplet" read, 4/5× → "5:4"), because that fold's
     // comb teeth still hit every 2nd/3rd true beat. The true, faster tempo phase-locks
     // with more energy per tap (all taps on beats, not alternating on/off), so promote
-    // a faster metrical relative when its aligned energy clearly beats the current lock.
+    // a metrical relative when its aligned energy clearly beats the current lock. The
+    // same test catches the comb settling on a *faster* 4:3 fold of dotted rhythms.
     let (bpm, phase_frames) = correct_metrical(&env, frame_rate, bpm0, phase0);
     // Frame → time at the window *centre* (see `dsp::frame_to_ms`); the envelope
     // index is not a timestamp on its own.
@@ -231,17 +232,22 @@ fn refine(env: &[f32], frame_rate: f32, coarse_bpm: f32) -> (f32, f32) {
     (best_bpm, phase)
 }
 
-/// Faster metrical relatives to test against the detected tempo. `2/3` and `4/5`
-/// folds are what the comb settles on, so their inverses (`3/2`, `5/4`) plus the
-/// neighbouring `4/3` and the octave `2` recover the true tempo.
-const METRICAL_MULTIPLES: [f32; 4] = [5.0 / 4.0, 4.0 / 3.0, 3.0 / 2.0, 2.0];
+/// Metrical relatives to test against the detected tempo. `2/3` and `4/5` folds
+/// are what the comb settles on, so their inverses (`3/2`, `5/4`) plus the
+/// neighbouring `4/3` and the octave `2` recover the true tempo. The comb can
+/// also land *above* it: a dotted-eighth percussion line (every 3 sixteenths)
+/// puts its teeth on a `4/3` period, so 121 BPM deep techno read 161.4. The
+/// slower non-octave folds (`3/4`, `2/3`, `4/5`) undo that; half tempo is left
+/// out, since a half-time lock collects as much energy per tap as the true one.
+const METRICAL_MULTIPLES: [f32; 7] =
+    [3.0 / 4.0, 2.0 / 3.0, 4.0 / 5.0, 5.0 / 4.0, 4.0 / 3.0, 3.0 / 2.0, 2.0];
 
 /// A faster relative must beat the current lock's aligned-energy×prior score by this
 /// margin to win — so only a *clearly* better tempo overrides, leaving correct locks
 /// (and genuinely slow tracks) untouched.
 const OVERRIDE_MARGIN: f32 = 1.05;
 
-/// Promote a faster metrical relative of `(bpm, phase)` when it phase-locks with more
+/// Promote a metrical relative of `(bpm, phase)` when it phase-locks with more
 /// energy per tap (weighted by the tempo prior). Returns the chosen `(bpm, phase)`.
 fn correct_metrical(env: &[f32], frame_rate: f32, bpm: f32, phase: f32) -> (f32, f32) {
     let aligned_energy = |b: f32| comb_align(env, 60.0 / b * frame_rate, 0.25).1;
