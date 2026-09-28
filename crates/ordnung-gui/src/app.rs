@@ -3422,6 +3422,7 @@ impl App {
                 // place into whichever slot `nav_primary` assigns it — big and
                 // leading when vinyl is primary, a compact pinned row otherwise.
                 let crate_sets = self.crate_sets.clone();
+                let vinyl_tab = self.vinyl_tab;
                 let draw_vinyl_tile = |ui: &mut egui::Ui,
                                        view: &mut LibraryView,
                                        lead: bool,
@@ -3432,16 +3433,29 @@ impl App {
                     // in either slot. Just "Vinyl", at every tier and with no
                     // count: the shelf is a place you go, not a number you
                     // track.
-                    if source_tile(
+                    let tile = source_tile(
                         ui,
                         density,
                         SourceMark::Glyph(named(icons::VINYL)),
                         "Vinyl",
                         *view == LibraryView::Vinyl,
                     )
-                    .on_hover_note("Your Discogs vinyl collection")
-                    .clicked()
-                    {
+                    .on_hover_note("Your Discogs vinyl collection");
+                    let mut tile_clicked = tile.clicked();
+                    // The two shelves inside the tile, as the "New" pill sits
+                    // inside "Library"; the rail has no room beside the glyph.
+                    if !density.icons_only() {
+                        let current = match (*view == LibraryView::Vinyl, vinyl_tab) {
+                            (true, VinylTab::Shelf(list)) => Some(list),
+                            _ => None,
+                        };
+                        if let Some(list) = crate::sidebar::nav_tile_shelves(ui, tile.rect, current) {
+                            *sidebar_action = Some(SidebarAction::OpenShelf(list));
+                            // The tile underneath reports the same click.
+                            tile_clicked = false;
+                        }
+                    }
+                    if tile_clicked {
                         *view = LibraryView::Vinyl;
                     }
                     // The crates, under the shelf the way the playlists sit
@@ -3796,6 +3810,10 @@ impl App {
                     self.reload_after_playlist_edit();
                 }
             }
+            Some(SidebarAction::OpenShelf(list)) => {
+                self.view = LibraryView::Vinyl;
+                self.vinyl_tab = VinylTab::Shelf(list);
+            }
             Some(SidebarAction::NewCrateSet(kind)) => {
                 self.nav_unfold(match kind {
                     CrateKind::Crate => "crates",
@@ -3807,7 +3825,13 @@ impl App {
                 };
                 match Catalog::open(&self.db_path).and_then(|c| c.create_crate_set(placeholder, kind)) {
                     Ok(id) => {
-                        self.view = LibraryView::CrateSet(id);
+                        // A new crate opens, like a new playlist. A new tag
+                        // does not: it is a word to mark songs with, named
+                        // in place, and opening its (empty) table would throw
+                        // away the view the user was marking songs in.
+                        if kind == CrateKind::Crate {
+                            self.view = LibraryView::CrateSet(id);
+                        }
                         // An empty buffer, like a new playlist: the hint shows
                         // the placeholder, and a blank name on blur discards
                         // the set.

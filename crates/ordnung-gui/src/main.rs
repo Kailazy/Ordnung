@@ -2314,6 +2314,9 @@ enum SidebarAction {
     NewPlaylist(Option<Id>),
     /// Make a crate, or a tag, and hand its row to the inline editor.
     NewCrateSet(CrateKind),
+    /// Go to the vinyl view on one of its shelves (the pills inside the
+    /// "Vinyl" tile).
+    OpenShelf(VinylList),
     RenameCrateSet(Id, String),
     DeleteCrateSet(Id),
     /// Songs dropped onto a crate (crate id, the dragged songs).

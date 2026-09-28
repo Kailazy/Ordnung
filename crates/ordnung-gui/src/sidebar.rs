@@ -222,11 +222,6 @@ pub(crate) fn nav_tile_badge(
     count: &str,
     selected: bool,
 ) -> egui::Response {
-    // Sized off the tile so the pill stays visually inset at every tier: a
-    // right gutter matching the tile's left one, and a height that leaves the
-    // tile's fill visible above and below.
-    const GUTTER: f32 = 8.0;
-    let height = (host.height() - 16.0).clamp(18.0, 24.0);
     // The sparkle and the count, the sparkle in the icon face.
     let galley = crate::ui::icon_text(named(icons::SPARKLE), count, font::callout()).into_galley(
         ui,
@@ -235,29 +230,91 @@ pub(crate) fn nav_tile_badge(
         egui::TextStyle::Small,
     );
     let width = galley.size().x + 16.0;
+    nav_tile_pill(ui, host, host.right() - NAV_PILL_GUTTER, width, "nav-tile-badge", selected, false, |p, rect| {
+        p.galley(rect.center() - galley.size() / 2.0, galley, color::LABEL);
+    })
+}
+
+/// The Discogs shelves inside the "Vinyl" tile: a square pill per shelf at
+/// the tile's right end, each carrying its shelf mark, the way the "New"
+/// pill sits inside "Library". The collection and the wantlist are two views
+/// of the one vinyl library, so they live in its tile rather than as rows of
+/// their own. `current` is the shelf on screen, lit; returns the one clicked.
+/// A shelf is only on screen while the tile is selected, so the pills are
+/// drawn for the accent tile then: the current shelf on the accent, the
+/// other a bare mark.
+pub(crate) fn nav_tile_shelves(
+    ui: &mut egui::Ui,
+    host: egui::Rect,
+    current: Option<VinylList>,
+) -> Option<VinylList> {
+    const GAP: f32 = 4.0;
+    let side = nav_pill_height(host);
+    let mut right = host.right() - NAV_PILL_GUTTER;
+    let mut clicked = None;
+    // Right to left, so the collection reads first.
+    for (list, note) in [
+        (VinylList::Wantlist, "Your wantlist"),
+        (VinylList::Collection, "Your collection"),
+    ] {
+        let on = current == Some(list);
+        let resp = nav_tile_pill(ui, host, right, side, ("nav-tile-shelf", list), on, current.is_some(), |p, rect| {
+            let ink = if on { color::LABEL } else { color::LABEL_2 };
+            crate::ui::icon::shelf(p, rect.center(), crate::ui::icon::SHELF_R, ink, on, list);
+        })
+        .on_hover_note(note);
+        if resp.clicked() {
+            clicked = Some(list);
+        }
+        right -= side + GAP;
+    }
+    clicked
+}
+
+/// Inset of a tile pill from the tile's right edge, matching the tile's
+/// left gutter.
+const NAV_PILL_GUTTER: f32 = 8.0;
+
+/// A tile pill's height: the tile's, less enough to leave the tile's fill
+/// showing above and below it at every tier.
+fn nav_pill_height(host: egui::Rect) -> f32 {
+    (host.height() - 16.0).clamp(18.0, 24.0)
+}
+
+/// One pill inside a nav tile: `width` wide with its right edge at `right`,
+/// centred on the tile, claimed with `Sense::click` at that exact rect so it
+/// sits above the tile in the interaction stack (the tile was added first,
+/// so the pill wins). A muted chip that lifts on hover, the accent while
+/// `selected`; on a tile that is itself `on_accent` (selected), the chip
+/// only shows while selected, in the full accent so it stands off the
+/// tile's. `paint` draws what it carries into its rect.
+fn nav_tile_pill(
+    ui: &mut egui::Ui,
+    host: egui::Rect,
+    right: f32,
+    width: f32,
+    salt: impl std::hash::Hash,
+    selected: bool,
+    on_accent: bool,
+    paint: impl FnOnce(&egui::Painter, egui::Rect),
+) -> egui::Response {
+    let height = nav_pill_height(host);
     let rect = egui::Rect::from_min_size(
-        egui::pos2(
-            host.right() - GUTTER - width,
-            host.center().y - height / 2.0,
-        ),
+        egui::pos2(right - width, host.center().y - height / 2.0),
         egui::vec2(width, height),
     );
-    // Claimed with `Sense::click` at this exact rect so it sits above the tile
-    // in the interaction stack; the tile was added first, so the badge wins.
-    let resp = ui.interact(rect, ui.id().with("nav-tile-badge"), egui::Sense::click());
-    // Selected: solid accent. Otherwise a muted chip that lifts on hover, so it
-    // reads as a control rather than a static count.
-    let fill = if selected {
-        color::ACCENT_SOFT
-    } else if resp.hovered() {
-        color::SURFACE_ACTIVE
-    } else {
-        color::SURFACE_HOVER
+    let resp = ui.interact(rect, ui.id().with(salt), egui::Sense::click());
+    let fill = match (on_accent, selected, resp.hovered()) {
+        (true, true, _) => color::ACCENT,
+        (true, false, true) => egui::Color32::from_white_alpha(24),
+        (true, false, false) => egui::Color32::TRANSPARENT,
+        (false, true, _) => color::ACCENT_SOFT,
+        (false, false, true) => color::SURFACE_ACTIVE,
+        (false, false, false) => color::SURFACE_HOVER,
     };
     ui.painter()
         .rect_filled(rect, egui::Rounding::same(height / 2.0), fill);
-    ui.painter()
-        .galley(rect.center() - galley.size() / 2.0, galley, color::LABEL);
+    paint(ui.painter(), rect);
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -537,9 +594,13 @@ fn inline_rename_editor(
         })
         .inner;
     // Grab focus only on the first frame the box appears. Re-requesting it every
-    // frame would pin focus to the box and make clicking away impossible.
+    // frame would pin focus to the box and make clicking away impossible. The
+    // box is also scrolled into view then, focus ring and all: a row made at
+    // the end of a long list (a tag under forty playlists) would otherwise be
+    // named off screen.
     if state.needs_focus {
         resp.request_focus();
+        ui.scroll_to_rect(resp.rect.expand(space::S2), None);
         state.needs_focus = false;
     }
     if !resp.lost_focus() {
