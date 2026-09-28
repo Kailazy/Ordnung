@@ -2428,7 +2428,7 @@ impl App {
                 });
             }
             Some(TrackMenuAction::Analyze(ids)) => {
-                self.spawn_analyze_ids(ctx_clone.clone(), ids, false);
+                self.spawn_analyze_ids(ids, false);
             }
             Some(TrackMenuAction::AddToPlaylist(pid, ids)) => {
                 match Catalog::open(&self.db_path).and_then(|c| c.add_tracks(pid, &ids)) {

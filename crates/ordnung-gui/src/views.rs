@@ -1164,11 +1164,11 @@ impl App {
                 }
                 // Run analysis for the copies missing a quality verdict. `force` is
                 // false: these ids are exactly the ones not yet analyzed at the
-                // current version. On completion `poll_worker` → `reload`
+                // current version. On completion `poll_analysis` → `reload`
                 // recomputes the duplicate groups (we're in the Duplicates view),
                 // so the chips appear without any extra plumbing.
-                Act::Analyze(ids) if !ids.is_empty() && !self.is_busy() => {
-                    self.spawn_analyze_ids(ui.ctx().clone(), ids, false);
+                Act::Analyze(ids) if !ids.is_empty() => {
+                    self.spawn_analyze_ids(ids, false);
                 }
                 Act::Analyze(_) => {}
                 // Persist the dismissal and recompute so the group drops out now.

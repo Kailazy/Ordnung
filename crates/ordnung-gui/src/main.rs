@@ -7,6 +7,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod analysis_lane;
 mod app;
 mod audio;
 mod config;
@@ -72,7 +73,7 @@ use records::{RecordFetched, RecordSearch, SearchScope, RECORD_DEBOUNCE, SCOPE_T
 use sidebar::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -1708,6 +1709,10 @@ struct App {
     /// Set while a cancellable job (scan / artwork fetch) is running; the worker
     /// polls it and stops early. `None` when idle or running a non-cancellable job.
     job_cancel: Option<Arc<AtomicBool>>,
+    /// The analysis lane, off the shared job slot so a long analysis never
+    /// locks out imports or other jobs. Started on the first Analyze or
+    /// auto-analyzed import. See [`analysis_lane`].
+    analysis: Option<analysis_lane::AnalysisLane>,
     /// Per-track candidate releases waiting for the user to pick (front first).
     artwork_queue: VecDeque<ArtworkChoices>,
     /// Whether picking a candidate should also fill in the track's missing

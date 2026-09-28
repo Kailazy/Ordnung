@@ -1,5 +1,6 @@
 //! Split out of `main.rs`; part of the GUI `App`.
 use super::*;
+use crate::analysis_lane::{AnalysisQueue, AnalyzeTargets};
 
 impl App {
     pub(crate) fn is_busy(&self) -> bool {
@@ -140,8 +141,9 @@ impl App {
     /// auto-analysis, and the automatic Discogs release match (only when it's
     /// switched on AND a token exists — without one the searches could only
     /// fail). Snapshotted at spawn time so the worker never reads config off
-    /// another thread.
-    fn import_follow_ups(&self) -> FollowUps {
+    /// another thread. Auto-analysis is a handle on the analysis lane, which
+    /// this starts if it isn't running.
+    fn import_follow_ups(&mut self) -> FollowUps {
         let token = self.discogs_token().trim().to_string();
         let auto_match = if self.config.discogs_auto_fetch && !token.is_empty() {
             Some(AutoMatchSpec {
@@ -183,7 +185,7 @@ impl App {
         };
         FollowUps {
             auto_convert,
-            auto_analyze: self.config.auto_analyze,
+            auto_analyze: self.config.auto_analyze.then(|| self.analysis_queue()),
             auto_match,
         }
     }
@@ -549,39 +551,6 @@ impl App {
         self.status = format!("Searching {} for missing files…", dir.display());
         let db = self.db_path.clone();
         thread::spawn(move || run_relocate(db, dir, tx, ctx));
-    }
-
-    pub(crate) fn spawn_analyze(&mut self, ctx: egui::Context, force: bool) {
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        // Cancellable: a whole-library sweep is thousands of tracks, and the flag
-        // is checked per track, so Abort stops the queue without discarding the
-        // analyses that already landed.
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
-        self.status = "Analyzing…".into();
-        let db = self.db_path.clone();
-        let query = if self.filter.trim().is_empty() {
-            None
-        } else {
-            Some(self.filter.clone())
-        };
-        thread::spawn(move || {
-            run_analyze(db, AnalyzeTargets::Query(query), force, cancel, tx, ctx)
-        });
-    }
-
-    /// Analyze a specific set of tracks (the context-menu selection) rather than
-    /// the whole filtered view. Skips tracks already analyzed at the current
-    /// version unless `force`.
-    pub(crate) fn spawn_analyze_ids(&mut self, ctx: egui::Context, ids: Vec<Id>, force: bool) {
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
-        self.status = "Analyzing…".into();
-        let db = self.db_path.clone();
-        thread::spawn(move || run_analyze(db, AnalyzeTargets::Ids(ids), force, cancel, tx, ctx));
     }
 
     /// Sync the local vinyl-collection cache from Discogs: pull the user's whole
@@ -1617,13 +1586,13 @@ pub(crate) fn import_files(
 }
 
 /// The per-user follow-up policy an import spawn snapshots for its worker:
-/// whether to convert new files to the default target, whether to chain
+/// whether to convert new files to the default target, where to send them for
 /// analysis, and whether (and how) to auto-match new tracks to Discogs
 /// releases. All are GUI policy mirroring explicit actions; core stays
 /// explicit-only.
 pub(crate) struct FollowUps {
     pub auto_convert: Option<AutoConvertSpec>,
-    pub auto_analyze: bool,
+    pub auto_analyze: Option<AnalysisQueue>,
     pub auto_match: Option<AutoMatchSpec>,
 }
 
@@ -1645,13 +1614,16 @@ pub(crate) struct AutoMatchSpec {
     pub hidden_mediums: Vec<String>,
 }
 
-/// Close out an import: report the tally, chaining auto-convert, auto-analysis
-/// and then the automatic Discogs release match onto this same job thread when
-/// they're enabled — one progress flow, one terminal `Done` carrying the
-/// combined summary. Conversion runs FIRST: an in-place convert relinks the
-/// catalog to the new file, and analyzing before that would key the analysis
-/// cache on a file about to disappear. The import's cancel flag stays live
-/// through every chained phase, so one Abort covers the whole run.
+/// Close out an import: report the tally, chaining auto-convert and then the
+/// automatic Discogs release match onto this same job thread when they're
+/// enabled — one progress flow, one terminal `Done` carrying the combined
+/// summary. The new tracks go to the analysis lane in between rather than
+/// being analyzed here, so the job slot frees once the files are in and the
+/// analysis carries on beside whatever runs next. Conversion runs FIRST: an
+/// in-place convert relinks the catalog to the new file, and analyzing before
+/// that would key the analysis cache on a file about to disappear. The
+/// import's cancel flag stays live through every chained phase, so one Abort
+/// covers the whole job; the lane has its own Cancel.
 fn finish_import(
     catalog: &Catalog,
     outcome: ImportOutcome,
@@ -1669,18 +1641,9 @@ fn finish_import(
             }
         }
     }
-    if !outcome.cancelled && follow.auto_analyze && !outcome.touched.is_empty() {
-        // Resolve the touched ids to tracks; skip any that vanished since the
-        // scan. Lead the analysis tally with what was imported, so the combined
-        // Done reads e.g. "Scanned 5 file(s): … Analyzed 5 track(s), 0 failed."
-        let tracks: Vec<Track> = outcome
-            .touched
-            .iter()
-            .filter_map(|&id| catalog.get_track(id).ok())
-            .collect();
-        if !tracks.is_empty() {
-            let lead = format!("{summary} ");
-            summary = analyze_tracks(catalog, tracks, false, &lead, cancel, tx, ctx);
+    if !outcome.cancelled && !cancel.load(Ordering::Relaxed) && !outcome.touched.is_empty() {
+        if let Some(queue) = &follow.auto_analyze {
+            queue.add(AnalyzeTargets::Ids(outcome.touched.clone()), false);
         }
     }
     if !outcome.cancelled && !cancel.load(Ordering::Relaxed) && !outcome.touched.is_empty() {
@@ -2468,208 +2431,6 @@ pub(crate) fn run_trash_marked(
         }
     )));
     ctx.request_repaint();
-}
-
-/// What `run_analyze` should operate on: the current filtered view (`Query`) or
-/// an explicit set of track ids (`Ids`, from the right-click selection).
-pub(crate) enum AnalyzeTargets {
-    Query(Option<String>),
-    Ids(Vec<Id>),
-}
-
-pub(crate) fn run_analyze(
-    db: PathBuf,
-    targets: AnalyzeTargets,
-    force: bool,
-    cancel: Arc<AtomicBool>,
-    tx: Sender<JobMsg>,
-    ctx: egui::Context,
-) {
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
-    };
-    let tracks = match targets {
-        AnalyzeTargets::Query(query) => match catalog.list_tracks(query.as_deref(), 0) {
-            Ok(t) => t,
-            Err(e) => {
-                let _ = tx.send(JobMsg::Failed(e.to_string()));
-                ctx.request_repaint();
-                return;
-            }
-        },
-        // Resolve each id; silently skip any that vanished since the menu opened.
-        AnalyzeTargets::Ids(ids) => ids
-            .iter()
-            .filter_map(|&id| catalog.get_track(id).ok())
-            .collect(),
-    };
-    if tracks.is_empty() {
-        let _ = tx.send(JobMsg::Done("No matching tracks to analyze.".into()));
-        ctx.request_repaint();
-        return;
-    }
-    let summary = analyze_tracks(&catalog, tracks, force, "", &cancel, &tx, &ctx);
-    let _ = tx.send(JobMsg::Done(summary));
-    ctx.request_repaint();
-}
-
-/// Analyze `tracks` in parallel, skipping any already current at this analyzer
-/// version (unless `force`), then save each result. Sends progress and returns
-/// the closing tally, prefixed with `lead` (empty for a standalone analyze; the
-/// import tally when chained after a scan) — the caller owns the terminal
-/// `Done`, so `finish_import` can chain further phases after this one. Shared
-/// by the explicit "Analyze" action and auto-analysis-on-import.
-fn analyze_tracks(
-    catalog: &Catalog,
-    tracks: Vec<Track>,
-    force: bool,
-    lead: &str,
-    cancel: &AtomicBool,
-    tx: &Sender<JobMsg>,
-    ctx: &egui::Context,
-) -> String {
-    let mut pending = Vec::new();
-    for t in &tracks {
-        let (size, mtime) = file_stamp(&t.source_path);
-        match catalog.needs_analysis(t.id, size, mtime, ANALYZER_VERSION) {
-            Ok(true) if !force => pending.push((t.id, t.source_path.clone(), size, mtime)),
-            Ok(_) if force => pending.push((t.id, t.source_path.clone(), size, mtime)),
-            _ => {}
-        }
-    }
-    if pending.is_empty() {
-        return format!("{lead}All {} track(s) already analyzed.", tracks.len());
-    }
-    let total = pending.len();
-    let _ = tx.send(JobMsg::Status(format!("Analyzing {total} track(s)…")));
-    let _ = tx.send(JobMsg::Progress { done: 0, total });
-    ctx.request_repaint();
-
-    // Analysis runs in parallel; a shared atomic counts completions so the
-    // progress bar advances as tracks finish. `map_init` hands each rayon worker
-    // its own `Sender` clone (the channel sender isn't `Sync`); the egui context
-    // and the counter are `Sync`, so they're shared by reference.
-    //
-    // Run it on a pool sized for *memory*, not just cores: each worker holds a
-    // whole decoded track plus its spectrogram, so on a small-RAM machine the
-    // default one-thread-per-core pool is what pushes the app into swap.
-    let params = AnalysisParams::default();
-    let done = AtomicUsize::new(0);
-    let pool = analysis_pool();
-
-    // Map id -> source path so a failure can be reported by file name.
-    let name_for = |id: u64| -> String {
-        pending
-            .iter()
-            .find(|(pid, ..)| *pid == id)
-            .map(|(_, path, ..)| {
-                Path::new(path)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.clone())
-            })
-            .unwrap_or_else(|| format!("track {id}"))
-    };
-
-    // Results stream back to *this* thread and are saved as they land, rather
-    // than being collected and written after the whole fan-out finishes. The
-    // catalog connection isn't shareable across rayon workers, so it stays here
-    // and the workers only send.
-    //
-    // Why it matters: a full-library sweep runs for hours. Collecting first
-    // meant a crash, a force-quit, or a power loss at hour three threw away
-    // every track analysed in that run — `needs_analysis` would re-derive the
-    // whole pending set on the next launch. Saving per track makes the run
-    // resumable at whatever point it stopped, and the SQLite write is trivial
-    // next to the decode+FFT that produced it.
-    let (res_tx, res_rx) = mpsc::channel::<(u64, u64, i64, Option<Result<Analysis, String>>)>();
-    let (mut ok, mut failed, mut skipped) = (0u64, 0u64, 0u64);
-    let mut fails: Vec<(String, String)> = Vec::new();
-
-    // The fan-out borrows `pending`/`cancel`/`ctx`; the drain borrows `catalog`.
-    // A scoped thread lets both run concurrently without moving either.
-    thread::scope(|scope| {
-        scope.spawn(|| {
-            let run = || {
-                pending.par_iter().for_each_init(
-                    || (tx.clone(), res_tx.clone()),
-                    |(tx_local, res_local), (id, path, size, mtime)| {
-                        // Abort can't interrupt a decode already in flight, but
-                        // it stops every track rayon hasn't started yet — with a
-                        // queue of thousands that's the difference between
-                        // seconds and hours. `None` marks a skipped track: it's
-                        // neither saved nor counted as a failure.
-                        if cancel.load(Ordering::Relaxed) {
-                            // Still tick progress: the bar drains quickly to its
-                            // total instead of freezing where the user clicked.
-                            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                            let _ = tx_local.send(JobMsg::Progress { done: n, total });
-                            ctx.request_repaint();
-                            let _ = res_local.send((*id, *size, *mtime, None));
-                            return;
-                        }
-                        let r = analysis::analyze_file(path, params).map_err(|e| e.to_string());
-                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                        let _ = tx_local.send(JobMsg::Progress { done: n, total });
-                        ctx.request_repaint();
-                        let _ = res_local.send((*id, *size, *mtime, Some(r)));
-                    },
-                );
-            };
-            // `install` runs the fan-out on the sized pool; without a pool we're
-            // on rayon's global one, which is the pre-clamp behavior.
-            match &pool {
-                Some(p) => p.install(run),
-                None => run(),
-            }
-            // Drop this thread's handle so the drain below sees the channel
-            // close once every worker clone is gone.
-            drop(res_tx);
-        });
-
-        // Drain and persist as each track finishes. Ends when the fan-out
-        // thread and all its worker clones have dropped their senders.
-        for (id, size, mtime, result) in res_rx {
-            let Some(result) = result else {
-                skipped += 1;
-                continue;
-            };
-            match result {
-                Ok(a) => match catalog.save_analysis(id, &a, size, mtime) {
-                    Ok(()) => ok += 1,
-                    Err(e) => {
-                        failed += 1;
-                        fails.push((name_for(id), format!("couldn't save analysis: {e}")));
-                    }
-                },
-                Err(e) => {
-                    failed += 1;
-                    fails.push((name_for(id), format!("analysis failed: {e}")));
-                }
-            }
-        }
-    });
-    if !fails.is_empty() {
-        let _ = tx.send(JobMsg::Failures {
-            title: "Analyze".into(),
-            items: fails,
-        });
-    }
-    // A cancelled run reports what it managed to keep, so the user knows the
-    // finished analyses were saved and only the remainder was dropped.
-    if skipped > 0 {
-        format!(
-            "{lead}Analysis cancelled: {ok} of {total} track(s) analyzed, \
-             {failed} failed, {skipped} skipped."
-        )
-    } else {
-        format!("{lead}Analyzed {ok} track(s), {failed} failed.")
-    }
 }
 
 /// How long a cached marketplace price stays fresh (30 days). Prices are the one
@@ -4480,7 +4241,7 @@ mod usb_transfer_tests {
             egui::Context::default(),
             FollowUps {
                 auto_convert: None,
-                auto_analyze: false,
+                auto_analyze: None,
                 auto_match: None,
             },
         );
@@ -4852,7 +4613,7 @@ mod drop_import_tests {
                 egui::Context::default(),
                 FollowUps {
                     auto_convert: None,
-                    auto_analyze: false,
+                    auto_analyze: None,
                     auto_match: None,
                 },
             );

@@ -271,6 +271,7 @@ impl App {
             cover_drop: None,
             tags_editing: false,
             job_cancel: None,
+            analysis: None,
             artwork_queue: VecDeque::new(),
             artwork_enrich: false,
             wantlist_after_fetch: Vec::new(),
@@ -2036,10 +2037,11 @@ impl App {
         self.tex_graveyard.clear();
         // Closed windows and menus let their backdrop textures go.
         crate::ui::glass::sweep(ctx);
-        // Both lanes drain every frame; either can change the rows.
+        // Every lane drains every frame; any can change the rows.
         let worker_changed = self.poll_worker();
         let vinyl_changed = self.poll_vinyl_edits();
-        if worker_changed || vinyl_changed {
+        let analysis_changed = self.poll_analysis();
+        if worker_changed || vinyl_changed || analysis_changed {
             self.reload();
             self.refresh_selected();
             // A finished analysis job may have re-gridded the loaded track;
@@ -2470,50 +2472,52 @@ impl App {
                     // the vinyl side too: songs on records.
                     // A tag showing its tracks is the library table again.
                     if !matches!(self.view, LibraryView::Vinyl | LibraryView::CrateSet(_)) || self.tag_table_view() {
-                        ui.add_enabled_ui(!busy, |ui| {
-                            // When rows are selected, the toolbar buttons act on just that
-                            // selection (in visible order); otherwise they fall back to the
-                            // whole filtered view. The label reflects which, so a user who
-                            // picked a few tracks isn't surprised by a full-library run.
-                            // USB rows have synthetic non-catalog ids, so a device-view
-                            // selection is ignored here — the buttons keep their
-                            // whole-catalog fallback meaning instead of no-op'ing.
-                            let usb_view = matches!(self.view, LibraryView::Usb(..));
-                            let sel_ids: Vec<Id> = if usb_view {
-                                Vec::new()
+                        // When rows are selected, the toolbar buttons act on just that
+                        // selection (in visible order); otherwise they fall back to the
+                        // whole filtered view. The label reflects which, so a user who
+                        // picked a few tracks isn't surprised by a full-library run.
+                        // USB rows have synthetic non-catalog ids, so a device-view
+                        // selection is ignored here — the buttons keep their
+                        // whole-catalog fallback meaning instead of no-op'ing.
+                        let usb_view = matches!(self.view, LibraryView::Usb(..));
+                        let sel_ids: Vec<Id> = if usb_view {
+                            Vec::new()
+                        } else {
+                            self.rows
+                                .iter()
+                                .filter(|x| self.selection.contains(&x.id))
+                                .map(|x| x.id)
+                                .collect()
+                        };
+                        // Analysis: one button. Force re-analyze and bulk Discogs
+                        // fetches were dropped — the per-track ↻ re-pick covers the
+                        // metadata case, and re-analysis is rarely wanted in bulk.
+                        // It stays live while a job runs: analysis has its own
+                        // lane, and a click mid-run adds to the queue.
+                        let analyze_label = if sel_ids.is_empty() {
+                            "Analyze".to_string()
+                        } else {
+                            format!("Analyze {} selected", sel_ids.len())
+                        };
+                        if ui
+                            .button(crate::ui::icon_text(
+                                named(icons::LIGHTNING),
+                                &analyze_label,
+                                font::body(),
+                            ))
+                            .on_hover_note(
+                                "Detect BPM, key, beatgrid, and quality. Skips tracks \
+                         already analyzed.",
+                            )
+                            .clicked()
+                        {
+                            if sel_ids.is_empty() {
+                                self.spawn_analyze(false);
                             } else {
-                                self.rows
-                                    .iter()
-                                    .filter(|x| self.selection.contains(&x.id))
-                                    .map(|x| x.id)
-                                    .collect()
-                            };
-                            // Analysis: one button. Force re-analyze and bulk Discogs
-                            // fetches were dropped — the per-track ↻ re-pick covers the
-                            // metadata case, and re-analysis is rarely wanted in bulk.
-                            let analyze_label = if sel_ids.is_empty() {
-                                "Analyze".to_string()
-                            } else {
-                                format!("Analyze {} selected", sel_ids.len())
-                            };
-                            if ui
-                                .button(crate::ui::icon_text(
-                                    named(icons::LIGHTNING),
-                                    &analyze_label,
-                                    font::body(),
-                                ))
-                                .on_hover_note(
-                                    "Detect BPM, key, beatgrid, and quality. Skips tracks \
-                             already analyzed.",
-                                )
-                                .clicked()
-                            {
-                                if sel_ids.is_empty() {
-                                    self.spawn_analyze(ctx.clone(), false);
-                                } else {
-                                    self.spawn_analyze_ids(ctx.clone(), sel_ids.clone(), false);
-                                }
+                                self.spawn_analyze_ids(sel_ids.clone(), false);
                             }
+                        }
+                        ui.add_enabled_ui(!busy, |ui| {
                             // Batch convert: enabled whenever tracks are selected. Opens a
                             // dialog to pick one target format for all of them.
                             if !self.selection.is_empty() && !usb_view {
@@ -2952,17 +2956,14 @@ impl App {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.add_space(2.0);
             let mut do_abort = false;
-            ui.horizontal(|ui| {
+            let mut abort_analysis = false;
+            // Bars and Cancel buttons share one height (see `ui::control_row`).
+            ui.horizontal(|ui| crate::ui::control_row(ui, |ui| {
                 // Determinate bar when the job reports item counts; otherwise a
                 // plain spinner for work whose length we can't measure.
                 match self.progress {
                     Some((done, total)) if total > 0 => {
-                        let frac = (done as f32 / total as f32).clamp(0.0, 1.0);
-                        ui.add(
-                            egui::ProgressBar::new(frac)
-                                .desired_width(180.0)
-                                .text(format!("{done}/{total}")),
-                        );
+                        status_progress(ui, done, total, format!("{done}/{total}"));
                     }
                     _ if self.is_busy() || self.vinyl_edit_running() => {
                         ui.spinner();
@@ -2976,6 +2977,18 @@ impl App {
                         .clicked()
                 {
                     do_abort = true;
+                }
+                // Analysis runs on its own lane, so it has its own bar and
+                // Cancel beside the job's: stopping one never stops the other.
+                if let Some((done, total)) = self.analysis_progress().filter(|&(_, t)| t > 0) {
+                    status_progress(ui, done, total, format!("Analyzing {done}/{total}"));
+                    if ui
+                        .button("✖ Cancel")
+                        .on_hover_note("Stop analyzing after the tracks already running")
+                        .clicked()
+                    {
+                        abort_analysis = true;
+                    }
                 }
                 if let Some(err) = &self.load_error {
                     ui.colored_label(egui::Color32::LIGHT_RED, format!("catalog error: {err}"));
@@ -2996,12 +3009,15 @@ impl App {
                         ui.label(text);
                     }
                 }
-            });
+            }));
             if do_abort {
                 if let Some(cancel) = &self.job_cancel {
                     cancel.store(true, Ordering::Relaxed);
                 }
                 self.status = "Cancelling…".into();
+            }
+            if abort_analysis {
+                self.cancel_analysis();
             }
             ui.add_space(2.0);
         });
@@ -4524,6 +4540,18 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
         pdb_info,
         complete: true,
     }
+}
+
+/// A status-bar progress bar: `done` of `total`, labelled `text`, as tall as
+/// the row's controls so the Cancel beside it lines up.
+fn status_progress(ui: &mut egui::Ui, done: usize, total: usize, text: String) {
+    let frac = (done as f32 / total as f32).clamp(0.0, 1.0);
+    ui.add(
+        egui::ProgressBar::new(frac)
+            .desired_width(180.0)
+            .desired_height(ui.spacing().interact_size.y)
+            .text(text),
+    );
 }
 
 #[cfg(test)]
