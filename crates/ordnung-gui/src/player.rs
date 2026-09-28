@@ -297,13 +297,15 @@ impl App {
         // fixed base. Only reserve the lane's extra height when there's a waveform
         // to show — unanalyzed tracks have no lane.
         // The cue bar stacks above the lane when it's open (see `cues`),
-        // sliding down into place and fading in, and back out the same way.
-        let cue_t = ctx.animate_bool_with_time(
-            egui::Id::new("cue_bar_reveal"),
-            !waveform.is_empty() && self.config.cue_bar_open,
-            CUE_BAR_ANIM,
-        );
-        let cue_strip_h = (crate::cues::CUE_BAR_H + 8.0) * cue_t;
+        // there at once, no reveal. The panel grows by the strip and the row
+        // gap after it, exactly, so the lane and the controls under it stay
+        // where they were: the bar only adds height above them.
+        let cue_open = !waveform.is_empty() && self.config.cue_bar_open;
+        let cue_strip_h = if cue_open {
+            crate::cues::CUE_BAR_H + 8.0 + ctx.style().spacing.item_spacing.y
+        } else {
+            0.0
+        };
         let panel_h = if waveform.is_empty() {
             150.0
         } else {
@@ -337,22 +339,25 @@ impl App {
                 // playhead, scrolling under it during playback. Wheel to zoom,
                 // grab and drag to scrub. Skipped for unanalyzed tracks (no waveform).
                 if !waveform.is_empty() {
-                    if cue_t > 0.0 {
-                        // The strip grows with the reveal; the bar sits at its
-                        // bottom, so it slides down out from under the top edge.
+                    if cue_open {
+                        // The strip is the bar and the 8 pt under it; the bar
+                        // draws in a child, which leaves the layout to the
+                        // strip (a child allocated in the parent pulled the
+                        // cursor back up by that gap, lifting everything
+                        // below it a few points).
                         let (strip, _) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), cue_strip_h),
+                            egui::vec2(
+                                ui.available_width(),
+                                crate::cues::CUE_BAR_H + 8.0,
+                            ),
                             egui::Sense::hover(),
                         );
-                        let full = egui::Rect::from_min_size(
-                            egui::pos2(strip.left(), strip.bottom() - 8.0 - crate::cues::CUE_BAR_H),
+                        let bar = egui::Rect::from_min_size(
+                            strip.min,
                             egui::vec2(strip.width(), crate::cues::CUE_BAR_H),
                         );
-                        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(full), |ui| {
-                            ui.set_clip_rect(strip.intersect(ui.clip_rect()));
-                            ui.set_opacity(cue_t);
-                            self.draw_cue_bar(ui);
-                        });
+                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar));
+                        self.draw_cue_bar(&mut child);
                     }
                     // Prefer the high-res envelope; fall back to the coarse preview
                     // bands while the PCM is still decoding.
@@ -2742,7 +2747,6 @@ const MIN_ZOOM_SECS: f32 = 0.5;
 const MAX_ZOOM_SECS: f32 = 90.0;
 
 /// How long the cue bar takes to slide into or out of the player.
-const CUE_BAR_ANIM: f32 = 0.16;
 
 /// Default pixel height of the moving zoomed detail lane.
 pub(crate) const DEFAULT_LANE_H: f32 = 46.0;
