@@ -2775,12 +2775,15 @@ pub(crate) fn run_refresh_vinyl(
             ctx.request_repaint();
         }
         // Best-effort: a release that won't fetch (deleted, private, a transient
-        // network error) is left uncached and retried on the next sync.
+        // network error) is left uncached and retried on the next sync. Through
+        // the cache so a sheet or dig fetching the same release meanwhile
+        // shares the one request.
         let id = release_id.to_string();
-        if let Ok(detail) = client.fetch_release(&id) {
-            if catalog.cache_release(&detail).is_ok() {
-                detailed += 1;
-            }
+        if catalog
+            .release_cached_or(&id, || client.fetch_release(&id))
+            .is_ok()
+        {
+            detailed += 1;
         }
     }
     if detail_total > 0 && !quiet {

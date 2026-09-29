@@ -282,14 +282,17 @@ fn sheet_alternative(
     const MAX_VERSION_PRICES: usize = 4;
 
     // The master id rides along on the release detail the sheet already caches,
-    // so this usually costs nothing.
+    // so this usually costs nothing; on a miss it joins the sheet's own fetch of
+    // the same release rather than racing it.
     let id = release_id.to_string();
     let cat = Catalog::open(db).ok();
-    let master_id = cat
-        .as_ref()
-        .and_then(|cat| cat.cached_release(&id).ok().flatten())
-        .and_then(|d| d.master_id)
-        .or_else(|| client.fetch_release(&id).ok().and_then(|d| d.master_id))?;
+    let fetch = || client.fetch_release(&id);
+    let master_id = match &cat {
+        Some(cat) => cat.release_cached_or(&id, fetch),
+        None => fetch(),
+    }
+    .ok()?
+    .master_id?;
 
     // The pressing list is cached (see `Catalog::master_versions_cached_or`);
     // the prices below never are — they're what the user decides on.
