@@ -3304,8 +3304,10 @@ impl App {
                                 *view = LibraryView::Liked;
                             }
                         }
-                        ui.add_space(space::S3);
                         if density.icons_only() {
+                            // The rail's "+" tile needs the air; a caption
+                            // row carries its own.
+                            ui.add_space(space::S3);
                             // In the rail the caption is gone, so right-aligning
                             // the "+" left it floating in an empty row with
                             // nothing to align against. It takes the rail's
@@ -3457,7 +3459,7 @@ impl App {
                         density,
                         SourceMark::Glyph(named(icons::VINYL)),
                         "Vinyl",
-                        *view == LibraryView::Vinyl,
+                        *view == LibraryView::Vinyl && !matches!(vinyl_tab, VinylTab::Shelf(_)),
                     )
                     .on_hover_note("Your Discogs vinyl collection");
                     let mut tile_clicked = tile.clicked();
@@ -3481,8 +3483,8 @@ impl App {
                     // under the library: a caption with its +, then a row per
                     // crate. Capped in height so a long list of crates
                     // never squeezes the playlist tree out.
-                    ui.add_space(space::S3);
                     if density.icons_only() {
+                        ui.add_space(space::S3);
                         if crate::sidebar::rail_add_tile(ui)
                             .on_hover_note("New crate")
                             .clicked()
@@ -3542,7 +3544,6 @@ impl App {
                                 // Groups are parted by space alone, never by
                                 // a rule: one policy for the whole panel.
                                 ui.add_space(space::S4);
-                                section_caption(ui, "Digital library");
                                 draw_library_group(ui, &mut self.view, &mut sidebar_action);
                             }
                         }
@@ -3657,8 +3658,8 @@ impl App {
                                     // (see `crates`), so the rows, the
                                     // rename and the drop target are the
                                     // crate's.
-                                    ui.add_space(space::S3);
                                     if density.icons_only() {
+                                        ui.add_space(space::S3);
                                         if crate::sidebar::rail_add_tile(ui)
                                             .on_hover_note("New tag")
                                             .clicked()

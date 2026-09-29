@@ -772,11 +772,6 @@ impl App {
                             egui::Rounding::same(r),
                             if hot { color::SURFACE_HOVER } else { color::FIELD },
                         );
-                        painter.rect_stroke(
-                            rect,
-                            egui::Rounding::same(r),
-                            egui::Stroke::new(1.0, if hot { color::OUTLINE_HOVER } else { color::SURFACE_HI }),
-                        );
                         painter.text(
                             rect.left_top() + egui::vec2(6.0, 3.0),
                             egui::Align2::LEFT_TOP,

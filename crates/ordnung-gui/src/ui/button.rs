@@ -212,18 +212,15 @@ pub fn deck(
         let rounding = egui::Rounding::same(radius::XS);
         let hovered = enabled && resp.hovered();
         let down = enabled && resp.is_pointer_button_down_on();
-        let (fill, ink, edge) = match lit {
-            Some(c) if enabled => (c, egui::Color32::from_gray(16), None),
-            _ if !enabled => (color::FIELD, color::LABEL_4, Some(color::SURFACE_HI)),
-            _ if down => (color::SURFACE_ACTIVE, color::LABEL, None),
-            _ if hovered => (color::SURFACE_HOVER, color::LABEL, None),
-            _ => (color::FIELD, color::LABEL_2, Some(color::SURFACE_HI)),
+        // Fill only, like every other button: the theme's resting fill, no edge.
+        let (fill, ink) = match lit {
+            Some(c) if enabled => (c, egui::Color32::from_gray(16)),
+            _ if !enabled => (color::FIELD, color::LABEL_4),
+            _ if down => (color::SURFACE_ACTIVE, color::LABEL),
+            _ if hovered => (color::SURFACE_HOVER, color::LABEL),
+            _ => (color::SURFACE_HI, color::LABEL_2),
         };
         ui.painter().rect_filled(rect, rounding, fill);
-        if let Some(edge) = edge {
-            ui.painter()
-                .rect_stroke(rect, rounding, egui::Stroke::new(1.0, edge));
-        }
         ui.painter()
             .galley(rect.center() - galley.size() / 2.0, galley, ink);
         if hovered {

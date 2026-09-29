@@ -124,6 +124,10 @@ pub(crate) const NAV_ACCENT: egui::Color32 = egui::Color32::from_rgb(64, 110, 18
 /// tell that the panel was several parts rather than one system.
 pub(crate) const SOURCE_TILE_H: f32 = 40.0;
 
+/// Corner radius of every nav tile and row, a step squarer than a button so
+/// a stack of rows reads as a list rather than a column of pills.
+const NAV_TILE_RADIUS: f32 = radius::XS;
+
 /// The label face of a source tile: the headline size at SemiBold. Weight
 /// is the hierarchy tool here, not a larger size.
 pub(crate) fn source_font() -> egui::FontId {
@@ -176,7 +180,7 @@ pub(crate) fn nav_button_text_sized(
     let w = width;
     let mut btn = egui::Button::new(text)
         .min_size(egui::vec2(w, height))
-        .rounding(egui::Rounding::same(radius::SM));
+        .rounding(egui::Rounding::same(NAV_TILE_RADIUS));
     if selected {
         btn = btn.fill(color::ACCENT_SOFT);
     }
@@ -230,7 +234,7 @@ pub(crate) fn nav_tile_badge(
         egui::TextStyle::Small,
     );
     let width = galley.size().x + 16.0;
-    nav_tile_pill(ui, host, host.right() - NAV_PILL_GUTTER, width, "nav-tile-badge", selected, false, |p, rect| {
+    nav_tile_pill(ui, host, host.right() - NAV_PILL_GUTTER, width, "nav-tile-badge", selected, |p, rect| {
         p.galley(rect.center() - galley.size() / 2.0, galley, color::LABEL);
     })
 }
@@ -240,9 +244,8 @@ pub(crate) fn nav_tile_badge(
 /// pill sits inside "Library". The collection and the wantlist are two views
 /// of the one vinyl library, so they live in its tile rather than as rows of
 /// their own. `current` is the shelf on screen, lit; returns the one clicked.
-/// A shelf is only on screen while the tile is selected, so the pills are
-/// drawn for the accent tile then: the current shelf on the accent, the
-/// other a bare mark.
+/// The pills are coloured like the "New" pill: the shelf on screen lit, and
+/// the tile itself unlit then, the way "Library" is while "New" is open.
 pub(crate) fn nav_tile_shelves(
     ui: &mut egui::Ui,
     host: egui::Rect,
@@ -258,7 +261,7 @@ pub(crate) fn nav_tile_shelves(
         (VinylList::Collection, "Your collection"),
     ] {
         let on = current == Some(list);
-        let resp = nav_tile_pill(ui, host, right, side, ("nav-tile-shelf", list), on, current.is_some(), |p, rect| {
+        let resp = nav_tile_pill(ui, host, right, side, ("nav-tile-shelf", list), on, |p, rect| {
             let ink = if on { color::LABEL } else { color::LABEL_2 };
             crate::ui::icon::shelf(p, rect.center(), crate::ui::icon::SHELF_R, ink, on, list);
         })
@@ -284,10 +287,9 @@ fn nav_pill_height(host: egui::Rect) -> f32 {
 /// One pill inside a nav tile: `width` wide with its right edge at `right`,
 /// centred on the tile, claimed with `Sense::click` at that exact rect so it
 /// sits above the tile in the interaction stack (the tile was added first,
-/// so the pill wins). A muted chip that lifts on hover, the accent while
-/// `selected`; on a tile that is itself `on_accent` (selected), the chip
-/// only shows while selected, in the full accent so it stands off the
-/// tile's. `paint` draws what it carries into its rect.
+/// so the pill wins). A muted chip that lifts on hover, the muted accent
+/// while `selected`; the "New" pill and the shelves share this one
+/// colouring. `paint` draws what it carries into its rect.
 fn nav_tile_pill(
     ui: &mut egui::Ui,
     host: egui::Rect,
@@ -295,7 +297,6 @@ fn nav_tile_pill(
     width: f32,
     salt: impl std::hash::Hash,
     selected: bool,
-    on_accent: bool,
     paint: impl FnOnce(&egui::Painter, egui::Rect),
 ) -> egui::Response {
     let height = nav_pill_height(host);
@@ -304,13 +305,10 @@ fn nav_tile_pill(
         egui::vec2(width, height),
     );
     let resp = ui.interact(rect, ui.id().with(salt), egui::Sense::click());
-    let fill = match (on_accent, selected, resp.hovered()) {
-        (true, true, _) => color::ACCENT,
-        (true, false, true) => egui::Color32::from_white_alpha(24),
-        (true, false, false) => egui::Color32::TRANSPARENT,
-        (false, true, _) => color::ACCENT_SOFT,
-        (false, false, true) => color::SURFACE_ACTIVE,
-        (false, false, false) => color::SURFACE_HOVER,
+    let fill = match (selected, resp.hovered()) {
+        (true, _) => color::ACCENT_SOFT,
+        (false, true) => color::SURFACE_ACTIVE,
+        (false, false) => color::SURFACE_HOVER,
     };
     ui.painter()
         .rect_filled(rect, egui::Rounding::same(height / 2.0), fill);
@@ -821,7 +819,7 @@ pub(crate) fn draw_playlist_leaf(
         // (drawn on the edge, not floating outside it) and the corners stay round.
         ui.painter().rect_stroke(
             resp.rect.shrink(1.0),
-            egui::Rounding::same(radius::SM),
+            egui::Rounding::same(NAV_TILE_RADIUS),
             egui::Stroke::new(1.5, color::ACCENT),
         );
     }
@@ -975,7 +973,7 @@ pub(crate) fn draw_usb_playlist_nodes(
             {
                 ui.painter().rect_stroke(
                     resp.rect.shrink(1.0),
-                    egui::Rounding::same(radius::SM),
+                    egui::Rounding::same(NAV_TILE_RADIUS),
                     egui::Stroke::new(1.5, color::ACCENT),
                 );
             }
@@ -1067,7 +1065,7 @@ pub(crate) fn list_header_folding(
 
 fn list_header_at(ui: &mut egui::Ui, caption: &str, tip: &str, open: Option<bool>) -> ListHeader {
     let mut out = ListHeader::default();
-    crate::ui::sidebar::caption_row(ui, caption, |ui| {
+    tight_caption(ui, caption, |ui| {
         // Laid out right to left: the "+" takes the end of the row, the
         // chevron sits inside it.
         if crate::ui::button::square(ui, named(icons::PLUS))
@@ -1090,16 +1088,22 @@ fn list_header_at(ui: &mut egui::Ui, caption: &str, tip: &str, open: Option<bool
             }
         }
     });
-    if open != Some(false) {
-        ui.add_space(space::S2);
-    }
     out
 }
 
-/// A caption on its own, for a group that has no "+" ("Digital library").
+/// A caption on its own, for a list that has no "+" (a plain volume's
+/// playlists).
 pub(crate) fn section_caption(ui: &mut egui::Ui, caption: &str) {
-    crate::ui::sidebar::caption_row(ui, caption, |_| {});
-    ui.add_space(space::S2);
+    tight_caption(ui, caption, |_| {});
+}
+
+/// The caption row, hugging the rows it heads: the row already carries air
+/// around its small caps, so the item gap under it is cut to a hairline.
+fn tight_caption(ui: &mut egui::Ui, caption: &str, action: impl FnOnce(&mut egui::Ui)) {
+    let gap = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = space::S1;
+    crate::ui::sidebar::caption_row(ui, caption, action);
+    ui.spacing_mut().item_spacing.y = gap;
 }
 
 /// The sidebar's source tabs: the local catalog ("Library") and each mounted
@@ -1282,7 +1286,7 @@ pub(crate) fn draw_crate_rows(
         if resp.dnd_hover_payload::<DraggedSongs>().is_some() {
             ui.painter().rect_stroke(
                 resp.rect.shrink(1.0),
-                egui::Rounding::same(radius::SM),
+                egui::Rounding::same(NAV_TILE_RADIUS),
                 egui::Stroke::new(1.5, color::ACCENT),
             );
         }
