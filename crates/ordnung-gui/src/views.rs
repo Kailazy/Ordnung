@@ -649,29 +649,26 @@ impl App {
             /// All copies, best first; each carries its own keep/delete mark.
             copies: Vec<CopyView>,
         }
-        // Per-copy transcode-quality verdict, looked up once from the analysis
-        // cache. Mirrors the Library "Quality" column: only meaningful at analyzer
-        // v6+, where the low-pass cutoff was measured. Copies missing it read as
-        // "not analyzed" and get an inline Analyze button below.
+        // Per-copy transcode-quality verdict, read from the analysis the scan
+        // already attached to each copy (this runs every frame, so no catalog
+        // reads here). Mirrors the Library "Quality" column: only meaningful at
+        // analyzer v6+, where the low-pass cutoff was measured. Copies missing it
+        // read as "not analyzed" and get an inline Analyze button below.
         type QualityInfo = (Option<TranscodeVerdict>, Option<f32>, Option<&'static str>);
-        let quality: HashMap<Id, QualityInfo> = Catalog::open(&self.db_path)
-            .map(|c| {
-                self.dup_groups
-                    .iter()
-                    .flat_map(|g| &g.tracks)
-                    .map(|t| {
-                        let a = c.get_analysis(t.id).ok().flatten();
-                        let v = a
-                            .as_ref()
-                            .filter(|a| a.analyzer_version >= 6)
-                            .map(|a| a.transcode_verdict());
-                        let cut = a.as_ref().and_then(|a| a.lowpass_hz);
-                        let src = a.as_ref().and_then(|a| a.estimated_source_kbps());
-                        (t.id, (v, cut, src))
-                    })
-                    .collect()
+        let quality: HashMap<Id, QualityInfo> = self
+            .dup_groups
+            .iter()
+            .flat_map(|g| &g.tracks)
+            .map(|t| {
+                let a = t.analysis.as_ref();
+                let v = a
+                    .filter(|a| a.analyzer_version >= 6)
+                    .map(|a| a.transcode_verdict());
+                let cut = a.and_then(|a| a.lowpass_hz);
+                let src = a.and_then(|a| a.estimated_source_kbps());
+                (t.id, (v, cut, src))
             })
-            .unwrap_or_default();
+            .collect();
         let make_copy =
             |t: &Track, audio: &Option<AudioEngine>, is_best: bool, marked_delete: bool| {
                 let (qv, qcut, qsrc) = quality.get(&t.id).copied().unwrap_or((None, None, None));
