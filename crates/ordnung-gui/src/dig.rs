@@ -353,6 +353,36 @@ pub(crate) struct DigStep {
 }
 
 impl DigStep {
+    /// A step that has only just landed: nothing resolved about it yet, no
+    /// links. Callers fill in what their source already knows.
+    pub(crate) fn new(release_id: u64, artist: String, title: String, sub: String) -> Self {
+        DigStep {
+            release_id,
+            artist,
+            title,
+            label: None,
+            artist_ids: Vec::new(),
+            label_ids: Vec::new(),
+            styles: Vec::new(),
+            genres: Vec::new(),
+            detail_resolved: false,
+            year: None,
+            credits: Vec::new(),
+            companies: Vec::new(),
+            aliases: Vec::new(),
+            family: Vec::new(),
+            kin_resolved: false,
+            sub,
+            thumb_url: None,
+            owned: false,
+            via: None,
+            landed_at: std::time::Instant::now(),
+            parent: None,
+            children: Vec::new(),
+            last_child: None,
+        }
+    }
+
     /// The query down `thread` from this record: the primary artist or label
     /// id, or the full set of style tags. `None` while the detail is still
     /// resolving (or when the release genuinely has none) — the buttons wait
@@ -1336,8 +1366,9 @@ pub(crate) fn is_vinyl(format: &str) -> bool {
         || f.contains("7\"")
 }
 
-/// The body of [`App::dig_roll`], as a free function so it can be used while a
-/// mutable borrow of the dig is live.
+/// A cheap varying index in `0..len`, from a seed advanced every frame the
+/// strip draws, so taking the same branch twice lands somewhere else. A free
+/// function so it can be used while a mutable borrow of the dig is live.
 fn dig_roll_with(seed: u64, len: usize) -> usize {
     if len == 0 {
         return 0;
@@ -1541,29 +1572,9 @@ mod tests {
     /// A bare step for layout tests — only the links matter to `layout_web`.
     fn step(parent: Option<usize>, children: Vec<usize>) -> DigStep {
         DigStep {
-            release_id: 0,
-            artist: String::new(),
-            title: String::new(),
-            label: None,
-            artist_ids: Vec::new(),
-            label_ids: Vec::new(),
-            styles: Vec::new(),
-            genres: Vec::new(),
-            detail_resolved: false,
-            year: None,
-            credits: Vec::new(),
-            companies: Vec::new(),
-            aliases: Vec::new(),
-            family: Vec::new(),
-            kin_resolved: false,
-            sub: String::new(),
-            thumb_url: None,
-            owned: false,
-            via: None,
-            landed_at: std::time::Instant::now(),
             parent,
             children,
-            last_child: None,
+            ..DigStep::new(0, String::new(), String::new(), String::new())
         }
     }
 
@@ -2279,29 +2290,10 @@ impl App {
         }
         self.dig = Some(DigPath {
             steps: vec![DigStep {
-                release_id,
-                artist,
-                title,
                 label,
-                artist_ids: Vec::new(),
-                label_ids: Vec::new(),
-                styles: Vec::new(),
-                genres: Vec::new(),
-                detail_resolved: false,
-                year: None,
-                credits: Vec::new(),
-                companies: Vec::new(),
-                aliases: Vec::new(),
-                family: Vec::new(),
-                kin_resolved: false,
-                sub,
                 thumb_url,
                 owned,
-                via: None,
-                landed_at: std::time::Instant::now(),
-                parent: None,
-                children: Vec::new(),
-                last_child: None,
+                ..DigStep::new(release_id, artist, title, sub)
             }],
             at: 0,
             seen,
@@ -2457,7 +2449,7 @@ impl App {
         // has told us how many pages exist, roll inside that range.
         let known = dig.pages.get(&(thread, entity));
         let page = match known {
-            Some(&n) if n > 1 => 1 + self.dig_roll(n.min(20) as usize) as u32,
+            Some(&n) if n > 1 => 1 + dig_roll_with(self.dig_seed, n.min(20) as usize) as u32,
             _ => 1,
         };
         if let Some(dig) = self.dig.as_mut() {
@@ -2671,36 +2663,21 @@ impl App {
             // — the row itself carries neither.
             _ => matched.unwrap_or_default(),
         };
+        // Ids aren't in a browse row — they come from the release detail,
+        // fetched next so this step's own branches are ready to take.
         let step = DigStep {
-            release_id,
-            artist,
-            title,
             // Blank on most browse rows; the release detail fetched next
             // carries the real one, alongside the ids.
             label: (!pick.label.trim().is_empty()).then(|| pick.label.clone()),
-            // Ids aren't in a browse row — they come from the release detail,
-            // fetched next so this step's own branches are ready to take.
-            artist_ids: Vec::new(),
-            label_ids: Vec::new(),
             // A search row already carries its tags; a browse row's arrive
             // with the detail. Either way the detail's set wins once it lands.
             styles: pick.styles.clone(),
             genres: pick.genres.clone(),
-            detail_resolved: false,
             year: pick.year.filter(|y| *y > 0),
-            credits: Vec::new(),
-            companies: Vec::new(),
-            aliases: Vec::new(),
-            family: Vec::new(),
-            kin_resolved: false,
-            sub,
             thumb_url: (!pick.thumb_url.trim().is_empty()).then(|| pick.thumb_url.clone()),
-            owned: false,
             via: Some((msg_thread, matched)),
-            landed_at: std::time::Instant::now(),
             parent: Some(dig.at),
-            children: Vec::new(),
-            last_child: None,
+            ..DigStep::new(release_id, artist, title, sub)
         };
         dig.seen.insert(release_id);
         dig.works.insert(work_key(&step.artist, &step.title));
@@ -3104,12 +3081,6 @@ impl App {
                 }
             }
         }
-    }
-
-    /// A cheap varying index in `0..len`. Mixes a seed advanced every frame the
-    /// strip draws, so taking the same branch twice lands somewhere else.
-    fn dig_roll(&self, len: usize) -> usize {
-        dig_roll_with(self.dig_seed, len)
     }
 
     /// The decoded cover for a dug record's thumbnail URL, if it has arrived.

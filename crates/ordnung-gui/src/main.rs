@@ -52,7 +52,7 @@ use dig::DigPath;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use onboarding::Tour;
-use ordnung_core::analysis::{self, AnalysisParams, ANALYZER_VERSION, WAVEFORM_FULLTRACK_VERSION};
+use ordnung_core::analysis::{self, ANALYZER_VERSION, WAVEFORM_FULLTRACK_VERSION};
 use ordnung_core::convert::{self, ConvertSpec};
 use ordnung_core::discogs;
 use ordnung_core::genredb;
@@ -303,6 +303,24 @@ enum LibraryView {
     /// device, not in the catalog — rows are built from `usb_tracks` (with
     /// synthetic ids, see [`usb_track_id`]) and rendered in the normal table.
     Usb(PathBuf, Option<u32>),
+}
+
+impl LibraryView {
+    /// The playlist this view shows, if it is one. Every arm is spelled out
+    /// so a new view has to say whether it is a playlist.
+    fn playlist_id(&self) -> Option<Id> {
+        match self {
+            LibraryView::Playlist(pid) => Some(*pid),
+            LibraryView::Library
+            | LibraryView::RecentlyAdded
+            | LibraryView::Duplicates
+            | LibraryView::Missing
+            | LibraryView::Liked
+            | LibraryView::Vinyl
+            | LibraryView::CrateSet(_)
+            | LibraryView::Usb(..) => None,
+        }
+    }
 }
 
 /// Which tab of the vinyl view is showing. The two shelves (collection and

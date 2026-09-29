@@ -121,6 +121,10 @@ pub(crate) fn format_from_key(k: &str) -> Option<Format> {
     }
 }
 
+/// The formats a convert can write, in the order the pickers list them.
+pub(crate) const CONVERT_TARGETS: [Format; 5] =
+    [Format::Mp3, Format::Aac, Format::Flac, Format::Wav, Format::Aiff];
+
 pub(crate) fn format_label(f: Format) -> &'static str {
     match f {
         Format::Mp3 => "MP3",

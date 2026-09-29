@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
 
-use ordnung_core::analysis::{self, AnalysisParams, ANALYZER_VERSION};
+use ordnung_core::analysis::{self, ANALYZER_VERSION};
 use ordnung_core::catalog::Catalog;
 use ordnung_core::model::{Beat, Cue, Id};
 use ordnung_core::{scan, Key};
@@ -327,7 +327,7 @@ fn build_library(work: &Path, reference: &Path, ex: &RbExport) -> Res<Library> {
                 let (queue, tx) = (&queue, tx.clone());
                 s.spawn(move || loop {
                     let Some((id, path, size, mtime)) = queue.lock().unwrap().next() else { break };
-                    let r = analysis::analyze_file(&path, AnalysisParams::default());
+                    let r = analysis::analyze_file(&path);
                     let _ = tx.send((id, path, size, mtime, r));
                 });
             }

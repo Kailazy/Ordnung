@@ -835,9 +835,7 @@ impl App {
             // writeback choice the user skipped past, but do stop reopening the
             // tour on every launch. The config default (automatic) stands.
             self.config.onboarding_completed_version = TOUR_VERSION;
-            if let Err(e) = self.config.save() {
-                self.status = format!("Couldn't save settings: {e}");
-            }
+            self.save_config();
             self.tour = None;
         }
     }
@@ -900,9 +898,7 @@ impl App {
         self.config.discogs_auto_fetch = auto_fetch;
         self.config.discogs_auto_match = auto_match.key().to_string();
         self.config.onboarding_completed_version = TOUR_VERSION;
-        if let Err(e) = self.config.save() {
-            self.status = format!("Couldn't save settings: {e}");
-        } else {
+        if self.save_config() {
             self.status = if auto_write {
                 "Ordnung will keep your files in sync as you edit.".to_string()
             } else {

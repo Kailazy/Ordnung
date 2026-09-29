@@ -191,7 +191,6 @@ fn run_lane(
             }
         },
     };
-    let params = AnalysisParams::default();
     let mut catalog: Option<Catalog> = None;
     let mut run = Run::default();
     for msg in rx {
@@ -248,7 +247,7 @@ fn run_lane(
                     // thousands stops in seconds, not hours.
                     pool.spawn_fifo(move || {
                         let result = (generation.load(Ordering::Relaxed) == gen)
-                            .then(|| analysis::analyze_file(&path, params).map_err(|e| e.to_string()));
+                            .then(|| analysis::analyze_file(&path).map_err(|e| e.to_string()));
                         let _ = back.send(LaneIn::Finished {
                             id,
                             size,

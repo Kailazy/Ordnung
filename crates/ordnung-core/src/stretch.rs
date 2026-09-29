@@ -124,17 +124,6 @@ impl Stretcher {
         self.out_origin + (self.out_read / self.channels) as f64 * self.out_rate
     }
 
-    /// Forget the pending output and tail and continue from `frame`. The next
-    /// block starts clean, with no crossfade, so it joins whatever the caller
-    /// was playing up to `frame` without a seam.
-    pub fn reset_at(&mut self, frame: f64) {
-        self.in_pos = frame.max(0.0);
-        self.out_origin = self.in_pos;
-        self.tail.clear();
-        self.out.clear();
-        self.out_read = 0;
-    }
-
     /// Fold the input cursor back by `len` frames once it has reached `end`,
     /// the way a loop wraps. The pending output is kept: the caller's reader
     /// already served those frames from the loop's start.

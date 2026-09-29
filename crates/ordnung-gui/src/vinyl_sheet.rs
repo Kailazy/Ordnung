@@ -423,19 +423,7 @@ fn stocked_rows(stocked: &[SellerOffer], skip: Option<u64>) -> Vec<StockedRow> {
 }
 
 pub(crate) fn fmt_market_price(p: &discogs::MarketPrice) -> String {
-    let code = p.currency.trim().to_uppercase();
-    let symbol = match code.as_str() {
-        "USD" | "CAD" | "AUD" | "NZD" => "$",
-        "EUR" => "€",
-        "GBP" => "£",
-        "JPY" => "¥",
-        _ => "",
-    };
-    if symbol.is_empty() {
-        format!("{:.2} {code}", p.value)
-    } else {
-        format!("{symbol}{:.2}", p.value)
-    }
+    crate::views::format_price(p.value, Some(&p.currency), true)
 }
 
 /// The record's Bandcamp page on one line: the vinyl first (this is a record
@@ -535,54 +523,34 @@ impl App {
         let Some(record) = self.vinyl_record(key) else {
             return;
         };
-        // Opening a different record replaces the sheet; its video would
-        // otherwise play on under a tracklist it doesn't belong to (and
-        // `playing_video` indexes the old release's videos).
-        self.stop_sheet_video();
         let sub = sub_line(
             &record.year.map(|y| y.to_string()).unwrap_or_default(),
             record.format.as_deref().unwrap_or(""),
         );
-        let label = imprint_line(record.label.as_deref(), record.catalog_number.as_deref());
-
-        self.vinyl_sheet = Some(VinylSheet {
-            key: Some(key),
-            // Set even though the cache normally serves a keyed record's cover:
-            // it's the fallback for when the record leaves its list. See the
-            // field's docs.
-            cover_url: record.thumb_url.clone(),
-            local_cover: None,
-            release_id: record.release_id,
-            title: record.title.clone(),
-            artist: record.artist.clone(),
+        // The same sheet a bare release opens, then what the shelf adds: the
+        // key, the imprint and the price on file. Dropped first so another
+        // copy of the release that is already open still gives way.
+        self.stop_sheet_video();
+        self.vinyl_sheet = None;
+        // The cover URL is set even though the cache normally serves a keyed
+        // record's cover: it's the fallback for when the record leaves its
+        // list. See the field's docs.
+        self.open_release_sheet(
+            record.release_id,
+            record.artist.clone(),
+            record.title.clone(),
             sub,
-            label,
-            detail: None,
-            local: self.sheet_local_tracks(record.release_id),
-            rows: Vec::new(),
-            extra_videos: Vec::new(),
-            loading: true,
-            error: None,
-            playing_video: None,
-            video_uri: None,
-            video_scrub: None,
-            pending_play: false,
-            // A synced record already has a price on file; anything else asks
-            // the marketplace when the sheet opens.
-            price: match (record.price, record.price_currency.clone()) {
-                (Some(value), Some(currency)) => {
-                    PriceState::Ready(Some(discogs::MarketPrice { value, currency }))
-                }
-                _ => PriceState::Idle,
-            },
-            bandcamp: None,
-            offer: None,
-            stocked: self.sheet_stocked(record.release_id),
-            mark: None,
-            cursor: None,
-        });
-        self.spawn_sheet_fetch(record.release_id, ctx.clone());
-        self.spawn_sheet_price(record.release_id, ctx.clone());
+            record.thumb_url.clone(),
+            ctx,
+        );
+        if let Some(sheet) = self.vinyl_sheet.as_mut() {
+            sheet.key = Some(key);
+            sheet.label = imprint_line(record.label.as_deref(), record.catalog_number.as_deref());
+            // A synced record already has a price on file.
+            if let (Some(value), Some(currency)) = (record.price, record.price_currency.clone()) {
+                sheet.price = PriceState::Ready(Some(discogs::MarketPrice { value, currency }));
+            }
+        }
     }
 
     /// Open the sheet for a bare Discogs release — a record from a dig, which

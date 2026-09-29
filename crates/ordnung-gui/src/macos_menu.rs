@@ -28,10 +28,13 @@ use std::sync::atomic::{AtomicU8, Ordering};
 /// Deliberately a plain enum with no payload: menu items are global commands,
 /// and anything selection-dependent is resolved by `App` when it handles the
 /// command, using the selection as of that frame.
+/// Each command's number is its menu item's tag and its value in the
+/// pending slot (0 there means none).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum MenuCommand {
     /// Reload the table from the catalog (⌘R).
-    Reload,
+    Reload = 1,
     /// Open the Settings window (⌘,).
     Settings,
     /// Select every visible row (⌘A).
@@ -56,31 +59,10 @@ pub enum MenuCommand {
 /// clicks in practice.
 static PENDING: AtomicU8 = AtomicU8::new(0);
 
-fn encode(cmd: MenuCommand) -> u8 {
-    match cmd {
-        MenuCommand::Reload => 1,
-        MenuCommand::Settings => 2,
-        MenuCommand::SelectAll => 3,
-        MenuCommand::ClearFilters => 4,
-        MenuCommand::Copy => 5,
-        MenuCommand::AddFolder => 6,
-        MenuCommand::PlayPause => 7,
-        MenuCommand::FocusSearch => 8,
-    }
-}
-
 fn decode(v: u8) -> Option<MenuCommand> {
-    Some(match v {
-        1 => MenuCommand::Reload,
-        2 => MenuCommand::Settings,
-        3 => MenuCommand::SelectAll,
-        4 => MenuCommand::ClearFilters,
-        5 => MenuCommand::Copy,
-        6 => MenuCommand::AddFolder,
-        7 => MenuCommand::PlayPause,
-        8 => MenuCommand::FocusSearch,
-        _ => return None,
-    })
+    use MenuCommand::*;
+    let all = [Reload, Settings, SelectAll, ClearFilters, Copy, AddFolder, PlayPause, FocusSearch];
+    all.into_iter().find(|&c| c as u8 == v)
 }
 
 /// Take the pending menu command, if any. Call once per frame from `update`.
@@ -100,7 +82,7 @@ pub fn install() {}
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use super::{encode, MenuCommand, PENDING};
+    use super::{MenuCommand, PENDING};
     use std::sync::atomic::Ordering;
 
     use objc2::declare_class;
@@ -182,7 +164,7 @@ mod imp {
         mi.setKeyEquivalentModifierMask(mask);
         if let Some(cmd) = cmd {
             // The tag carries the command, so the shared target needs no state.
-            let _: () = unsafe { objc2::msg_send![&*mi, setTag: encode(cmd) as isize] };
+            let _: () = unsafe { objc2::msg_send![&*mi, setTag: cmd as u8 as isize] };
             unsafe { mi.setTarget(target.map(|t| t as &AnyObject)) };
         }
         mi
@@ -437,5 +419,20 @@ mod imp {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_command_round_trips_through_its_tag() {
+        for v in 1..=8u8 {
+            let cmd = decode(v).expect("tags 1-8 are commands");
+            assert_eq!(cmd as u8, v);
+        }
+        assert_eq!(decode(0), None);
+        assert_eq!(decode(9), None);
     }
 }

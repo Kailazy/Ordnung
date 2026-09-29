@@ -893,17 +893,7 @@ impl App {
             .filter(|p| !p.is_folder)
             .map(|p| (p.id, p.name.clone()))
             .collect();
-        let menu_playlist_view = match self.view {
-            LibraryView::Playlist(pid) => Some(pid),
-            LibraryView::Library
-            | LibraryView::RecentlyAdded
-            | LibraryView::Duplicates
-            | LibraryView::Missing
-            | LibraryView::Liked
-            | LibraryView::Vinyl
-            | LibraryView::CrateSet(_)
-            | LibraryView::Usb(..) => None,
-        };
+        let menu_playlist_view = self.view.playlist_id();
         // USB rows aren't catalog tracks (synthetic ids, files on the device):
         // catalog actions — convert, analyze, playlists, Discogs, delete — are
         // hidden for them, drag-to-playlist is disabled (⌥ file drag-out still
@@ -995,17 +985,7 @@ impl App {
         // drop — only engages when the visible rows ARE the playlist in stored
         // order: a real playlist, no sort override, and no active filter (the same
         // gate as the "Move to top/bottom" menu items).
-        let playlist_pid = match self.view {
-            LibraryView::Playlist(pid) => Some(pid),
-            LibraryView::Library
-            | LibraryView::RecentlyAdded
-            | LibraryView::Duplicates
-            | LibraryView::Missing
-            | LibraryView::Liked
-            | LibraryView::Vinyl
-            | LibraryView::CrateSet(_)
-            | LibraryView::Usb(..) => None,
-        };
+        let playlist_pid = menu_playlist_view;
         // The leading order gutter is RESERVED in EVERY view — the library and every
         // playlist — at one fixed width, so the data columns line up at the same x
         // everywhere and the shared per-column widths read as truly universal. (It
@@ -2366,9 +2346,7 @@ impl App {
                 config::WaveformColorMode::Spectrum => config::WaveformColorMode::Energy,
             };
             self.config.waveform_color_mode = next.key().to_string();
-            if let Err(e) = self.config.save() {
-                self.status = format!("Couldn't save settings: {e}");
-            }
+            self.save_config();
         }
 
         // A right-clicked header opens (or re-anchors) the column reorder popup.

@@ -29,90 +29,33 @@
 //! the embed's `playlist=` chaining is gone, and a record's queue is driven from
 //! here instead (see [`poll`]).
 
-/// Start playing `youtube_ids` in order, with `title` on the panel's title bar.
-/// Reuses the existing panel when one is already open, so moving to the next
-/// track doesn't flash a new window. Returns false when the platform has no
-/// mini-player (non-macOS) or the window handle wasn't available this frame —
-/// callers fall back to opening the video in a browser.
-///
-/// Must be called on the UI thread — eframe's `update` always is.
 #[cfg(target_os = "macos")]
-pub fn play(frame: &eframe::Frame, youtube_ids: &[String], title: &str) -> bool {
-    imp::play(frame, youtube_ids, title)
-}
+pub use imp::{
+    close, ended, is_open, next_poll_in, on_air, play, poll, preload, prewarm, seek, set_volume,
+    status, toggle_pause, transport,
+};
 
 #[cfg(not(target_os = "macos"))]
 pub fn play(_frame: &eframe::Frame, _youtube_ids: &[String], _title: &str) -> bool {
     false
 }
 
-/// Build the mini-player ahead of its first use, on a blank page, so the
-/// first play doesn't pay for the panel and WebKit's content process on top
-/// of the page load. Idempotent and cheap once built; call it when a record
-/// sheet opens.
-#[cfg(target_os = "macos")]
-pub fn prewarm() {
-    imp::prewarm();
-}
-
 #[cfg(not(target_os = "macos"))]
 pub fn prewarm() {}
-
-/// Ready `youtube_id` on a second page behind the one on air: its watch page
-/// is loaded now, muted, and held at its start as soon as its player is up,
-/// so a later [`play`] (or queue advance) whose first video is this one swaps
-/// the pages instead of navigating, and the next track starts the moment it's
-/// asked for rather than after a page load and a buffer. Idempotent for the
-/// same id; a different id replaces the page being readied. The page left
-/// behind by a swap is navigated away and taken out of the window.
-#[cfg(target_os = "macos")]
-pub fn preload(youtube_id: &str) {
-    imp::preload(youtube_id);
-}
 
 #[cfg(not(target_os = "macos"))]
 pub fn preload(_youtube_id: &str) {}
 
-/// Hide the mini-player and stop playback. A no-op when nothing is open.
-#[cfg(target_os = "macos")]
-pub fn close() {
-    imp::close();
-}
-
 #[cfg(not(target_os = "macos"))]
 pub fn close() {}
-
-/// True while the panel is on screen. Goes false on its own when the user closes
-/// the panel with its own close button, which is how the UI notices.
-#[cfg(target_os = "macos")]
-pub fn is_open() -> bool {
-    imp::is_open()
-}
 
 #[cfg(not(target_os = "macos"))]
 pub fn is_open() -> bool {
     false
 }
 
-/// Keep the panel's own playback moving: advance to the next video in the queue
-/// when the current one ends, and refresh what [`status`] reports. Cheap and
-/// idempotent — call it once per frame while the panel is open.
-#[cfg(target_os = "macos")]
-pub fn poll() {
-    imp::poll();
-}
-
 #[cfg(not(target_os = "macos"))]
 pub fn poll() {}
-
-/// How long until [`poll`] next has work to do, or `None` when the panel is
-/// closed. Callers feed this to `Context::request_repaint_after`, since the
-/// panel lives outside egui's event loop and an otherwise idle frame loop would
-/// leave [`poll`] uncalled for as long as nothing else woke it.
-#[cfg(target_os = "macos")]
-pub fn next_poll_in() -> Option<std::time::Duration> {
-    imp::next_poll_in()
-}
 
 #[cfg(not(target_os = "macos"))]
 pub fn next_poll_in() -> Option<std::time::Duration> {
@@ -142,44 +85,16 @@ pub struct Transport {
     pub reported: bool,
 }
 
-/// The mini-player's playback position, for drawing a scrubber.
-#[cfg(target_os = "macos")]
-pub fn transport() -> Transport {
-    imp::transport()
-}
-
 #[cfg(not(target_os = "macos"))]
 pub fn transport() -> Transport {
     Transport::default()
 }
 
-/// Play or pause the loaded video, whichever it isn't doing now. The state the
-/// sheet's button paints comes from the next [`poll`], not from here — the page
-/// is the only authority on whether the video actually moved.
-#[cfg(target_os = "macos")]
-pub fn toggle_pause() {
-    imp::toggle_pause();
-}
-
 #[cfg(not(target_os = "macos"))]
 pub fn toggle_pause() {}
 
-/// Jump the loaded video to `secs`.
-#[cfg(target_os = "macos")]
-pub fn seek(secs: f32) {
-    imp::seek(secs);
-}
-
 #[cfg(not(target_os = "macos"))]
 pub fn seek(_secs: f32) {}
-
-/// Hold YouTube audio at `volume` (`0.0`–`1.0`), so the app's master knob rules
-/// the video player as well as the file player. Safe to call with nothing
-/// playing: the level is remembered and applied to the next video that loads.
-#[cfg(target_os = "macos")]
-pub fn set_volume(volume: f32) {
-    imp::set_volume(volume);
-}
 
 #[cfg(not(target_os = "macos"))]
 pub fn set_volume(_volume: f32) {}
@@ -196,37 +111,14 @@ pub enum PlayerStatus {
     Stuck,
 }
 
-/// True once the loaded video has run to its end with nothing queued after
-/// it, as of the last [`poll`]. What the radio waits on to dig for the next
-/// record; the sheet's queue advance is handled inside [`poll`] itself.
-#[cfg(target_os = "macos")]
-pub fn ended() -> bool {
-    imp::ended()
-}
-
 #[cfg(not(target_os = "macos"))]
 pub fn ended() -> bool {
     false
 }
 
-/// The YouTube id of the video on air, or `None` when nothing is loaded. The
-/// panel advances its own queue when a video ends, so the id it started on is
-/// not for long the one sounding; a sheet marking the playing row asks this
-/// to follow the music down the tracklist.
-#[cfg(target_os = "macos")]
-pub fn on_air() -> Option<String> {
-    imp::on_air()
-}
-
 #[cfg(not(target_os = "macos"))]
 pub fn on_air() -> Option<String> {
     None
-}
-
-/// Ask the mini-player what became of the video it was given.
-#[cfg(target_os = "macos")]
-pub fn status() -> PlayerStatus {
-    imp::status()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -440,6 +332,13 @@ mod imp {
         volume: f32,
     }
 
+    /// Start playing `youtube_ids` in order, with `title` on the panel's title bar.
+    /// Reuses the existing panel when one is already open, so moving to the next
+    /// track doesn't flash a new window. Returns false when the platform has no
+    /// mini-player (non-macOS) or the window handle wasn't available this frame —
+    /// callers fall back to opening the video in a browser.
+    ///
+    /// Must be called on the UI thread — eframe's `update` always is.
     pub fn play(frame: &eframe::Frame, youtube_ids: &[String], title: &str) -> bool {
         let Some(mtm) = MainThreadMarker::new() else {
             return false;
@@ -469,6 +368,10 @@ mod imp {
         })
     }
 
+    /// Build the mini-player ahead of its first use, on a blank page, so the
+    /// first play doesn't pay for the panel and WebKit's content process on top
+    /// of the page load. Idempotent and cheap once built; call it when a record
+    /// sheet opens.
     pub fn prewarm() {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -485,6 +388,13 @@ mod imp {
         });
     }
 
+    /// Ready `youtube_id` on a second page behind the one on air: its watch page
+    /// is loaded now, muted, and held at its start as soon as its player is up,
+    /// so a later [`play`] (or queue advance) whose first video is this one swaps
+    /// the pages instead of navigating, and the next track starts the moment it's
+    /// asked for rather than after a page load and a buffer. Idempotent for the
+    /// same id; a different id replaces the page being readied. The page left
+    /// behind by a swap is navigated away and taken out of the window.
     pub fn preload(youtube_id: &str) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -515,6 +425,7 @@ mod imp {
         });
     }
 
+    /// Hide the mini-player and stop playback. A no-op when nothing is open.
     pub fn close() {
         if MainThreadMarker::new().is_none() {
             return;
@@ -534,6 +445,8 @@ mod imp {
         });
     }
 
+    /// True while the panel is on screen. Goes false on its own when the user closes
+    /// the panel with its own close button, which is how the UI notices.
     pub fn is_open() -> bool {
         if MainThreadMarker::new().is_none() {
             return false;
@@ -541,6 +454,9 @@ mod imp {
         PANEL.with(|slot| slot.borrow().as_ref().is_some_and(|mini| mini.live))
     }
 
+    /// True once the loaded video has run to its end with nothing queued after
+    /// it, as of the last [`poll`]. What the radio waits on to dig for the next
+    /// record; the sheet's queue advance is handled inside [`poll`] itself.
     pub fn ended() -> bool {
         if MainThreadMarker::new().is_none() {
             return false;
@@ -552,6 +468,10 @@ mod imp {
         })
     }
 
+    /// The YouTube id of the video on air, or `None` when nothing is loaded. The
+    /// panel advances its own queue when a video ends, so the id it started on is
+    /// not for long the one sounding; a sheet marking the playing row asks this
+    /// to follow the music down the tracklist.
     pub fn on_air() -> Option<String> {
         MainThreadMarker::new()?;
         PANEL.with(|slot| {
@@ -561,6 +481,7 @@ mod imp {
         })
     }
 
+    /// Ask the mini-player what became of the video it was given.
     pub fn status() -> PlayerStatus {
         if MainThreadMarker::new().is_none() {
             return PlayerStatus::Unknown;
@@ -583,6 +504,7 @@ mod imp {
         })
     }
 
+    /// The mini-player's playback position, for drawing a scrubber.
     pub fn transport() -> Transport {
         if MainThreadMarker::new().is_none() {
             return Transport::default();
@@ -623,6 +545,9 @@ mod imp {
         })
     }
 
+    /// Play or pause the loaded video, whichever it isn't doing now. The state the
+    /// sheet's button paints comes from the next [`poll`], not from here — the page
+    /// is the only authority on whether the video actually moved.
     pub fn toggle_pause() {
         // Assume the flip locally so the button responds on the click rather
         // than at the next poll; the page's own answer overwrites it either way.
@@ -637,6 +562,7 @@ mod imp {
         });
     }
 
+    /// Jump the loaded video to `secs`.
     pub fn seek(secs: f32) {
         let secs = secs.max(0.0);
         with_video(&format!("v.currentTime={secs}"), move |page| {
@@ -672,6 +598,10 @@ mod imp {
         }
     }
 
+    /// Hold YouTube audio at `volume` (`0.0`–`1.0`), so the app's master knob rules
+    /// the video player as well as the file player. Safe to call with nothing
+    /// playing: the level is remembered and applied to the next video that loads.
+    ///
     /// Hold YouTube audio at `volume` (`0.0`–`1.0`).
     ///
     /// Recorded even with no panel built yet, so the knob still decides how the
@@ -735,6 +665,9 @@ mod imp {
         });
     }
 
+    /// Keep the panel's own playback moving: advance to the next video in the queue
+    /// when the current one ends, and refresh what [`status`] reports. Cheap and
+    /// idempotent — call it once per frame while the panel is open.
     pub fn poll() {
         if MainThreadMarker::new().is_none() {
             return;
@@ -785,6 +718,11 @@ mod imp {
         }
     }
 
+    /// How long until [`poll`] next has work to do, or `None` when the panel is
+    /// closed. Callers feed this to `Context::request_repaint_after`, since the
+    /// panel lives outside egui's event loop and an otherwise idle frame loop would
+    /// leave [`poll`] uncalled for as long as nothing else woke it.
+    ///
     /// How long until [`poll`] would next do something, or `None` when there's
     /// nothing on screen to drive. The GUI turns this into a repaint request:
     /// the panel isn't an egui surface, so without one an idle app never calls

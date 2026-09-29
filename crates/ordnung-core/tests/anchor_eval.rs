@@ -13,7 +13,7 @@
 //!
 //! Run: cargo test -p ordnung-core --test anchor_eval --release -- --ignored --nocapture
 
-use ordnung_core::analysis::{self, AnalysisParams};
+use ordnung_core::analysis;
 use std::path::Path;
 
 /// The anchor must collect clearly more kick energy than the track's average.
@@ -40,7 +40,7 @@ fn anchor_sits_on_the_kick() {
 
     let mut weak = Vec::new();
     for p in files.iter().take(12) {
-        let a = analysis::analyze_file(p, AnalysisParams::default()).unwrap();
+        let a = analysis::analyze_file(p).unwrap();
         let (Some(bpm), Some(b0)) = (a.bpm, a.beatgrid.beats.first().map(|b| b.position_ms)) else {
             continue;
         };

@@ -168,18 +168,10 @@ pub const ANALYZER_VERSION: u32 = 28;
 /// v14. The GUI must treat pre-`v14` waveform data as absent until re-analyzed.
 pub const WAVEFORM_FULLTRACK_VERSION: u32 = 14;
 
-/// How much audio to feed the analyzers. Steady-tempo material needs only a
-/// representative window, which keeps decoding fast.
-#[derive(Debug, Clone, Copy)]
-pub struct AnalysisParams {
-    pub max_seconds: u32,
-}
-
-impl Default for AnalysisParams {
-    fn default() -> Self {
-        AnalysisParams { max_seconds: 150 }
-    }
-}
+/// How much audio the key, quality and fingerprint analyzers read, from the
+/// top of the track. Steady-tempo material needs only a representative
+/// window, which keeps them fast.
+const KEY_WINDOW_SECS: usize = 150;
 
 /// Generous ceiling on how much audio we decode, so the colored waveform can span
 /// the whole track without an hour-long file blowing up memory. ~20 min covers
@@ -188,7 +180,7 @@ const DECODE_CEILING_SECS: usize = 20 * 60;
 
 /// Decode and analyze one file into an `Analysis` (BPM, key, beatgrid anchor,
 /// waveform preview, peak/loudness, and a content hash for caching).
-pub fn analyze_file(path: impl AsRef<Path>, params: AnalysisParams) -> Result<Analysis> {
+pub fn analyze_file(path: impl AsRef<Path>) -> Result<Analysis> {
     // Decode the whole track (capped at a sane ceiling) so the waveform spans the
     // full song. Key/BPM/quality only need a representative window, taken as a
     // slice of the decoded audio below — they don't pay for the full length.
@@ -197,8 +189,8 @@ pub fn analyze_file(path: impl AsRef<Path>, params: AnalysisParams) -> Result<An
         .max(1);
     let audio = decode_mono_capped(path, Some(ceiling))?;
 
-    // Window for key/quality/fingerprint: the first `max_seconds` of the decode.
-    let key_cap = (params.max_seconds as usize)
+    // Window for key/quality/fingerprint: the first `KEY_WINDOW_SECS` of the decode.
+    let key_cap = KEY_WINDOW_SECS
         .saturating_mul(audio.sample_rate as usize)
         .max(1);
     let key_slice = &audio.samples[..audio.samples.len().min(key_cap)];

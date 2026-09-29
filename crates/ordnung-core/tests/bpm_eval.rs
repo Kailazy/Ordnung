@@ -244,7 +244,7 @@ fn downbeat_phase_probe() {
 #[test]
 #[ignore = "decodes a sample track; run with --ignored --nocapture"]
 fn analyze_file_emits_static_grid() {
-    use ordnung_core::analysis::{analyze_file, AnalysisParams};
+    use ordnung_core::analysis::analyze_file;
 
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/seeker-sample");
     if !dir.is_dir() {
@@ -259,7 +259,7 @@ fn analyze_file_emits_static_grid() {
         .find(|p| p.file_name().map_or(false, |n| n.to_string_lossy().contains("02. Lava")))
         .expect("Lava sample present");
 
-    let a = analyze_file(&path, AnalysisParams::default()).expect("analyze");
+    let a = analyze_file(&path).expect("analyze");
     let bpm = a.bpm.expect("bpm emitted");
     assert!((bpm - 130.0).abs() < 2.0, "bpm {bpm}");
     assert!(a.beatgrid.beats.len() > 100, "grid populated: {}", a.beatgrid.beats.len());

@@ -467,6 +467,18 @@ impl App {
         });
     }
 
+    /// Persist the settings, reporting a failure in the status line. True
+    /// when they were saved.
+    pub(crate) fn save_config(&mut self) -> bool {
+        match self.config.save() {
+            Ok(()) => true,
+            Err(e) => {
+                self.status = format!("Couldn't save settings: {e}");
+                false
+            }
+        }
+    }
+
     /// The Discogs token to use: the saved config value wins; if unset, fall
     /// back to the `DISCOGS_TOKEN` environment variable (so existing setups keep
     /// working). Returns an empty string when neither is set.
@@ -1343,7 +1355,6 @@ impl App {
         self.usb_analysis_rx = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let params = AnalysisParams::default();
             let run = || {
                 pending.par_iter().for_each_init(
                     || tx.clone(),
@@ -1355,7 +1366,7 @@ impl App {
                             return;
                         }
                         let (bpm, key, waveform, waveform_bands) =
-                            match analysis::analyze_file(path, params) {
+                            match analysis::analyze_file(path) {
                                 Ok(a) => (a.bpm, a.key, a.waveform_preview, a.waveform_bands),
                                 // A failed decode still reports (empty), so
                                 // progress reaches the total.
@@ -1432,44 +1443,9 @@ impl App {
     /// `usb_tracks` indices by relative path (case-insensitively; the volume
     /// is FAT32) — the same join the device scan itself uses.
     fn apply_usb_export(&mut self, vol: &Path, export: &ordnung_rbdb::pdb::RbExport) {
-        let by_rel: HashMap<String, usize> = self
-            .usb_tracks
-            .iter()
-            .enumerate()
-            .filter_map(|(i, t)| {
-                let rel = Path::new(&t.source_path)
-                    .strip_prefix(vol)
-                    .ok()?
-                    .to_string_lossy()
-                    .to_lowercase();
-                Some((rel, i))
-            })
-            .collect();
+        let by_rel = usb_rel_index(vol, &self.usb_tracks);
         self.usb_playlists = export.playlists.clone();
-        self.usb_playlist_tracks = export
-            .entries
-            .iter()
-            .map(|(pid, tids)| {
-                let indices: Vec<usize> = tids
-                    .iter()
-                    .filter_map(|tid| {
-                        let rel = export
-                            .tracks
-                            .get(tid)?
-                            .file_path
-                            .trim_start_matches('/')
-                            .to_lowercase();
-                        by_rel.get(&rel).copied()
-                    })
-                    .collect();
-                (*pid, indices)
-            })
-            .collect();
-        for p in &export.playlists {
-            if !p.is_folder {
-                self.usb_playlist_tracks.entry(p.id).or_default();
-            }
-        }
+        self.usb_playlist_tracks = usb_playlist_tracks(export, &by_rel);
         // The visible table may be showing the playlist that just changed.
         self.reload();
     }
@@ -1558,7 +1534,7 @@ impl App {
         match then {
             Then::ImportFiles => {
                 if !paths.is_empty() {
-                    self.spawn_import(ctx.clone(), paths);
+                    self.spawn_import_into(ctx.clone(), paths, None);
                 }
             }
             Then::ScanFolder => {
@@ -1585,10 +1561,9 @@ impl App {
             Then::LibraryRoot => {
                 if let Some(dir) = first {
                     self.config.library_root = Some(dir);
-                    self.status = match self.config.save() {
-                        Ok(()) => "Library folder set. Scan for new songs to import it.".into(),
-                        Err(e) => format!("Couldn't save settings: {e}"),
-                    };
+                    if self.save_config() {
+                        self.status = "Library folder set. Scan for new songs to import it.".into();
+                    }
                 }
             }
             Then::TourLibraryRoot => {
@@ -1609,9 +1584,7 @@ impl App {
             Then::ConvertSettingOutDir => {
                 if let Some(dir) = first {
                     self.config.convert_out_dir = Some(dir);
-                    if let Err(e) = self.config.save() {
-                        self.status = format!("Couldn't save settings: {e}");
-                    }
+                    self.save_config();
                 }
             }
             Then::SaveTrackList { text, count } => {
@@ -2560,18 +2533,7 @@ impl App {
                             // When viewing a playlist with a selection, offer to drop those
                             // tracks from it. Only unlinks the playlist membership — the
                             // tracks stay in the catalog (and in any other playlists).
-                            let playlist_view = match &self.view {
-                                LibraryView::Playlist(pid) => Some(*pid),
-                                LibraryView::Library
-                                | LibraryView::RecentlyAdded
-                                | LibraryView::Duplicates
-                                | LibraryView::Missing
-                                | LibraryView::Liked
-                                | LibraryView::Vinyl
-                                | LibraryView::CrateSet(_)
-                                | LibraryView::Usb(..) => None,
-                            };
-                            if let Some(pid) = playlist_view {
+                            if let Some(pid) = self.view.playlist_id() {
                                 if !self.selection.is_empty() {
                                     let n = self.selection.len();
                                     if ui
@@ -4172,13 +4134,7 @@ impl App {
                             egui::ComboBox::from_id_salt("target_format")
                                 .selected_text(format_label(modal.target))
                                 .show_ui(ui, |ui| {
-                                    for &f in &[
-                                        Format::Mp3,
-                                        Format::Aac,
-                                        Format::Flac,
-                                        Format::Wav,
-                                        Format::Aiff,
-                                    ] {
+                                    for &f in &CONVERT_TARGETS {
                                         ui.selectable_value(&mut modal.target, f, format_label(f));
                                     }
                                 });
@@ -4379,24 +4335,9 @@ pub(crate) fn read_usb_pdb(vol: &Path) -> Option<UsbScan> {
         tags.year = (t.year != 0).then_some(t.year);
         let i = tracks.len();
         index_by_id.insert(id, i);
-        let (waveform, waveform_bands) = usb_anlz_waveforms(vol, t);
         pdb_info.insert(
             i,
-            UsbPdbInfo {
-                bpm: t.bpm(),
-                key: t.key.clone(),
-                artwork_path: t
-                    .artwork_path
-                    .as_ref()
-                    .map(|p| vol.join(p.trim_start_matches('/'))),
-                waveform,
-                waveform_bands,
-                anlz_path: t
-                    .analyze_path
-                    .as_ref()
-                    .map(|p| vol.join(p.trim_start_matches('/'))),
-                pdb_id: Some(id),
-            },
+            UsbPdbInfo::from_row(vol, id, t),
         );
         tracks.push(ScannedTrack {
             source_path: abs.to_string_lossy().into_owned(),
@@ -4442,6 +4383,67 @@ pub(crate) fn read_usb_pdb(vol: &Path) -> Option<UsbScan> {
     })
 }
 
+/// Each scanned file on a stick by its path under `vol`, lowercased: FAT32
+/// is case-insensitive, and this is how pdb rows find their files.
+fn usb_rel_index(vol: &Path, tracks: &[ScannedTrack]) -> HashMap<String, usize> {
+    tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| {
+            let rel = Path::new(&t.source_path)
+                .strip_prefix(vol)
+                .ok()?
+                .to_string_lossy()
+                .to_lowercase();
+            Some((rel, i))
+        })
+        .collect()
+}
+
+/// Each export playlist's entries as indices into the scanned files. A
+/// playlist with no resolvable tracks still shows (empty), so the tree
+/// mirrors what the player would list.
+fn usb_playlist_tracks(
+    export: &ordnung_rbdb::pdb::RbExport,
+    by_rel: &HashMap<String, usize>,
+) -> HashMap<u32, Vec<usize>> {
+    let mut out: HashMap<u32, Vec<usize>> = export
+        .entries
+        .iter()
+        .map(|(pid, tids)| {
+            let indices = tids
+                .iter()
+                .filter_map(|tid| {
+                    let rel = export.tracks.get(tid)?.file_path.trim_start_matches('/');
+                    by_rel.get(&rel.to_lowercase()).copied()
+                })
+                .collect();
+            (*pid, indices)
+        })
+        .collect();
+    for p in export.playlists.iter().filter(|p| !p.is_folder) {
+        out.entry(p.id).or_default();
+    }
+    out
+}
+
+impl UsbPdbInfo {
+    /// What the pdb row `id` of a stick at `vol` says about its track.
+    fn from_row(vol: &Path, id: u32, t: &ordnung_rbdb::pdb::RbTrack) -> Self {
+        let on_stick = |p: &String| vol.join(p.trim_start_matches('/'));
+        let (waveform, waveform_bands) = usb_anlz_waveforms(vol, t);
+        UsbPdbInfo {
+            bpm: t.bpm(),
+            key: t.key.clone(),
+            artwork_path: t.artwork_path.as_ref().map(on_stick),
+            waveform,
+            waveform_bands,
+            anlz_path: t.analyze_path.as_ref().map(on_stick),
+            pdb_id: Some(id),
+        }
+    }
+}
+
 pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
     let files = scan::discover(&vol);
     // Tag reads are per-file and independent; rayon keeps a big stick from
@@ -4458,40 +4460,8 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
     let pdb = vol.join("PIONEER").join("rekordbox").join("export.pdb");
     if pdb.is_file() {
         if let Ok(export) = ordnung_rbdb::pdb::read_stick(&vol) {
-            let by_rel_path: HashMap<String, usize> = tracks
-                .iter()
-                .enumerate()
-                .filter_map(|(i, t)| {
-                    let rel = Path::new(&t.source_path)
-                        .strip_prefix(&vol)
-                        .ok()?
-                        .to_string_lossy()
-                        .to_lowercase();
-                    Some((rel, i))
-                })
-                .collect();
-            for (playlist, track_ids) in &export.entries {
-                let indices: Vec<usize> = track_ids
-                    .iter()
-                    .filter_map(|tid| {
-                        let rel = export
-                            .tracks
-                            .get(tid)?
-                            .file_path
-                            .trim_start_matches('/')
-                            .to_lowercase();
-                        by_rel_path.get(&rel).copied()
-                    })
-                    .collect();
-                playlist_tracks.insert(*playlist, indices);
-            }
-            // Playlists with no resolvable tracks still show (empty), so the
-            // tree mirrors what the player would list.
-            for p in &export.playlists {
-                if !p.is_folder {
-                    playlist_tracks.entry(p.id).or_default();
-                }
-            }
+            let by_rel_path = usb_rel_index(&vol, &tracks);
+            playlist_tracks = usb_playlist_tracks(&export, &by_rel_path);
             playlists = export.playlists;
             // The pdb rows carry what rekordbox analyzed (tempo, key); hang
             // it off each scanned file so the table can show the same numbers
@@ -4500,22 +4470,7 @@ pub(crate) fn scan_usb_volume(vol: PathBuf) -> UsbScan {
             for (&id, t) in &export.tracks {
                 let rel = t.file_path.trim_start_matches('/').to_lowercase();
                 if let Some(&i) = by_rel_path.get(&rel) {
-                    let (waveform, waveform_bands) = usb_anlz_waveforms(&vol, t);
-                    let info = UsbPdbInfo {
-                        bpm: t.bpm(),
-                        key: t.key.clone(),
-                        artwork_path: t
-                            .artwork_path
-                            .as_ref()
-                            .map(|p| vol.join(p.trim_start_matches('/'))),
-                        waveform,
-                        waveform_bands,
-                        anlz_path: t
-                            .analyze_path
-                            .as_ref()
-                            .map(|p| vol.join(p.trim_start_matches('/'))),
-                        pdb_id: Some(id),
-                    };
+                    let info = UsbPdbInfo::from_row(&vol, id, t);
                     if info.bpm.is_some()
                         || info.key.is_some()
                         || info.artwork_path.is_some()

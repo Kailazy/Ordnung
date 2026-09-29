@@ -2166,11 +2166,7 @@ impl Catalog {
               LIMIT {limit}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let refs: Vec<&dyn rusqlite::ToSql> = filter_params
-            .iter()
-            .map(|p| p as &dyn rusqlite::ToSql)
-            .collect();
-        let rows = stmt.query_map(refs.as_slice(), row_to_track)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(&filter_params), row_to_track)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -2202,11 +2198,7 @@ impl Catalog {
               ORDER BY added_at DESC, id DESC"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let refs: Vec<&dyn rusqlite::ToSql> = filter_params
-            .iter()
-            .map(|p| p as &dyn rusqlite::ToSql)
-            .collect();
-        let rows = stmt.query_map(refs.as_slice(), row_to_track)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(&filter_params), row_to_track)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 

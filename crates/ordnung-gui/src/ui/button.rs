@@ -27,6 +27,15 @@ pub fn button(ui: &mut egui::Ui, label: impl Into<egui::WidgetText>) -> egui::Re
     ui.add(egui::Button::new(label))
 }
 
+/// A push button for an action that destroys something (clear, delete,
+/// remove): white on red, so it never reads as the safe default.
+pub fn danger(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE))
+            .fill(egui::Color32::from_rgb(150, 40, 40)),
+    )
+}
+
 /// A push button that can be greyed out. Disabled, it still takes its space
 /// and its label, so the row doesn't reflow when it comes back.
 pub fn button_enabled(

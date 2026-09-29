@@ -304,14 +304,10 @@ impl App {
     }
 
     /// Import paths dropped onto the window from Finder (folders are walked,
-    /// individual audio files taken as-is). Behaves exactly like "Add songs…".
-    pub(crate) fn spawn_import(&mut self, ctx: egui::Context, paths: Vec<PathBuf>) {
-        self.spawn_import_into(ctx, paths, None);
-    }
-
-    /// `spawn_import`, optionally gathering every imported track (including
-    /// ones already in the library) into playlist `into_playlist` afterwards —
-    /// the "drop files onto a playlist" gesture.
+    /// individual audio files taken as-is), like "Add songs…", optionally
+    /// gathering every imported track (including ones already in the library)
+    /// into playlist `into_playlist` afterwards — the "drop files onto a
+    /// playlist" gesture.
     pub(crate) fn spawn_import_into(
         &mut self,
         ctx: egui::Context,
@@ -918,27 +914,7 @@ impl App {
         ctx: egui::Context,
         modal: &ConvertModal,
     ) -> Result<(), String> {
-        let bitrate_kbps = match modal.target {
-            Format::Mp3 | Format::Aac => {
-                let s = modal.bitrate_kbps.trim();
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(
-                        s.parse::<u32>()
-                            .map_err(|_| format!("invalid bitrate `{s}` (expected kbps)"))?,
-                    )
-                }
-            }
-            _ => None,
-        };
-        let spec = ConvertSpec {
-            target: modal.target,
-            bitrate_kbps,
-        };
-        if let Some(dir) = &modal.out_dir {
-            std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-        }
+        let spec = convert_spec(modal.target, &modal.bitrate_kbps, modal.out_dir.as_deref())?;
 
         // A single ffmpeg run; not interruptible.
         let Some((tx, _)) = self.start_job(false) else {
@@ -954,9 +930,8 @@ impl App {
         Ok(())
     }
 
-    /// Start a background batch conversion of `ids` to `target`. Validates the
-    /// bitrate and creates the output folder up front so a bad value surfaces in
-    /// the dialog rather than mid-run.
+    /// Start a background batch conversion of `ids` to `target` (see
+    /// [`convert_spec`] for what is checked first).
     pub(crate) fn spawn_batch_convert(
         &mut self,
         ctx: egui::Context,
@@ -966,27 +941,7 @@ impl App {
         out_dir: Option<PathBuf>,
         in_place: bool,
     ) -> Result<(), String> {
-        let bitrate_kbps = match target {
-            Format::Mp3 | Format::Aac => {
-                let s = bitrate_raw.trim();
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(
-                        s.parse::<u32>()
-                            .map_err(|_| format!("invalid bitrate `{s}` (expected kbps)"))?,
-                    )
-                }
-            }
-            _ => None,
-        };
-        if let Some(dir) = &out_dir {
-            std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-        }
-        let spec = ConvertSpec {
-            target,
-            bitrate_kbps,
-        };
+        let spec = convert_spec(target, bitrate_raw, out_dir.as_deref())?;
 
         let Some((tx, cancel)) = self.start_job(true) else {
             return Err(self.status.clone());
@@ -1027,6 +982,69 @@ impl App {
     }
 }
 
+/// The conversion a convert dialog asks for, checked before any job starts:
+/// the bitrate must parse (blank takes the encoder's default), and the output
+/// folder is created, so a bad value surfaces in the dialog rather than
+/// mid-run.
+fn convert_spec(
+    target: Format,
+    bitrate_raw: &str,
+    out_dir: Option<&Path>,
+) -> Result<ConvertSpec, String> {
+    let bitrate_kbps = match target {
+        Format::Mp3 | Format::Aac => {
+            let s = bitrate_raw.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.parse::<u32>().map_err(|_| format!("invalid bitrate `{s}` (expected kbps)"))?)
+            }
+        }
+        _ => None,
+    };
+    if let Some(dir) = out_dir {
+        std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    }
+    Ok(ConvertSpec {
+        target,
+        bitrate_kbps,
+    })
+}
+
+/// What a Discogs search for `track` goes on: its artist (empty when
+/// untagged), title and album (trimmed, `None` when blank), and an
+/// "Artist — Title" label for progress lines and failure reports.
+fn track_query(track: &Track) -> (String, Option<String>, Option<String>, String) {
+    let trimmed = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let artist = trimmed(&track.tags.artist).unwrap_or_default();
+    let title = trimmed(&track.tags.title);
+    let album = trimmed(&track.tags.album);
+    let label = format!(
+        "{} — {}",
+        if artist.is_empty() { "Unknown" } else { &artist },
+        title.as_deref().unwrap_or("Untitled"),
+    );
+    (artist, title, album, label)
+}
+
+/// Open the catalog for a worker, or report the failure as the job's
+/// outcome and hand back `None` so the worker returns.
+fn open_or_fail(db: &Path, tx: &Sender<JobMsg>, ctx: &egui::Context) -> Option<Catalog> {
+    match Catalog::open(db) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
+            ctx.request_repaint();
+            None
+        }
+    }
+}
+
 pub(crate) fn run_scan(
     db: PathBuf,
     dir: PathBuf,
@@ -1035,13 +1053,8 @@ pub(crate) fn run_scan(
     ctx: egui::Context,
     follow: FollowUps,
 ) {
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
+    let Some(catalog) = open_or_fail(&db, &tx, &ctx) else {
+        return;
     };
     let files = scan::discover(&dir);
     if files.is_empty() {
@@ -1100,13 +1113,8 @@ pub(crate) fn run_export(
         export_usb_with, ExportError, ExportMode, ExportOptions, ExportStage,
     };
 
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
+    let Some(catalog) = open_or_fail(&db, &tx, &ctx) else {
+        return;
     };
     // Whole library (empty ids) or the chosen playlist/folder subtree, with
     // analyses attached — see Catalog::export_selection.
@@ -1236,13 +1244,8 @@ pub(crate) fn run_usb_transfer(
     ctx: egui::Context,
     follow: FollowUps,
 ) {
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
+    let Some(catalog) = open_or_fail(&db, &tx, &ctx) else {
+        return;
     };
     let total = sources.len();
     let mut copied = 0usize;
@@ -1394,13 +1397,8 @@ pub(crate) fn run_import(
     ctx: egui::Context,
     follow: FollowUps,
 ) {
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
+    let Some(catalog) = open_or_fail(&db, &tx, &ctx) else {
+        return;
     };
     let mut files = Vec::new();
     for p in &paths {
@@ -1804,36 +1802,7 @@ fn auto_match_tracks(
             skipped += 1;
             continue;
         };
-        let artist = track
-            .tags
-            .artist
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let title = track
-            .tags
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let album = track
-            .tags
-            .album
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let label = format!(
-            "{} — {}",
-            if artist.is_empty() {
-                "Unknown"
-            } else {
-                &artist
-            },
-            title.as_deref().unwrap_or("Untitled"),
-        );
+        let (artist, title, album, label) = track_query(&track);
         if artist.is_empty() && title.is_none() && album.is_none() {
             skipped += 1;
             continue;
@@ -2168,13 +2137,8 @@ fn apply_release(
 /// relinks each confident match. The relink is a catalog row update — files are
 /// never moved or modified.
 pub(crate) fn run_relocate(db: PathBuf, dir: PathBuf, tx: Sender<JobMsg>, ctx: egui::Context) {
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
+    let Some(catalog) = open_or_fail(&db, &tx, &ctx) else {
+        return;
     };
     let missing = match catalog.missing_tracks_detailed() {
         Ok(m) => m,
@@ -2254,13 +2218,8 @@ pub(crate) fn run_write_edits(
     tx: Sender<JobMsg>,
     ctx: egui::Context,
 ) {
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
+    let Some(catalog) = open_or_fail(&db, &tx, &ctx) else {
+        return;
     };
     let tracks = match catalog.list_edited_tracks() {
         Ok(t) => t,
@@ -2368,13 +2327,8 @@ pub(crate) fn run_trash_marked(
     tx: Sender<JobMsg>,
     ctx: egui::Context,
 ) {
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
+    let Some(catalog) = open_or_fail(&db, &tx, &ctx) else {
+        return;
     };
     let total = batch.len();
     let mut trashed = 0usize;
@@ -2482,13 +2436,8 @@ pub(crate) fn run_sweep_seller(
     tx: Sender<JobMsg>,
     ctx: egui::Context,
 ) {
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
+    let Some(catalog) = open_or_fail(&db, &tx, &ctx) else {
+        return;
     };
     // Paced as background: a click elsewhere in the app takes the request
     // slot ahead of this sweep rather than queueing behind it.
@@ -2665,13 +2614,8 @@ pub(crate) fn run_refresh_vinyl(
     tx: Sender<JobMsg>,
     ctx: egui::Context,
 ) {
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
+    let Some(catalog) = open_or_fail(&db, &tx, &ctx) else {
+        return;
     };
     // Paced as background: a click elsewhere in the app takes the request
     // slot ahead of this sweep rather than queueing behind it.
@@ -2915,13 +2859,8 @@ pub(crate) fn run_vinyl_edit(
     tail: Sender<JobMsg>,
     ctx: egui::Context,
 ) {
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
+    let Some(catalog) = open_or_fail(&db, &tx, &ctx) else {
+        return;
     };
     let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
 
@@ -3559,13 +3498,8 @@ pub(crate) fn run_fetch_tracks(
         hidden_release_mediums: hidden_mediums,
         ..config::Config::default()
     };
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
+    let Some(catalog) = open_or_fail(&db, &tx, &ctx) else {
+        return;
     };
     // Paced as background: a click elsewhere in the app takes the request
     // slot ahead of this sweep rather than queueing behind it.
@@ -3601,36 +3535,7 @@ pub(crate) fn run_fetch_tracks(
                 continue;
             }
         };
-        let artist = track
-            .tags
-            .artist
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let title = track
-            .tags
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let album = track
-            .tags
-            .album
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let label = format!(
-            "{} — {}",
-            if artist.is_empty() {
-                "Unknown"
-            } else {
-                &artist
-            },
-            title.as_deref().unwrap_or("Untitled"),
-        );
+        let (artist, title, album, label) = track_query(&track);
         // Name the track in flight: at ~1.1 s per search the bar alone moves
         // too slowly to read as progress.
         let _ = tx.send(JobMsg::Status(format!(
@@ -3914,13 +3819,8 @@ pub(crate) fn run_batch_convert(
     tx: Sender<JobMsg>,
     ctx: egui::Context,
 ) {
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
+    let Some(catalog) = open_or_fail(&db, &tx, &ctx) else {
+        return;
     };
     let total = ids.len();
     let (mut ok, mut failed, mut partial) = (0usize, 0usize, 0usize);
@@ -4369,13 +4269,8 @@ pub(crate) fn run_match_tracklist(
     use ordnung_core::model::{ChosenBy, DugRelease};
     use ordnung_core::tracklist::{self, Confidence, LineKind};
 
-    let catalog = match Catalog::open(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(JobMsg::Failed(format!("Couldn't open the catalog: {e}")));
-            ctx.request_repaint();
-            return;
-        }
+    let Some(catalog) = open_or_fail(&db, &tx, &ctx) else {
+        return;
     };
     let entries = match catalog.tracklist_entries(tracklist_id) {
         Ok(v) => v,

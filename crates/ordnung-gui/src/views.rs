@@ -410,10 +410,43 @@ fn sort_vinyl_cells(cells: &mut [VinylCell], sort: VinylSort, ascending: bool) {
     }
 }
 
+/// The "In your catalog" chip on a record you own `n` digital tracks of,
+/// in the grid's corner or beside the list row's price. True when clicked
+/// (the caller jumps to those tracks).
+fn catalog_badge(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    resp: egui::Response,
+    hovered: bool,
+    n: usize,
+) -> bool {
+    let bg = if hovered {
+        egui::Color32::from_rgb(120, 220, 150)
+    } else {
+        egui::Color32::from_rgb(90, 200, 120)
+    };
+    ui.painter().rect_filled(rect, egui::Rounding::same(5.0), bg);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "♪",
+        egui::FontId::proportional(14.0),
+        egui::Color32::from_gray(20),
+    );
+    let tip = if n > 1 {
+        format!("In your catalog ({n} tracks). Click to show.")
+    } else {
+        "In your catalog. Click to show.".to_string()
+    };
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_note(tip)
+        .clicked()
+}
+
 /// Render a marketplace price the way the grid shows it: symbol for the
 /// currencies a record collection actually turns up, else the bare code.
 /// `decimals` is for the tooltip, where there's room for the exact figure.
-fn format_price(value: f64, currency: Option<&str>, decimals: bool) -> String {
+pub(crate) fn format_price(value: f64, currency: Option<&str>, decimals: bool) -> String {
     let code = currency.unwrap_or("").trim().to_uppercase();
     let symbol = match code.as_str() {
         "USD" | "CAD" | "AUD" | "NZD" => "$",
@@ -1774,9 +1807,7 @@ impl App {
                 }
                 if pick != current {
                     self.config.graph_arrange = pick.key().to_string();
-                    if let Err(e) = self.config.save() {
-                        self.status = format!("Couldn't save settings: {e}");
-                    }
+                    self.save_config();
                 }
                 // Which kinds of record are on the map. Each row toggles
                 // one kind and the menu stays open, so a dig's flood of
@@ -1830,9 +1861,7 @@ impl App {
                 });
                 if hide != self.config.graph_hide {
                     self.config.graph_hide = hide;
-                    if let Err(e) = self.config.save() {
-                        self.status = format!("Couldn't save settings: {e}");
-                    }
+                    self.save_config();
                 }
                 if clear_dug {
                     self.confirm_clear_dug = true;
@@ -1987,9 +2016,7 @@ impl App {
         {
             self.config.vinyl_sort = sort.key().to_string();
             self.config.vinyl_sort_ascending = ascending;
-            if let Err(e) = self.config.save() {
-                self.status = format!("Couldn't save settings: {e}");
-            }
+            self.save_config();
         }
         // The hairline itself, with no spacing of its own: the gap above is
         // `pad`, and the content below keeps the usual item spacing.
@@ -2008,29 +2035,8 @@ impl App {
         if graph_mode {
             let rect = ui.available_rect_before_wrap();
             self.graph_rect = rect;
-            let act = self.draw_graph(ui, rect, &query, graph::MapScope::Library);
-            match act {
-                Some(graph::GraphAct::Open(rel)) => {
-                    let cover_url = rel.cover_url();
-                    match rel.key {
-                        Some(key) => self.open_vinyl_sheet(key, ctx),
-                        None => self.open_release_sheet(
-                            rel.release_id,
-                            rel.artist,
-                            rel.title,
-                            rel.sub,
-                            cover_url,
-                            ctx,
-                        ),
-                    }
-                }
-                Some(graph::GraphAct::Thread(rel, thread)) => {
-                    self.map_take_thread(&rel, thread, graph::MapScope::Library);
-                }
-                Some(graph::GraphAct::Radio(rel)) => {
-                    self.radio_start_from(&rel);
-                }
-                None => {}
+            if let Some(act) = self.draw_graph(ui, rect, &query, graph::MapScope::Library) {
+                self.apply_graph_act(act, graph::MapScope::Library, ctx);
             }
             return;
         }
@@ -2564,28 +2570,7 @@ impl App {
                         // opening Discogs.
                         let mut badge_clicked = false;
                         if let Some((badge_rect, badge)) = badge {
-                            let bg = if badge_hovered {
-                                egui::Color32::from_rgb(120, 220, 150)
-                            } else {
-                                egui::Color32::from_rgb(90, 200, 120)
-                            };
-                            ui.painter()
-                                .rect_filled(badge_rect, egui::Rounding::same(5.0), bg);
-                            ui.painter().text(
-                                badge_rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                "♪",
-                                egui::FontId::proportional(14.0),
-                                egui::Color32::from_gray(20),
-                            );
-                            let n = c.linked.len();
-                            let tip = if n > 1 {
-                                format!("In your catalog ({n} tracks). Click to show.")
-                            } else {
-                                "In your catalog. Click to show.".to_string()
-                            };
-                            let badge = badge.on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if badge.on_hover_note(tip).clicked() {
+                            if catalog_badge(ui, badge_rect, badge, badge_hovered, c.linked.len()) {
                                 badge_clicked = true;
                                 action =
                                     Some(VinylGridAction::Goto(c.title.clone(), c.linked.clone()));
@@ -2842,28 +2827,8 @@ impl App {
                         ui.id().with(("vinyl-row-cat", c.key)),
                         egui::Sense::click(),
                     );
-                    let bg = if badge.hovered() {
-                        egui::Color32::from_rgb(120, 220, 150)
-                    } else {
-                        egui::Color32::from_rgb(90, 200, 120)
-                    };
-                    ui.painter()
-                        .rect_filled(badge_rect, egui::Rounding::same(5.0), bg);
-                    ui.painter().text(
-                        badge_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "♪",
-                        egui::FontId::proportional(14.0),
-                        egui::Color32::from_gray(20),
-                    );
-                    let n = c.linked.len();
-                    let tip = if n > 1 {
-                        format!("In your catalog ({n} tracks). Click to show.")
-                    } else {
-                        "In your catalog. Click to show.".to_string()
-                    };
-                    let badge = badge.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if badge.on_hover_note(tip).clicked() {
+                    let hovered = badge.hovered();
+                    if catalog_badge(ui, badge_rect, badge, hovered, c.linked.len()) {
                         badge_clicked = true;
                         action = Some(VinylGridAction::Goto(c.title.clone(), c.linked.clone()));
                     }

@@ -1159,9 +1159,7 @@ impl App {
             let new = slot_for(bar.center());
             if new != dock {
                 self.config.radio_dock = new.key().to_string();
-                if let Err(e) = self.config.save() {
-                    self.status = format!("Couldn't save settings: {e}");
-                }
+                self.save_config();
             }
             // A released bar keeps a little of the hand's motion and is
             // drawn home from there, rather than flying off like a slingshot.

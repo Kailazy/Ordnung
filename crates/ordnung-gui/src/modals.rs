@@ -163,13 +163,7 @@ impl App {
                             egui::ComboBox::from_id_salt("batch_target_format")
                                 .selected_text(format_label(m.target))
                                 .show_ui(ui, |ui| {
-                                    for &f in &[
-                                        Format::Mp3,
-                                        Format::Aac,
-                                        Format::Flac,
-                                        Format::Wav,
-                                        Format::Aiff,
-                                    ] {
+                                    for &f in &CONVERT_TARGETS {
                                         ui.selectable_value(&mut m.target, f, format_label(f));
                                     }
                                 });
@@ -399,9 +393,7 @@ impl App {
                     self.config.discogs_token.clear();
                     self.config.discogs_username.clear();
                     self.discogs_auth = DiscogsAuth::SignedOut;
-                    if let Err(e) = self.config.save() {
-                        self.status = format!("Couldn't save settings: {e}");
-                    } else {
+                    if self.save_config() {
                         self.status = "Signed out of Discogs.".into();
                     }
                 }
@@ -522,9 +514,7 @@ impl App {
             );
         }
         if mediums_dirty {
-            if let Err(e) = self.config.save() {
-                self.status = format!("Couldn't save settings: {e}");
-            }
+            self.save_config();
             // An open artist or label page follows the setting at once.
             self.refilter_browse_page();
         }
@@ -582,9 +572,7 @@ impl App {
             }
         });
         if auto_dirty {
-            if let Err(e) = self.config.save() {
-                self.status = format!("Couldn't save settings: {e}");
-            }
+            self.save_config();
         }
 
         ui.add_space(14.0);
@@ -769,10 +757,7 @@ impl App {
                                                 ui.end_row();
                                             });
                                         if nav_dirty {
-                                            if let Err(e) = self.config.save() {
-                                                self.status =
-                                                    format!("Couldn't save settings: {e}");
-                                            }
+                                            self.save_config();
                                         }
                                         ui.add_space(14.0);
                                         ui.separator();
@@ -867,10 +852,7 @@ impl App {
                                             // the next track, not a jump now.
                                             self.video_mid_start = webview::on_air()
                                                 .map(crate::playback::VideoMidStart::settled);
-                                            if let Err(e) = self.config.save() {
-                                                self.status =
-                                                    format!("Couldn't save settings: {e}");
-                                            }
+                                            self.save_config();
                                         }
                                         if ui
                                             .checkbox(
@@ -881,10 +863,7 @@ impl App {
                                             .changed()
                                         {
                                             self.apply_mid_start();
-                                            if let Err(e) = self.config.save() {
-                                                self.status =
-                                                    format!("Couldn't save settings: {e}");
-                                            }
+                                            self.save_config();
                                         }
                                         ui.add_space(14.0);
                                         ui.separator();
@@ -914,10 +893,7 @@ impl App {
                                             // flipping the setting is a fresh request
                                             // to try the files again.
                                             self.auto_write_stalled_at = None;
-                                            if let Err(e) = self.config.save() {
-                                                self.status =
-                                                    format!("Couldn't save settings: {e}");
-                                            }
+                                            self.save_config();
                                         }
                                         ui.add_space(14.0);
                                         ui.separator();
@@ -957,9 +933,7 @@ impl App {
                     )
                     .changed()
                 {
-                    if let Err(e) = self.config.save() {
-                        self.status = format!("Couldn't save settings: {e}");
-                    }
+                    self.save_config();
                 }
                                     }
                                     SettingsTab::Waveform => {
@@ -1002,10 +976,7 @@ impl App {
                                         if picked != current {
                                             self.config.waveform_color_mode =
                                                 picked.key().to_string();
-                                            if let Err(e) = self.config.save() {
-                                                self.status =
-                                                    format!("Couldn't save settings: {e}");
-                                            }
+                                            self.save_config();
                                         }
 
                                         ui.add_space(12.0);
@@ -1518,10 +1489,7 @@ impl App {
                                                 self.wave_save_pending = true;
                                             } else {
                                                 self.wave_save_pending = false;
-                                                if let Err(e) = self.config.save() {
-                                                    self.status =
-                                                        format!("Couldn't save settings: {e}");
-                                                }
+                                                self.save_config();
                                             }
                                         }
                                     }
@@ -1636,10 +1604,7 @@ impl App {
                                                 ui.end_row();
                                             });
                                         if sort_dirty {
-                                            if let Err(e) = self.config.save() {
-                                                self.status =
-                                                    format!("Couldn't save settings: {e}");
-                                            }
+                                            self.save_config();
                                             // Apply the new default to the live view immediately so the
                                             // change is visible without relaunching.
                                             self.sort = self.default_sort();
@@ -1702,13 +1667,7 @@ impl App {
                                                 )
                                                 .selected_text(format_label(target))
                                                 .show_ui(ui, |ui| {
-                                                    for &f in &[
-                                                        Format::Mp3,
-                                                        Format::Aac,
-                                                        Format::Flac,
-                                                        Format::Wav,
-                                                        Format::Aiff,
-                                                    ] {
+                                                    for &f in &CONVERT_TARGETS {
                                                         ui.selectable_value(
                                                             &mut target,
                                                             f,
@@ -1852,10 +1811,7 @@ impl App {
                                             }
                                         }
                                         if convert_dirty {
-                                            if let Err(e) = self.config.save() {
-                                                self.status =
-                                                    format!("Couldn't save settings: {e}");
-                                            }
+                                            self.save_config();
                                         }
                                     }
                                     SettingsTab::Discogs => {
@@ -1875,12 +1831,7 @@ impl App {
                     .weak(),
                 );
                                         ui.add_space(6.0);
-                                        let clear_btn = egui::Button::new(
-                                            egui::RichText::new("Clear catalog…")
-                                                .color(egui::Color32::WHITE),
-                                        )
-                                        .fill(egui::Color32::from_rgb(150, 40, 40));
-                                        if ui.add(clear_btn).clicked() {
+                                        if crate::ui::button::danger(ui, "Clear catalog…").clicked() {
                                             self.confirm_clear_db = true;
                                         }
                                     }
@@ -1938,47 +1889,23 @@ impl App {
         if !self.confirm_clear_db {
             return;
         }
-        let mut open = true;
-        let mut confirm = false;
-        crate::ui::window::Window::new("Clear catalog?")
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.set_min_width(380.0);
-                let n = self.rows.len();
-                ui.label(
-                    egui::RichText::new(format!(
-                        "This permanently removes {n} track{} and all of their analysis \
-                         and fetched artwork from the catalog. Playlists are kept but \
-                         emptied.",
-                        if n == 1 { "" } else { "s" }
-                    ))
-                    .strong(),
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new("Your source audio files are not deleted or modified.")
-                        .small()
-                        .weak(),
-                );
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        self.confirm_clear_db = false;
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let btn = egui::Button::new(
-                            egui::RichText::new("Clear catalog").color(egui::Color32::WHITE),
-                        )
-                        .fill(egui::Color32::from_rgb(150, 40, 40));
-                        if ui.add(btn).clicked() {
-                            confirm = true;
-                        }
-                    });
-                });
-            });
-
-        if confirm {
+        let n = self.rows.len();
+        let answer = danger_confirm(
+            ctx,
+            "Clear catalog?",
+            &format!(
+                "This permanently removes {n} track{} and all of their analysis \
+                 and fetched artwork from the catalog. Playlists are kept but \
+                 emptied.",
+                if n == 1 { "" } else { "s" }
+            ),
+            "Your source audio files are not deleted or modified.",
+            "Clear catalog",
+        );
+        if answer.is_some() {
             self.confirm_clear_db = false;
+        }
+        if answer == Some(true) {
             match Catalog::open(&self.db_path).and_then(|c| c.clear_tracks()) {
                 Ok(removed) => {
                     self.selected = None;
@@ -1995,9 +1922,6 @@ impl App {
                 Err(e) => self.status = format!("Couldn't clear catalog: {e}"),
             }
         }
-        if !open {
-            self.confirm_clear_db = false;
-        }
     }
 
     /// "Forget every discovered record?" popup, from the map's Show menu.
@@ -2013,50 +1937,22 @@ impl App {
             .find(|(s, _)| *s == crate::graph::Status::Dug)
             .map(|(_, n)| *n)
             .unwrap_or(0);
-        let mut open = true;
-        let mut confirm = false;
-        crate::ui::window::Window::new("Forget discovered records?")
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.set_min_width(380.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "This takes {n} record{} you dug to off the map.",
-                        if n == 1 { "" } else { "s" }
-                    ))
-                    .strong(),
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(
-                        "Your collection and wantlist stay, and so does anything you \
-                         asked for on a list. A later dig can find them again.",
-                    )
-                    .small()
-                    .weak(),
-                );
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if crate::ui::button::button(ui, "Cancel").clicked() {
-                        self.confirm_clear_dug = false;
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let btn = egui::Button::new(
-                            egui::RichText::new("Forget them").color(egui::Color32::WHITE),
-                        )
-                        .fill(egui::Color32::from_rgb(150, 40, 40));
-                        if ui.add(btn).clicked() {
-                            confirm = true;
-                        }
-                    });
-                });
-            });
-        if confirm {
+        let answer = danger_confirm(
+            ctx,
+            "Forget discovered records?",
+            &format!(
+                "This takes {n} record{} you dug to off the map.",
+                if n == 1 { "" } else { "s" }
+            ),
+            "Your collection and wantlist stay, and so does anything you \
+             asked for on a list. A later dig can find them again.",
+            "Forget them",
+        );
+        if answer.is_some() {
             self.confirm_clear_dug = false;
-            self.clear_dug();
         }
-        if !open {
-            self.confirm_clear_dug = false;
+        if answer == Some(true) {
+            self.clear_dug();
         }
     }
 
@@ -2167,9 +2063,7 @@ Converted copies go on the stick; your library files stay as they are. Needs ffm
                         c.player = player;
                     }
                     self.config.export_convert_for_older_players = convert;
-                    if let Err(e) = self.config.save() {
-                        self.status = format!("Couldn't save settings: {e}");
-                    }
+                    self.save_config();
                 }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -2468,47 +2362,18 @@ files elsewhere on the device stay plain storage.",
             return;
         };
         let n = ids.len();
-        let mut open = true;
-        let mut confirm = false;
-        crate::ui::window::Window::new("Delete from catalog?")
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.set_min_width(400.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Remove {n} track{} from the catalog?",
-                        if n == 1 { "" } else { "s" }
-                    ))
-                    .strong(),
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(
-                        "They are dropped from every playlist and the analysis cache. \
-                         The original files on disk are NOT deleted. This can't be undone.",
-                    )
-                    .small()
-                    .weak(),
-                );
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        self.confirm_delete = None;
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let btn = egui::Button::new(
-                            egui::RichText::new("Delete").color(egui::Color32::WHITE),
-                        )
-                        .fill(egui::Color32::from_rgb(150, 60, 60));
-                        if ui.add(btn).clicked() {
-                            confirm = true;
-                        }
-                    });
-                });
-            });
-
-        if confirm {
+        let answer = danger_confirm(
+            ctx,
+            "Delete from catalog?",
+            &format!("Remove {n} track{} from the catalog?", if n == 1 { "" } else { "s" }),
+            "They are dropped from every playlist and the analysis cache. \
+             The original files on disk are NOT deleted. This can't be undone.",
+            "Delete",
+        );
+        if answer.is_some() {
             self.confirm_delete = None;
+        }
+        if answer == Some(true) {
             match Catalog::open(&self.db_path).and_then(|c| c.delete_tracks(&ids)) {
                 Ok(removed) => {
                     self.status = format!(
@@ -2520,9 +2385,6 @@ files elsewhere on the device stay plain storage.",
                 Err(e) => self.status = format!("Delete failed: {e}"),
             }
             self.reload();
-        }
-        if !open {
-            self.confirm_delete = None;
         }
     }
 
@@ -2560,65 +2422,38 @@ files elsewhere on the device stay plain storage.",
             Kind::Remove => "Remove from your collection?",
             Kind::Swap(_) => "Swap this pressing?",
         };
-        let mut open = true;
-        let mut confirm = false;
-        crate::ui::window::Window::new(title)
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.set_min_width(400.0);
-                ui.label(
-                    egui::RichText::new(format!("{} — {}", record.artist, record.title)).strong(),
-                );
-                ui.add_space(4.0);
-                let detail = match kind {
-                    Kind::Move => "This gives up your copy on Discogs and adds the release \
-                         to your wantlist instead. The copy's date added, rating and notes \
-                         are lost."
-                        .to_string(),
-                    Kind::Remove => "This deletes your copy from your Discogs collection, \
-                         along with its date added, rating and notes."
-                        .to_string(),
-                    Kind::Swap(to) => format!(
-                        "This puts {to} in your collection and deletes the copy above from \
-                         it. The old copy's date added, rating and notes are lost."
-                    ),
-                };
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{detail} It changes your real Discogs account and can't be undone \
-                         from Ordnung."
-                    ))
-                    .small()
-                    .weak(),
-                );
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        self.confirm_vinyl_edit = None;
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let btn = egui::Button::new(
-                            egui::RichText::new(match kind {
-                                Kind::Move => "Move",
-                                Kind::Remove => "Remove",
-                                Kind::Swap(_) => "Swap",
-                            })
-                            .color(egui::Color32::WHITE),
-                        )
-                        .fill(egui::Color32::from_rgb(150, 60, 60));
-                        if ui.add(btn).clicked() {
-                            confirm = true;
-                        }
-                    });
-                });
-            });
-
-        if confirm {
+        let detail = match kind {
+            Kind::Move => "This gives up your copy on Discogs and adds the release \
+                 to your wantlist instead. The copy's date added, rating and notes \
+                 are lost."
+                .to_string(),
+            Kind::Remove => "This deletes your copy from your Discogs collection, \
+                 along with its date added, rating and notes."
+                .to_string(),
+            Kind::Swap(to) => format!(
+                "This puts {to} in your collection and deletes the copy above from \
+                 it. The old copy's date added, rating and notes are lost."
+            ),
+        };
+        let answer = danger_confirm(
+            ctx,
+            title,
+            &format!("{} — {}", record.artist, record.title),
+            &format!(
+                "{detail} It changes your real Discogs account and can't be undone \
+                 from Ordnung."
+            ),
+            match kind {
+                Kind::Move => "Move",
+                Kind::Remove => "Remove",
+                Kind::Swap(_) => "Swap",
+            },
+        );
+        if answer.is_some() {
             self.confirm_vinyl_edit = None;
-            self.spawn_vinyl_edit(ctx.clone(), edit);
         }
-        if !open {
-            self.confirm_vinyl_edit = None;
+        if answer == Some(true) {
+            self.spawn_vinyl_edit(ctx.clone(), edit);
         }
     }
 
@@ -3751,4 +3586,42 @@ impl App {
             self.look_editor = None;
         }
     }
+}
+
+/// A confirmation for a destructive action: the `headline` in bold, the
+/// `detail` small beneath it, Cancel on the left and the red `action` button
+/// on the right. `Some(true)` when confirmed, `Some(false)` when cancelled or
+/// closed, `None` while it is still up.
+fn danger_confirm(
+    ctx: &egui::Context,
+    title: &str,
+    headline: &str,
+    detail: &str,
+    action: &str,
+) -> Option<bool> {
+    let mut open = true;
+    let mut answer = None;
+    crate::ui::window::Window::new(title)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.set_min_width(400.0);
+            ui.label(egui::RichText::new(headline).strong());
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(detail).small().weak());
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if crate::ui::button::button(ui, "Cancel").clicked() {
+                    answer = Some(false);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::ui::button::danger(ui, action).clicked() {
+                        answer = Some(true);
+                    }
+                });
+            });
+        });
+    if !open {
+        answer.get_or_insert(false);
+    }
+    answer
 }

@@ -2526,9 +2526,7 @@ impl App {
                 });
                 if pick != arrange {
                     self.config.graph_arrange = pick.key().to_string();
-                    if let Err(e) = self.config.save() {
-                        self.status = format!("Couldn't save settings: {e}");
-                    }
+                    self.save_config();
                 }
                 ui.add_space(crate::ui::tokens::space::S3);
                 let rect = ui.available_rect_before_wrap();
@@ -2538,8 +2536,19 @@ impl App {
                 }
                 act = self.draw_graph(ui, rect, "", MapScope::Dig);
             });
+        if let Some(act) = act {
+            self.apply_graph_act(act, MapScope::Dig, ctx);
+        }
+        if !open {
+            self.dig_window_open = false;
+        }
+    }
+
+    /// Carry out what a click on a map in `scope` asked for: open the
+    /// record's sheet, take a thread off it, or start the radio on it.
+    pub(crate) fn apply_graph_act(&mut self, act: GraphAct, scope: MapScope, ctx: &egui::Context) {
         match act {
-            Some(GraphAct::Open(rel)) => {
+            GraphAct::Open(rel) => {
                 let cover_url = rel.cover_url();
                 match rel.key {
                     Some(key) => self.open_vinyl_sheet(key, ctx),
@@ -2553,16 +2562,8 @@ impl App {
                     ),
                 }
             }
-            Some(GraphAct::Thread(rel, thread)) => {
-                self.map_take_thread(&rel, thread, MapScope::Dig);
-            }
-            Some(GraphAct::Radio(rel)) => {
-                self.radio_start_from(&rel);
-            }
-            None => {}
-        }
-        if !open {
-            self.dig_window_open = false;
+            GraphAct::Thread(rel, thread) => self.map_take_thread(&rel, thread, scope),
+            GraphAct::Radio(rel) => self.radio_start_from(&rel),
         }
     }
 
@@ -2716,9 +2717,7 @@ impl App {
         let is_new = !self.dug.iter().any(|x| x.release_id == d.release_id);
         if is_new && !d.wanted && self.config.graph_hide.iter().any(|k| k == Status::Dug.key()) {
             self.config.graph_hide.retain(|k| k != Status::Dug.key());
-            if let Err(e) = self.config.save() {
-                self.status = format!("Couldn't save settings: {e}");
-            }
+            self.save_config();
         }
         match self.dug.iter_mut().find(|x| x.release_id == d.release_id) {
             Some(x) => {
