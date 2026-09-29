@@ -3052,7 +3052,7 @@ pub(crate) fn run_vinyl_edit(
                 }
             };
             touched.push(VinylList::Collection);
-            let fetched = client.collection_record(&username, release_id, instance_id);
+            let fetched = client.collection_record(release_id, instance_id);
             if let Ok((_, detail)) = &fetched {
                 let _ = catalog.cache_release(detail);
             }
@@ -3224,7 +3224,7 @@ pub(crate) fn run_vinyl_edit(
                     Some((instance_id, None)) => Some((
                         instance_id,
                         client
-                            .collection_record(&username, to_release, instance_id)
+                            .collection_record(to_release, instance_id)
                             .ok()
                             .and_then(|(rec, detail)| {
                                 let _ = catalog.cache_release(&detail);

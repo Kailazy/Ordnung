@@ -7,8 +7,8 @@
 use crate::error::{Error, Result};
 use std::path::Path;
 use symphonia::core::audio::{AudioBufferRef, Signal};
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
@@ -46,42 +46,9 @@ pub fn decode_interleaved_chunks(
     mut on_chunk: impl FnMut(&[f32]) -> bool,
 ) -> Result<()> {
     let path = path.as_ref();
-    let file = std::fs::File::open(path).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| decode_err(path, e))?;
-    let mut format = probed.format;
-
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| Error::Decode {
-            path: path.to_path_buf(),
-            msg: "no decodable audio track".into(),
-        })?;
-    let track_id = track.id;
-    let sample_rate = track.codec_params.sample_rate.unwrap_or(44_100);
-    let total_frames = track.codec_params.n_frames;
-
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| decode_err(path, e))?;
+    let Opened { mut format, mut decoder, params, track_id, .. } = open_audio(path)?;
+    let sample_rate = params.sample_rate.unwrap_or(44_100);
+    let total_frames = params.n_frames;
 
     let mut on_start = Some(on_start);
     let mut chunk: Vec<f32> = Vec::new();
@@ -139,37 +106,8 @@ pub fn decode_mono_capped(path: impl AsRef<Path>, max_samples: Option<usize>) ->
 /// when the codec doesn't report a frame count.
 pub fn probe_for_scan(path: impl AsRef<Path>) -> Result<crate::model::AudioProperties> {
     let path = path.as_ref();
-    let file = std::fs::File::open(path).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| decode_err(path, e))?;
-    let mut format = probed.format;
-
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| Error::Decode {
-            path: path.to_path_buf(),
-            msg: "no decodable audio track".into(),
-        })?;
-    let track_id = track.id;
-    let cp = &track.codec_params;
+    let Opened { mut format, mut decoder, params, track_id, file_len } = open_audio(path)?;
+    let cp = &params;
     let sample_rate = cp.sample_rate.unwrap_or(0);
     let channels = cp.channels.map(|c| c.count() as u8).unwrap_or(0);
     let bit_depth = cp.bits_per_sample.map(|b| b as u8);
@@ -200,12 +138,6 @@ pub fn probe_for_scan(path: impl AsRef<Path>) -> Result<crate::model::AudioPrope
             });
         }
     }
-
-    // Building the decoder copies what it needs from `cp`, releasing the borrow of
-    // `format` so we can pull packets below.
-    let mut decoder = symphonia::default::get_codecs()
-        .make(cp, &DecoderOptions::default())
-        .map_err(|e| decode_err(path, e))?;
 
     // Confirm actual audio — a handful of packets is plenty. A header-only truncated
     // file returns EOF before any frame decodes.
@@ -261,30 +193,34 @@ pub fn probe_for_scan(path: impl AsRef<Path>) -> Result<crate::model::AudioPrope
     })
 }
 
-/// Shared decode core. `max_samples` caps the output length.
-fn decode_mono_inner(path: impl AsRef<Path>, max_samples: Option<usize>) -> Result<DecodedAudio> {
-    let path = path.as_ref();
+/// A file opened for decoding: its container, the decoder for its first
+/// audio track, that track's parameters and id, and the file's size.
+struct Opened {
+    format: Box<dyn FormatReader>,
+    decoder: Box<dyn Decoder>,
+    params: CodecParameters,
+    track_id: u32,
+    file_len: u64,
+}
+
+/// Open `path`, probe its container and make a decoder for the first track
+/// that carries audio. Shared by every decode path so they agree on which
+/// track a file's audio is.
+fn open_audio(path: &Path) -> Result<Opened> {
     let file = std::fs::File::open(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
     })?;
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
-
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| decode_err(path, e))?;
-    let mut format = probed.format;
-
+    let format = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| decode_err(path, e))?
+        .format;
     let track = format
         .tracks()
         .iter()
@@ -293,13 +229,20 @@ fn decode_mono_inner(path: impl AsRef<Path>, max_samples: Option<usize>) -> Resu
             path: path.to_path_buf(),
             msg: "no decodable audio track".into(),
         })?;
+    let params = track.codec_params.clone();
     let track_id = track.id;
-    let sample_rate = track.codec_params.sample_rate.unwrap_or(44_100);
-    let n_frames = track.codec_params.n_frames;
-
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
+    let decoder = symphonia::default::get_codecs()
+        .make(&params, &DecoderOptions::default())
         .map_err(|e| decode_err(path, e))?;
+    Ok(Opened { format, decoder, params, track_id, file_len })
+}
+
+/// Shared decode core. `max_samples` caps the output length.
+fn decode_mono_inner(path: impl AsRef<Path>, max_samples: Option<usize>) -> Result<DecodedAudio> {
+    let path = path.as_ref();
+    let Opened { mut format, mut decoder, params, track_id, .. } = open_audio(path)?;
+    let sample_rate = params.sample_rate.unwrap_or(44_100);
+    let n_frames = params.n_frames;
 
 
     // Pre-size the output to the known cap so a ~150 s window (≈7 M f32, ~29 MB)

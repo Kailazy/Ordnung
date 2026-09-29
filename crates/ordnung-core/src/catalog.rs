@@ -89,6 +89,39 @@ fn shipping_quote(r: &rusqlite::Row, i: usize) -> rusqlite::Result<Option<(f64, 
     Ok(price.zip(currency))
 }
 
+/// The columns of a `seller_listings` row that make a [`SellerListing`], in
+/// the order [`read_seller_listing`] reads them.
+const SELLER_LISTING_COLS: &str = "listing_id, release_id, title, artist, year, label, \
+     catalog_number, format, thumb_url, price, currency, condition, sleeve_condition, \
+     ships_from, shipping_price, shipping_currency, allow_offers, uri, posted";
+
+/// One [`SellerListing`] from a row selecting [`SELLER_LISTING_COLS`] from
+/// column `base` on (1 when the seller is selected ahead of them).
+fn read_seller_listing(r: &rusqlite::Row, base: usize) -> rusqlite::Result<SellerListing> {
+    let c = |i: usize| base + i;
+    Ok(SellerListing {
+        listing_id: r.get::<_, i64>(c(0))? as u64,
+        release_id: r.get::<_, i64>(c(1))? as u64,
+        title: r.get(c(2))?,
+        artist: r.get(c(3))?,
+        year: r.get::<_, Option<i64>>(c(4))?.map(|y| y as u16),
+        label: r.get(c(5))?,
+        catalog_number: r.get(c(6))?,
+        format: r.get(c(7))?,
+        thumb_url: r.get(c(8))?,
+        price: r.get(c(9))?,
+        currency: r.get(c(10))?,
+        condition: r.get(c(11))?,
+        sleeve_condition: r.get(c(12))?,
+        ships_from: r.get(c(13))?,
+        shipping_price: shipping_quote(r, c(14))?.map(|(p, _)| p),
+        shipping_currency: shipping_quote(r, c(14))?.map(|(_, c)| c),
+        allow_offers: r.get::<_, i64>(c(16))? != 0,
+        uri: r.get(c(17))?,
+        posted: r.get(c(18))?,
+    })
+}
+
 /// Build an [`Analysis`] from a row selecting [`Catalog::ANALYSIS_COLS`], whose
 /// first column sits at `base` (0 when the row is exactly those columns, 1 when a
 /// `track_id` is selected ahead of them). Shared by the single-track load and the
@@ -1878,12 +1911,8 @@ impl Catalog {
         let mut stmt = self.conn.prepare(
             "SELECT track_id FROM track_external_artwork WHERE typeof(png_bytes) = 'blob'",
         )?;
-        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r? as Id);
-        }
-        Ok(out)
+        let rows = stmt.query_map([], |r| Ok(r.get::<_, i64>(0)? as Id))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Whether `track_id` has *full-resolution* external artwork on record —
@@ -1902,67 +1931,14 @@ impl Catalog {
             .unwrap_or(false))
     }
 
-    /// Other tracks on the *same album* as `track_id` that have no cover of their
-    /// own (no embedded art and no external-artwork row). "Same album" means a
-    /// matching, non-empty album title under the same album identity — the album
-    /// artist, falling back to the track artist when no album artist is set — both
-    /// compared case-insensitively and trimmed so tag noise doesn't split a record.
-    /// Used to propagate one chosen cover across a whole album: the returned ids
-    /// are exactly the siblings that would benefit, leaving any that already have
-    /// their own art untouched. Empty when `track_id` has no album, or no needy
-    /// siblings exist.
-    pub fn album_siblings_missing_art(&self, track_id: Id) -> Result<Vec<Id>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT t.id
-             FROM tracks t
-             JOIN tracks me ON me.id = ?1
-             LEFT JOIN track_external_artwork e ON e.track_id = t.id
-             WHERE t.id <> me.id
-               AND TRIM(COALESCE(me.album, '')) <> ''
-               AND lower(TRIM(t.album)) = lower(TRIM(me.album))
-               AND lower(COALESCE(NULLIF(TRIM(t.album_artist), ''), t.artist, ''))
-                   = lower(COALESCE(NULLIF(TRIM(me.album_artist), ''), me.artist, ''))
-               AND COALESCE(t.has_cover, 0) = 0
-               AND (e.track_id IS NULL OR e.png_bytes IS NULL)
-             ORDER BY t.id",
-        )?;
-        let rows = stmt.query_map(params![track_id as i64], |r| r.get::<_, i64>(0))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r? as Id);
-        }
-        Ok(out)
-    }
-
-    /// *Every* other track on the same album as `track_id`, regardless of whether
-    /// it already has a cover. Same "same album" identity as
-    /// [`Catalog::album_siblings_missing_art`]; used when the user chooses to
-    /// overwrite album-mates' existing covers so the whole album matches.
-    pub fn album_siblings(&self, track_id: Id) -> Result<Vec<Id>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT t.id
-             FROM tracks t
-             JOIN tracks me ON me.id = ?1
-             WHERE t.id <> me.id
-               AND TRIM(COALESCE(me.album, '')) <> ''
-               AND lower(TRIM(t.album)) = lower(TRIM(me.album))
-               AND lower(COALESCE(NULLIF(TRIM(t.album_artist), ''), t.artist, ''))
-                   = lower(COALESCE(NULLIF(TRIM(me.album_artist), ''), me.artist, ''))
-             ORDER BY t.id",
-        )?;
-        let rows = stmt.query_map(params![track_id as i64], |r| r.get::<_, i64>(0))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r? as Id);
-        }
-        Ok(out)
-    }
-
     /// Every other track on the same album as `track_id`, with the name fields
-    /// and a per-track `has_art` flag. Same "same album" identity as
-    /// [`Catalog::album_siblings`]; this richer form lets the GUI list mates by
-    /// name and pre-select the cover-less ones when copying a cover across an
-    /// album.
+    /// and a per-track `has_art` flag (embedded art, or a fetched external
+    /// image). "Same album" means a matching, non-empty album title under the
+    /// same album identity — the album artist, falling back to the track artist
+    /// when no album artist is set — both compared case-insensitively and
+    /// trimmed so tag noise doesn't split a record. The GUI lists mates by name
+    /// and fills the cover-less ones (or every one, to overwrite) when copying
+    /// a cover across an album. Empty when `track_id` has no album.
     pub fn album_siblings_detailed(&self, track_id: Id) -> Result<Vec<AlbumSibling>> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, t.artist, t.title,
@@ -1988,11 +1964,7 @@ impl Catalog {
                 has_art: r.get::<_, i64>(3)? != 0,
             })
         })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Whether `track_id` already has *some* cover — either an embedded one
@@ -2069,11 +2041,7 @@ impl Catalog {
                 release_id: r.get::<_, Option<String>>(4)?,
             })
         })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Mark a track as having completed a Discogs song-data fetch, so
@@ -3770,39 +3738,14 @@ impl Catalog {
     /// order a sweep fetched them in) — `posted` is ISO 8601 so it sorts as
     /// text, with undated listings sinking to the end.
     pub fn list_seller_listings(&self, seller: &str) -> Result<Vec<SellerListing>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT listing_id, release_id, title, artist, year, label,
-                    catalog_number, format, thumb_url, price, currency, condition,
-                    sleeve_condition, ships_from, shipping_price, shipping_currency,
-                    allow_offers, uri, posted
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {SELLER_LISTING_COLS}
              FROM seller_listings
              WHERE seller=?1
-             ORDER BY posted IS NULL, posted DESC, listing_id DESC",
-        )?;
+             ORDER BY posted IS NULL, posted DESC, listing_id DESC"
+        ))?;
         let rows = stmt
-            .query_map(params![seller], |r| {
-                Ok(SellerListing {
-                    listing_id: r.get::<_, i64>(0)? as u64,
-                    release_id: r.get::<_, i64>(1)? as u64,
-                    title: r.get(2)?,
-                    artist: r.get(3)?,
-                    year: r.get::<_, Option<i64>>(4)?.map(|y| y as u16),
-                    label: r.get(5)?,
-                    catalog_number: r.get(6)?,
-                    format: r.get(7)?,
-                    thumb_url: r.get(8)?,
-                    price: r.get(9)?,
-                    currency: r.get(10)?,
-                    condition: r.get(11)?,
-                    sleeve_condition: r.get(12)?,
-                    ships_from: r.get(13)?,
-                    shipping_price: shipping_quote(r, 14)?.map(|(p, _)| p),
-                    shipping_currency: shipping_quote(r, 14)?.map(|(_, c)| c),
-                    allow_offers: r.get::<_, i64>(16)? != 0,
-                    uri: r.get(17)?,
-                    posted: r.get(18)?,
-                })
-            })?
+            .query_map(params![seller], |r| read_seller_listing(r, 0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -3835,11 +3778,7 @@ impl Catalog {
             })
             .collect();
         let sql = format!(
-            "SELECT l.seller, l.listing_id, l.release_id, l.title, l.artist,
-                    l.year, l.label, l.catalog_number, l.format, l.thumb_url,
-                    l.price, l.currency, l.condition, l.sleeve_condition,
-                    l.ships_from, l.shipping_price, l.shipping_currency,
-                    l.allow_offers, l.uri, l.posted
+            "SELECT l.seller, {SELLER_LISTING_COLS}
              FROM seller_listings l
              WHERE {}
              ORDER BY l.artist COLLATE NOCASE ASC, l.title COLLATE NOCASE ASC,
@@ -3858,27 +3797,7 @@ impl Catalog {
             .query_map(rusqlite::params_from_iter(params.iter()), |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    SellerListing {
-                        listing_id: r.get::<_, i64>(1)? as u64,
-                        release_id: r.get::<_, i64>(2)? as u64,
-                        title: r.get(3)?,
-                        artist: r.get(4)?,
-                        year: r.get::<_, Option<i64>>(5)?.map(|y| y as u16),
-                        label: r.get(6)?,
-                        catalog_number: r.get(7)?,
-                        format: r.get(8)?,
-                        thumb_url: r.get(9)?,
-                        price: r.get(10)?,
-                        currency: r.get(11)?,
-                        condition: r.get(12)?,
-                        sleeve_condition: r.get(13)?,
-                        ships_from: r.get(14)?,
-                        shipping_price: shipping_quote(r, 15)?.map(|(p, _)| p),
-                        shipping_currency: shipping_quote(r, 15)?.map(|(_, c)| c),
-                        allow_offers: r.get::<_, i64>(17)? != 0,
-                        uri: r.get(18)?,
-                        posted: r.get(19)?,
-                    },
+                    read_seller_listing(r, 1)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -3894,40 +3813,17 @@ impl Catalog {
         &self,
         release_id: u64,
     ) -> Result<Vec<(String, SellerListing)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT seller, listing_id, release_id, title, artist, year, label,
-                    catalog_number, format, thumb_url, price, currency, condition,
-                    sleeve_condition, ships_from, shipping_price, shipping_currency,
-                    allow_offers, uri, posted
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT seller, {SELLER_LISTING_COLS}
              FROM seller_listings
              WHERE release_id=?1
-             ORDER BY price ASC, seller COLLATE NOCASE ASC, listing_id ASC",
-        )?;
+             ORDER BY price ASC, seller COLLATE NOCASE ASC, listing_id ASC"
+        ))?;
         let rows = stmt
             .query_map(params![release_id as i64], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    SellerListing {
-                        listing_id: r.get::<_, i64>(1)? as u64,
-                        release_id: r.get::<_, i64>(2)? as u64,
-                        title: r.get(3)?,
-                        artist: r.get(4)?,
-                        year: r.get::<_, Option<i64>>(5)?.map(|y| y as u16),
-                        label: r.get(6)?,
-                        catalog_number: r.get(7)?,
-                        format: r.get(8)?,
-                        thumb_url: r.get(9)?,
-                        price: r.get(10)?,
-                        currency: r.get(11)?,
-                        condition: r.get(12)?,
-                        sleeve_condition: r.get(13)?,
-                        ships_from: r.get(14)?,
-                        shipping_price: shipping_quote(r, 15)?.map(|(p, _)| p),
-                        shipping_currency: shipping_quote(r, 15)?.map(|(_, c)| c),
-                        allow_offers: r.get::<_, i64>(17)? != 0,
-                        uri: r.get(18)?,
-                        posted: r.get(19)?,
-                    },
+                    read_seller_listing(r, 1)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -3942,41 +3838,17 @@ impl Catalog {
     /// currencies as bare numbers, which is approximate but keeps the list
     /// scannable), ties broken by artist for a stable order.
     pub fn wantlist_offers(&self) -> Result<Vec<(String, SellerListing)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT l.seller, l.listing_id, l.release_id, l.title, l.artist,
-                    l.year, l.label, l.catalog_number, l.format, l.thumb_url,
-                    l.price, l.currency, l.condition, l.sleeve_condition,
-                    l.ships_from, l.shipping_price, l.shipping_currency,
-                    l.allow_offers, l.uri, l.posted
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT l.seller, {SELLER_LISTING_COLS}
              FROM seller_listings l
              WHERE l.release_id IN (SELECT release_id FROM vinyl_wantlist)
-             ORDER BY l.price ASC, l.artist ASC, l.listing_id ASC",
-        )?;
+             ORDER BY l.price ASC, l.artist ASC, l.listing_id ASC"
+        ))?;
         let rows = stmt
             .query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    SellerListing {
-                        listing_id: r.get::<_, i64>(1)? as u64,
-                        release_id: r.get::<_, i64>(2)? as u64,
-                        title: r.get(3)?,
-                        artist: r.get(4)?,
-                        year: r.get::<_, Option<i64>>(5)?.map(|y| y as u16),
-                        label: r.get(6)?,
-                        catalog_number: r.get(7)?,
-                        format: r.get(8)?,
-                        thumb_url: r.get(9)?,
-                        price: r.get(10)?,
-                        currency: r.get(11)?,
-                        condition: r.get(12)?,
-                        sleeve_condition: r.get(13)?,
-                        ships_from: r.get(14)?,
-                        shipping_price: shipping_quote(r, 15)?.map(|(p, _)| p),
-                        shipping_currency: shipping_quote(r, 15)?.map(|(_, c)| c),
-                        allow_offers: r.get::<_, i64>(17)? != 0,
-                        uri: r.get(18)?,
-                        posted: r.get(19)?,
-                    },
+                    read_seller_listing(r, 1)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -5103,7 +4975,7 @@ pub fn song_key(
     release_id: Option<u64>,
     position: Option<&str>,
 ) -> String {
-    let a = norm_match(strip_discogs_disambiguator(artist));
+    let a = norm_match(crate::discogs::strip_discogs_number(artist));
     let t = norm_match(crate::discogs::strip_original_mix(title));
     if a.is_empty() && t.is_empty() {
         return String::new();
@@ -5115,22 +4987,6 @@ pub fn song_key(
         }
     }
     key
-}
-
-/// An artist name without the ` (2)` Discogs appends to tell namesakes
-/// apart: it's a Discogs bookkeeping mark, never how a tag spells the name.
-fn strip_discogs_disambiguator(artist: &str) -> &str {
-    let s = artist.trim_end();
-    if let Some(open) = s.rfind(" (") {
-        let tail = &s[open + 2..];
-        if tail.len() > 1
-            && tail.ends_with(')')
-            && tail[..tail.len() - 1].bytes().all(|b| b.is_ascii_digit())
-        {
-            return s[..open].trim_end();
-        }
-    }
-    s
 }
 
 /// Whether a normalized title says nothing about the song: blank,
@@ -6157,15 +6013,18 @@ mod tests {
         let _d = scan("/d.mp3", "Y", "AA", false); // different album
         let _e = scan("/e.mp3", "X", "BB", false); // same album title, other artist
 
-        // All mates on album X / AA, excluding A itself (D and E differ).
-        assert_eq!(cat.album_siblings(a).unwrap(), vec![b, c]);
-        // Only the cover-less mate is "missing art".
-        assert_eq!(cat.album_siblings_missing_art(a).unwrap(), vec![b]);
+        // All mates on album X / AA, excluding A itself (D and E differ);
+        // only the cover-less one lacks art.
+        let mates = cat.album_siblings_detailed(a).unwrap();
+        let ids: Vec<Id> = mates.iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![b, c]);
+        let bare: Vec<Id> = mates.iter().filter(|s| !s.has_art).map(|s| s.id).collect();
+        assert_eq!(bare, vec![b]);
 
         // A track with no album has no mates.
         let lone = scanned("/lone.mp3", "Z", "Ambient", 1000);
         let lone = cat.upsert_scanned(&lone).unwrap().0;
-        assert!(cat.album_siblings(lone).unwrap().is_empty());
+        assert!(cat.album_siblings_detailed(lone).unwrap().is_empty());
     }
 
     #[test]
@@ -7077,8 +6936,8 @@ mod tests {
             song_key("Metro Area (2)", "Miura (Original Mix)", None, None),
             song_key("metro area", "miura", None, None)
         );
-        assert_eq!(strip_discogs_disambiguator("Nobody (Yet)"), "Nobody (Yet)");
-        assert_eq!(strip_discogs_disambiguator("Nobody ()"), "Nobody ()");
+        assert_eq!(crate::discogs::strip_discogs_number("Nobody (Yet)"), "Nobody (Yet)");
+        assert_eq!(crate::discogs::strip_discogs_number("Nobody ()"), "Nobody ()");
         assert!(song_key("", "", None, None).is_empty());
     }
 

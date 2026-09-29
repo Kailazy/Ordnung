@@ -248,7 +248,7 @@ pub fn scan_file(path: impl AsRef<Path>) -> Result<ScannedTrack> {
         // Cover art — flag + downscaled thumbnail for the catalog/GUI.
         tags.has_cover = tag.picture_count() > 0;
         if let Some(pic) = tag.pictures().first() {
-            cover_thumb = thumbnail_png(pic.data(), 96);
+            cover_thumb = crate::discogs::downscale_png(pic.data(), 96);
         }
     }
 
@@ -407,21 +407,7 @@ pub fn read_front_cover_png(path: impl AsRef<Path>) -> Result<Option<Vec<u8>>> {
     let Some(pic) = tag.pictures().first() else {
         return Ok(None);
     };
-    Ok(thumbnail_png(pic.data(), PREVIEW_MAX_SIDE))
-}
-
-/// Decode the embedded cover bytes (typically JPEG or PNG), downscale to a
-/// `max_side`-pixel square thumbnail, and re-encode as PNG. Returns `None` if
-/// the bytes don't decode as any supported image format.
-fn thumbnail_png(bytes: &[u8], max_side: u32) -> Option<Vec<u8>> {
-    use std::io::Cursor;
-    let img = image::load_from_memory(bytes).ok()?;
-    let thumb = img.thumbnail(max_side, max_side);
-    let mut out = Vec::new();
-    thumb
-        .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
-        .ok()?;
-    Some(out)
+    Ok(crate::discogs::downscale_png(pic.data(), PREVIEW_MAX_SIDE))
 }
 
 /// Map a file extension to its [`Format`]. Public because the GUI's device

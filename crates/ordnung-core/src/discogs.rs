@@ -1532,10 +1532,7 @@ impl Client {
         let page = page.max(1).to_string();
         let per_page = per_page.clamp(1, 100).to_string();
         let resp = self.call_with_retry(|| {
-            self.agent
-                .get(SEARCH_URL)
-                .set("User-Agent", &self.user_agent)
-                .set("Authorization", &format!("Discogs token={}", self.token))
+            self.authed(self.agent.get(SEARCH_URL))
                 .query("q", query)
                 .query("type", "release")
                 .query("per_page", &per_page)
@@ -1586,10 +1583,7 @@ impl Client {
         }
         let per_page = per_page.clamp(1, 100).to_string();
         let resp = self.call_with_retry(|| {
-            self.agent
-                .get(SEARCH_URL)
-                .set("User-Agent", &self.user_agent)
-                .set("Authorization", &format!("Discogs token={}", self.token))
+            self.authed(self.agent.get(SEARCH_URL))
                 .query("q", query)
                 .query("type", "artist")
                 .query("per_page", &per_page)
@@ -1722,17 +1716,7 @@ impl Client {
     /// can fill in album-level tag fields via [`ReleaseDetail::apply_to_tags`].
     /// One authenticated request — pace alongside the search rate limit.
     pub fn fetch_release(&self, release_id: &str) -> Result<ReleaseDetail> {
-        let url = format!("{RELEASE_URL}/{release_id}");
-        let resp = self.call_with_retry(|| {
-            self.agent
-                .get(&url)
-                .set("User-Agent", &self.user_agent)
-                .set("Authorization", &format!("Discogs token={}", self.token))
-        })?;
-        let body: ReleaseResponse = resp
-            .into_json()
-            .map_err(|e| Error::Network(format!("decoding Discogs release response: {e}")))?;
-        Ok(body.into_detail())
+        Ok(self.get_release(release_id)?.into_detail())
     }
 
     /// The format summary of one release (`Vinyl, 12", 33 ⅓ RPM`), for deciding
@@ -1740,17 +1724,15 @@ impl Client {
     /// API request; callers should only reach for it on rows where
     /// [`BrowseRelease::format_known`] is false.
     pub fn release_format(&self, release_id: u64) -> Result<String> {
+        Ok(self.get_release(release_id)?.format_summary())
+    }
+
+    /// `GET /releases/{id}`, decoded.
+    fn get_release(&self, release_id: impl std::fmt::Display) -> Result<ReleaseResponse> {
         let url = format!("{RELEASE_URL}/{release_id}");
-        let resp = self.call_with_retry(|| {
-            self.agent
-                .get(&url)
-                .set("User-Agent", &self.user_agent)
-                .set("Authorization", &format!("Discogs token={}", self.token))
-        })?;
-        let body: ReleaseResponse = resp
-            .into_json()
-            .map_err(|e| Error::Network(format!("decoding Discogs release response: {e}")))?;
-        Ok(body.format_summary())
+        let resp = self.call_with_retry(|| self.authed(self.agent.get(&url)))?;
+        resp.into_json()
+            .map_err(|e| Error::Network(format!("decoding Discogs release response: {e}")))
     }
 
     /// Resolve the token owner's Discogs username (`GET /oauth/identity`). One
@@ -1758,10 +1740,7 @@ impl Client {
     /// this is the first call a collection sync makes.
     pub fn identity(&self) -> Result<String> {
         let resp = self.call_with_retry(|| {
-            self.agent
-                .get(IDENTITY_URL)
-                .set("User-Agent", &self.user_agent)
-                .set("Authorization", &format!("Discogs token={}", self.token))
+            self.authed(self.agent.get(IDENTITY_URL))
         })?;
         let body: IdentityResponse = resp
             .into_json()
@@ -1780,35 +1759,10 @@ impl Client {
     pub fn fetch_collection_for(&self, username: &str) -> Result<Vec<VinylRecord>> {
         let base =
             format!("https://api.discogs.com/users/{username}/collection/folders/0/releases");
-        let mut out = Vec::new();
-        let mut page = 1u32;
-        loop {
-            let page_str = page.to_string();
-            let per_page = COLLECTION_PER_PAGE.to_string();
-            let resp = self.call_with_retry(|| {
-                self.agent
-                    .get(&base)
-                    .set("User-Agent", &self.user_agent)
-                    .set("Authorization", &format!("Discogs token={}", self.token))
-                    .query("page", &page_str)
-                    .query("per_page", &per_page)
-                    .query("sort", "added")
-                    .query("sort_order", "desc")
-            })?;
-            let body: CollectionResponse = resp.into_json().map_err(|e| {
-                Error::Network(format!("decoding Discogs collection response: {e}"))
-            })?;
-            for item in body.releases {
-                if let Some(rec) = item.into_record() {
-                    out.push(rec);
-                }
-            }
-            if page >= body.pagination.pages.max(1) {
-                break;
-            }
-            page += 1;
-        }
-        Ok(out)
+        self.fetch_vinyl_pages(&base, "collection", |body: CollectionResponse| {
+            let recs = body.releases.into_iter().filter_map(|i| i.into_record()).collect();
+            (recs, body.pagination.pages)
+        })
     }
 
     /// Fetch the token owner's wantlist (`GET /users/{u}/wants`), keeping only
@@ -1818,33 +1772,40 @@ impl Client {
     /// pacing match [`Client::fetch_collection_for`].
     pub fn fetch_wantlist_for(&self, username: &str) -> Result<Vec<VinylRecord>> {
         let base = format!("https://api.discogs.com/users/{username}/wants");
+        self.fetch_vinyl_pages(&base, "wantlist", |body: WantlistResponse| {
+            let recs = body.wants.into_iter().filter_map(|i| i.into_record()).collect();
+            (recs, body.pagination.pages)
+        })
+    }
+
+    /// Walk every page of a user list (collection or wantlist), newest added
+    /// first; `split` turns one decoded page into its vinyl records and the
+    /// page count.
+    fn fetch_vinyl_pages<T: serde::de::DeserializeOwned>(
+        &self,
+        base: &str,
+        what: &str,
+        split: impl Fn(T) -> (Vec<VinylRecord>, u32),
+    ) -> Result<Vec<VinylRecord>> {
         let mut out = Vec::new();
-        let mut page = 1u32;
-        loop {
+        let per_page = COLLECTION_PER_PAGE.to_string();
+        for page in 1u32.. {
             let page_str = page.to_string();
-            let per_page = COLLECTION_PER_PAGE.to_string();
             let resp = self.call_with_retry(|| {
-                self.agent
-                    .get(&base)
-                    .set("User-Agent", &self.user_agent)
-                    .set("Authorization", &format!("Discogs token={}", self.token))
+                self.authed(self.agent.get(base))
                     .query("page", &page_str)
                     .query("per_page", &per_page)
                     .query("sort", "added")
                     .query("sort_order", "desc")
             })?;
-            let body: WantlistResponse = resp
+            let body: T = resp
                 .into_json()
-                .map_err(|e| Error::Network(format!("decoding Discogs wantlist response: {e}")))?;
-            for item in body.wants {
-                if let Some(rec) = item.into_record() {
-                    out.push(rec);
-                }
-            }
-            if page >= body.pagination.pages.max(1) {
+                .map_err(|e| Error::Network(format!("decoding Discogs {what} response: {e}")))?;
+            let (recs, pages) = split(body);
+            out.extend(recs);
+            if page >= pages.max(1) {
                 break;
             }
-            page += 1;
         }
         Ok(out)
     }
@@ -1921,10 +1882,7 @@ impl Client {
     pub fn master_versions(&self, master_id: u64) -> Result<Vec<MasterVersion>> {
         let url = format!("{MASTERS_URL}/{master_id}/versions");
         let resp = self.call_with_retry(|| {
-            self.agent
-                .get(&url)
-                .set("User-Agent", &self.user_agent)
-                .set("Authorization", &format!("Discogs token={}", self.token))
+            self.authed(self.agent.get(&url))
                 .query("per_page", "100")
         })?;
         let body: VersionsResponse = resp
@@ -1972,16 +1930,12 @@ impl Client {
     /// release a second time to warm the sheet.
     pub fn collection_record(
         &self,
-        _username: &str,
         release_id: u64,
         instance_id: u64,
     ) -> Result<(Option<VinylRecord>, ReleaseDetail)> {
         let url = format!("{RELEASE_URL}/{release_id}");
         let resp = self.call_with_retry(|| {
-            self.agent
-                .get(&url)
-                .set("User-Agent", &self.user_agent)
-                .set("Authorization", &format!("Discogs token={}", self.token))
+            self.authed(self.agent.get(&url))
         })?;
         let body: serde_json::Value = resp
             .into_json()
@@ -2212,10 +2166,7 @@ impl Client {
             BrowseThread::Label => format!("{LABELS_URL}/{id}/releases"),
         };
         let resp = self.call_with_retry(|| {
-            self.agent
-                .get(&url)
-                .set("User-Agent", &self.user_agent)
-                .set("Authorization", &format!("Discogs token={}", self.token))
+            self.authed(self.agent.get(&url))
                 .query("per_page", "100")
                 .query("page", &page.to_string())
         })?;
@@ -2321,10 +2272,7 @@ impl Client {
     fn fetch_artist_uncached(&self, id: u64) -> Result<ArtistDetail> {
         let url = format!("{ARTISTS_URL}/{id}");
         let resp = self.call_with_retry(|| {
-            self.agent
-                .get(&url)
-                .set("User-Agent", &self.user_agent)
-                .set("Authorization", &format!("Discogs token={}", self.token))
+            self.authed(self.agent.get(&url))
         })?;
         let body: ArtistResponse = resp
             .into_json()
@@ -2334,7 +2282,7 @@ impl Client {
         };
         Ok(ArtistDetail {
             id: body.id,
-            name: strip_discogs_number(&body.name),
+            name: strip_discogs_number(&body.name).to_string(),
             aliases: refs(body.aliases),
             groups: refs(body.groups),
             members: refs(body.members),
@@ -2353,17 +2301,14 @@ impl Client {
     fn fetch_label_uncached(&self, id: u64) -> Result<LabelDetail> {
         let url = format!("{LABELS_URL}/{id}");
         let resp = self.call_with_retry(|| {
-            self.agent
-                .get(&url)
-                .set("User-Agent", &self.user_agent)
-                .set("Authorization", &format!("Discogs token={}", self.token))
+            self.authed(self.agent.get(&url))
         })?;
         let body: LabelResponse = resp
             .into_json()
             .map_err(|e| Error::Network(format!("decoding Discogs label response: {e}")))?;
         Ok(LabelDetail {
             id: body.id,
-            name: strip_discogs_number(&body.name),
+            name: strip_discogs_number(&body.name).to_string(),
             parent: body.parent_label.and_then(RefEntry::into_ref),
             sublabels: body
                 .sublabels
@@ -2380,11 +2325,7 @@ impl Client {
     fn search_page(&self, facets: &[(&str, &str)], page: u32) -> Result<BrowsePage> {
         let page = page.max(1).to_string();
         let resp = self.call_with_retry(|| {
-            let mut req = self
-                .agent
-                .get(SEARCH_URL)
-                .set("User-Agent", &self.user_agent)
-                .set("Authorization", &format!("Discogs token={}", self.token));
+            let mut req = self.authed(self.agent.get(SEARCH_URL));
             for (k, v) in facets {
                 req = req.query(k, v);
             }
@@ -2428,11 +2369,7 @@ impl Client {
 
     fn search_release(&self, params: &[(&str, &str)]) -> Result<Vec<SearchHit>> {
         let resp = self.call_with_retry(|| {
-            let mut req = self
-                .agent
-                .get(SEARCH_URL)
-                .set("User-Agent", &self.user_agent)
-                .set("Authorization", &format!("Discogs token={}", self.token));
+            let mut req = self.authed(self.agent.get(SEARCH_URL));
             for (k, v) in params {
                 req = req.query(k, v);
             }
@@ -2900,7 +2837,7 @@ impl InventoryItem {
             listing_id: self.id,
             release_id: r.id,
             title: r.title,
-            artist: strip_discogs_number(&r.artist),
+            artist: strip_discogs_number(&r.artist).to_string(),
             year: r.year.filter(|y| *y > 0),
             label: none_if_empty(r.label),
             catalog_number: none_if_empty(r.catalog_number),
@@ -2946,6 +2883,29 @@ impl CollectionItem {
     }
 }
 
+/// Whether any of a release's formats is vinyl.
+fn is_vinyl(formats: &[CollectionFormat]) -> bool {
+    formats.iter().any(|f| f.name.eq_ignore_ascii_case("Vinyl"))
+}
+
+/// Artist credits joined the way the release is billed, each without
+/// Discogs's disambiguation suffix (e.g. "Surgeon (2)").
+fn billed_artist<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    names
+        .map(strip_discogs_number)
+        .filter(|n| !n.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The primary (first-listed) label and its catalog number.
+fn first_label(labels: &[ReleaseLabel]) -> (Option<String>, Option<String>) {
+    match labels.first() {
+        Some(l) => (none_if_empty(l.name.clone()), none_if_empty(l.catno.clone())),
+        None => (None, None),
+    }
+}
+
 impl BasicInformation {
     /// Build a [`VinylRecord`] from the release metadata a collection *or*
     /// wantlist item carries, or `None` if it isn't a vinyl pressing. Discogs
@@ -2959,32 +2919,17 @@ impl BasicInformation {
         date_added: String,
     ) -> Option<VinylRecord> {
         let bi = self;
-        let is_vinyl = bi
-            .formats
-            .iter()
-            .any(|f| f.name.eq_ignore_ascii_case("Vinyl"));
-        if !is_vinyl {
+        if !is_vinyl(&bi.formats) {
             return None;
         }
-        // Strip Discogs's disambiguation suffix (e.g. "Surgeon (2)") and join
-        // multi-artist credits the way the release is billed.
-        let artist = bi
-            .artists
-            .iter()
-            .map(|a| strip_discogs_number(&a.name))
-            .filter(|n| !n.is_empty())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let artist = billed_artist(bi.artists.iter().map(|a| a.name.as_str()));
         // Summarize the format as "name, descriptions" (e.g. `Vinyl, 12", 45 RPM`).
         let format = bi.formats.first().map(|f| {
             let mut parts = vec![f.name.clone()];
             parts.extend(f.descriptions.iter().cloned());
             parts.join(", ")
         });
-        let (label, catalog_number) = match bi.labels.into_iter().next() {
-            Some(l) => (none_if_empty(l.name), none_if_empty(l.catno)),
-            None => (None, None),
-        };
+        let (label, catalog_number) = first_label(&bi.labels);
         Some(VinylRecord {
             instance_id,
             release_id,
@@ -3014,20 +2959,17 @@ impl BasicInformation {
 /// diacritics (`Áttfalt` / `Attfalt`), and the spelling of a few words that
 /// uploaders and Discogs never agree on (`&` / `and`, `Pt.` / `Part`).
 fn norm_loose(s: &str) -> String {
-    let mut folded = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            // `&` and `+` are words, not punctuation: `Bits + Pieces` is
-            // `Bits & Pieces` is `Bits And Pieces`.
-            '&' | '+' => folded.push_str(" and "),
-            c => match fold_diacritic(c) {
-                Some(plain) => folded.push_str(plain),
-                None => folded.push(c),
-            },
+    // `&` and `+` are words, not punctuation: `Bits + Pieces` is
+    // `Bits & Pieces` is `Bits And Pieces`.
+    let words = s.replace(['&', '+'], " and ");
+    let mut folded = String::with_capacity(words.len());
+    for c in crate::catalog::fold_search(&words).chars() {
+        match fold_letter(c) {
+            Some(plain) => folded.push_str(plain),
+            None => folded.push(c),
         }
     }
     folded
-        .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|p| !p.is_empty())
         .map(|w| match w {
@@ -3041,42 +2983,23 @@ fn norm_loose(s: &str) -> String {
         .join(" ")
 }
 
-/// A Latin letter with its diacritic dropped, or `None` for anything that
-/// isn't one. Covers Latin-1 and Latin Extended-A, which is what record
-/// titles in the catalogue actually carry (`Í`, `ø`, `ł`).
-fn fold_diacritic(c: char) -> Option<&'static str> {
-    const TABLE: &[(&str, &str)] = &[
-        ("ÀÁÂÃÄÅĀĂĄàáâãäåāăą", "a"),
-        ("ÆæǢǣ", "ae"),
-        ("ÇĆĈĊČçćĉċč", "c"),
-        ("ÐĎĐðďđ", "d"),
-        ("ÈÉÊËĒĔĖĘĚèéêëēĕėęě", "e"),
-        ("ĜĞĠĢĝğġģ", "g"),
-        ("ĤĦĥħ", "h"),
-        ("ÌÍÎÏĨĪĬĮİìíîïĩīĭįı", "i"),
-        ("Ĵĵ", "j"),
-        ("Ķķ", "k"),
-        ("ĹĻĽĿŁĺļľŀł", "l"),
-        ("ÑŃŅŇñńņňŉ", "n"),
-        ("ÒÓÔÕÖØŌŎŐòóôõöøōŏő", "o"),
-        ("Œœ", "oe"),
-        ("ŔŖŘŕŗř", "r"),
-        ("ŚŜŞŠśŝşš", "s"),
-        ("ß", "ss"),
-        ("ŢŤŦţťŧ", "t"),
-        ("ÙÚÛÜŨŪŬŮŰŲùúûüũūŭůűų", "u"),
-        ("Ŵŵ", "w"),
-        ("ÝŶŸýÿŷ", "y"),
-        ("ŹŻŽźżž", "z"),
-        ("Þþ", "th"),
-    ];
-    if c.is_ascii() {
-        return None;
-    }
-    TABLE
-        .iter()
-        .find(|(from, _)| from.contains(c))
-        .map(|(_, to)| *to)
+/// The plain spelling of a lowercase Latin letter that NFKD leaves whole
+/// (its "diacritic" is part of the letter), so [`crate::catalog::fold_search`]
+/// can't strip it: `ø`, `ł`, `æ`, `ß`.
+fn fold_letter(c: char) -> Option<&'static str> {
+    Some(match c {
+        'æ' => "ae",
+        'ð' | 'đ' => "d",
+        'ħ' => "h",
+        'ı' => "i",
+        'ł' => "l",
+        'ø' => "o",
+        'œ' => "oe",
+        'ß' => "ss",
+        'ŧ' => "t",
+        'þ' => "th",
+        _ => return None,
+    })
 }
 
 /// The normalized forms a title is compared under: as written, and with an
@@ -3667,16 +3590,21 @@ pub(crate) fn without_brackets(title: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Drop a trailing Discogs disambiguation number, e.g. `Surgeon (2)` → `Surgeon`.
-fn strip_discogs_number(name: &str) -> String {
-    let trimmed = name.trim();
-    if let Some(open) = trimmed.rfind(" (") {
-        let tail = &trimmed[open + 2..];
-        if tail.ends_with(')') && tail[..tail.len() - 1].chars().all(|c| c.is_ascii_digit()) {
-            return trimmed[..open].trim().to_string();
+/// Drop a trailing Discogs disambiguation number, e.g. `Surgeon (2)` → `Surgeon`:
+/// a Discogs bookkeeping mark that tells namesakes apart, never how a tag
+/// spells the name. Anything else in brackets stays.
+pub(crate) fn strip_discogs_number(name: &str) -> &str {
+    let s = name.trim();
+    if let Some(open) = s.rfind(" (") {
+        let tail = &s[open + 2..];
+        if tail.len() > 1
+            && tail.ends_with(')')
+            && tail[..tail.len() - 1].bytes().all(|b| b.is_ascii_digit())
+        {
+            return s[..open].trim_end();
         }
     }
-    trimmed.to_string()
+    s
 }
 
 #[derive(Debug, Deserialize)]
@@ -3797,7 +3725,7 @@ impl RefEntry {
     fn into_ref(self) -> Option<NamedRef> {
         (self.id > 0 && !self.name.trim().is_empty()).then(|| NamedRef {
             id: self.id,
-            name: strip_discogs_number(&self.name),
+            name: strip_discogs_number(&self.name).to_string(),
         })
     }
 }
@@ -3910,30 +3838,14 @@ where
 impl ReleaseResponse {
     /// Build a [`VinylRecord`] straight from a release response, for a copy the
     /// user just added to their collection. `None` when the release isn't
-    /// vinyl. Mirrors `BasicInformation::into_record`, but reads the release
-    /// endpoint's own shape.
+    /// vinyl. The release endpoint's counterpart of
+    /// `BasicInformation::into_record`.
     fn into_vinyl_record(self, instance_id: u64, folder_id: Option<u32>) -> Option<VinylRecord> {
-        if !self
-            .formats
-            .iter()
-            .any(|f| f.name.eq_ignore_ascii_case("Vinyl"))
-        {
+        if !is_vinyl(&self.formats) {
             return None;
         }
-        let artist = self
-            .artists
-            .iter()
-            .map(|a| strip_discogs_number(&a.name))
-            .filter(|n| !n.is_empty())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let (label, catalog_number) = match self.labels.first() {
-            Some(l) => (
-                none_if_empty(l.name.clone()),
-                none_if_empty(l.catno.clone()),
-            ),
-            None => (None, None),
-        };
+        let artist = billed_artist(self.artists.iter().map(|a| a.name.as_str()));
+        let (label, catalog_number) = first_label(&self.labels);
         let format = none_if_empty(self.format_summary());
         Some(VinylRecord {
             instance_id,
@@ -4026,7 +3938,7 @@ impl ReleaseResponse {
             }
             credits.push(ReleaseCredit {
                 artist_id: c.id,
-                name: strip_discogs_number(&c.name),
+                name: strip_discogs_number(&c.name).to_string(),
                 role,
             });
         }
@@ -4039,7 +3951,7 @@ impl ReleaseResponse {
             .filter(|c| seen_company.insert((c.id, c.entity_type_name.trim().to_lowercase())))
             .map(|c| ReleaseCompany {
                 label_id: c.id,
-                name: strip_discogs_number(&c.name),
+                name: strip_discogs_number(&c.name).to_string(),
                 role: c.entity_type_name.trim().to_string(),
             })
             .collect();
@@ -4102,7 +4014,7 @@ fn artist_credits(artists: &[ReleaseArtist]) -> Vec<ArtistCredit> {
         .filter(|a| !a.name.trim().is_empty())
         .map(|a| ArtistCredit {
             id: a.id,
-            name: strip_discogs_number(&a.name),
+            name: strip_discogs_number(&a.name).to_string(),
             join: a.join.trim().to_string(),
         })
         .collect()
@@ -4173,7 +4085,7 @@ fn track_credits(entries: &[CreditEntry]) -> Vec<ReleaseCredit> {
         }
         out.push(ReleaseCredit {
             artist_id: c.id,
-            name: strip_discogs_number(name),
+            name: strip_discogs_number(name).to_string(),
             role: role.to_string(),
         });
     }
@@ -4270,14 +4182,12 @@ fn discogs_error_message(body: &str) -> String {
     out
 }
 
-/// Decode arbitrary image bytes (Discogs returns JPEG), downscale to a
-/// `max_side`-pixel square, re-encode as PNG. Returns `None` on any failure,
-/// which the caller treats as "no usable artwork" and moves on.
-/// Decode `bytes` and re-encode as PNG, shrinking to fit `max_side` if larger.
-/// Never enlarges: `image::thumbnail` scales *up* to fit as readily as down,
+/// Decode image bytes (a Discogs JPEG, a file's embedded cover) and re-encode
+/// as PNG, shrinking to fit a `max_side` square if larger. `None` on any
+/// failure, which callers treat as "no usable artwork". Never enlarges: `image::thumbnail` scales *up* to fit as readily as down,
 /// which would turn a 150px thumb into a 400px blur that looks cached at
 /// full size — and can't be told apart from one afterwards.
-fn downscale_png(bytes: &[u8], max_side: u32) -> Option<Vec<u8>> {
+pub(crate) fn downscale_png(bytes: &[u8], max_side: u32) -> Option<Vec<u8>> {
     let img = image::load_from_memory(bytes).ok()?;
     let thumb = if img.width() > max_side || img.height() > max_side {
         img.thumbnail(max_side, max_side)
@@ -5441,6 +5351,13 @@ mod tests {
         assert_eq!(strip_original_mix("Plain Title"), "Plain Title");
         // A title that is nothing but the marker strips to empty (caller skips it).
         assert_eq!(strip_original_mix("(Original Mix)"), "");
+    }
+
+    #[test]
+    fn norm_loose_folds_accents_and_whole_letters() {
+        assert_eq!(norm_loose("Áttfalt"), "attfalt");
+        assert_eq!(norm_loose("Ø Łódź Straße Þórr Œuvre"), "o lodz strasse thorr oeuvre");
+        assert_eq!(norm_loose("Bits + Pieces Pt. 2"), "bits and pieces part 2");
     }
 
     #[test]

@@ -954,14 +954,8 @@ fn is_id_word(s: &str) -> bool {
 /// `(2)` disambiguator dropped, a leading "the" dropped, punctuation
 /// collapsed to single spaces.
 pub fn fold_name(s: &str) -> String {
-    let mut s = crate::catalog::fold_search(s.trim());
-    // "artist (2)"
-    if let Some(open) = s.rfind(" (") {
-        let tail = &s[open + 2..];
-        if tail.ends_with(')') && tail[..tail.len() - 1].bytes().all(|b| b.is_ascii_digit()) {
-            s.truncate(open);
-        }
-    }
+    let folded = crate::catalog::fold_search(s.trim());
+    let s = crate::discogs::strip_discogs_number(&folded);
     let mut out = String::with_capacity(s.len());
     let mut space = true;
     for c in s.chars() {

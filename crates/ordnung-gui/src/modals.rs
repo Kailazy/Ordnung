@@ -3386,11 +3386,13 @@ files elsewhere on the device stay plain storage.",
                     // Either way they point at the same release, so a later re-fetch
                     // still works. The touched ids ride back so the UI can refresh them.
                     if apply_album {
-                        let siblings = if album_overwrite {
-                            catalog.album_siblings(track_id)
-                        } else {
-                            catalog.album_siblings_missing_art(track_id)
-                        };
+                        let siblings = catalog.album_siblings_detailed(track_id).map(|mates| {
+                            mates
+                                .into_iter()
+                                .filter(|s| album_overwrite || !s.has_art)
+                                .map(|s| s.id)
+                                .collect::<Vec<Id>>()
+                        });
                         if let Ok(siblings) = siblings {
                             for &sib in &siblings {
                                 let _ = catalog.set_external_artwork(
