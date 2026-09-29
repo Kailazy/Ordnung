@@ -123,38 +123,12 @@ impl App {
     /// area, sitting at the drawer's inner boundary. `inset` is how far in from
     /// the right edge to sit — the drawer's animated width — so the tab rides
     /// out with the panel and stays the one control that toggles it.
-    ///
-    /// The tab also doubles as a nameplate for the last track the player
-    /// loaded: the title runs down it in rotated text under the chevron, so the
-    /// handle carries information rather than only a toggle.
     pub(crate) fn draw_inspector_tab(&mut self, ctx: &egui::Context, inset: f32) {
         // Slim: the tab is a grip, not a button. The chevron spans its full
         // width so the narrower it gets the more it reads as an arrow.
         const W: f32 = 18.0;
-        /// Height of the chevron block at the top of the tab.
+        /// The tab's height: the chevron block alone.
         const HEAD: f32 = 40.0;
-        /// Extra height given over to the rotated last-played title.
-        const LABEL_H: f32 = 130.0;
-
-        // The title that rides down the tab: whatever the player last loaded.
-        // `now_playing` outlives playback (only an explicit close clears it), so
-        // this stays the *last* played track rather than blanking on pause.
-        let label = self
-            .now_playing
-            .as_ref()
-            .map(|np| {
-                if np.artist.is_empty() {
-                    np.title.clone()
-                } else {
-                    format!("{} — {}", np.title, np.artist)
-                }
-            })
-            .unwrap_or_default();
-        let h = if label.is_empty() {
-            HEAD
-        } else {
-            HEAD + LABEL_H
-        };
 
         // Horizontal: measured from the window's own right edge, because that's
         // what `inset` (the drawer's width) is measured against. Using
@@ -183,7 +157,7 @@ impl App {
             .fixed_pos(pos)
             .show(ctx, |ui| {
                 ui.set_clip_rect(ctx.available_rect());
-                let (rect, resp) = ui.allocate_exact_size(egui::vec2(W, h), egui::Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(W, HEAD), egui::Sense::click());
                 let open = self.inspector_open;
                 let hovered = resp.hovered();
                 if hovered {
@@ -237,36 +211,6 @@ impl App {
                     fg,
                     egui::Stroke::NONE,
                 ));
-
-                // Last-played title, rotated a quarter turn so it reads top-to-
-                // bottom down the tab. Laid out truncated to the label run's
-                // height (its length once rotated) so a long title ends in an
-                // ellipsis instead of running off the bottom.
-                if !label.is_empty() {
-                    let galley = ui.painter().layout_job({
-                        let mut job = egui::text::LayoutJob::simple_singleline(
-                            label,
-                            crate::ui::tokens::font::footnote(),
-                            fg,
-                        );
-                        // One row, capped at the label run's length: anything
-                        // longer ends in egui's default `…` rather than running
-                        // off the bottom of the tab.
-                        job.wrap.max_width = LABEL_H - 12.0;
-                        job.wrap.max_rows = 1;
-                        job.wrap.break_anywhere = true;
-                        job
-                    });
-                    // Rotation is about the galley's own min corner, so place
-                    // that corner at the top-right of the label run: +90° then
-                    // sweeps the text down the tab, centred across its width.
-                    let x = rect.center().x + galley.size().y / 2.0;
-                    let y = head.bottom() + 6.0;
-                    ui.painter().add(
-                        egui::epaint::TextShape::new(egui::pos2(x, y), galley, fg)
-                            .with_angle(std::f32::consts::FRAC_PI_2),
-                    );
-                }
 
                 let resp = resp.on_hover_note(if open {
                     "Hide the track inspector"

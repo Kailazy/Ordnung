@@ -654,11 +654,27 @@ impl App {
             );
 
             // --- Pads ---------------------------------------------------
-            let pad_top = row_top + (row_h - PAD_H) / 2.0;
+            // Until the track has a hot cue, the eight empty pads are one
+            // thin strip at the loop keys' height, a letter per slot: eight
+            // blank boxes were most of the bar and said nothing. The first
+            // cue brings the full pads back.
+            let bare = !cues.iter().any(|c| c.is_hot());
+            let pad_h = if bare { crate::ui::control_h(ui) } else { PAD_H };
+            let pad_top = row_top + (row_h - pad_h) / 2.0;
+            if bare {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(pads_rect.left(), pad_top),
+                        egui::vec2(pads_w, pad_h),
+                    ),
+                    egui::Rounding::same(radius::SM),
+                    color::FIELD,
+                );
+            }
             for slot in 0..8u8 {
                 let rect = egui::Rect::from_min_size(
                     egui::pos2(pads_rect.left() + slot as f32 * (pad_w + GAP), pad_top),
-                    egui::vec2(pad_w, PAD_H),
+                    egui::vec2(pad_w, pad_h),
                 );
                 let id = ui.id().with(("cue_pad", slot));
                 let resp = ui.interact(rect, id, egui::Sense::click());
@@ -767,19 +783,30 @@ impl App {
                     }
                     None => {
                         let hot = resp.hovered() && editable;
-                        painter.rect_filled(
-                            rect,
-                            egui::Rounding::same(r),
-                            if hot { color::SURFACE_HOVER } else { color::FIELD },
-                        );
-                        painter.text(
-                            rect.left_top() + egui::vec2(6.0, 3.0),
-                            egui::Align2::LEFT_TOP,
-                            letter,
-                            font::strong(14.0),
-                            if hot { color::LABEL_2 } else { color::LABEL_4 },
-                        );
-                        if hot {
+                        let ink = if hot { color::LABEL_2 } else { color::LABEL_4 };
+                        if bare {
+                            // A slot in the strip: lit under the pointer, the
+                            // letter centred; the hover note says what a
+                            // click does.
+                            if hot {
+                                painter.rect_filled(rect, egui::Rounding::same(r), color::SURFACE_HOVER);
+                            }
+                            painter.text(rect.center(), egui::Align2::CENTER_CENTER, letter, font::strong(12.0), ink);
+                        } else {
+                            painter.rect_filled(
+                                rect,
+                                egui::Rounding::same(r),
+                                if hot { color::SURFACE_HOVER } else { color::FIELD },
+                            );
+                            painter.text(
+                                rect.left_top() + egui::vec2(6.0, 3.0),
+                                egui::Align2::LEFT_TOP,
+                                letter,
+                                font::strong(14.0),
+                                ink,
+                            );
+                        }
+                        if hot && !bare {
                             let sub = match active {
                                 Some(_) => "store loop".to_string(),
                                 None => fmt_time(self.snap_ms(playhead) as f32 / 1000.0),
@@ -791,6 +818,8 @@ impl App {
                                 font::mono_small(),
                                 color::LABEL_2,
                             );
+                        }
+                        if hot {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
                         if resp.clicked() && editable {
