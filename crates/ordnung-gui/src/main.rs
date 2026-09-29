@@ -223,6 +223,9 @@ struct TrackRow {
     /// artwork row for this track. Combined with `has_cover` to decide
     /// whether the cover cell should attempt a load at all.
     has_external_cover: bool,
+    /// Position in the order the view loaded the rows in. Ties in a header sort
+    /// fall back to it, and clearing the sort restores it without a reload.
+    natural: usize,
 }
 
 impl TrackRow {

@@ -185,7 +185,10 @@ impl App {
     /// rows keep their prior (catalog/playlist) order. A `None` sort is a no-op,
     /// leaving the natural order untouched.
     pub(crate) fn apply_sort(&mut self) {
-        let Some((col, asc)) = self.sort else { return };
+        let Some((col, asc)) = self.sort else {
+            self.rows.sort_by_key(|r| r.natural);
+            return;
+        };
         use std::cmp::Ordering;
         let ci = |a: &str, b: &str| a.to_lowercase().cmp(&b.to_lowercase());
         let fcmp = |a: Option<f32>, b: Option<f32>| match (a, b) {
@@ -211,11 +214,8 @@ impl App {
                 // Severity rank: descending floats likely-transcodes to the top.
                 SortColumn::Quality => a.quality_sort.cmp(&b.quality_sort),
             };
-            if asc {
-                ord
-            } else {
-                ord.reverse()
-            }
+            let ord = if asc { ord } else { ord.reverse() };
+            ord.then(a.natural.cmp(&b.natural))
         });
     }
 
@@ -241,7 +241,7 @@ impl App {
             Some((c, false)) if c == col => None,
             _ => Some((col, true)),
         };
-        self.reload();
+        self.apply_sort();
     }
 
     /// Rebuild `column_order`/`hidden_columns` from the saved config, tolerating a
@@ -3023,6 +3023,7 @@ pub(crate) fn load_rows(
             source_path: PathBuf::from(t.source_path),
             has_cover: t.tags.has_cover,
             has_external_cover: ext_art.contains(&t.id),
+            natural: 0,
             dur_ms,
             bpm_val,
             bitrate_val,

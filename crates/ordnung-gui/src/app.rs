@@ -743,6 +743,9 @@ impl App {
                     self.select_anchor = None;
                 }
                 self.rows = rows;
+                for (i, r) in self.rows.iter_mut().enumerate() {
+                    r.natural = i;
+                }
                 self.apply_sort();
                 self.load_error = None;
             }
@@ -1910,6 +1913,7 @@ impl App {
                     has_cover: t.cover_thumb.is_some()
                         || pdb.is_some_and(|p| p.artwork_path.is_some()),
                     has_external_cover: false,
+                    natural: 0,
                     dur_ms: Some(t.properties.duration_ms),
                     bpm_val,
                     bitrate_val: t.properties.bitrate_kbps,
