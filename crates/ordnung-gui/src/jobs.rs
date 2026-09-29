@@ -600,7 +600,10 @@ impl App {
         }
         let db = self.db_path.clone();
         let ledger = self.vinyl_confirmed.clone();
-        thread::spawn(move || run_refresh_vinyl(db, token, cancel, quiet, ledger, tx, ctx));
+        let username = self.config.discogs_username.trim().to_string();
+        thread::spawn(move || {
+            run_refresh_vinyl(db, token, username, cancel, quiet, ledger, tx, ctx)
+        });
     }
 
     /// Sweep one saved seller's Discogs inventory into the local cache — the
@@ -2651,6 +2654,7 @@ pub(crate) fn run_import_genredb(
 pub(crate) fn run_refresh_vinyl(
     db: PathBuf,
     token: String,
+    known_username: String,
     cancel: Arc<AtomicBool>,
     quiet: bool,
     ledger: Ledger,
@@ -2674,9 +2678,16 @@ pub(crate) fn run_refresh_vinyl(
         let _ = tx.send(JobMsg::Status("Fetching Discogs collection…".into()));
         ctx.request_repaint();
     }
-    // Resolve the username up front so we can report it back for the collection
-    // link, then reuse it for the fetch (no second identity request).
-    let username = match client.identity() {
+    // The collection endpoints are keyed by username. A saved one is reused
+    // (saving a token clears it, so it always belongs to this token); only a
+    // first sync spends the identity request, and reports the name back for the
+    // collection link. A revoked token still fails, on the collection fetch.
+    let username = if known_username.is_empty() {
+        client.identity()
+    } else {
+        Ok(known_username)
+    };
+    let username = match username {
         Ok(u) => u,
         Err(e) => {
             let _ = tx.send(JobMsg::Failed(format!("Couldn't sign in to Discogs. {e}.")));
