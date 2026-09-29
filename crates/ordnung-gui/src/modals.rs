@@ -3255,23 +3255,19 @@ files elsewhere on the device stay plain storage.",
                     .unwrap_or_default();
                 Ok((detail, tags))
             });
-            let (fills, detail) = match resolved {
-                Ok((detail, tags)) => {
-                    let fills = detail
-                        .proposed_fills(&tags, overwrite)
-                        .into_iter()
-                        .map(|f| (f.field.label().to_string(), f.value))
-                        .collect();
-                    (fills, Some(detail))
-                }
-                Err(_) => (Vec::new(), None),
+            let fills = match resolved {
+                Ok((detail, tags)) => detail
+                    .proposed_fills(&tags, overwrite)
+                    .into_iter()
+                    .map(|f| (f.field.label().to_string(), f.value))
+                    .collect(),
+                Err(_) => Vec::new(),
             };
             let _ = tx.send(PreviewMsg {
                 track_id,
                 release_id,
                 overwrite,
                 fills,
-                detail,
             });
             ctx.request_repaint();
         });
@@ -3282,9 +3278,6 @@ files elsewhere on the device stay plain storage.",
         while let Ok(msg) = self.preview_rx.try_recv() {
             let key = (msg.track_id, msg.release_id.clone(), msg.overwrite);
             self.preview_inflight.remove(&key);
-            if let Some(detail) = msg.detail {
-                self.release_detail_cache.insert(msg.release_id, detail);
-            }
             self.preview_cache.insert(key, msg.fills);
         }
     }

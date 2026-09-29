@@ -292,7 +292,6 @@ impl App {
             preview_rx,
             preview_cache: HashMap::new(),
             preview_inflight: HashSet::new(),
-            release_detail_cache: HashMap::new(),
             config: Config::default(),
             column_order: TableColumn::DEFAULT_ORDER.to_vec(),
             hidden_columns: HashSet::new(),

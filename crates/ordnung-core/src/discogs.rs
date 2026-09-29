@@ -81,18 +81,6 @@ const THUMB_MAX_SIDE: u32 = 96;
 /// this, so they pass through untouched (`thumbnail` only downscales).
 const FULL_MAX_SIDE: u32 = 1400;
 
-/// A successful artwork lookup — Discogs release the image came from, the
-/// original image URL (for refresh / debugging), and two decoded PNGs ready to
-/// drop into `Catalog::set_external_artwork`: a small `png_bytes` thumbnail for
-/// GUI rendering and a `full_bytes` full-resolution image for tag embedding.
-#[derive(Debug, Clone)]
-pub struct ArtworkHit {
-    pub release_id: String,
-    pub thumb_url: String,
-    pub png_bytes: Vec<u8>,
-    pub full_bytes: Vec<u8>,
-}
-
 /// The cheapest copy of a release currently listed on the Discogs marketplace,
 /// in whatever currency Discogs quoted it (the token owner's, when it has one).
 /// A live market price, not a purchase price — see
@@ -1362,18 +1350,6 @@ impl Client {
         self
     }
 
-    /// Warm the shared connection to the API without spending a request slot:
-    /// a cheap unauthenticated round trip that opens (or refreshes) the pooled
-    /// TLS connection, so the next real request skips the handshake. Best
-    /// effort; failures are ignored.
-    pub fn prewarm(&self) {
-        let _ = self
-            .agent
-            .head("https://api.discogs.com/")
-            .set("User-Agent", &self.user_agent)
-            .call();
-    }
-
     /// Block until the pace allows another API request, then claim the slot.
     ///
     /// Foreground callers announce themselves in [`FOREGROUND_WAITING`] and
@@ -1523,73 +1499,12 @@ impl Client {
         }
     }
 
-    /// Search Discogs for a release matching this track and return the best
-    /// thumbnail we can find. `Ok(None)` means "searched and nothing matched
-    /// or no result had artwork" — that's a normal outcome, not an error.
-    ///
-    /// Strategy (see [`Client::resolve_hits`] for the full fallback chain):
-    /// album search takes priority over track search, and each search tries the
-    /// structured `artist` filter first then a hyphen-safe free-text `q` retry.
-    /// We ask Discogs to return releases (not masters / artists) and take the
-    /// first hit that has a non-empty `thumb` URL.
-    ///
-    /// For the multi-candidate picker that lets the user choose among releases,
-    /// see [`Client::find_artwork_candidates`] below; this method keeps the
-    /// "best single hit" behaviour for callers that just want one cover.
-    pub fn find_artwork(
-        &self,
-        artist: &str,
-        title: Option<&str>,
-        album: Option<&str>,
-    ) -> Result<Option<ArtworkHit>> {
-        let artist = artist.trim();
-        if artist.is_empty() {
-            return Ok(None);
-        }
-
-        let hits = self.resolve_hits(artist, title, album)?;
-
-        for hit in hits {
-            if hit.thumb.is_empty() {
-                continue;
-            }
-            let thumb_src = match self.download(&hit.thumb) {
-                Ok(b) => b,
-                // Discogs CDN occasionally 404s a thumb URL — try the next hit.
-                Err(_) => continue,
-            };
-            let Some(thumb_png) = downscale_png(&thumb_src, THUMB_MAX_SIDE) else {
-                continue;
-            };
-            // Full-resolution image for embedding. Prefer the larger
-            // `cover_image`; fall back to the thumb source if it's missing or
-            // fails to download/decode, so we always have *something* to embed.
-            let full_src = if hit.cover_image.is_empty() {
-                None
-            } else {
-                self.download(&hit.cover_image).ok()
-            };
-            let full_png = full_src
-                .as_deref()
-                .and_then(|b| downscale_png(b, FULL_MAX_SIDE))
-                .or_else(|| downscale_png(&thumb_src, FULL_MAX_SIDE))
-                .unwrap_or_else(|| thumb_png.clone());
-            return Ok(Some(ArtworkHit {
-                release_id: hit.id.to_string(),
-                thumb_url: hit.thumb,
-                png_bytes: thumb_png,
-                full_bytes: full_png,
-            }));
-        }
-        Ok(None)
-    }
-
     /// Free-text record lookup: search all of Discogs for releases matching a
     /// user-typed query, the way the discogs.com search box does.
     ///
-    /// This is the general search [`Client::find_artwork`] and
-    /// [`Client::find_artwork_candidates`] are not — those anchor on a known
-    /// artist to identify *one track's* release and return nothing without one.
+    /// This is the general search [`Client::find_artwork_candidates`] is not:
+    /// that anchors on a known artist to identify *one track's* release and
+    /// returns nothing without one.
     /// Here the query is whatever the user typed ("metro area", "environ 006",
     /// "theo parrish"), so it goes straight to `q` with no fallback ladder.
     ///
@@ -1686,10 +1601,10 @@ impl Client {
         Ok(artist_hits(body.results))
     }
 
-    /// Like [`Client::find_artwork`] but returns *every* candidate release
-    /// (up to ~10) with metadata and image URLs, leaving image downloads to the
-    /// caller. Search strategy mirrors `find_artwork` (album first, then track
-    /// title). Candidates without a thumbnail URL are dropped.
+    /// Every candidate release (up to ~10) for one track, with metadata and
+    /// image URLs, leaving image downloads to the caller. Album search first,
+    /// then track title (see [`Client::resolve_hits`]). Candidates without a
+    /// thumbnail URL are dropped.
     pub fn find_artwork_candidates(
         &self,
         artist: &str,
@@ -1840,7 +1755,7 @@ impl Client {
 
     /// Resolve the token owner's Discogs username (`GET /oauth/identity`). One
     /// authenticated request — the collection endpoints are keyed by username, so
-    /// this is the first call [`Client::fetch_collection`] makes.
+    /// this is the first call a collection sync makes.
     pub fn identity(&self) -> Result<String> {
         let resp = self.call_with_retry(|| {
             self.agent
@@ -1857,16 +1772,6 @@ impl Client {
             ));
         }
         Ok(body.username)
-    }
-
-    /// Fetch the token owner's entire vinyl collection (Discogs folder 0 = "All"),
-    /// walking every page and keeping only items pressed on vinyl. Returns the
-    /// records as metadata only — cover images are downloaded separately by the
-    /// caller via [`Client::fetch_cover`] so a refresh can skip covers it already
-    /// has. Each page is one authenticated request, paced by the shared throttle.
-    pub fn fetch_collection(&self) -> Result<Vec<VinylRecord>> {
-        let username = self.identity()?;
-        self.fetch_collection_for(&username)
     }
 
     /// Fetch the vinyl collection for a known username, skipping the identity

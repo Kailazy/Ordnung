@@ -2225,26 +2225,6 @@ impl Catalog {
         Ok(())
     }
 
-    /// Clear the song-data fetched mark for `track_ids` so a later run can revisit
-    /// them. Empty slice clears every track (a full re-fetch reset). Returns the
-    /// number of rows touched.
-    pub fn clear_metadata_fetched(&self, track_ids: &[Id]) -> Result<usize> {
-        let n = if track_ids.is_empty() {
-            self.conn
-                .execute("UPDATE tracks SET discogs_meta_fetched_at = NULL", [])?
-        } else {
-            let mut n = 0;
-            for &id in track_ids {
-                n += self.conn.execute(
-                    "UPDATE tracks SET discogs_meta_fetched_at = NULL WHERE id = ?1",
-                    params![id as i64],
-                )?;
-            }
-            n
-        };
-        Ok(n)
-    }
-
     /// Persist every Tags field to the row. Used by scan upserts (extended set)
     /// and by `update_tags` (which then also flips `user_edited`).
     fn write_all_tags(&self, id: Id, tags: &Tags) -> Result<()> {
@@ -2447,30 +2427,10 @@ impl Catalog {
             .collect())
     }
 
-    /// How many tracks have a missing source file. Cheaper than
-    /// [`Catalog::missing_tracks`] — it stats paths without building `Track`s —
-    /// so it can drive the toolbar's "relocate" affordance on refresh.
-    /// Total tracks in the catalog — a bare `COUNT(*)`, cheap enough for UI
-    /// affordances (e.g. sizing an export before loading full rows).
-    pub fn count_tracks(&self) -> Result<u64> {
-        Ok(self
-            .conn
-            .query_row("SELECT count(*) FROM tracks", [], |r| r.get::<_, i64>(0))?
-            as u64)
-    }
-
-    pub fn count_missing(&self) -> Result<u64> {
-        let mut stmt = self.conn.prepare("SELECT source_path FROM tracks")?;
-        let paths = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(paths.iter().filter(|p| !Path::new(p).exists()).count() as u64)
-    }
-
     /// Short "Artist — Title" labels for every track whose source file is gone,
     /// in `source_path` order. Reads only the three columns a label needs (no
     /// `Track` building), so it's cheap enough to refresh the toolbar's relocate
-    /// hover alongside [`Catalog::count_missing`]. Falls back to the file name
+    /// hover. Falls back to the file name
     /// when artist/title are blank so a row is never an empty line.
     pub fn missing_track_labels(&self) -> Result<Vec<String>> {
         let mut stmt = self

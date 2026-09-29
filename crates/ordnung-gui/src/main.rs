@@ -1072,8 +1072,8 @@ impl VinylEdit {
 
 /// Result of a background "what would this release fill in?" lookup, computed for
 /// the "Fetch song data" picker so the user can see the data before committing.
-/// Carries the human-readable (field, value) rows to display and the underlying
-/// `ReleaseDetail` to reuse on apply (so we don't fetch the release twice).
+/// Carries the human-readable (field, value) rows to display; the release itself
+/// lands in the catalog's release cache, which apply reads back.
 struct PreviewMsg {
     track_id: Id,
     release_id: String,
@@ -1083,8 +1083,6 @@ struct PreviewMsg {
     /// `(field label, value)` for each field this release would write under the
     /// current mode. Empty when the release adds nothing new or the lookup failed.
     fills: Vec<(String, String)>,
-    /// `None` when the release lookup failed (network/decode).
-    detail: Option<discogs::ReleaseDetail>,
 }
 
 /// What the Discogs settings tab knows about the saved token. "Connected" is
@@ -1796,9 +1794,6 @@ struct App {
     /// `(track id, release id, overwrite)` previews currently being fetched, so
     /// we don't spawn duplicate lookups and can show a spinner while one runs.
     preview_inflight: HashSet<(Id, String, bool)>,
-    /// Fetched `ReleaseDetail`s keyed by release id, kept so applying a chosen
-    /// release reuses the preview's fetch instead of hitting Discogs again.
-    release_detail_cache: HashMap<String, discogs::ReleaseDetail>,
     /// Persistent settings (Discogs token), loaded from `~/.ordnung/config.toml`.
     config: Config,
     /// Visible-and-hidden track-table columns in left-to-right order, reordered
