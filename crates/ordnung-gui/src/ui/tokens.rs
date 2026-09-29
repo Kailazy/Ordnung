@@ -13,19 +13,12 @@ use eframe::egui::{Color32, FontId};
 
 /// Corner radii. Apple keeps nested corners *concentric*: an inset child's radius
 /// equals its parent's radius minus the padding between them, so the two curves
-/// stay parallel. Derive those child radii with [`inner`] rather than guessing.
+/// stay parallel.
 pub mod radius {
     pub const XS: f32 = 4.0; // chips, tiny pills
     pub const SM: f32 = 6.0; // buttons, inputs
     pub const MD: f32 = 10.0; // menus, popovers
     pub const LG: f32 = 14.0; // cards, windows
-    pub const XL: f32 = 20.0; // large sheets
-}
-
-/// Radius for an element inset by `pad` inside a container of radius `outer`, so
-/// their corners stay concentric. Clamped at 0 (a flat inner corner).
-pub fn inner(outer: f32, pad: f32) -> f32 {
-    (outer - pad).max(0.0)
 }
 
 /// 8-pt spacing grid. Reach for these instead of ad-hoc pixel gaps; consistent
@@ -76,17 +69,7 @@ pub mod color {
     pub const SURFACE_HOVER: Color32 = Color32::from_rgb(54, 54, 58);
     /// Pressed interactive surface — one step above `SURFACE_HOVER`.
     pub const SURFACE_ACTIVE: Color32 = Color32::from_rgb(64, 64, 68);
-    /// The inspector drawer and its pull tab. One token for both so the handle
-    /// reads as part of the panel it grows out of, rather than two greys that
-    /// drift apart the next time either is touched.
-    ///
-    /// Darker than `CONTENT_BG`, not lighter: a right-hand utility panel is
-    /// chrome beside the content, so it recedes the way Finder's preview pane
-    /// and Spotify's now-playing rail do. The old `gray(54)` was brighter than
-    /// the table it bordered, which made the panel read as a slab laid on top
-    /// of the app instead of part of its frame.
-    pub const DRAWER: Color32 = Color32::from_rgb(30, 30, 32);
-    /// The pull tab's hovered fill — one elevation step up from `DRAWER`, so
+    /// The pull tab's hovered fill — one elevation step up from the drawer, so
     /// the handle lifts under the pointer instead of flashing to a light grey.
     pub const DRAWER_HOVER: Color32 = Color32::from_rgb(46, 46, 50);
 

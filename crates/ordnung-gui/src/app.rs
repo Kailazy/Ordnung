@@ -4323,19 +4323,6 @@ impl App {
         if self.is_busy() || !self.artwork_queue.is_empty() || self.artwork_saving {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
-
-        // TEMP DEBUG: trace the cursor icon egui asks for, frame by frame.
-        if std::env::var_os("ORDNUNG_CURSOR_DEBUG").is_some() {
-            let icon = ctx.output(|o| o.cursor_icon);
-            let pos = ctx.input(|i| i.pointer.latest_pos());
-            let screen = ctx.screen_rect();
-            let over = ctx.is_pointer_over_area();
-            let id = ctx.input(|i| i.pointer.interact_pos());
-            eprintln!(
-                "cursor: {icon:?} at {pos:?} interact={id:?} over_area={over} screen={screen:?}"
-            );
-            ctx.request_repaint();
-        }
     }
 }
 

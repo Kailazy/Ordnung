@@ -931,7 +931,7 @@ enum JobMsg {
     /// A tracklist match settled another line of this tracklist, so the
     /// Tracklists window re-reads its rows on the next frame (rows fill in as
     /// they land rather than all at once when the job ends).
-    TracklistChanged(Id),
+    TracklistChanged,
 }
 
 /// A Discogs run's "only hidden formats" outcome: the tracks it applied to,

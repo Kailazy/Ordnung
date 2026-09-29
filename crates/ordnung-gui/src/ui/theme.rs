@@ -37,15 +37,6 @@ fn install_fonts(ctx: &egui::Context) {
         "DejaVuSans".to_owned(),
         FontData::from_static(include_bytes!("../../assets/fonts/DejaVuSans.ttf")),
     );
-    // Source Serif sits in its own named family, used only for tooltip / hover
-    // text (see `ui::hover`). A serif face there reads as more formal and
-    // instructional than the sans UI body. DejaVu backs it for glyph coverage.
-    fonts.font_data.insert(
-        "SourceSerif".to_owned(),
-        FontData::from_static(include_bytes!(
-            "../../assets/fonts/SourceSerif4-Regular.ttf"
-        )),
-    );
     // Inter and DejaVu only reach Latin / Cyrillic / Greek, so titles in CJK,
     // Arabic, Hebrew, Thai, the Indic scripts, etc. — all common in DJ metadata
     // — render as tofu boxes. Pull broad-coverage system fonts off disk at
@@ -75,10 +66,6 @@ fn install_fonts(ctx: &egui::Context) {
     fonts.families.insert(
         FontFamily::Name(super::tokens::font::ICON_FAMILY.into()),
         vec!["phosphor".to_owned(), "DejaVuSans".to_owned()],
-    );
-    fonts.families.insert(
-        FontFamily::Name(super::hover::SERIF_FAMILY.into()),
-        vec!["SourceSerif".to_owned(), "DejaVuSans".to_owned()],
     );
     // egui 0.29 has no weight axis on `FontId`, so a second weight has to be its
     // own named family. `tokens::font::strong()` builds `FontId`s against this

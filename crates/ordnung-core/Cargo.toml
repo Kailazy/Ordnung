@@ -15,7 +15,6 @@ lofty = "0.24.0"
 # (e.g. the acoustic-duplicate fingerprint comparison, which is O(n²)-in-window).
 rayon = "1.12.0"
 rusqlite = { version = "0.39.0", features = ["bundled", "functions"] }
-rustfft = "6.4.1"
 # Real-input FFT wrapper over the same rustfft primitives. The STFT feeds it real
 # audio, and a complex transform spends half its work on an imaginary part that is
 # always zero; this halves that. Same crate family, so no second FFT dependency.
@@ -38,4 +37,3 @@ unicode-normalization = "0.1"
 walkdir = "2.5.0"
 flate2 = "1"
 quick-xml = "0.37"
-# Phase 1+: symphonia, lofty, rusqlite, rustfft, rayon (see PLAN.md).

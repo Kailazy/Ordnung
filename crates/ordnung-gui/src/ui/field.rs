@@ -13,10 +13,9 @@
 //! shorter; on a row with a field it goes through [`super::control_row`],
 //! which brings it up to the field. A focused field shows the accent
 //! outline; a field that is the whole surface it sits on (a paste box, an
-//! inline rename) can turn that `outline` off.
+//! inline rename) turns it off with [`Field::quiet`].
 //!
-//! The builder forwards the `TextEdit` settings a call site needs; anything
-//! rarer goes through [`Field::edit`].
+//! The builder forwards the `TextEdit` settings a call site needs.
 
 use super::tokens::{color, font, radius, space};
 use eframe::egui::{self, Margin, Stroke, TextBuffer, Widget};
@@ -39,9 +38,6 @@ pub struct FieldResponse {
     pub trailing: Option<egui::Response>,
 }
 
-// The builder is complete ahead of use: a setting no call site needs yet
-// stays, so a new field never reaches past the component.
-#[allow(dead_code)]
 pub struct Field<'t> {
     edit: egui::TextEdit<'t>,
     outline: bool,
@@ -54,7 +50,6 @@ pub struct Field<'t> {
     width: Option<f32>,
 }
 
-#[allow(dead_code)]
 impl<'t> Field<'t> {
     /// A one-line field.
     pub fn singleline(text: &'t mut dyn TextBuffer) -> Self {
@@ -110,11 +105,6 @@ impl<'t> Field<'t> {
         self
     }
 
-    pub fn id_salt(mut self, salt: impl std::hash::Hash) -> Self {
-        self.edit = self.edit.id_salt(salt);
-        self
-    }
-
     /// Show dots instead of the text.
     pub fn password(mut self, password: bool) -> Self {
         self.edit = self.edit.password(password);
@@ -145,25 +135,13 @@ impl<'t> Field<'t> {
         self
     }
 
-    /// Whether a focused field draws the accent outline (the default).
-    pub fn outline(mut self, outline: bool) -> Self {
-        self.outline = outline;
-        self
-    }
-
     /// A field with no outline in any state, only its fill: for a filter
     /// that sits over the thing it narrows and should read as part of that
     /// surface rather than as a control on it. Focus still shows in the
-    /// caret and the selection. Implies `outline(false)`.
+    /// caret and the selection.
     pub fn quiet(mut self) -> Self {
         self.outline = false;
         self.quiet = true;
-        self
-    }
-
-    /// Anything the builder doesn't forward.
-    pub fn edit(mut self, f: impl FnOnce(egui::TextEdit<'t>) -> egui::TextEdit<'t>) -> Self {
-        self.edit = f(self.edit);
         self
     }
 

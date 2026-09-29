@@ -101,19 +101,6 @@ fn chrome<R>(ui: &mut egui::Ui, margin: egui::Margin, add: impl FnOnce(&mut egui
     add(ui)
 }
 
-/// The panel's title line, where a window's title bar is: the caption at
-/// the left, and `add_action` laid out right-to-left from the panel's
-/// inner edge, so a button there ends at the content's edge and the
-/// caption is cut before it reaches the button.
-// Part of the docked window's vocabulary even while no panel's head is a
-// caption: the inspector leads with the artwork now.
-#[allow(dead_code)]
-pub fn header(ui: &mut egui::Ui, title: &str, add_action: impl FnOnce(&mut egui::Ui)) {
-    ui.add_space(egui::Frame::window(ui.style()).inner_margin.top);
-    caption_row(ui, title, add_action);
-    ui.add_space(window::TITLE_CLEARANCE);
-}
-
 /// One titled block: the caption over a hairline, then the body. Much
 /// more space above than below: a heading belongs to what follows it, and
 /// equal gaps are what make a long column read as one undifferentiated
@@ -186,18 +173,6 @@ pub fn rule(ui: &mut egui::Ui) {
         .rect_filled(rect, 0.0, color::SEPARATOR_OPAQUE);
 }
 
-/// A hairline across the whole panel, margin to margin, dividing one part
-/// of it from the next (a pinned head from what scrolls beneath it).
-#[allow(dead_code)]
-pub fn rule_full(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-    ui.painter().hline(
-        ui.clip_rect().x_range(),
-        rect.center().y,
-        egui::Stroke::new(1.0, color::SEPARATOR_OPAQUE),
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,7 +199,7 @@ mod tests {
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             Sidebar::right("side").show(ctx, &mut state, 1.0, |ui| {
                 content_right = ui.max_rect().right();
-                header(ui, "Track", |ui| {
+                caption_row(ui, "Track", |ui| {
                     button = Some(ui.button("View release").rect);
                 });
             });

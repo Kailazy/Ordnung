@@ -207,7 +207,7 @@ pub struct AlbumSibling {
 }
 
 /// Minimum fields needed to search an external source for a track's artwork —
-/// returned by `Catalog::tracks_missing_artwork` and consumed by the
+/// returned by `Catalog::tracks_missing_metadata` and consumed by the
 /// `discogs` engine.
 #[derive(Debug, Clone)]
 pub struct MissingArtwork {
@@ -218,7 +218,7 @@ pub struct MissingArtwork {
     /// Discogs release id of the artwork already on file for this track, when
     /// any. Lets the song-data run pull tags straight from the release the user
     /// already picked art from, instead of re-prompting. `None` for tracks with
-    /// no external-artwork row (always `None` for `tracks_missing_artwork`).
+    /// no external-artwork row.
     pub release_id: Option<String>,
 }
 
@@ -328,17 +328,6 @@ pub struct MissingTrack {
     pub id: Id,
     pub source_path: String,
     pub fingerprint: Option<String>,
-}
-
-/// Outcome of a [`Catalog::relink_prefix`] call.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct RelinkReport {
-    /// Tracks whose path was repointed (or, on a dry run, would be).
-    pub moved: usize,
-    /// Matches skipped because the new path already belongs to another track.
-    pub skipped: usize,
-    /// The `(old, new)` rewrites — applied, or previewed on a dry run.
-    pub changes: Vec<(String, String)>,
 }
 
 /// A track is "metadata-complete" — and so never needs the Discogs picker —
@@ -1390,64 +1379,6 @@ impl Catalog {
         Ok(())
     }
 
-    /// Repoint every track whose `source_path` is, or sits under, the `from`
-    /// directory so that prefix becomes `to` — the explicit "I renamed/moved a
-    /// source folder" fix. Matching is path-boundary aware: `from = /Music/Old`
-    /// repoints `/Music/Old/x.mp3` but never the sibling `/Music/OldStuff/...`.
-    /// A rewrite that would collide with another track's existing path is skipped.
-    /// With `dry_run`, nothing is written — the report previews what would change.
-    pub fn relink_prefix(&self, from: &str, to: &str, dry_run: bool) -> Result<RelinkReport> {
-        let from = from.trim_end_matches('/');
-        let to = to.trim_end_matches('/');
-
-        let mut stmt = self.conn.prepare("SELECT id, source_path FROM tracks")?;
-        let all = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(stmt);
-
-        let planned: Vec<(i64, String, String)> = all
-            .into_iter()
-            .filter_map(|(id, path)| {
-                strip_prefix_boundary(&path, from).map(|rest| {
-                    let new = format!("{to}{rest}");
-                    (id, path, new)
-                })
-            })
-            .collect();
-
-        let mut report = RelinkReport::default();
-        let tx = self.conn.unchecked_transaction()?;
-        for (id, old, new) in planned {
-            let clash: Option<i64> = tx
-                .query_row(
-                    "SELECT id FROM tracks WHERE source_path=?1 AND id<>?2",
-                    params![new, id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if clash.is_some() {
-                report.skipped += 1;
-                continue;
-            }
-            if !dry_run {
-                tx.execute(
-                    "UPDATE tracks SET source_path=?2 WHERE id=?1",
-                    params![id, new],
-                )?;
-            }
-            report.moved += 1;
-            report.changes.push((old, new));
-        }
-        if dry_run {
-            // Leave the DB untouched; the transaction never wrote anything.
-            drop(tx);
-        } else {
-            tx.commit()?;
-        }
-        Ok(report)
-    }
-
     /// Fetch the stored cover thumbnail (PNG bytes) for a track, if any.
     pub fn get_cover_thumb(&self, id: Id) -> Result<Option<Vec<u8>>> {
         Ok(self
@@ -1464,8 +1395,7 @@ impl Catalog {
     /// Record (or replace) the external-artwork row for `track_id`. `png_bytes`
     /// is the small GUI thumbnail; `full_bytes` is the full-resolution image
     /// used for tag embedding. Pass `png_bytes = None` to record a "no match"
-    /// attempt so we don't keep re-querying — call `clear_external_artwork` to
-    /// allow a retry.
+    /// attempt so we don't keep re-querying.
     pub fn set_external_artwork(
         &self,
         track_id: Id,
@@ -1734,20 +1664,10 @@ impl Catalog {
         Ok(out)
     }
 
-    /// Forget any external-artwork row for `track_id`. Lets the next "fetch
-    /// missing artwork" run re-attempt the lookup.
-    pub fn clear_external_artwork(&self, track_id: Id) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM track_external_artwork WHERE track_id=?1",
-            params![track_id as i64],
-        )?;
-        Ok(())
-    }
-
     /// The fetched cover now lives in the source file: forget the cached image
     /// bytes but keep the row's release link. Embedding is the normal end of an
     /// auto-match (fetch → pending edit → automatic write), and deleting the
-    /// whole row there — as [`Self::clear_external_artwork`] does — silently
+    /// whole row there silently
     /// un-matched every such track: the library's release tick, "View release",
     /// and the wantlist menu all read `external_id`. With the images gone the
     /// inspector's "Embed fetched cover" button still disappears (it keys on
@@ -1833,34 +1753,6 @@ impl Catalog {
             }
         }
         Ok(out)
-    }
-
-    /// Of `release_ids`, the ones with no release-cache row at all — the fetch
-    /// list for a seller genre-tag run. Presence alone decides: a cached
-    /// release with no genre tags is genuinely untagged on Discogs, so
-    /// re-fetching it would spend a paced request to learn nothing new.
-    pub fn releases_not_cached(&self, release_ids: &[u64]) -> Result<Vec<u64>> {
-        let mut cached = std::collections::HashSet::new();
-        for chunk in release_ids.chunks(500) {
-            let placeholders = vec!["?"; chunk.len()].join(",");
-            let mut stmt = self.conn.prepare(&format!(
-                "SELECT release_id FROM release_cache WHERE release_id IN ({placeholders})"
-            ))?;
-            let rows = stmt.query_map(
-                rusqlite::params_from_iter(chunk.iter().map(|id| id.to_string())),
-                |r| r.get::<_, String>(0),
-            )?;
-            for row in rows {
-                if let Ok(id) = row?.parse::<u64>() {
-                    cached.insert(id);
-                }
-            }
-        }
-        Ok(release_ids
-            .iter()
-            .copied()
-            .filter(|id| !cached.contains(id))
-            .collect())
     }
 
     /// Store a fetched [`ReleaseDetail`] in the release cache, replacing any prior
@@ -2010,34 +1902,6 @@ impl Catalog {
             .unwrap_or(false))
     }
 
-    /// Tracks with no embedded cover and no external-artwork attempt logged.
-    /// Drives the "fetch missing artwork" worker — returns only the fields it
-    /// needs to query Discogs.
-    pub fn tracks_missing_artwork(&self) -> Result<Vec<MissingArtwork>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT t.id, t.artist, t.title, t.album
-             FROM tracks t
-             LEFT JOIN track_external_artwork e ON e.track_id = t.id
-             WHERE COALESCE(t.has_cover, 0) = 0 AND e.track_id IS NULL
-             ORDER BY t.artist, t.title",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(MissingArtwork {
-                id: r.get::<_, i64>(0)? as Id,
-                artist: r.get::<_, Option<String>>(1)?,
-                title: r.get::<_, Option<String>>(2)?,
-                album: r.get::<_, Option<String>>(3)?,
-                // By construction these tracks have no external-artwork row.
-                release_id: None,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
     /// Other tracks on the *same album* as `track_id` that have no cover of their
     /// own (no embedded art and no external-artwork row). "Same album" means a
     /// matching, non-empty album title under the same album identity — the album
@@ -2185,8 +2049,7 @@ impl Catalog {
     /// marked whatever the outcome (release applied, or no match). This query no
     /// longer re-derives completeness each run, so a song the user has handled —
     /// or that was complete on import — won't reappear, even if a field is later
-    /// cleared. Unlike [`Catalog::tracks_missing_artwork`], having a cover does
-    /// NOT exclude a track. Returns the minimum fields needed to search Discogs.
+    /// cleared. Having a cover does NOT exclude a track. Returns the minimum fields needed to search Discogs.
     pub fn tracks_missing_metadata(&self) -> Result<Vec<MissingArtwork>> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, t.artist, t.title, t.album, e.external_id
@@ -2395,8 +2258,7 @@ impl Catalog {
     /// Tracks whose recorded `source_path` no longer exists on disk — the file
     /// was moved, renamed, or deleted out from under the catalog. The rows (and
     /// their cues/analysis/playlist links) are intact; only the locator is stale.
-    /// Drives the `missing` command and any "missing files" view, and pairs with
-    /// `relink_prefix` to repoint a whole moved folder at once.
+    /// Drives the "missing files" view.
     pub fn missing_tracks(&self) -> Result<Vec<Track>> {
         Ok(self
             .list_tracks(None, 0)?
@@ -5010,29 +4872,6 @@ impl Catalog {
         Ok(())
     }
 
-    /// Move a playlist/folder under a new parent folder (`None` = top level).
-    /// Rejects moves that would create a cycle or nest under a non-folder.
-    pub fn move_playlist(&self, id: Id, parent: Option<Id>) -> Result<()> {
-        self.get_playlist(id)?; // existence
-        if let Some(p) = parent {
-            if p == id {
-                return Err(Error::Invalid("a playlist cannot be its own parent".into()));
-            }
-            self.expect_folder(p)?;
-            if self.is_descendant(p, id)? {
-                return Err(Error::Invalid(
-                    "cannot move a folder into one of its own descendants".into(),
-                ));
-            }
-        }
-        let position = self.next_sibling_position(parent)?;
-        self.conn.execute(
-            "UPDATE playlists SET parent_id=?2, position=?3 WHERE id=?1",
-            params![id as i64, parent.map(|p| p as i64), position],
-        )?;
-        Ok(())
-    }
-
     /// Delete a playlist or folder. Folders cascade to descendants and all
     /// track links (ON DELETE CASCADE). Source tracks are never touched.
     pub fn delete_playlist(&self, id: Id) -> Result<()> {
@@ -5205,39 +5044,6 @@ impl Catalog {
         }
     }
 
-    /// Whether `candidate` is `ancestor` or nested anywhere beneath it.
-    fn is_descendant(&self, candidate: Id, ancestor: Id) -> Result<bool> {
-        let mut cur = Some(candidate);
-        while let Some(c) = cur {
-            if c == ancestor {
-                return Ok(true);
-            }
-            cur = self
-                .conn
-                .query_row(
-                    "SELECT parent_id FROM playlists WHERE id=?1",
-                    params![c as i64],
-                    |r| r.get::<_, Option<i64>>(0),
-                )
-                .optional()?
-                .flatten()
-                .map(|v| v as Id);
-        }
-        Ok(false)
-    }
-}
-
-/// If `path` is exactly `prefix` or sits beneath it at a path boundary, return
-/// the remainder (including the leading separator, e.g. `/x.mp3`). Otherwise
-/// `None`. `prefix` is assumed already stripped of any trailing separator.
-/// Keeps `relink_prefix` from matching `/Music/OldStuff` against `/Music/Old`.
-fn strip_prefix_boundary(path: &str, prefix: &str) -> Option<String> {
-    let rest = path.strip_prefix(prefix)?;
-    if rest.is_empty() || rest.starts_with('/') {
-        Some(rest.to_string())
-    } else {
-        None
-    }
 }
 
 /// Normalize a title/album/artist for fuzzy linking: lowercase, split on any
@@ -6021,76 +5827,6 @@ mod tests {
     }
 
     #[test]
-    fn relink_prefix_repoints_a_moved_folder_at_boundaries() {
-        let cat = Catalog::open(":memory:").unwrap();
-        let (a, _) = cat
-            .upsert_scanned(&scanned("/Music/Old/x.mp3", "A", "House", 1000))
-            .unwrap();
-        let (b, _) = cat
-            .upsert_scanned(&scanned("/Music/Old/sub/y.mp3", "B", "House", 1000))
-            .unwrap();
-        // Sibling whose name merely starts with "Old" — must NOT be touched.
-        let (c, _) = cat
-            .upsert_scanned(&scanned("/Music/OldStuff/z.mp3", "C", "House", 1000))
-            .unwrap();
-
-        let report = cat
-            .relink_prefix("/Music/Old", "/Library/New", false)
-            .unwrap();
-        assert_eq!(report.moved, 2);
-        assert_eq!(report.skipped, 0);
-        assert_eq!(cat.get_track(a).unwrap().source_path, "/Library/New/x.mp3");
-        assert_eq!(
-            cat.get_track(b).unwrap().source_path,
-            "/Library/New/sub/y.mp3"
-        );
-        assert_eq!(
-            cat.get_track(c).unwrap().source_path,
-            "/Music/OldStuff/z.mp3",
-            "sibling prefix left alone"
-        );
-    }
-
-    #[test]
-    fn relink_prefix_dry_run_previews_without_writing() {
-        let cat = Catalog::open(":memory:").unwrap();
-        let (a, _) = cat
-            .upsert_scanned(&scanned("/Music/Old/x.mp3", "A", "House", 1000))
-            .unwrap();
-        let report = cat.relink_prefix("/Music/Old", "/New", true).unwrap();
-        assert_eq!(report.moved, 1);
-        assert_eq!(
-            report.changes,
-            vec![("/Music/Old/x.mp3".to_string(), "/New/x.mp3".to_string())]
-        );
-        assert_eq!(
-            cat.get_track(a).unwrap().source_path,
-            "/Music/Old/x.mp3",
-            "dry run changed nothing"
-        );
-    }
-
-    #[test]
-    fn relink_prefix_skips_path_collisions() {
-        let cat = Catalog::open(":memory:").unwrap();
-        // Repointing /A/x.mp3 → /B/x.mp3 would collide with the existing /B/x.mp3.
-        let (_, _) = cat
-            .upsert_scanned(&scanned("/A/x.mp3", "A", "House", 1000))
-            .unwrap();
-        let (keep, _) = cat
-            .upsert_scanned(&scanned("/B/x.mp3", "B", "House", 1000))
-            .unwrap();
-        let report = cat.relink_prefix("/A", "/B", false).unwrap();
-        assert_eq!(report.moved, 0);
-        assert_eq!(report.skipped, 1);
-        assert_eq!(
-            cat.get_track(keep).unwrap().source_path,
-            "/B/x.mp3",
-            "collision target intact"
-        );
-    }
-
-    #[test]
     fn rescan_preserves_user_edits_but_refreshes_properties() {
         let cat = Catalog::open(":memory:").unwrap();
 
@@ -6798,9 +6534,6 @@ mod tests {
         // Reorder must be a permutation of current members.
         cat.add_tracks(pl, &[t1]).unwrap();
         assert!(cat.reorder_tracks(pl, &[t1, 9999]).is_err());
-        // Can't move a folder into its own descendant.
-        let sub = cat.create_playlist("Sub", Some(folder), true).unwrap();
-        assert!(cat.move_playlist(folder, Some(sub)).is_err());
     }
 
     #[test]

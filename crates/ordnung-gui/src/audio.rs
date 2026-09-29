@@ -1017,14 +1017,6 @@ impl AudioEngine {
         Some((self.pcm_buf.clone()?, self.channels, self.sample_rate))
     }
 
-    /// Play control click for a row: start `id` (at the engine's start
-    /// point, see [`set_start_fraction`](Self::set_start_fraction)), or — if
-    /// it's already the loaded track — toggle pause/resume.
-    pub fn play_or_toggle(&mut self, id: Id, path: PathBuf) {
-        let start = self.start_fraction;
-        self.play_or_toggle_from(id, path, start);
-    }
-
     /// [`play_or_toggle`](Self::play_or_toggle) with the start point named
     /// by the caller: `Some(fraction)` of the length, `None` for the top.
     /// This load alone; the engine's own setting stands for the next.

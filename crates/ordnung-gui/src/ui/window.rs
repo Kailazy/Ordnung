@@ -7,8 +7,8 @@
 //! the centre of the screen every time (a window dragged aside comes back
 //! to the centre on its next open), with a title bar and a close button. A
 //! panel that grows with its list is `resizable_height`; one the user may
-//! drag to size is `resizable`, by its bottom-right corner unless its
-//! `grips` say otherwise; a popover opens `at` a point, or `anchored`
+//! drag to size is `resizable`, by its bottom-right corner; a popover
+//! opens `at` a point, or `anchored`
 //! to a screen edge. A window whose content carries its own heading turns
 //! the `title_bar` off and keeps the close button, in the corner. None
 //! collapse.
@@ -52,9 +52,7 @@ enum Place {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Grips(u8);
 
-#[allow(dead_code)] // the set is the API; callers pick from it
 impl Grips {
-    pub const NONE: Self = Self(0);
     pub const LEFT: Self = Self(1);
     pub const RIGHT: Self = Self(2);
     pub const TOP: Self = Self(4);
@@ -63,23 +61,9 @@ impl Grips {
     pub const TOP_RIGHT: Self = Self(32);
     pub const BOTTOM_LEFT: Self = Self(64);
     pub const BOTTOM_RIGHT: Self = Self(128);
-    pub const EDGES: Self = Self(15);
-    pub const CORNERS: Self = Self(240);
-    pub const ALL: Self = Self(255);
-
-    pub const fn with(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
 
     pub const fn has(self, other: Self) -> bool {
         self.0 & other.0 == other.0
-    }
-}
-
-impl std::ops::BitOr for Grips {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self {
-        self.with(rhs)
     }
 }
 
@@ -96,7 +80,6 @@ pub struct Window<'o> {
     escape: Option<&'o mut bool>,
     title_bar: bool,
     resizable: [bool; 2],
-    grips: Option<Grips>,
     default_size: [Option<f32>; 2],
     min_size: [Option<f32>; 2],
     max_size: [Option<f32>; 2],
@@ -116,7 +99,6 @@ impl<'o> Window<'o> {
             escape: None,
             title_bar: true,
             resizable: [false, false],
-            grips: None,
             default_size: [None, None],
             min_size: [None, None],
             max_size: [None, None],
@@ -168,8 +150,8 @@ impl<'o> Window<'o> {
         self
     }
 
-    /// The user may drag it to size, both ways, by the bottom-right corner
-    /// (or the [`Self::grips`] given). Such a window is always the size it
+    /// The user may drag it to size, both ways, by the bottom-right corner.
+    /// Such a window is always the size it
     /// was given, whatever its content claims: the frame covers the whole
     /// of it, so content laid out in the offered rect (panels, a table)
     /// never draws past the glass.
@@ -179,16 +161,9 @@ impl<'o> Window<'o> {
     }
 
     /// Fixed width, height following the content up to a drag on the
-    /// bottom edge (or the [`Self::grips`] given).
+    /// bottom edge.
     pub fn resizable_height(mut self) -> Self {
         self.resizable = [false, true];
-        self
-    }
-
-    /// Which edges and corners size the window, for one that is resizable.
-    #[allow(dead_code)]
-    pub fn grips(mut self, grips: Grips) -> Self {
-        self.grips = Some(grips);
         self
     }
 
@@ -311,11 +286,11 @@ impl<'o> Window<'o> {
         // grips this window doesn't offer are covered by blockers (see
         // `block_grips`), and a drag on a blocker moves the window, as a
         // drag on the frame there would without them.
-        let grips = self.grips.unwrap_or(if self.resizable[0] {
+        let grips = if self.resizable[0] {
             Grips::BOTTOM_RIGHT
         } else {
             Grips::BOTTOM
-        });
+        };
         let last_rect = egui::AreaState::load(ctx, id).map(|s| s.rect());
         let moved = BLOCKERS
             .iter()

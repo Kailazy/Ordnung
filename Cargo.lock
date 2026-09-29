@@ -2673,7 +2673,6 @@ dependencies = [
  "rayon",
  "realfft",
  "rusqlite",
- "rustfft",
  "serde",
  "serde_json",
  "symphonia",
@@ -2687,7 +2686,6 @@ dependencies = [
 name = "ordnung-gui"
 version = "0.164.8"
 dependencies = [
- "anyhow",
  "block2 0.5.1",
  "dotenvy",
  "eframe",

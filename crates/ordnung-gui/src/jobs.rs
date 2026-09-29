@@ -98,7 +98,7 @@ impl App {
                 }
                 Ok(JobMsg::VinylChanged) => reload = true,
                 // The rows and the list's counts both move as lines settle.
-                Ok(JobMsg::TracklistChanged(_)) => tracklists_changed = true,
+                Ok(JobMsg::TracklistChanged) => tracklists_changed = true,
                 Ok(JobMsg::VinylUsername(u)) => {
                     // Persist the resolved username so the collection link works
                     // across launches. Only write when it actually changed.
@@ -4483,7 +4483,7 @@ pub(crate) fn run_match_tracklist(
                 ChosenBy::Auto,
                 &[],
             );
-            let _ = tx.send(JobMsg::TracklistChanged(tracklist_id));
+            let _ = tx.send(JobMsg::TracklistChanged);
             let _ = tx.send(JobMsg::Progress { done: i + 1, total });
             ctx.request_repaint();
             continue;
@@ -4535,7 +4535,7 @@ pub(crate) fn run_match_tracklist(
                 dug_at: 0,
             });
         }
-        let _ = tx.send(JobMsg::TracklistChanged(tracklist_id));
+        let _ = tx.send(JobMsg::TracklistChanged);
         let _ = tx.send(JobMsg::Progress { done: i + 1, total });
         ctx.request_repaint();
     }

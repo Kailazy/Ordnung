@@ -8,61 +8,19 @@ use crate::error::{Error, Result};
 use std::path::Path;
 use symphonia::core::audio::{AudioBufferRef, Signal};
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
-use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
+use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
 
 pub struct DecodedAudio {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
 }
 
-/// Decoded audio that preserves the source's channel layout — for faithful
-/// playback, where downmixing to mono would collapse the stereo image and
-/// phase-cancel wide content (it audibly changes the tone). `samples` are
-/// interleaved frames (L,R,L,R,… for stereo); length is `frames * channels`.
-pub struct DecodedInterleaved {
-    pub samples: Vec<f32>,
-    pub sample_rate: u32,
-    pub channels: u16,
-}
-
 /// Decode `path` fully to mono f32 samples in [-1, 1].
 pub fn decode_mono(path: impl AsRef<Path>) -> Result<DecodedAudio> {
-    decode_mono_inner(path, None, None)
-}
-
-/// Decode `path` fully to interleaved f32 samples at the native sample rate and
-/// channel count, with no downmix — the high-quality path used for playback.
-pub fn decode_interleaved(path: impl AsRef<Path>) -> Result<DecodedInterleaved> {
-    let path = path.as_ref();
-    let mut samples: Vec<f32> = Vec::new();
-    let mut sample_rate = 44_100;
-    let mut channels: u16 = 1;
-    decode_interleaved_chunks(
-        path,
-        |start| {
-            sample_rate = start.sample_rate;
-            channels = start.channels;
-        },
-        |chunk| {
-            samples.extend_from_slice(chunk);
-            true
-        },
-    )?;
-    if samples.is_empty() {
-        return Err(Error::Decode {
-            path: path.to_path_buf(),
-            msg: "decoded zero samples".into(),
-        });
-    }
-    Ok(DecodedInterleaved {
-        samples,
-        sample_rate,
-        channels,
-    })
+    decode_mono_inner(path, None)
 }
 
 /// Format facts reported once at the head of a streaming decode, as soon as
@@ -76,7 +34,7 @@ pub struct StreamStart {
     pub total_frames: Option<u64>,
 }
 
-/// Streaming variant of [`decode_interleaved`]: `on_start` fires once with the
+/// Streaming interleaved decode: `on_start` fires once with the
 /// stream's format, then `on_chunk` receives each decoded packet's interleaved
 /// samples in order. This is what lets playback begin after the first second
 /// of audio instead of after the whole file. Returning `false` from `on_chunk`
@@ -168,19 +126,7 @@ pub fn decode_interleaved_chunks(
 /// Analysis only needs a representative window: for steady-tempo material a slice
 /// is as accurate as the whole track and far faster to decode. `None` decodes all.
 pub fn decode_mono_capped(path: impl AsRef<Path>, max_samples: Option<usize>) -> Result<DecodedAudio> {
-    decode_mono_inner(path, max_samples, None)
-}
-
-/// Decode roughly `window_secs` of mono audio centered on the middle of the
-/// track, seeking past the head instead of decoding the whole file.
-///
-/// Preview playback only needs a short slice from the middle; decoding the entire
-/// track (often minutes) just to keep ~12 s dominated click-to-play latency. We
-/// read the duration from the container, seek near the midpoint, and decode only
-/// the window. Falls back to a capped decode from the start when the duration is
-/// unknown or the track is shorter than the window.
-pub fn decode_mono_middle(path: impl AsRef<Path>, window_secs: f32) -> Result<DecodedAudio> {
-    decode_mono_inner(path, None, Some(window_secs.max(0.0)))
+    decode_mono_inner(path, max_samples)
 }
 
 /// Probe a file's audio properties via the decoder, confirming real sample data is
@@ -315,14 +261,8 @@ pub fn probe_for_scan(path: impl AsRef<Path>) -> Result<crate::model::AudioPrope
     })
 }
 
-/// Shared decode core. `max_samples` caps the output length. `middle_window_secs`,
-/// when set, seeks to the middle of the track and decodes only that window (it
-/// also acts as the cap); it takes precedence over `max_samples`.
-fn decode_mono_inner(
-    path: impl AsRef<Path>,
-    max_samples: Option<usize>,
-    middle_window_secs: Option<f32>,
-) -> Result<DecodedAudio> {
+/// Shared decode core. `max_samples` caps the output length.
+fn decode_mono_inner(path: impl AsRef<Path>, max_samples: Option<usize>) -> Result<DecodedAudio> {
     let path = path.as_ref();
     let file = std::fs::File::open(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
@@ -361,33 +301,6 @@ fn decode_mono_inner(
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| decode_err(path, e))?;
 
-    // Resolve the output cap, seeking to the middle first when a preview window
-    // was requested and the track is long enough to bother.
-    let max_samples = match middle_window_secs {
-        Some(window_secs) => {
-            let window = (window_secs * sample_rate as f32).ceil() as usize;
-            if let Some(total) = n_frames {
-                if (total as usize) > window {
-                    let mid_secs = total as f64 / sample_rate as f64 / 2.0;
-                    let start_secs = (mid_secs - window_secs as f64 / 2.0).max(0.0);
-                    if format
-                        .seek(
-                            SeekMode::Coarse,
-                            SeekTo::Time {
-                                time: Time::from(start_secs),
-                                track_id: Some(track_id),
-                            },
-                        )
-                        .is_ok()
-                    {
-                        decoder.reset();
-                    }
-                }
-            }
-            Some(window)
-        }
-        None => max_samples,
-    };
 
     // Pre-size the output to the known cap so a ~150 s window (≈7 M f32, ~29 MB)
     // fills without the repeated grow-and-copy reallocations of an empty Vec.

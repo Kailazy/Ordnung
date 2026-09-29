@@ -615,22 +615,6 @@ pub fn seller_baskets(offers: &[(String, SellerListing)]) -> Vec<SellerBasket> {
     baskets
 }
 
-/// Conversion target chosen explicitly by the user. Never applied automatically.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ConvertRule {
-    pub target: Format,
-    pub bitrate_kbps: Option<u32>,
-}
-
-/// An export job description: which playlists/tracks go to which device, with an
-/// optional explicit conversion rule.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ExportProfile {
-    pub device_path: String,
-    pub playlist_ids: Vec<Id>,
-    pub convert: Option<ConvertRule>,
-}
-
 /// A pasted mix tracklist the user asked Ordnung to match to records — see
 /// [`crate::tracklist`] and the `tracklists` catalog table. Kept with its
 /// match state so a mix worked through once stays worked through.

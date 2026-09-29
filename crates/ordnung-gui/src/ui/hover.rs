@@ -10,10 +10,6 @@
 use super::tooltip;
 use eframe::egui::{self, Color32, RichText};
 
-/// Name of the serif font family installed in [`super::theme`]. No longer used
-/// for tooltips, but the family is still registered for any future serif copy.
-pub const SERIF_FAMILY: &str = "serif";
-
 /// Hover-text point size — matches the 13pt UI body.
 const SIZE: f32 = 13.0;
 

@@ -184,32 +184,6 @@ pub fn set_volume(volume: f32) {
 #[cfg(not(target_os = "macos"))]
 pub fn set_volume(_volume: f32) {}
 
-/// Show or hide the video panel without interrupting playback. Hidden is the
-/// default: the record sheet's own transport is the interface, and the panel is
-/// only worth looking at when the user wants the picture.
-#[cfg(target_os = "macos")]
-#[allow(dead_code)] // no button reaches for it now; kept for the panel
-pub fn set_video_visible(visible: bool) {
-    imp::set_video_visible(visible);
-}
-
-#[cfg(not(target_os = "macos"))]
-#[allow(dead_code)] // no button reaches for it now; kept for the panel
-pub fn set_video_visible(_visible: bool) {}
-
-/// Whether the video panel is currently on screen.
-#[cfg(target_os = "macos")]
-#[allow(dead_code)] // no button reaches for it now; kept for the panel
-pub fn video_visible() -> bool {
-    imp::video_visible()
-}
-
-#[cfg(not(target_os = "macos"))]
-#[allow(dead_code)] // no button reaches for it now; kept for the panel
-pub fn video_visible() -> bool {
-    false
-}
-
 /// What the mini-player is doing, as of the last [`poll`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlayerStatus {
@@ -292,8 +266,6 @@ mod imp {
     /// plausible display arrangement that no screen reaches it, while staying an
     /// ordered-in window so WebKit keeps its media running.
     const OFFSCREEN: NSPoint = NSPoint::new(-20000.0, -20000.0);
-    /// Inset from the main window's bottom-right corner on first show.
-    const MARGIN: f64 = 24.0;
     /// How often the page is asked what it's doing once it's settled. The answer
     /// drives queue advance and the stuck fallback, neither of which needs to be
     /// tighter than this.
@@ -455,9 +427,6 @@ mod imp {
         /// because the panel is normally parked off screen while playing and
         /// AppKit would still call that visible. Cleared by [`close`].
         live: bool,
-        /// Whether the panel is parked on screen rather than off it. Only ever
-        /// true because the user asked for the picture.
-        visible: bool,
         /// Videos still to play after the current one, in order.
         queue: Vec<String>,
         /// Panel title, reused when the queue advances on its own.
@@ -485,21 +454,14 @@ mod imp {
         PANEL.with(|slot| {
             let mut slot = slot.borrow_mut();
             let mini = slot.get_or_insert_with(|| build(mtm));
-            let was_live = mini.live;
 
             unsafe {
                 // Re-parent every time: eframe can recreate the window, and
                 // AppKit ignores an add for a parent it already has.
                 parent.addChildWindow_ordered(&mini.panel, NSWindowOrderingMode::NSWindowAbove);
             }
-            // A new session starts hidden — the sheet's transport is the
-            // interface — but one already showing the picture keeps showing it
-            // across a queue advance rather than blinking away mid-record.
-            if !was_live {
-                mini.visible = false;
-            }
             mini.live = true;
-            place(mini, &parent);
+            park(mini);
             mini.queue = rest.to_vec();
             mini.title = title.to_string();
             put_on(mini, first);
@@ -560,7 +522,6 @@ mod imp {
         PANEL.with(|slot| {
             if let Some(mini) = slot.borrow_mut().as_mut() {
                 mini.live = false;
-                mini.visible = false;
                 mini.queue.clear();
                 if let Some(next) = mini.next.take() {
                     retire(mini, next);
@@ -891,7 +852,6 @@ mod imp {
             next: None,
             spare: None,
             live: false,
-            visible: false,
             queue: Vec::new(),
             title: String::new(),
             volume: VOLUME.with(|v| v.get()),
@@ -1189,66 +1149,14 @@ mod imp {
         }
     }
 
-    /// Put the panel where its current visibility says it belongs, and order it
-    /// in either way — a parked-off-screen panel is still an ordinary visible
-    /// window, which is what keeps WebKit playing its media (see the module
-    /// note). Shown, it sits in the main window's bottom-right corner; hidden,
-    /// it sits far off the left of every screen.
-    ///
-    /// Screen coordinates are bottom-left origin, so the corner is
-    /// `origin + margin` on Y and the far edge less the panel width on X.
-    fn place(mini: &Mini, parent: &NSWindow) {
-        let f = mini.panel.frame();
-        let origin = if mini.visible {
-            let p = parent.frame();
-            NSPoint::new(
-                p.origin.x + p.size.width - f.size.width - MARGIN,
-                p.origin.y + MARGIN,
-            )
-        } else {
-            OFFSCREEN
-        };
+    /// Park the panel far off the left of every screen and order it in: a
+    /// parked-off-screen panel is still an ordinary visible window, which is
+    /// what keeps WebKit playing its media (see the module note).
+    fn park(mini: &Mini) {
         unsafe {
-            mini.panel.setFrameOrigin(origin);
+            mini.panel.setFrameOrigin(OFFSCREEN);
             mini.panel.orderFront(None);
         }
-    }
-
-    #[allow(dead_code)] // no button reaches for it now; kept for the panel
-    pub fn set_video_visible(visible: bool) {
-        if MainThreadMarker::new().is_none() {
-            return;
-        }
-        PANEL.with(|slot| {
-            let mut slot = slot.borrow_mut();
-            let Some(mini) = slot.as_mut() else { return };
-            if !mini.live || mini.visible == visible {
-                return;
-            }
-            mini.visible = visible;
-            // Re-park against the panel's own parent, so showing it lands it on
-            // the main window wherever that has since been moved to.
-            let parent = unsafe { mini.panel.parentWindow() };
-            match parent {
-                Some(parent) => place(mini, &parent),
-                // No parent this frame (eframe recreated the window): the next
-                // `play` re-parents and places it. Order it in regardless, so a
-                // requested show isn't silently dropped.
-                None => mini.panel.orderFront(None),
-            }
-        });
-    }
-
-    #[allow(dead_code)] // no button reaches for it now; kept for the panel
-    pub fn video_visible() -> bool {
-        if MainThreadMarker::new().is_none() {
-            return false;
-        }
-        PANEL.with(|slot| {
-            slot.borrow()
-                .as_ref()
-                .is_some_and(|mini| mini.live && mini.visible)
-        })
     }
 
     /// The app's main `NSWindow`, via eframe's AppKit handle. Borrowed for the

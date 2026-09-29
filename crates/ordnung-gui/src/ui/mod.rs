@@ -25,10 +25,6 @@ pub mod phosphor_icons;
 pub mod sheet;
 pub mod sidebar;
 pub mod theme;
-// Tokens are an intentionally ahead-of-use palette: Pass 1 wires only a subset
-// into the global style; the rest are consumed as call sites migrate off inline
-// literals. Allow the interim dead-code until that pass lands.
-#[allow(dead_code)]
 pub mod tokens;
 pub mod tooltip;
 pub mod window;

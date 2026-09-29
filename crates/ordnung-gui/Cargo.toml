@@ -23,7 +23,6 @@ default = ["usb-export"]
 usb-export = []
 
 [dependencies]
-anyhow = "1.0.102"
 # `persistence` lets eframe auto-save egui's memory (and window geometry) to the
 # OS app-data dir on exit and restore it on launch. We rely on this so resized
 # table column widths — which egui_extras keeps in egui memory — survive restarts.

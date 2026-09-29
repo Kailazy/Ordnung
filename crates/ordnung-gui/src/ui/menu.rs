@@ -206,7 +206,6 @@ pub struct MenuUi<'u> {
 // (the vinyl sort menu) exercises `selectable`/`separator`/`close`; the rest of
 // the surface exists for the call sites that migrate next. Allow the interim
 // dead-code until they do.
-#[allow(dead_code)]
 impl MenuUi<'_> {
     /// A plain action row. Returns true on click.
     pub fn item(&mut self, label: impl Into<String>) -> bool {
