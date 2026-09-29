@@ -6,9 +6,6 @@
 //! engineering (<https://djl-analysis.deepsymmetry.org/>) and were validated
 //! against rekordcrate's parser on real exports (see `tests/pdb_read.rs`).
 //!
-//! The writer half (building the full track/artist/…/playlist tables CDJs
-//! read) is Phase 5 and still to come; see the `rekordbox-format` skill.
-//!
 //! Everything here is defensive: a corrupt or truncated database returns an
 //! error or simply yields fewer rows — it must never panic, since the GUI
 //! points this at whatever `export.pdb` happens to sit on a mounted stick.
@@ -131,8 +128,8 @@ const TYPE_ARTISTS: u32 = 2;
 const TYPE_ALBUMS: u32 = 3;
 const TYPE_LABELS: u32 = 4;
 const TYPE_KEYS: u32 = 5;
-const TYPE_PLAYLIST_TREE: u32 = 7;
-const TYPE_PLAYLIST_ENTRIES: u32 = 8;
+pub(crate) const TYPE_PLAYLIST_TREE: u32 = 7;
+pub(crate) const TYPE_PLAYLIST_ENTRIES: u32 = 8;
 const TYPE_ARTWORK: u32 = 13;
 
 /// Byte size of a page header; the row heap starts right after it.
@@ -200,19 +197,8 @@ pub fn read_export_bytes(data: &[u8]) -> Result<RbExport, ReadError> {
 }
 
 fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
-    // Header: u32 0, page_size, num_tables, next_unused_page, unknown,
-    // sequence, u32 0, then `num_tables` 16-byte table pointers.
-    if u32_at(data, 0) != Some(0) {
-        return Err(ReadError::Format("bad signature"));
-    }
-    let page_size = u32_at(data, 4).ok_or(ReadError::Format("truncated header"))? as usize;
-    if !(512..=65536).contains(&page_size) {
-        return Err(ReadError::Format("implausible page size"));
-    }
-    let num_tables = u32_at(data, 8).ok_or(ReadError::Format("truncated header"))? as usize;
-    if num_tables > 64 {
-        return Err(ReadError::Format("implausible table count"));
-    }
+    let tables = table_dir(data)?;
+    let page_size = tables.page_size;
 
     let mut out = RbExport::default();
     // playlist id → (entry_index, track_id), sorted after collection.
@@ -230,11 +216,7 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
     // remixer_id, composer_id, original_artist_id).
     let mut track_refs: HashMap<u32, [u32; 9]> = HashMap::new();
 
-    for t in 0..num_tables {
-        let base = 0x1C + t * 16;
-        let Some(page_type) = u32_at(data, base) else {
-            break;
-        };
+    for &(page_type, first_page, last_page) in &tables.dir {
         if !matches!(
             page_type,
             TYPE_TRACKS
@@ -249,12 +231,6 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
         ) {
             continue;
         }
-        let Some(first_page) = u32_at(data, base + 8) else {
-            break;
-        };
-        let Some(last_page) = u32_at(data, base + 12) else {
-            break;
-        };
         for page_off in table_pages(data, page_size, first_page, last_page) {
             for row in page_rows(data, page_size, page_off, page_type) {
                 match page_type {
@@ -462,6 +438,50 @@ fn parse_export(data: &[u8]) -> Result<RbExport, ReadError> {
     Ok(out)
 }
 
+/// An export.pdb's header: the page size and the table directory, one
+/// `(type, first_page, last_page)` per table in directory order (a table's
+/// directory slot is its index here).
+pub(crate) struct TableDir {
+    pub(crate) page_size: usize,
+    pub(crate) dir: Vec<(u32, u32, u32)>,
+}
+
+impl TableDir {
+    /// The directory slot, first and last page of the table of type `ty`.
+    pub(crate) fn find(&self, ty: u32) -> Option<(usize, u32, u32)> {
+        let slot = self.dir.iter().position(|&(t, _, _)| t == ty)?;
+        let (_, first, last) = self.dir[slot];
+        Some((slot, first, last))
+    }
+}
+
+/// Parse the header: u32 0, page_size, num_tables, next_unused_page,
+/// unknown, sequence, u32 0, then `num_tables` 16-byte table pointers
+/// (type, empty_candidate, first_page, last_page).
+pub(crate) fn table_dir(data: &[u8]) -> Result<TableDir, ReadError> {
+    if u32_at(data, 0) != Some(0) {
+        return Err(ReadError::Format("bad signature"));
+    }
+    let page_size = u32_at(data, 4).ok_or(ReadError::Format("truncated header"))? as usize;
+    if !(512..=65536).contains(&page_size) {
+        return Err(ReadError::Format("implausible page size"));
+    }
+    let n = u32_at(data, 8).ok_or(ReadError::Format("truncated header"))? as usize;
+    if n > 64 {
+        return Err(ReadError::Format("implausible table count"));
+    }
+    let dir = (0..n)
+        .map(|t| {
+            let base = 0x1C + t * 16;
+            match (u32_at(data, base), u32_at(data, base + 8), u32_at(data, base + 12)) {
+                (Some(ty), Some(first), Some(last)) => Ok((ty, first, last)),
+                _ => Err(ReadError::Format("truncated table directory")),
+            }
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(TableDir { page_size, dir })
+}
+
 /// Follow one table's linked list of pages, returning each page's byte offset.
 /// Cycles and out-of-file links terminate the walk instead of hanging it.
 pub(crate) fn table_pages(data: &[u8], page_size: usize, first: u32, last: u32) -> Vec<usize> {
@@ -475,6 +495,10 @@ pub(crate) fn table_pages(data: &[u8], page_size: usize, first: u32, last: u32) 
         }
         // Page header sanity: leading u32 is 0 and the stored index matches.
         if u32_at(data, off) != Some(0) || u32_at(data, off + 4) != Some(index) {
+            break;
+        }
+        // ponytail: linear revisit check; a table has at most a few thousand pages.
+        if pages.contains(&off) {
             break;
         }
         pages.push(off);

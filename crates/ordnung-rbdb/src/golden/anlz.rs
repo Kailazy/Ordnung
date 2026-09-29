@@ -40,32 +40,18 @@ impl Section<'_> {
     }
 }
 
-fn be32(b: &[u8], i: usize) -> Option<u32> {
-    b.get(i..i + 4).and_then(|x| x.try_into().ok()).map(u32::from_be_bytes)
-}
+use crate::anlz::u32_at as be32;
 
 /// Walk a PMAI file's sections. `None` when the file isn't PMAI; a malformed
 /// length ends the walk early.
 fn sections(data: &[u8]) -> Option<Vec<Section<'_>>> {
-    if data.get(0..4) != Some(b"PMAI") {
-        return None;
-    }
-    let mut off = be32(data, 4)? as usize;
-    let mut out = Vec::new();
-    while off + 12 <= data.len() {
-        let len_header = be32(data, off + 4)? as usize;
-        let len_tag = be32(data, off + 8)? as usize;
-        if len_tag < 12 || off + len_tag > data.len() {
-            break;
-        }
-        out.push(Section {
-            tag: String::from_utf8_lossy(&data[off..off + 4]).into_owned(),
-            len_header,
-            bytes: &data[off..off + len_tag],
-        });
-        off += len_tag;
-    }
-    Some(out)
+    let (spans, _) = crate::anlz::section_spans(data)?;
+    let section = |(off, len): (usize, usize)| Section {
+        tag: String::from_utf8_lossy(&data[off..off + 4]).into_owned(),
+        len_header: be32(data, off + 4).unwrap_or(0) as usize,
+        bytes: &data[off..off + len],
+    };
+    Some(spans.into_iter().map(section).collect())
 }
 
 /// How closely one waveform section of ours follows rekordbox's.

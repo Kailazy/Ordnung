@@ -39,18 +39,23 @@ pub struct DlpPlaylists {
     pub entries_by_path: HashMap<u32, Vec<String>>,
 }
 
-/// Open an `exportLibrary.db` read-only with the Device Library Plus key.
-pub(crate) fn open_read_only(db_path: &Path) -> Result<rusqlite::Connection, ReadError> {
-    let conn = rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|e| ReadError::Dlp(e.to_string()))?;
+/// Open an `exportLibrary.db` with the Device Library Plus key.
+pub(crate) fn open(
+    db_path: &Path,
+    flags: rusqlite::OpenFlags,
+) -> Result<rusqlite::Connection, ReadError> {
+    let err = |e: rusqlite::Error| ReadError::Dlp(e.to_string());
+    let conn = rusqlite::Connection::open_with_flags(db_path, flags).map_err(err)?;
     conn.execute_batch(&format!(
         "PRAGMA key = '{DLP_KEY}'; PRAGMA cipher_compatibility = 4;"
     ))
-    .map_err(|e| ReadError::Dlp(e.to_string()))?;
+    .map_err(err)?;
     Ok(conn)
+}
+
+/// Open an `exportLibrary.db` read-only with the Device Library Plus key.
+pub(crate) fn open_read_only(db_path: &Path) -> Result<rusqlite::Connection, ReadError> {
+    open(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
 }
 
 /// Open `db_path` (an `exportLibrary.db`) read-only and pull the playlist
@@ -203,10 +208,6 @@ const SORTS: &[(i64, i64, i64, i64, i64)] = &[
     (17, 22, 0, 0, 0),
 ];
 
-const COLOR_NAMES: [&str; 8] = [
-    "Pink", "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple",
-];
-
 /// Fixed masterDbId stamped on every row (rekordbox uses its install's random
 /// id; any consistent nonzero value serves).
 const MASTER_DB_ID: i64 = 715_983_263;
@@ -250,12 +251,7 @@ fn build_library(
     t: &crate::pdbw::PdbTables,
     device_name: &str,
 ) -> Result<(), ReadError> {
-    let conn =
-        rusqlite::Connection::open(db_path).map_err(|e| ReadError::Dlp(e.to_string()))?;
-    conn.execute_batch(&format!(
-        "PRAGMA key = '{DLP_KEY}'; PRAGMA cipher_compatibility = 4;"
-    ))
-    .map_err(|e| ReadError::Dlp(e.to_string()))?;
+    let conn = open(db_path, rusqlite::OpenFlags::default())?;
     conn.execute_batch(DLP_SCHEMA)
         .map_err(|e| ReadError::Dlp(e.to_string()))?;
 
@@ -297,7 +293,7 @@ fn build_library(
             )
             .map_err(err)?;
         }
-        for (i, name) in COLOR_NAMES.iter().enumerate() {
+        for (i, name) in crate::pdbw::COLORS.iter().enumerate() {
             conn.execute(
                 "INSERT INTO color VALUES (?1, ?2)",
                 rusqlite::params![i as i64 + 1, name],
@@ -471,15 +467,7 @@ mod tests {
         };
         write_library(&db, &tables, "TEST").expect("write");
 
-        let conn = rusqlite::Connection::open_with_flags(
-            &db,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        conn.execute_batch(&format!(
-            "PRAGMA key = '{DLP_KEY}'; PRAGMA cipher_compatibility = 4;"
-        ))
-        .unwrap();
+        let conn = open_read_only(&db).unwrap();
         let n_tables: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table'",

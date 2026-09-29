@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 pub mod anlz;
 pub mod stick;
 
-use crate::pdb::{self, dsql_string, page_rows, table_pages, u16_at, u32_at, ReadError};
+use crate::pdb::{self, dsql_string, page_rows, table_dir as header, table_pages, u16_at, u32_at, ReadError, TableDir};
 
 /// One field that differs between the two files.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,36 +253,8 @@ const ROW_STRINGS: [(&str, Option<&str>); 21] = [
     ("file_path", Some("Ordnung keeps /Contents flat; rekordbox mirrors the source tree")),
 ];
 
-struct Tables {
-    page_size: usize,
-    /// type → (first_page, last_page)
-    dir: Vec<(u32, u32, u32)>,
-}
-
-fn header(data: &[u8]) -> Result<Tables, ReadError> {
-    if u32_at(data, 0) != Some(0) {
-        return Err(ReadError::Format("bad signature"));
-    }
-    let page_size = u32_at(data, 4).ok_or(ReadError::Format("truncated header"))? as usize;
-    let n = u32_at(data, 8).ok_or(ReadError::Format("truncated header"))? as usize;
-    if page_size == 0 || n > 64 {
-        return Err(ReadError::Format("implausible header"));
-    }
-    let mut dir = Vec::new();
-    for t in 0..n {
-        let base = 0x1C + t * 16;
-        let (Some(ty), Some(first), Some(last)) =
-            (u32_at(data, base), u32_at(data, base + 8), u32_at(data, base + 12))
-        else {
-            return Err(ReadError::Format("truncated table directory"));
-        };
-        dir.push((ty, first, last));
-    }
-    Ok(Tables { page_size, dir })
-}
-
 /// Data pages (sentinels skipped) and present-row offsets of one table.
-fn table_rows(data: &[u8], t: &Tables, ty: u32) -> (Vec<usize>, Vec<usize>) {
+fn table_rows(data: &[u8], t: &TableDir, ty: u32) -> (Vec<usize>, Vec<usize>) {
     let Some(&(_, first, last)) = t.dir.iter().find(|(x, _, _)| *x == ty) else {
         return (Vec::new(), Vec::new());
     };

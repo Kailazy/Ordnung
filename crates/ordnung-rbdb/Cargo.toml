@@ -24,5 +24,3 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # statvfs for the export's free-space precheck — refuse a too-large export up
 # front rather than half-writing a stick that runs out of room.
 libc = "0.2"
-# Phase 5 (write side): rekordcrate (binrw read/write of DeviceSQL). See the
-# rekordbox-format skill. The read side is a self-contained parser in `pdb`.

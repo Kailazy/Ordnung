@@ -59,24 +59,43 @@ pub struct AnlzWaveforms {
     pub bands: Vec<u8>,
 }
 
-/// Locate one tagged section's body (past its 12-byte prelude) in an ANLZ
-/// file. Defensive: any malformed length ends the walk.
-fn find_section<'a>(data: &'a [u8], want: &[u8; 4]) -> Option<&'a [u8]> {
-    if data.len() < 0x1C || &data[0..4] != b"PMAI" {
+/// The `(offset, length)` of each section of a `PMAI` file, in file order,
+/// and the offset the walk reached (the file's length when the sections tile
+/// it). `None` when the file isn't `PMAI`; a malformed length ends the walk.
+pub(crate) fn section_spans(data: &[u8]) -> Option<(Vec<(usize, usize)>, usize)> {
+    if data.get(0..4) != Some(b"PMAI") {
         return None;
     }
-    let mut off = 0x1C;
-    while off + 12 <= data.len() {
-        let len_tag = u32::from_be_bytes(data[off + 8..off + 12].try_into().ok()?) as usize;
-        if len_tag < 12 || off + len_tag > data.len() {
-            return None;
-        }
-        if &data[off..off + 4] == want {
-            return Some(&data[off + 12..off + len_tag]);
-        }
-        off += len_tag;
+    let head_len = u32_at(data, 4)? as usize;
+    if head_len < 0x1C || head_len > data.len() {
+        return None;
     }
-    None
+    let mut spans = Vec::new();
+    let mut off = head_len;
+    while let Some(len) = u32_at(data, off + 8).map(|v| v as usize) {
+        if len < 12 || off + len > data.len() {
+            break;
+        }
+        spans.push((off, len));
+        off += len;
+    }
+    Some((spans, off))
+}
+
+/// Every section tagged `want`, each past its 12-byte prelude, in file order
+/// (a file carries two cue lists: hot cues, then memory cues).
+fn find_sections<'a>(data: &'a [u8], want: &[u8; 4]) -> Vec<&'a [u8]> {
+    let spans = section_spans(data).map(|(s, _)| s).unwrap_or_default();
+    spans
+        .into_iter()
+        .filter(|&(o, _)| &data[o..o + 4] == want)
+        .map(|(o, len)| &data[o + 12..o + len])
+        .collect()
+}
+
+/// The first section tagged `want`, past its 12-byte prelude.
+fn find_section<'a>(data: &'a [u8], want: &[u8; 4]) -> Option<&'a [u8]> {
+    find_sections(data, want).into_iter().next()
 }
 
 /// Read a track's beatgrid back from its `ANLZ0000.DAT`'s `PQTZ` section:
@@ -142,35 +161,7 @@ pub fn read_cues(dat_path: &std::path::Path) -> Vec<Cue> {
     out
 }
 
-/// Every section with `tag`, in file order (a file carries two cue lists:
-/// hot cues, then memory cues).
-fn find_sections<'a>(data: &'a [u8], want: &[u8; 4]) -> Vec<&'a [u8]> {
-    let mut out = Vec::new();
-    if data.len() < 0x1C || &data[0..4] != b"PMAI" {
-        return out;
-    }
-    let mut off = 0x1C;
-    while off + 12 <= data.len() {
-        let Some(len_tag) = data
-            .get(off + 8..off + 12)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_be_bytes)
-            .map(|v| v as usize)
-        else {
-            break;
-        };
-        if len_tag < 12 || off + len_tag > data.len() {
-            break;
-        }
-        if &data[off..off + 4] == want {
-            out.push(&data[off + 12..off + len_tag]);
-        }
-        off += len_tag;
-    }
-    out
-}
-
-fn u32_at(b: &[u8], i: usize) -> Option<u32> {
+pub(crate) fn u32_at(b: &[u8], i: usize) -> Option<u32> {
     b.get(i..i + 4).and_then(|x| x.try_into().ok()).map(u32::from_be_bytes)
 }
 fn u16_at(b: &[u8], i: usize) -> Option<u16> {
@@ -806,27 +797,11 @@ pub(crate) fn splice_sections(
     insert: &[Vec<u8>],
     before: Option<&[u8; 4]>,
 ) -> Option<Vec<u8>> {
-    if data.len() < 0x1C || &data[0..4] != b"PMAI" {
+    let (secs, end) = section_spans(data)?;
+    if end != data.len() {
         return None;
     }
-    let head_len = u32::from_be_bytes(data[4..8].try_into().ok()?) as usize;
-    if head_len < 0x1C || head_len > data.len() {
-        return None;
-    }
-    // (offset, len) of each section, in file order.
-    let mut secs: Vec<(usize, usize)> = Vec::new();
-    let mut off = head_len;
-    while off + 12 <= data.len() {
-        let len = u32::from_be_bytes(data[off + 8..off + 12].try_into().ok()?) as usize;
-        if len < 12 || off + len > data.len() {
-            return None;
-        }
-        secs.push((off, len));
-        off += len;
-    }
-    if off != data.len() {
-        return None;
-    }
+    let head_len = secs.first().map_or(end, |&(o, _)| o);
     let tag = |o: usize| &data[o..o + 4];
     let at = secs
         .iter()

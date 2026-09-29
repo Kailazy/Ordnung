@@ -28,7 +28,7 @@ use std::path::Path;
 
 use ordnung_core::model::{Beat, Cue};
 
-use crate::pdb::{RbExport, RbPlaylist, ReadError};
+use crate::pdb::{u32_at, RbExport, RbPlaylist, ReadError, TYPE_PLAYLIST_ENTRIES, TYPE_PLAYLIST_TREE};
 use crate::pdbw;
 
 /// One user-level playlist edit. Paths are relative to the volume root with
@@ -407,28 +407,21 @@ fn rewrite_track_row(
     track_id: u32,
     edit: impl FnOnce(&mut TrackRowEdit),
 ) -> Result<String, ReadError> {
-    use crate::pdb::{table_pages, u32_at, PAGE_HEADER, TYPE_TRACKS};
+    use crate::pdb::{table_dir, table_pages, u32_at, PAGE_HEADER, TYPE_TRACKS};
     let mut data = std::fs::read(pdb_path).map_err(|e| ReadError::Io {
         path: pdb_path.to_path_buf(),
         source: e,
     })?;
-    let page_size = u32_at(&data, 4).ok_or(ReadError::Format("truncated header"))? as usize;
-    let num_tables = u32_at(&data, 8).ok_or(ReadError::Format("truncated header"))? as usize;
+    let tables = table_dir(&data)?;
+    let page_size = tables.page_size;
     if page_size != pdbw::PAGE {
         return Err(ReadError::Format("unsupported page size"));
     }
-    if num_tables > 64 {
-        return Err(ReadError::Format("implausible table count"));
-    }
     let mut hit: Option<(usize, usize)> = None; // (page_off, row)
-    for t in 0..num_tables {
-        let base = 0x1C + t * 16;
-        if u32_at(&data, base) != Some(TYPE_TRACKS) {
+    for &(ty, first, last) in &tables.dir {
+        if ty != TYPE_TRACKS {
             continue;
         }
-        let (Some(first), Some(last)) = (u32_at(&data, base + 8), u32_at(&data, base + 12)) else {
-            break;
-        };
         for page_off in table_pages(&data, page_size, first, last) {
             if u32_at(&data, page_off + 8) != Some(TYPE_TRACKS) || data[page_off + 0x1B] & 0x40 != 0 {
                 continue;
@@ -514,12 +507,7 @@ fn with_local_dlp(
     let _ = std::fs::remove_file(&tmp);
     std::fs::copy(db_path, &tmp).map_err(err_io)?;
     let result = (|| {
-        let conn = rusqlite::Connection::open(&tmp).map_err(err)?;
-        conn.execute_batch(&format!(
-            "PRAGMA key = '{}'; PRAGMA cipher_compatibility = 4;",
-            crate::dlp::DLP_KEY
-        ))
-        .map_err(err)?;
+        let conn = crate::dlp::open(&tmp, rusqlite::OpenFlags::default())?;
         conn.execute_batch("BEGIN").map_err(err)?;
         f(&conn).map_err(err)?;
         conn.execute_batch("COMMIT").map_err(err)?;
@@ -537,8 +525,6 @@ fn with_local_dlp(
 // export.pdb surgery
 // ---------------------------------------------------------------------------
 
-const TYPE_PLAYLIST_TREE: u32 = 7;
-const TYPE_PLAYLIST_ENTRIES: u32 = 8;
 
 /// Rewrite exactly the PlaylistTree and PlaylistEntries tables of the
 /// DeviceSQL database at `pdb_path`, leaving every other byte of every other
@@ -557,15 +543,12 @@ fn rewrite_pdb_playlist_tables(
     };
     let mut data = std::fs::read(pdb_path).map_err(io_err)?;
 
-    let page_size = u32_at(&data, 4).ok_or(ReadError::Format("truncated header"))? as usize;
+    let tables = crate::pdb::table_dir(&data)?;
+    let page_size = tables.page_size;
     if page_size != pdbw::PAGE {
         // Never seen in the wild (rekordbox always writes 4096); refuse
         // rather than build pages of the wrong size.
         return Err(ReadError::Format("unsupported page size"));
-    }
-    let num_tables = u32_at(&data, 8).ok_or(ReadError::Format("truncated header"))? as usize;
-    if num_tables > 64 {
-        return Err(ReadError::Format("implausible table count"));
     }
 
     // Encode the replacement rows. Entries are grouped per playlist in tree
@@ -597,15 +580,15 @@ fn rewrite_pdb_playlist_tables(
     let mut next_free = (data.len() / page_size) as u32;
     next_free = next_free.max(u32_at(&data, 0x0C).unwrap_or(0));
 
-    let mut plan: Vec<(usize, Vec<Vec<Vec<u8>>>)> = Vec::new(); // (dir slot, chunks)
+    let mut plan = Vec::new(); // (dir slot, type, first, last, chunks)
     for (ty, rows) in [
         (TYPE_PLAYLIST_TREE, &tree_rows),
         (TYPE_PLAYLIST_ENTRIES, &entry_rows),
     ] {
-        let slot = (0..num_tables)
-            .find(|t| u32_at(&data, 0x1C + t * 16) == Some(ty))
+        let (slot, first, last) = tables
+            .find(ty)
             .ok_or(ReadError::Format("playlist table missing from directory"))?;
-        plan.push((slot, pdbw::paginate(rows)));
+        plan.push((slot, ty, first, last, pdbw::paginate(rows)));
     }
 
     // First pass: settle page assignments for both tables so every chain's
@@ -619,12 +602,11 @@ fn rewrite_pdb_playlist_tables(
         fresh: Vec<u32>, // appended pages
     }
     let mut tables: Vec<TablePlan> = Vec::new();
-    for (slot, chunks) in plan {
-        let base = 0x1C + slot * 16;
-        let ty = u32_at(&data, base).unwrap_or(0);
-        let first = u32_at(&data, base + 8).ok_or(ReadError::Format("truncated directory"))?;
-        let last = u32_at(&data, base + 12).ok_or(ReadError::Format("truncated directory"))?;
-        let chain = walk_chain(&data, page_size, first, last);
+    for (slot, ty, first, last, chunks) in plan {
+        let chain: Vec<u32> = crate::pdb::table_pages(&data, page_size, first, last)
+            .into_iter()
+            .map(|off| (off / page_size) as u32)
+            .collect();
         if chain.is_empty() {
             return Err(ReadError::Format("broken playlist table chain"));
         }
@@ -718,41 +700,6 @@ fn rewrite_pdb_playlist_tables(
     Ok(())
 }
 
-/// Follow one table's page chain from `first` to `last`, returning page
-/// indices. Same defensive walk as the reader: cycles and out-of-file links
-/// end the walk.
-fn walk_chain(data: &[u8], page_size: usize, first: u32, last: u32) -> Vec<u32> {
-    let max_pages = data.len() / page_size + 1;
-    let mut pages = Vec::new();
-    let mut index = first;
-    for _ in 0..max_pages {
-        let off = index as usize * page_size;
-        if off + page_size > data.len() {
-            break;
-        }
-        if u32_at(data, off) != Some(0) || u32_at(data, off + 4) != Some(index) {
-            break;
-        }
-        if pages.contains(&index) {
-            break;
-        }
-        pages.push(index);
-        if index == last {
-            break;
-        }
-        match u32_at(data, off + 0x0C) {
-            Some(next) if next != index => index = next,
-            _ => break,
-        }
-    }
-    pages
-}
-
-fn u32_at(data: &[u8], pos: usize) -> Option<u32> {
-    data.get(pos..pos + 4)
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-}
-
 // ---------------------------------------------------------------------------
 // exportLibrary.db sync
 // ---------------------------------------------------------------------------
@@ -761,87 +708,50 @@ fn u32_at(data: &[u8], pos: usize) -> Option<u32> {
 /// export's current tree. Content ids are the DLP's own — resolved by file
 /// path, the only key shared with the pdb; entries whose path the DLP doesn't
 /// know are skipped rather than failing the edit.
-///
-/// SQLite cannot write in place on macOS's msdos (FAT32) driver (see
-/// [`crate::dlp::write_library`]), so the database is copied to local disk,
-/// edited there, and copied back whole.
 fn sync_dlp_playlists(db_path: &Path, export: &RbExport) -> Result<(), ReadError> {
-    let err_io = |e: std::io::Error| ReadError::Dlp(e.to_string());
-    let tmp = crate::dlp::scratch_db_path("ordnung-dlp-sync");
-    let _ = std::fs::remove_file(&tmp);
-    std::fs::copy(db_path, &tmp).map_err(err_io)?;
-    let result = sync_dlp_playlists_at(&tmp, export);
-    if result.is_ok() {
-        std::fs::copy(&tmp, db_path).map_err(err_io)?;
-        crate::export::sync_existing(db_path).map_err(err_io)?;
-    }
-    let _ = std::fs::remove_file(&tmp);
-    result
-}
-
-/// The actual sync, run against a database on a journal-friendly filesystem.
-fn sync_dlp_playlists_at(db_path: &Path, export: &RbExport) -> Result<(), ReadError> {
-    let err = |e: rusqlite::Error| ReadError::Dlp(e.to_string());
-    let conn = rusqlite::Connection::open(db_path).map_err(err)?;
-    conn.execute_batch(&format!(
-        "PRAGMA key = '{}'; PRAGMA cipher_compatibility = 4;",
-        crate::dlp::DLP_KEY
-    ))
-    .map_err(err)?;
-
-    let mut content_by_path: HashMap<String, i64> = HashMap::new();
-    {
-        let mut stmt = conn
-            .prepare("SELECT content_id, path FROM content")
-            .map_err(err)?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-            })
-            .map_err(err)?;
-        for (id, path) in rows.flatten() {
-            content_by_path.insert(path.trim_start_matches('/').to_lowercase(), id);
+    with_local_dlp(db_path, |conn| {
+        let mut content_by_path: HashMap<String, i64> = HashMap::new();
+        {
+            let mut stmt = conn.prepare("SELECT content_id, path FROM content")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            for (id, path) in rows.flatten() {
+                content_by_path.insert(path.trim_start_matches('/').to_lowercase(), id);
+            }
         }
-    }
-
-    conn.execute_batch("BEGIN").map_err(err)?;
-    conn.execute("DELETE FROM playlist", []).map_err(err)?;
-    conn.execute("DELETE FROM playlist_content", [])
-        .map_err(err)?;
-    for p in &export.playlists {
-        conn.execute(
-            "INSERT INTO playlist VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
-            rusqlite::params![
-                p.id as i64,
-                p.sort_order as i64,
-                p.name,
-                p.is_folder as i64,
-                p.parent_id as i64,
-            ],
-        )
-        .map_err(err)?;
-    }
-    for p in export.playlists.iter().filter(|p| !p.is_folder) {
-        let Some(tracks) = export.entries.get(&p.id) else {
-            continue;
-        };
-        for (i, tid) in tracks.iter().enumerate() {
-            let Some(track) = export.tracks.get(tid) else {
-                continue;
-            };
-            let key = track.file_path.trim_start_matches('/').to_lowercase();
-            let Some(content_id) = content_by_path.get(&key) else {
-                continue;
-            };
+        conn.execute("DELETE FROM playlist", [])?;
+        conn.execute("DELETE FROM playlist_content", [])?;
+        for p in &export.playlists {
             conn.execute(
-                "INSERT INTO playlist_content VALUES (?1, ?2, ?3)",
-                rusqlite::params![p.id as i64, content_id, i as i64],
-            )
-            .map_err(err)?;
+                "INSERT INTO playlist VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
+                rusqlite::params![
+                    p.id as i64,
+                    p.sort_order as i64,
+                    p.name,
+                    p.is_folder as i64,
+                    p.parent_id as i64,
+                ],
+            )?;
         }
-    }
-    conn.execute_batch("COMMIT").map_err(err)?;
-    Ok(())
+        for p in export.playlists.iter().filter(|p| !p.is_folder) {
+            let Some(tracks) = export.entries.get(&p.id) else {
+                continue;
+            };
+            for (i, tid) in tracks.iter().enumerate() {
+                let Some(track) = export.tracks.get(tid) else {
+                    continue;
+                };
+                let key = track.file_path.trim_start_matches('/').to_lowercase();
+                let Some(content_id) = content_by_path.get(&key) else {
+                    continue;
+                };
+                conn.execute(
+                    "INSERT INTO playlist_content VALUES (?1, ?2, ?3)",
+                    rusqlite::params![p.id as i64, content_id, i as i64],
+                )?;
+            }
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -959,15 +869,9 @@ mod tests {
 
     /// The 21 string slots of the row with `id`, as stored.
     fn row_strings(pdb: &Path, id: u32) -> [String; 21] {
-        use crate::pdb::{page_rows, table_pages, u32_at, TYPE_TRACKS};
+        use crate::pdb::{page_rows, table_dir, table_pages, u32_at, TYPE_TRACKS};
         let data = std::fs::read(pdb).unwrap();
-        let num_tables = u32_at(&data, 8).unwrap() as usize;
-        for t in 0..num_tables {
-            let base = 0x1C + t * 16;
-            if u32_at(&data, base) != Some(TYPE_TRACKS) {
-                continue;
-            }
-            let (first, last) = (u32_at(&data, base + 8).unwrap(), u32_at(&data, base + 12).unwrap());
+        if let Some((_, first, last)) = table_dir(&data).unwrap().find(TYPE_TRACKS) {
             for page_off in table_pages(&data, pdbw::PAGE, first, last) {
                 for row in page_rows(&data, pdbw::PAGE, page_off, TYPE_TRACKS) {
                     if u32_at(&data, row + 0x48) == Some(id) {

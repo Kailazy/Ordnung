@@ -311,7 +311,7 @@ fn summary_row(num_contents: u32, created_date: &str, index_shift: u16) -> Vec<u
 }
 
 /// The eight fixed rekordbox colors (always written, always these ids).
-const COLORS: [&str; 8] = [
+pub(crate) const COLORS: [&str; 8] = [
     "Pink", "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple",
 ];
 

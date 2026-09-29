@@ -1,9 +1,9 @@
 //! rekordbox/CDJ export.
 //!
 //! Writes a native USB layout: `/CONTENTS`, `/PIONEER/rekordbox/export.pdb`, and
-//! per-track ANLZ `.DAT`/`.EXT` files. Implemented in Phase 5 on top of
-//! `rekordcrate`. All format knowledge and invariants live in the
-//! `rekordbox-format` skill — consult it before touching this crate.
+//! per-track ANLZ `.DAT`/`.EXT` files. All format knowledge and invariants
+//! live in the `rekordbox-format` skill — consult it before touching this
+//! crate.
 //!
 //! Self-contained writers (`pdbw`, `anlz`, `dlp`, `export`) validated against
 //! the EYEBAGS golden dissection; `golden` diffs our output against a
