@@ -2536,11 +2536,11 @@ impl App {
                     self.wantlist_after_fetch = fetch_first.clone();
                     self.wantlist_after_fetch_label = label;
                     self.pending_wantlist_releases = release_ids;
-                    self.spawn_fetch_tracks(ctx_clone.clone(), fetch_first);
-                    // No token, so the picker never opened and there's nothing
-                    // to want later. Drop the pending state rather than let the
-                    // next idle frame report a no-op the user didn't ask for.
-                    if !self.is_busy() {
+                    // No token or a busy job slot, so the picker never opened
+                    // and there's nothing to want later. Drop the pending state
+                    // rather than let the next idle frame report a no-op the
+                    // user didn't ask for.
+                    if !self.spawn_fetch_tracks(ctx_clone.clone(), fetch_first) {
                         self.wantlist_after_fetch.clear();
                         self.wantlist_after_fetch_label.clear();
                         self.pending_wantlist_releases.clear();

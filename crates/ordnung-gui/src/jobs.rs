@@ -15,6 +15,36 @@ impl App {
         self.status = msg;
     }
 
+    /// Claim the shared job slot for a new background job, handing back the
+    /// worker's sender and cancel flag. `None`, with a note in the status bar,
+    /// while another job holds it: replacing the slot would orphan that job,
+    /// its result never read and Abort no longer reaching it. `cancellable:
+    /// false` keeps Abort off for jobs that always run to completion.
+    fn start_job(&mut self, cancellable: bool) -> Option<(mpsc::Sender<JobMsg>, Arc<AtomicBool>)> {
+        if self.is_busy() {
+            self.status = "Busy — wait for the current job to finish.".into();
+            return None;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.job_rx = Some(rx);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.job_cancel = cancellable.then(|| cancel.clone());
+        Some((tx, cancel))
+    }
+
+    /// The Discogs token, or `None` after pointing the user at Settings.
+    fn require_token(&mut self) -> Option<String> {
+        let token = self.discogs_token();
+        if token.trim().is_empty() {
+            self.status = "No Discogs token set. Add one in Settings \
+                (https://www.discogs.com/settings/developers)."
+                .into();
+            self.settings_open = true;
+            return None;
+        }
+        Some(token)
+    }
+
     /// Drain any pending worker messages. Returns true if we should reload rows.
     pub(crate) fn poll_worker(&mut self) -> bool {
         let Some(rx) = &self.job_rx else { return false };
@@ -127,10 +157,9 @@ impl App {
     }
 
     pub(crate) fn spawn_scan(&mut self, ctx: egui::Context, dir: PathBuf) {
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
+        let Some((tx, cancel)) = self.start_job(true) else {
+            return;
+        };
         self.status = format!("Scanning {}…", dir.display());
         let db = self.db_path.clone();
         let follow = self.import_follow_ups();
@@ -208,10 +237,9 @@ impl App {
         dest: PathBuf,
         playlist: Option<String>,
     ) {
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
+        let Some((tx, cancel)) = self.start_job(true) else {
+            return;
+        };
         self.status = format!(
             "Copying {} track(s) from {} to the library…",
             sources.len(),
@@ -240,10 +268,9 @@ impl App {
         replace: bool,
         player: ordnung_rbdb::export::PlayerTarget,
     ) {
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
+        let Some((tx, cancel)) = self.start_job(true) else {
+            return;
+        };
         let verb = if replace { "Exporting" } else { "Adding" };
         self.status = format!("{verb} {scope} to {}…", dest.display());
         // Remember where we're exporting so the completion handler can refresh
@@ -262,10 +289,9 @@ impl App {
     /// structure to a device that lacks one. Existing files on the volume are
     /// untouched (the empty merge only creates folders and databases).
     pub(crate) fn spawn_usb_setup(&mut self, ctx: egui::Context, dest: PathBuf) {
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
+        let Some((tx, cancel)) = self.start_job(true) else {
+            return;
+        };
         let name = dest
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -292,10 +318,9 @@ impl App {
         paths: Vec<PathBuf>,
         into_playlist: Option<Id>,
     ) {
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
+        let Some((tx, cancel)) = self.start_job(true) else {
+            return;
+        };
         let target = into_playlist
             .and_then(|pid| self.playlists.iter().find(|p| p.id == pid))
             .map(|p| format!(" into \u{201C}{}\u{201D}", p.name))
@@ -545,9 +570,10 @@ impl App {
     /// missing and repoint the catalog at the ones it confidently locates.
     /// Catalog-only; source files are never touched.
     pub(crate) fn spawn_relocate(&mut self, ctx: egui::Context, dir: PathBuf) {
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        self.job_cancel = None; // a single directory walk; runs to completion
+        // A single directory walk; runs to completion.
+        let Some((tx, _)) = self.start_job(false) else {
+            return;
+        };
         self.status = format!("Searching {} for missing files…", dir.display());
         let db = self.db_path.clone();
         thread::spawn(move || run_relocate(db, dir, tx, ctx));
@@ -560,9 +586,10 @@ impl App {
     /// Discogs vinyl collection (new records + any missing covers); add future
     /// always-up-to-date syncs here. Unlike an explicit Sync click, this
     /// silently no-ops when no Discogs token is configured, so a tokenless
-    /// launch is never nagged with the Settings modal.
+    /// launch is never nagged with the Settings modal. Likewise it skips,
+    /// without a busy note, when another job already holds the slot.
     pub(crate) fn spawn_startup_refresh(&mut self, ctx: egui::Context) {
-        if self.discogs_token().trim().is_empty() {
+        if self.discogs_token().trim().is_empty() || self.is_busy() {
             return;
         }
         self.spawn_refresh_vinyl_inner(ctx, true);
@@ -580,21 +607,15 @@ impl App {
     /// that's otherwise ready read as busy. An explicit Sync click still reports
     /// every phase and what it did — that one the user is waiting on.
     fn spawn_refresh_vinyl_inner(&mut self, ctx: egui::Context, quiet: bool) {
-        let token = self.discogs_token();
-        if token.trim().is_empty() {
-            self.status = "No Discogs token set. Add one in Settings \
-                (https://www.discogs.com/settings/developers)."
-                .into();
-            self.settings_open = true;
+        let Some(token) = self.require_token() else {
             return;
-        }
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
+        };
         // Cancellable because the price phase is one rate-limited request per
         // record — minutes on a first sync. Stopping keeps everything fetched so
         // far; the next refresh resumes with what's still unpriced.
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
+        let Some((tx, cancel)) = self.start_job(true) else {
+            return;
+        };
         if !quiet {
             self.status = "Syncing vinyl collection and wantlist…".into();
         }
@@ -612,22 +633,12 @@ impl App {
     /// requests, which is why this is backgrounded, progress-reported and
     /// cancellable).
     pub(crate) fn spawn_sweep_seller(&mut self, ctx: egui::Context, username: String) {
-        if self.is_busy() {
-            self.status = "Busy — wait for the current job to finish.".into();
+        let Some(token) = self.require_token() else {
             return;
-        }
-        let token = self.discogs_token();
-        if token.trim().is_empty() {
-            self.status = "No Discogs token set. Add one in Settings \
-                (https://www.discogs.com/settings/developers)."
-                .into();
-            self.settings_open = true;
+        };
+        let Some((tx, cancel)) = self.start_job(true) else {
             return;
-        }
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
+        };
         self.status = format!("Updating {username}'s crates…");
         let db = self.db_path.clone();
         thread::spawn(move || run_sweep_seller(db, token, username, cancel, tx, ctx));
@@ -640,14 +651,9 @@ impl App {
     /// releases newer than the dump stay untagged until a record sheet caches
     /// their detail.
     pub(crate) fn spawn_import_genredb(&mut self, ctx: egui::Context) {
-        if self.is_busy() {
-            self.status = "Busy — wait for the current job to finish.".into();
+        let Some((tx, cancel)) = self.start_job(true) else {
             return;
-        }
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
+        };
         self.status = "Downloading the Discogs genre database…".into();
         let path = genredb::default_path(&self.db_path);
         thread::spawn(move || run_import_genredb(path, cancel, tx, ctx));
@@ -668,14 +674,9 @@ impl App {
     /// first (see [`VinylEdit::destroys_collection_copy`]) — call this only once
     /// the user has agreed, or for edits that don't need it.
     pub(crate) fn spawn_vinyl_edit(&mut self, ctx: egui::Context, edit: VinylEdit) {
-        let token = self.discogs_token();
-        if token.trim().is_empty() {
-            self.status = "No Discogs token set. Add one in Settings \
-                (https://www.discogs.com/settings/developers)."
-                .into();
-            self.settings_open = true;
+        let Some(token) = self.require_token() else {
             return;
-        }
+        };
         // A record asked for on a list joins the map now, not when the sync
         // that follows the edit lands: the map is where a dig's finds go,
         // and the want is the moment they're kept.
@@ -863,8 +864,9 @@ impl App {
     /// these are deliberate per-track requests. Always a song-data run: the
     /// chosen release supplies the cover *and* fills empty tag fields, since a
     /// cover-only mode meant a second trip through the same picker.
-    pub(crate) fn spawn_fetch_tracks(&mut self, ctx: egui::Context, ids: Vec<Id>) {
-        self.spawn_fetch_tracks_with(ctx, ids, false);
+    /// False when nothing started (no ids, no token, or the job slot is busy).
+    pub(crate) fn spawn_fetch_tracks(&mut self, ctx: egui::Context, ids: Vec<Id>) -> bool {
+        self.spawn_fetch_tracks_with(ctx, ids, false)
     }
 
     /// [`Self::spawn_fetch_tracks`] with a switch to ignore the medium filter
@@ -876,23 +878,17 @@ impl App {
         ctx: egui::Context,
         ids: Vec<Id>,
         all_formats: bool,
-    ) {
+    ) -> bool {
         if ids.is_empty() {
-            return;
+            return false;
         }
-        let token = self.discogs_token();
-        if token.trim().is_empty() {
-            self.status = "No Discogs token set. Add one in Settings \
-                (https://www.discogs.com/settings/developers)."
-                .into();
-            self.settings_open = true;
-            return;
-        }
+        let Some(token) = self.require_token() else {
+            return false;
+        };
+        let Some((tx, cancel)) = self.start_job(true) else {
+            return false;
+        };
         self.artwork_enrich = true;
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
         self.status = "Searching Discogs for releases…".into();
         let db = self.db_path.clone();
         // Snapshot the medium filter for the worker: the user's picker
@@ -905,6 +901,7 @@ impl App {
         thread::spawn(move || {
             run_fetch_tracks(db, token, ids, cancel, tx, ctx, true, hidden_mediums)
         });
+        true
     }
 
     pub(crate) fn spawn_convert(
@@ -934,9 +931,10 @@ impl App {
             std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         }
 
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        self.job_cancel = None; // a single ffmpeg run; not interruptible
+        // A single ffmpeg run; not interruptible.
+        let Some((tx, _)) = self.start_job(false) else {
+            return Err(self.status.clone());
+        };
         self.status = format!("Converting {}…", modal.track_label);
 
         let db = self.db_path.clone();
@@ -981,10 +979,9 @@ impl App {
             bitrate_kbps,
         };
 
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
+        let Some((tx, cancel)) = self.start_job(true) else {
+            return Err(self.status.clone());
+        };
         self.status = format!("Converting {} track(s)…", ids.len());
 
         let db = self.db_path.clone();
@@ -996,10 +993,9 @@ impl App {
     /// file, clearing the flag as each succeeds. Cancellable; reports progress
     /// and a final summary through the shared job channel.
     pub(crate) fn spawn_write_edits(&mut self, ctx: egui::Context) {
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
+        let Some((tx, cancel)) = self.start_job(true) else {
+            return;
+        };
         self.status = "Writing edits to source files…".into();
         self.write_edits_running = true;
         let db = self.db_path.clone();
@@ -1013,10 +1009,9 @@ impl App {
     /// the Duplicates view stays interactive while it runs; `poll_worker` reloads
     /// (recomputing the groups) when it finishes.
     pub(crate) fn spawn_trash_marked(&mut self, ctx: egui::Context, batch: Vec<(Id, Id, PathBuf)>) {
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
+        let Some((tx, cancel)) = self.start_job(true) else {
+            return;
+        };
         self.status = format!("Trashing {} duplicate(s)…", batch.len());
         let db = self.db_path.clone();
         thread::spawn(move || run_trash_marked(db, batch, cancel, tx, ctx));
@@ -4327,22 +4322,12 @@ impl App {
         tracklist_id: Id,
         scope: MatchScope,
     ) {
-        if self.is_busy() {
-            self.status = "Busy — wait for the current job to finish.".into();
+        let Some(token) = self.require_token() else {
             return;
-        }
-        let token = self.discogs_token();
-        if token.trim().is_empty() {
-            self.status = "No Discogs token set. Add one in Settings \
-                (https://www.discogs.com/settings/developers)."
-                .into();
-            self.settings_open = true;
+        };
+        let Some((tx, cancel)) = self.start_job(true) else {
             return;
-        }
-        let (tx, rx) = mpsc::channel();
-        self.job_rx = Some(rx);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job_cancel = Some(cancel.clone());
+        };
         self.status = "Matching the tracklist…".into();
         let db = self.db_path.clone();
         let spec = AutoMatchSpec {
