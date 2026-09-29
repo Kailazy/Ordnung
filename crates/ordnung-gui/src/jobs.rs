@@ -3034,8 +3034,12 @@ pub(crate) fn run_vinyl_edit(
                 }
             };
             touched.push(VinylList::Collection);
+            let fetched = client.collection_record(&username, release_id, instance_id);
+            if let Ok((_, detail)) = &fetched {
+                let _ = catalog.cache_release(detail);
+            }
             Ok(
-                match client.collection_record(&username, release_id, instance_id) {
+                match fetched.map(|(rec, _)| rec) {
                     Ok(Some(rec)) => {
                         local(catalog.upsert_vinyl(VinylList::Collection, &rec));
                         confirm_added(VinylList::Collection, &rec);
@@ -3204,7 +3208,10 @@ pub(crate) fn run_vinyl_edit(
                         client
                             .collection_record(&username, to_release, instance_id)
                             .ok()
-                            .flatten(),
+                            .and_then(|(rec, detail)| {
+                                let _ = catalog.cache_release(&detail);
+                                rec
+                            }),
                     )),
                     None => None,
                 };

@@ -2039,12 +2039,16 @@ impl Client {
     /// The copy is brand new, so it's in the folder the add targeted
     /// ([`UNCATEGORIZED_FOLDER`]) and its `added` date is left for the next sync
     /// to fill from Discogs itself.
+    ///
+    /// The same response is the release's detail, returned alongside so the
+    /// caller can cache it (`Catalog::cache_release`) instead of fetching the
+    /// release a second time to warm the sheet.
     pub fn collection_record(
         &self,
         _username: &str,
         release_id: u64,
         instance_id: u64,
-    ) -> Result<Option<VinylRecord>> {
+    ) -> Result<(Option<VinylRecord>, ReleaseDetail)> {
         let url = format!("{RELEASE_URL}/{release_id}");
         let resp = self.call_with_retry(|| {
             self.agent
@@ -2052,10 +2056,17 @@ impl Client {
                 .set("User-Agent", &self.user_agent)
                 .set("Authorization", &format!("Discogs token={}", self.token))
         })?;
-        let body: ReleaseResponse = resp
+        let body: serde_json::Value = resp
             .into_json()
             .map_err(|e| Error::Network(format!("decoding Discogs release response: {e}")))?;
-        Ok(body.into_vinyl_record(instance_id, Some(UNCATEGORIZED_FOLDER)))
+        let parse = || {
+            serde_json::from_value::<ReleaseResponse>(body.clone())
+                .map_err(|e| Error::Network(format!("decoding Discogs release response: {e}")))
+        };
+        Ok((
+            parse()?.into_vinyl_record(instance_id, Some(UNCATEGORIZED_FOLDER)),
+            parse()?.into_detail(),
+        ))
     }
 
     /// Which collection folder holds a given copy
