@@ -926,12 +926,16 @@ impl App {
         ((self.dig_seed >> 33) as usize) % len.max(1)
     }
 
-    /// Fetch the record's detail, cache first, for its videos.
+    /// Fetch the record's detail, cache first, for its videos. While a record
+    /// is on air this one is the next up, fetched ahead of need, so it takes
+    /// the background lane and steps aside for anything the user clicked;
+    /// with nothing on air the user is waiting on it.
     fn radio_fetch_detail(&mut self, release_id: u64, ctx: egui::Context) {
         let (tx, rx) = mpsc::channel();
         self.radio.detail_rx = Some(rx);
         let db = self.db_path.clone();
         let token = self.discogs_token();
+        let ahead = self.radio.now.is_some();
         thread::spawn(move || {
             let id = release_id.to_string();
             let detail = Catalog::open(&db).ok().and_then(|cat| {
@@ -943,6 +947,7 @@ impl App {
                 }
                 let client =
                     discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/");
+                let client = if ahead { client.background() } else { client };
                 cat.release_cached_or(&id, || client.fetch_release(&id)).ok()
             });
             let _ = tx.send((release_id, detail));
