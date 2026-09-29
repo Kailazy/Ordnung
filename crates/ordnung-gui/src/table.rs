@@ -2730,6 +2730,9 @@ pub(crate) struct RowSources {
     added_at: HashMap<Id, i64>,
     /// Every analyzed track's analysis, envelopes split out for sharing.
     analyses: HashMap<Id, RowAnalysis>,
+    /// Envelopes being read off the UI thread, keyed by the stamp each was
+    /// requested at; [`RowSources::take_envelopes`] lands them.
+    envelopes_rx: Option<mpsc::Receiver<(HashMap<Id, i64>, HashMap<Id, (Vec<u8>, Vec<u8>)>)>>,
 }
 
 /// One track's analysis as the table needs it: the scalar fields, plus the
@@ -2753,6 +2756,7 @@ impl Default for RowSources {
             ext_art: HashSet::new(),
             added_at: HashMap::new(),
             analyses: HashMap::new(),
+            envelopes_rx: None,
         }
     }
 }
@@ -2794,7 +2798,7 @@ impl RowSources {
     }
 
     /// Re-read the catalog-wide inputs from `catalog` if they are stale.
-    fn ensure_fresh(&mut self, catalog: &Catalog) -> Result<(), String> {
+    fn ensure_fresh(&mut self, catalog: &Catalog, db: &Path, ctx: &egui::Context) -> Result<(), String> {
         if !self.stale {
             return Ok(());
         }
@@ -2823,7 +2827,10 @@ impl RowSources {
         let mut fresh: HashMap<Id, RowAnalysis> = HashMap::with_capacity(light.len());
         for (id, stamp, analysis) in light {
             let (waveform, waveform_bands) = match old.remove(&id) {
-                Some(prev) if prev.stamp == stamp => (prev.waveform, prev.waveform_bands),
+                // Empty means a read that hadn't landed yet: ask again.
+                Some(prev) if prev.stamp == stamp && !prev.waveform.is_empty() => {
+                    (prev.waveform, prev.waveform_bands)
+                }
                 _ => {
                     need.push(id);
                     (Arc::new(Vec::new()), Arc::new(Vec::new()))
@@ -2840,19 +2847,45 @@ impl RowSources {
             );
         }
         if !need.is_empty() {
-            let envelopes = catalog
-                .analysis_envelopes(&need)
-                .map_err(|e| e.to_string())?;
-            for (id, (waveform, waveform_bands)) in envelopes {
-                if let Some(row) = fresh.get_mut(&id) {
-                    row.waveform = Arc::new(waveform);
-                    row.waveform_bands = Arc::new(waveform_bands);
+            // Off the UI thread: on a cold launch every row needs its
+            // envelopes, ~50 MB of blobs, and reading them held the first
+            // frame for most of a second. Rows draw without an inline
+            // waveform until they land.
+            let stamps: HashMap<Id, i64> = need.iter().map(|id| (*id, fresh[id].stamp)).collect();
+            let (tx, rx) = mpsc::channel();
+            let (db, ctx) = (db.to_path_buf(), ctx.clone());
+            std::thread::spawn(move || {
+                if let Ok(env) = Catalog::open(&db).and_then(|c| c.analysis_envelopes(&need)) {
+                    let _ = tx.send((stamps, env));
+                    ctx.request_repaint();
                 }
-            }
+            });
+            self.envelopes_rx = Some(rx);
         }
         self.analyses = fresh;
         self.stale = false;
         Ok(())
+    }
+
+    /// Land envelopes read off-thread into the held analyses and the rows
+    /// already built from them. Skips any whose track was re-analyzed since.
+    pub(crate) fn take_envelopes(&mut self, rows: &mut [TrackRow]) {
+        let Some((stamps, env)) = self.envelopes_rx.as_ref().and_then(|rx| rx.try_recv().ok()) else {
+            return;
+        };
+        self.envelopes_rx = None;
+        for (id, (waveform, waveform_bands)) in env {
+            if let Some(a) = self.analyses.get_mut(&id).filter(|a| stamps.get(&id) == Some(&a.stamp)) {
+                a.waveform = Arc::new(waveform);
+                a.waveform_bands = Arc::new(waveform_bands);
+            }
+        }
+        for r in rows.iter_mut() {
+            if let Some(a) = self.analyses.get(&r.id) {
+                r.waveform = a.waveform.clone();
+                r.waveform_bands = a.waveform_bands.clone();
+            }
+        }
     }
 }
 
@@ -2863,9 +2896,10 @@ pub(crate) fn load_rows(
     filter: &str,
     view: &LibraryView,
     sources: &mut RowSources,
+    ctx: &egui::Context,
 ) -> Result<Vec<TrackRow>, String> {
     let catalog = Catalog::open(db).map_err(|e| e.to_string())?;
-    sources.ensure_fresh(&catalog)?;
+    sources.ensure_fresh(&catalog, db, ctx)?;
     let q = if filter.trim().is_empty() {
         None
     } else {

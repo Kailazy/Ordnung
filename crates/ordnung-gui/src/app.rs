@@ -331,6 +331,7 @@ impl App {
             missing_count: 0,
             recent_count: 0,
             missing_labels: Vec::new(),
+            missing_rx: None,
             confirm_bulk_write: false,
             confirm_delete: None,
             write_edits_running: false,
@@ -698,6 +699,7 @@ impl App {
                 &self.filter,
                 &self.view,
                 &mut self.row_sources,
+                &self.egui_ctx,
             )
         };
         match loaded {
@@ -2075,6 +2077,8 @@ impl App {
             self.auto_write_job = true;
             self.spawn_write_edits(ctx.clone());
         }
+        self.poll_missing();
+        self.row_sources.take_envelopes(&mut self.rows);
         self.poll_covers(ctx);
         self.poll_thumbs(ctx);
         self.poll_vinyl_covers(ctx);

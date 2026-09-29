@@ -578,10 +578,29 @@ impl App {
         if self.view == LibraryView::Missing {
             return;
         }
-        self.missing_labels = Catalog::open(&self.db_path)
-            .and_then(|c| c.missing_track_labels())
-            .unwrap_or_default();
-        self.missing_count = self.missing_labels.len() as u64;
+        // Stat'ing every source file is ~0.1 s on an iCloud library, so it
+        // runs off the UI thread; `poll_missing` lands it. A newer count
+        // replaces one still running.
+        let (tx, rx) = mpsc::channel();
+        self.missing_rx = Some(rx);
+        let db = self.db_path.clone();
+        let ctx = self.egui_ctx.clone();
+        thread::spawn(move || {
+            let labels = Catalog::open(&db)
+                .and_then(|c| c.missing_track_labels())
+                .unwrap_or_default();
+            let _ = tx.send(labels);
+            ctx.request_repaint();
+        });
+    }
+
+    pub(crate) fn poll_missing(&mut self) {
+        let Some(labels) = self.missing_rx.as_ref().and_then(|rx| rx.try_recv().ok()) else {
+            return;
+        };
+        self.missing_rx = None;
+        self.missing_count = labels.len() as u64;
+        self.missing_labels = labels;
     }
 
     /// Switch the Library Health window to one of its two tabs and remember the

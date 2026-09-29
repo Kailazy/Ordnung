@@ -579,34 +579,37 @@ impl App {
         thread::spawn(move || run_relocate(db, dir, tx, ctx));
     }
 
-    /// Sync the local vinyl-collection cache from Discogs: pull the user's whole
-    /// collection (folder 0), upsert metadata, prune records they've removed, and
     /// Kick off the background refreshes we always want current at launch. The
     /// single home for "keep this fresh on startup" work — today that's the
     /// Discogs vinyl collection (new records + any missing covers); add future
     /// always-up-to-date syncs here. Unlike an explicit Sync click, this
     /// silently no-ops when no Discogs token is configured, so a tokenless
-    /// launch is never nagged with the Settings modal. Likewise it skips,
-    /// without a busy note, when another job already holds the slot.
+    /// launch is never nagged with the Settings modal.
+    ///
+    /// Quiet, and off the job slot: nobody asked for it, and the sync can run
+    /// for minutes, so holding the slot locked every job out right after
+    /// launch. It reports on the edit tails' channel, which `poll_vinyl_edits`
+    /// drains every frame; with no Abort to reach it, it runs to completion.
     pub(crate) fn spawn_startup_refresh(&mut self, ctx: egui::Context) {
-        if self.discogs_token().trim().is_empty() || self.is_busy() {
+        let token = self.discogs_token();
+        if token.trim().is_empty() {
             return;
         }
-        self.spawn_refresh_vinyl_inner(ctx, true);
+        let db = self.db_path.clone();
+        let ledger = self.vinyl_confirmed.clone();
+        let username = self.config.discogs_username.trim().to_string();
+        let tail = self.vinyl_tail_tx.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        thread::spawn(move || {
+            run_refresh_vinyl(db, token, username, cancel, true, ledger, tail, ctx)
+        });
     }
 
+    /// Sync the local vinyl-collection cache from Discogs: pull the user's whole
+    /// collection (folder 0), upsert metadata, prune records they've removed, and
     /// download covers we don't already have. Token resolution is policy and lives
     /// here; the worker only talks to Discogs and the catalog.
     pub(crate) fn spawn_refresh_vinyl(&mut self, ctx: egui::Context) {
-        self.spawn_refresh_vinyl_inner(ctx, false);
-    }
-
-    /// Shared body of the two vinyl-sync entry points. `quiet` keeps the run
-    /// out of the status bar entirely — no phase lines, no progress, no closing
-    /// tally: nobody asked for the startup sync, and narrating it makes a launch
-    /// that's otherwise ready read as busy. An explicit Sync click still reports
-    /// every phase and what it did — that one the user is waiting on.
-    fn spawn_refresh_vinyl_inner(&mut self, ctx: egui::Context, quiet: bool) {
         let Some(token) = self.require_token() else {
             return;
         };
@@ -616,14 +619,12 @@ impl App {
         let Some((tx, cancel)) = self.start_job(true) else {
             return;
         };
-        if !quiet {
-            self.status = "Syncing vinyl collection and wantlist…".into();
-        }
+        self.status = "Syncing vinyl collection and wantlist…".into();
         let db = self.db_path.clone();
         let ledger = self.vinyl_confirmed.clone();
         let username = self.config.discogs_username.trim().to_string();
         thread::spawn(move || {
-            run_refresh_vinyl(db, token, username, cancel, quiet, ledger, tx, ctx)
+            run_refresh_vinyl(db, token, username, cancel, false, ledger, tx, ctx)
         });
     }
 
@@ -797,7 +798,8 @@ impl App {
 
     /// Drain the vinyl edit lane and the tails behind finished edits. Returns
     /// true if rows should reload. Mirrors [`App::poll_worker`] for the
-    /// messages an edit sends; the tails only ever ask for a reload or, rarely,
+    /// messages an edit sends; the tails (and the startup sync, which reports
+    /// here too) only ever ask for a reload, name the Discogs user or, rarely,
     /// report that a shelf couldn't be checked.
     pub(crate) fn poll_vinyl_edits(&mut self) -> bool {
         let mut reload = false;
@@ -849,7 +851,14 @@ impl App {
         }
         loop {
             match self.vinyl_tail_rx.try_recv() {
-                Ok(JobMsg::VinylChanged) => reload = true,
+                // The startup sync ends with `Done`.
+                Ok(JobMsg::VinylChanged | JobMsg::Done(_)) => reload = true,
+                Ok(JobMsg::VinylUsername(u)) => {
+                    if self.config.discogs_username != u {
+                        self.config.discogs_username = u;
+                        let _ = self.config.save();
+                    }
+                }
                 Ok(JobMsg::Failed(s)) => self.fail(s),
                 Ok(_) => {}
                 Err(_) => break,

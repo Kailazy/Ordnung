@@ -1918,6 +1918,8 @@ struct App {
     /// `missing_count`. Drives the relocate button's hover list so it works from
     /// any view (unlike `missing_list`, which only fills in the Missing view).
     missing_labels: Vec<String>,
+    /// The off-thread recount behind `missing_labels`, while it runs.
+    missing_rx: Option<Receiver<Vec<String>>>,
     /// Whether the "write N edited tracks to their files?" confirmation is open.
     confirm_bulk_write: bool,
     /// Track ids pending a "delete from catalog?" confirmation, if that dialog is
