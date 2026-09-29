@@ -572,7 +572,12 @@ impl App {
     /// Recount tracks with a missing source file (drives the toolbar's relocate
     /// button). Kept out of `reload` so filter keystrokes don't stat the whole
     /// catalog; called after jobs and on Refresh, when file existence can change.
+    /// In the Missing view `reload` has just stat'ed every file and filled the
+    /// same labels, and every caller reloads first, so this skips a second pass.
     pub(crate) fn recount_missing(&mut self) {
+        if self.view == LibraryView::Missing {
+            return;
+        }
         self.missing_labels = Catalog::open(&self.db_path)
             .and_then(|c| c.missing_track_labels())
             .unwrap_or_default();
