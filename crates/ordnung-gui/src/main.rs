@@ -1963,6 +1963,9 @@ struct App {
     /// scan is kicked off from `update` (which has the egui `Context` the worker
     /// needs to wake the UI); coalesced so reload bursts spawn at most one rescan.
     dup_dirty: bool,
+    /// A waveform setting changed mid-drag; `config.toml` is written once the
+    /// pointer lets go instead of on every drag frame.
+    wave_save_pending: bool,
     /// A background duplicate scan is in flight. Gates re-spawning and drives the
     /// view's "Scanning…" spinner. The result arrives over `dup_rx`.
     dup_loading: bool,

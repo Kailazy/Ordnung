@@ -343,6 +343,7 @@ impl App {
             playlist_stats: HashMap::new(),
             dup_groups: Vec::new(),
             dup_dirty: false,
+            wave_save_pending: false,
             dup_loading: false,
             dup_rx: None,
             dup_decisions: HashMap::new(),

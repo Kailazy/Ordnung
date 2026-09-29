@@ -1510,10 +1510,18 @@ impl App {
                                             }
                                             wave_dirty = true;
                                         }
-                                        if wave_dirty {
-                                            if let Err(e) = self.config.save() {
-                                                self.status =
-                                                    format!("Couldn't save settings: {e}");
+                                        // Sliders report a change on every drag frame:
+                                        // the change applies live, the file is written
+                                        // once the pointer lets go.
+                                        if wave_dirty || self.wave_save_pending {
+                                            if ui.input(|i| i.pointer.any_down()) {
+                                                self.wave_save_pending = true;
+                                            } else {
+                                                self.wave_save_pending = false;
+                                                if let Err(e) = self.config.save() {
+                                                    self.status =
+                                                        format!("Couldn't save settings: {e}");
+                                                }
                                             }
                                         }
                                     }
