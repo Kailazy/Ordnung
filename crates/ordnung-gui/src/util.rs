@@ -150,6 +150,25 @@ pub(crate) fn reveal_in_finder(path: &Path) {
         .spawn();
 }
 
+/// `tag::write_to_file` for a catalog track, then carry the file's new
+/// size/mtime onto its catalog stamps (`Catalog::restamp_source`) so a tag
+/// edit alone doesn't read as a changed file: no full re-analysis on the next
+/// Analyze, no tag re-read on the next scan.
+pub(crate) fn write_catalog_tags(
+    catalog: &Catalog,
+    id: Id,
+    path: &Path,
+    tags: &Tags,
+    artwork: Option<&[u8]>,
+) -> ordnung_core::Result<()> {
+    let before = scan::fs_signature(path);
+    tag::write_to_file(path, tags, artwork)?;
+    if let (Some(before), Some(after)) = (before, scan::fs_signature(path)) {
+        let _ = catalog.restamp_source(id, before, after);
+    }
+    Ok(())
+}
+
 /// Open a URL in the user's default browser. Best-effort, like `reveal_in_finder`:
 /// a spawn failure is ignored — this is a convenience shortcut, not a catalog op.
 pub(crate) fn open_url(url: &str) {

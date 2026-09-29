@@ -98,7 +98,7 @@ impl App {
         });
 
         match write_file {
-            Some(path) => match tag::write_to_file(&path, &track.tags, None) {
+            Some(path) => match write_catalog_tags(&catalog, id, &path, &track.tags, None) {
                 Ok(()) => {
                     // Catalog and file now agree — drop the "needs writing" flag so
                     // this track no longer shows up as edited / pending a write.
@@ -960,7 +960,7 @@ impl App {
                 return;
             }
         };
-        match tag::write_to_file(&path, &track.tags, Some(&art)) {
+        match write_catalog_tags(&catalog, id, &path, &track.tags, Some(&art)) {
             Ok(()) => {
                 self.status = format!("Embedded cover art into {}", path.display());
                 // The file now carries the cover, but the catalog still holds the

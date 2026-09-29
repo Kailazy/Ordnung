@@ -2303,7 +2303,7 @@ pub(crate) fn run_write_edits(
         // `None`, which leaves any existing embedded cover untouched. Mirrors
         // the single-track `embed_cover_into_file` path.
         let art = catalog.get_external_artwork_full(t.id).ok().flatten();
-        match tag::write_to_file(&path, &t.tags, art.as_deref()) {
+        match write_catalog_tags(&catalog, t.id, &path, &t.tags, art.as_deref()) {
             Ok(()) => {
                 // Synced: drop the flag so it won't be written again next time.
                 let _ = catalog.clear_user_edited(t.id);

@@ -2867,6 +2867,33 @@ impl Catalog {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Carry an in-app tag write's new file size/mtime onto the stamps that
+    /// still describe the file as it was just before the write. Tags aren't
+    /// audio: without this the next Analyze re-decodes the file
+    /// (`needs_analysis` sees a changed stamp) and the next scan re-reads its
+    /// tags (`track_unchanged`). A stamp that already disagreed with `before` is
+    /// left alone, so a file that changed some other way still reads as changed.
+    pub fn restamp_source(&self, id: Id, before: (u64, i64), after: (u64, i64)) -> Result<()> {
+        let p = params![
+            id as i64,
+            before.0 as i64,
+            before.1,
+            after.0 as i64,
+            after.1
+        ];
+        self.conn.execute(
+            "UPDATE tracks SET src_size=?4, src_mtime=?5
+             WHERE id=?1 AND src_size=?2 AND src_mtime=?3",
+            p,
+        )?;
+        self.conn.execute(
+            "UPDATE analysis SET src_size=?4, src_mtime=?5
+             WHERE track_id=?1 AND src_size=?2 AND src_mtime=?3",
+            p,
+        )?;
+        Ok(())
+    }
+
     /// Clear the `user_edited` flag for a track. Call after the catalog's tags
     /// have been written into the source file, so the two are back in sync and
     /// the track no longer counts as "needs writing". A later rescan reads the
@@ -5804,6 +5831,28 @@ mod tests {
         let b = scanned("/lib/b.mp3", "B", "Techno", 1000); // src_size/mtime = None
         cat.upsert_scanned(&b).unwrap();
         assert!(!cat.track_unchanged("/lib/b.mp3", 1, 1).unwrap());
+    }
+
+    #[test]
+    fn restamp_source_moves_only_stamps_that_matched_before_the_write() {
+        let cat = Catalog::open(":memory:").unwrap();
+        let mut a = scanned("/lib/a.mp3", "A", "House", 1000);
+        a.src_size = Some(100);
+        a.src_mtime = Some(10);
+        let (id, _) = cat.upsert_scanned(&a).unwrap();
+        cat.save_analysis(id, &Analysis::default(), 100, 10).unwrap();
+        let v = Analysis::default().analyzer_version;
+
+        // A tag write took the file from (100, 10) to (120, 20): both stamps follow.
+        cat.restamp_source(id, (100, 10), (120, 20)).unwrap();
+        assert!(cat.track_unchanged("/lib/a.mp3", 120, 20).unwrap());
+        assert!(!cat.needs_analysis(id, 120, 20, v).unwrap());
+
+        // A write whose "before" isn't what the catalog holds (the file changed
+        // behind our back first) moves nothing: that change must still show.
+        cat.restamp_source(id, (999, 99), (130, 30)).unwrap();
+        assert!(cat.track_unchanged("/lib/a.mp3", 120, 20).unwrap());
+        assert!(cat.needs_analysis(id, 130, 30, v).unwrap());
     }
 
     #[test]
