@@ -31,7 +31,7 @@ impl App {
             Some(id) => match Catalog::open(&self.db_path) {
                 Ok(c) => (
                     c.get_track(id).ok(),
-                    c.get_external_artwork_full(id).ok().flatten().is_some(),
+                    c.has_external_artwork_full(id).unwrap_or(false),
                 ),
                 Err(_) => (None, false),
             },

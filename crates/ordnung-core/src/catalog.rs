@@ -1994,20 +1994,20 @@ impl Catalog {
         Ok(out)
     }
 
-    /// Track ids that have *full-resolution* external artwork on record — i.e.
-    /// art the GUI/CLI can imprint into the source file (`tag --write --art`).
-    /// Narrower than `external_artwork_ids`, which also counts thumbnail-only
-    /// rows fetched before full-res storage existed.
-    pub fn external_artwork_full_ids(&self) -> Result<Vec<Id>> {
-        let mut stmt = self
+    /// Whether `track_id` has *full-resolution* external artwork on record —
+    /// art that can be imprinted into the source file. The same answer as
+    /// `get_external_artwork_full(..).is_some()` without loading the image
+    /// (`typeof` skips the blob; `IS NOT NULL` would read it).
+    pub fn has_external_artwork_full(&self, track_id: Id) -> Result<bool> {
+        Ok(self
             .conn
-            .prepare("SELECT track_id FROM track_external_artwork WHERE full_bytes IS NOT NULL")?;
-        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r? as Id);
-        }
-        Ok(out)
+            .query_row(
+                "SELECT typeof(full_bytes)='blob' FROM track_external_artwork WHERE track_id=?1",
+                params![track_id as i64],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false))
     }
 
     /// Tracks with no embedded cover and no external-artwork attempt logged.
@@ -7801,6 +7801,7 @@ mod tests {
         // A dragged-in cover: no release behind it.
         cat.set_external_artwork(b, "drag", None, None, Some(&[1, 2]), Some(&[3, 4]))
             .unwrap();
+        assert!(cat.has_external_artwork_full(b).unwrap());
 
         cat.clear_external_artwork_images(a).unwrap();
         cat.clear_external_artwork_images(b).unwrap();
@@ -7809,6 +7810,8 @@ mod tests {
         assert_eq!(cat.external_release_id(a).unwrap().as_deref(), Some("222"));
         assert!(cat.get_external_artwork(a).unwrap().is_none());
         assert!(cat.get_external_artwork_full(a).unwrap().is_none());
+        assert!(!cat.has_external_artwork_full(a).unwrap());
+        assert!(!cat.has_external_artwork_full(b).unwrap());
         assert!(!cat.prefers_external_artwork(a).unwrap());
         assert!(cat.external_artwork_ids().unwrap().is_empty());
         // Still counts as a settled Discogs attempt, so a re-import won't re-match.
