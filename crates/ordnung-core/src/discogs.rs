@@ -15,7 +15,7 @@
 use crate::error::{Error, Result};
 use crate::model::{SellerListing, Tags, VinylRecord};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -1286,6 +1286,28 @@ impl PaceState {
     }
 }
 
+/// Answer `id` from `seen` when this session already fetched it, else fetch it
+/// and remember it. For artist and label pages: they change on the scale of
+/// months, and a dig walking one label thread lands on the same label (and its
+/// parent) every step, each a paced request. Failures aren't remembered.
+// ponytail: session-only and uncapped; the ids one session reaches number in
+// the hundreds. A catalog table if they should survive restarts.
+fn session_memo<T: Clone>(
+    seen: &OnceLock<Mutex<HashMap<u64, T>>>,
+    id: u64,
+    fetch: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let seen = seen.get_or_init(Default::default);
+    if let Some(hit) = seen.lock().ok().and_then(|m| m.get(&id).cloned()) {
+        return Ok(hit);
+    }
+    let fresh = fetch()?;
+    if let Ok(mut m) = seen.lock() {
+        m.insert(id, fresh.clone());
+    }
+    Ok(fresh)
+}
+
 static PACE: Mutex<PaceState> = Mutex::new(PaceState {
     last: None,
     remaining: None,
@@ -2384,8 +2406,14 @@ impl Client {
         self.search_page(&[("style", style), ("year", &year)], page)
     }
 
-    /// The kin of an artist: aliases, groups, members. One paced request.
+    /// The kin of an artist: aliases, groups, members. One paced request the
+    /// first time this session, then from memory (see [`session_memo`]).
     pub fn fetch_artist(&self, id: u64) -> Result<ArtistDetail> {
+        static SEEN: OnceLock<Mutex<HashMap<u64, ArtistDetail>>> = OnceLock::new();
+        session_memo(&SEEN, id, || self.fetch_artist_uncached(id))
+    }
+
+    fn fetch_artist_uncached(&self, id: u64) -> Result<ArtistDetail> {
         let url = format!("{ARTISTS_URL}/{id}");
         let resp = self.call_with_retry(|| {
             self.agent
@@ -2410,8 +2438,14 @@ impl Client {
     }
 
     /// The family of a label: its parent and its sublabels. One paced
-    /// request.
+    /// request the first time this session, then from memory (see
+    /// [`session_memo`]).
     pub fn fetch_label(&self, id: u64) -> Result<LabelDetail> {
+        static SEEN: OnceLock<Mutex<HashMap<u64, LabelDetail>>> = OnceLock::new();
+        session_memo(&SEEN, id, || self.fetch_label_uncached(id))
+    }
+
+    fn fetch_label_uncached(&self, id: u64) -> Result<LabelDetail> {
         let url = format!("{LABELS_URL}/{id}");
         let resp = self.call_with_retry(|| {
             self.agent
@@ -4403,6 +4437,27 @@ mod throttle_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn session_memo_fetches_once_and_forgets_failures() {
+        use super::*;
+        static SEEN: OnceLock<Mutex<HashMap<u64, String>>> = OnceLock::new();
+        let mut calls = 0;
+        let mut get = |id: u64, ok: bool| {
+            session_memo(&SEEN, id, || {
+                calls += 1;
+                if ok {
+                    Ok(format!("v{id}"))
+                } else {
+                    Err(Error::Network("down".into()))
+                }
+            })
+        };
+        assert!(get(1, false).is_err());
+        assert_eq!(get(1, true).unwrap(), "v1");
+        assert_eq!(get(1, true).unwrap(), "v1");
+        assert_eq!(calls, 2, "a failure is retried, a success is not refetched");
+    }
+
     use super::*;
 
     /// A side position or a bare number is not a song's name; a real
