@@ -6,11 +6,13 @@
 //! [`chip`] the avatar pill, [`menu`] the dropdown a button anchors,
 //! [`window`] the one floating window, [`sidebar`] the window docked to an
 //! edge, [`nav`] the docked panel that snaps between designed widths,
-//! [`tooltip`] the hover note, [`glass`] the surface they all sit on,
-//! [`control_row`] the rule that a row of controls shares one height.
+//! [`tooltip`] the hover note, [`choices`] the row of buttons a dialog
+//! ends with, [`glass`] the surface they all sit on, [`control_row`] the
+//! rule that a row of controls shares one height.
 
 pub mod button;
 pub mod chip;
+pub mod choices;
 pub mod escape;
 pub mod fader;
 pub mod field;

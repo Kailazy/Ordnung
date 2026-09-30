@@ -1,6 +1,7 @@
 //! Split out of `main.rs`; part of the GUI `App`.
 use super::*;
 use crate::pick;
+use crate::ui::choices::{choices, Choice};
 use crate::ui::phosphor_icons::{app as icons, named};
 use crate::ui::tokens::{color, font, space};
 use ordnung_rbdb::edit;
@@ -4194,28 +4195,15 @@ impl App {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(6.0);
-                    // Primary action right-aligned, Cancel beside it — the
-                    // standard dialog footer shape. The row is allocated at an
-                    // explicit height: a bare right-to-left layout claimed all
-                    // the window's remaining height, leaving a tall dead gap
-                    // above the buttons.
-                    let footer = egui::Layout::right_to_left(egui::Align::Center);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), 26.0),
-                        footer,
-                        |ui| {
-                            let busy = self.job_rx.is_some();
-                            if ui
-                                .add_enabled(!busy, egui::Button::new("Convert"))
-                                .clicked()
-                            {
-                                start_convert = Some(());
-                            }
-                            if ui.button("Cancel").clicked() {
-                                close_modal = true;
-                            }
-                        },
-                    );
+                    let busy = self.job_rx.is_some();
+                    match choices(
+                        ui,
+                        &[Choice::cancel("Cancel"), Choice::primary("Convert").enabled(!busy)],
+                    ) {
+                        Some(0) => close_modal = true,
+                        Some(_) => start_convert = Some(()),
+                        None => {}
+                    }
                 });
         }
         // Apply deferred modal actions to satisfy the borrow checker.

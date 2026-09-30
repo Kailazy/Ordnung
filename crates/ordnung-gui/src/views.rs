@@ -1,5 +1,6 @@
 //! Split out of `main.rs`; part of the GUI `App`.
 use super::*;
+use crate::ui::choices::{choices, Choice};
 
 // `Ordering` from the glob import is the atomic one; the vinyl sort wants the
 // comparison enum, so it gets its own name.
@@ -1312,33 +1313,20 @@ impl App {
                             }
                         });
                     ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Cancel").clicked() {
-                            close = true;
-                        }
-                        let confirm = ui.add(
-                            egui::Button::new(
-                                egui::RichText::new(format!("Move {n} to Trash"))
-                                    .color(egui::Color32::WHITE),
-                            )
-                            .fill(egui::Color32::from_rgb(0xB0, 0x30, 0x30)),
-                        );
-                        // Focus the confirm button on open so Enter/Space commits
-                        // without moving the mouse.
-                        if ui.memory(|m| m.focused().is_none()) {
-                            confirm.request_focus();
-                        }
-                        if confirm.clicked() {
+                    match choices(
+                        ui,
+                        &[
+                            Choice::cancel("Cancel"),
+                            Choice::danger(format!("Move {n} to Trash")),
+                        ],
+                    ) {
+                        Some(0) => close = true,
+                        Some(_) => {
                             spawn_batch = Some(batch.clone());
                             close = true;
                         }
-                    });
-                    ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new("Enter to confirm · Esc to cancel")
-                            .weak()
-                            .small(),
-                    );
+                        None => {}
+                    }
                 },
             );
             if close || !stays {
@@ -3062,20 +3050,12 @@ impl App {
                         if n == 1 { "y" } else { "ies" },
                     ));
                     ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Cancel").clicked() {
-                            close = true;
-                        }
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new(format!("Remove {n}"))
-                                        .color(egui::Color32::WHITE),
-                                )
-                                .fill(egui::Color32::from_rgb(0xB0, 0x30, 0x30)),
-                            )
-                            .clicked()
-                        {
+                    match choices(
+                        ui,
+                        &[Choice::cancel("Cancel"), Choice::danger(format!("Remove {n}"))],
+                    ) {
+                        Some(0) => close = true,
+                        Some(_) => {
                             match Catalog::open(&self.db_path) {
                                 Ok(c) => match c.delete_tracks(&ids) {
                                     Ok(removed) => {
@@ -3090,7 +3070,8 @@ impl App {
                             }
                             close = true;
                         }
-                    });
+                        None => {}
+                    }
                 });
             if close || !stays {
                 self.missing_pending_remove = None;

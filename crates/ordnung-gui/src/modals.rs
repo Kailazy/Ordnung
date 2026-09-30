@@ -1,5 +1,6 @@
 //! Split out of `main.rs`; part of the GUI `App`.
 use super::*;
+use crate::ui::choices::{choices, Choice};
 
 impl App {
     /// The cover-drop confirmation popup: shown after an image is dropped onto a
@@ -97,31 +98,23 @@ impl App {
 
                     ui.add_space(8.0);
                     ui.separator();
-                    ui.horizontal(|ui| {
-                        let n = d.siblings.iter().filter(|s| s.selected).count();
-                        let label = if n > 0 {
-                            format!("Set cover ({} track(s))", n + 1)
-                        } else {
-                            "Set cover".to_string()
-                        };
-                        let btn = egui::Button::new(
-                            egui::RichText::new(label).color(egui::Color32::WHITE),
-                        )
-                        .fill(egui::Color32::from_rgb(64, 110, 180));
-                        if ui.add(btn).clicked() {
-                            apply = true;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            cancel = true;
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                egui::RichText::new("Catalog only — your files aren't touched.")
-                                    .small()
-                                    .weak(),
-                            );
-                        });
-                    });
+                    ui.label(
+                        egui::RichText::new("Catalog only — your files aren't touched.")
+                            .small()
+                            .weak(),
+                    );
+                    ui.add_space(4.0);
+                    let n = d.siblings.iter().filter(|s| s.selected).count();
+                    let label = if n > 0 {
+                        format!("Set cover ({} track(s))", n + 1)
+                    } else {
+                        "Set cover".to_string()
+                    };
+                    match choices(ui, &[Choice::cancel("Cancel"), Choice::primary(label)]) {
+                        Some(0) => cancel = true,
+                        Some(_) => apply = true,
+                        None => {}
+                    }
                 });
         }
         if apply {
@@ -211,21 +204,18 @@ impl App {
                         ui.colored_label(egui::Color32::LIGHT_RED, err);
                     }
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        let busy = self.job_rx.is_some();
-                        if ui
-                            .add_enabled(
-                                !busy,
-                                egui::Button::new(format!("Convert {}", m.ids.len())),
-                            )
-                            .clicked()
-                        {
-                            start = true;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            close = true;
-                        }
-                    });
+                    let busy = self.job_rx.is_some();
+                    match choices(
+                        ui,
+                        &[
+                            Choice::cancel("Cancel"),
+                            Choice::primary(format!("Convert {}", m.ids.len())).enabled(!busy),
+                        ],
+                    ) {
+                        Some(0) => close = true,
+                        Some(_) => start = true,
+                        None => {}
+                    }
                 });
         }
         if pick_out_dir {
@@ -2066,14 +2056,21 @@ Converted copies go on the stick; your library files stay as they are. Needs ffm
                     self.save_config();
                 }
                 ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    let busy = self.is_busy();
-                    let label = if has_export && !replace {
-                        "⇪ Add to stick"
-                    } else {
-                        "⇪ Export"
-                    };
-                    if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
+                let busy = self.is_busy();
+                if busy {
+                    ui.label(egui::RichText::new("another job is running").weak());
+                }
+                let label = if has_export && !replace {
+                    "⇪ Add to stick"
+                } else {
+                    "⇪ Export"
+                };
+                match choices(
+                    ui,
+                    &[Choice::cancel("Cancel"), Choice::primary(label).enabled(!busy)],
+                ) {
+                    Some(0) => self.export_confirm = None,
+                    Some(_) => {
                         self.export_confirm = None;
                         self.spawn_export(
                             ctx.clone(),
@@ -2084,15 +2081,8 @@ Converted copies go on the stick; your library files stay as they are. Needs ffm
                             player,
                         );
                     }
-                    if busy {
-                        ui.label(egui::RichText::new("another job is running").weak());
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Cancel").clicked() {
-                            self.export_confirm = None;
-                        }
-                    });
-                });
+                    None => {}
+                }
             });
         if !open {
             self.export_confirm = None;
@@ -2130,24 +2120,24 @@ files elsewhere on the device stay plain storage.",
                     .weak(),
                 );
                 ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    let busy = self.is_busy();
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("⇪ Set up device"))
-                        .clicked()
-                    {
+                let busy = self.is_busy();
+                if busy {
+                    ui.label(egui::RichText::new("another job is running").weak());
+                }
+                match choices(
+                    ui,
+                    &[
+                        Choice::cancel("Cancel"),
+                        Choice::primary("⇪ Set up device").enabled(!busy),
+                    ],
+                ) {
+                    Some(0) => self.usb_setup_confirm = None,
+                    Some(_) => {
                         self.usb_setup_confirm = None;
                         self.spawn_usb_setup(ctx.clone(), dest.clone());
                     }
-                    if busy {
-                        ui.label(egui::RichText::new("another job is running").weak());
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Cancel").clicked() {
-                            self.usb_setup_confirm = None;
-                        }
-                    });
-                });
+                    None => {}
+                }
             });
         if !open {
             self.usb_setup_confirm = None;
@@ -2302,55 +2292,26 @@ files elsewhere on the device stay plain storage.",
         if !self.confirm_bulk_write {
             return;
         }
-        let mut open = true;
-        let mut confirm = false;
         let n = self.edited_count;
-        crate::ui::window::Window::new("Write edits to source files?")
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.set_min_width(400.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "This writes the edited tags of {n} track{} into their original \
-                         files on disk.",
-                        if n == 1 { "" } else { "s" }
-                    ))
-                    .strong(),
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(
-                        "Only tracks you've edited are written. Any fetched cover art is \
-                         embedded into the file; tracks without fetched art keep their \
-                         existing cover. Each file's modification time changes, so those \
-                         tracks will be re-analyzed on the next Analyze.",
-                    )
-                    .small()
-                    .weak(),
-                );
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        self.confirm_bulk_write = false;
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let btn = egui::Button::new(
-                            egui::RichText::new("Write to files").color(egui::Color32::WHITE),
-                        )
-                        .fill(egui::Color32::from_rgb(70, 110, 70));
-                        if ui.add(btn).clicked() {
-                            confirm = true;
-                        }
-                    });
-                });
-            });
-
-        if confirm {
+        let answer = confirm(
+            ctx,
+            "Write edits to source files?",
+            &format!(
+                "This writes the edited tags of {n} track{} into their original \
+                 files on disk.",
+                if n == 1 { "" } else { "s" }
+            ),
+            "Only tracks you've edited are written. Any fetched cover art is \
+             embedded into the file; tracks without fetched art keep their \
+             existing cover. Each file's modification time changes, so those \
+             tracks will be re-analyzed on the next Analyze.",
+            Choice::primary("Write to files"),
+        );
+        if answer.is_some() {
             self.confirm_bulk_write = false;
-            self.spawn_write_edits(ctx.clone());
         }
-        if !open {
-            self.confirm_bulk_write = false;
+        if answer == Some(true) {
+            self.spawn_write_edits(ctx.clone());
         }
     }
 
@@ -3588,16 +3549,29 @@ impl App {
     }
 }
 
-/// A confirmation for a destructive action: the `headline` in bold, the
-/// `detail` small beneath it, Cancel on the left and the red `action` button
-/// on the right. `Some(true)` when confirmed, `Some(false)` when cancelled or
-/// closed, `None` while it is still up.
+/// A confirmation for a destructive action: [`confirm`] with the red
+/// `action` button.
 fn danger_confirm(
     ctx: &egui::Context,
     title: &str,
     headline: &str,
     detail: &str,
     action: &str,
+) -> Option<bool> {
+    confirm(ctx, title, headline, detail, Choice::danger(action))
+}
+
+/// A yes-or-no dialog: the `headline` in bold, the `detail` small beneath
+/// it, and a [`choices`] row of Cancel and the `action` (so Enter takes
+/// the action, Tab and the arrows move between the two, Escape and the
+/// close cancel). `Some(true)` when confirmed, `Some(false)` when
+/// cancelled or closed, `None` while it is still up.
+fn confirm(
+    ctx: &egui::Context,
+    title: &str,
+    headline: &str,
+    detail: &str,
+    action: Choice,
 ) -> Option<bool> {
     let mut open = true;
     let mut answer = None;
@@ -3609,16 +3583,9 @@ fn danger_confirm(
             ui.add_space(4.0);
             ui.label(egui::RichText::new(detail).small().weak());
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                if crate::ui::button::button(ui, "Cancel").clicked() {
-                    answer = Some(false);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if crate::ui::button::danger(ui, action).clicked() {
-                        answer = Some(true);
-                    }
-                });
-            });
+            if let Some(i) = choices(ui, &[Choice::cancel("Cancel"), action]) {
+                answer = Some(i == 1);
+            }
         });
     if !open {
         answer.get_or_insert(false);

@@ -27,6 +27,16 @@ pub fn button(ui: &mut egui::Ui, label: impl Into<egui::WidgetText>) -> egui::Re
     ui.add(egui::Button::new(label))
 }
 
+/// A push button for the one action a dialog is for (write, convert, set
+/// cover): white on the accent, so the row says which button is the
+/// answer. Goes on a [`super::choices`] row.
+pub fn primary(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE))
+            .fill(color::ACCENT),
+    )
+}
+
 /// A push button for an action that destroys something (clear, delete,
 /// remove): white on red, so it never reads as the safe default.
 pub fn danger(ui: &mut egui::Ui, label: &str) -> egui::Response {
