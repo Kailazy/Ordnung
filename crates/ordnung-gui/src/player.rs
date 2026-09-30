@@ -836,7 +836,7 @@ impl App {
 
         // Keys 1–8 press hot cue pads A–H (set when empty, jump when set),
         // like a controller's pad row. Skipped while a text field has focus.
-        if !ctx.wants_keyboard_input() {
+        if !crate::ui::field::wants_keyboard_input(ctx) {
             const PAD_KEYS: [egui::Key; 8] = [
                 egui::Key::Num1,
                 egui::Key::Num2,

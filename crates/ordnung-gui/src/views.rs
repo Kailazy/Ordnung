@@ -2129,7 +2129,7 @@ impl App {
         // on. In the wall ↑ ↓ move by a row of covers, ← → by one record;
         // the list is one column. The first press lands on the first record.
         self.vinyl_cursor_moved = false;
-        if self.vinyl_sheet.is_none() && !cells.is_empty() && !ctx.wants_keyboard_input() {
+        if self.vinyl_sheet.is_none() && !cells.is_empty() && !crate::ui::field::wants_keyboard_input(ctx) {
             let cols: usize = if self.config.vinyl_view == "list" {
                 1
             } else {

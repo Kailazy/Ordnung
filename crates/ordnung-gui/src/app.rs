@@ -2110,7 +2110,7 @@ impl App {
         // (`self.rows` is already narrowed to the active tab and column filters).
         // Skip it while a text field — search, per-column filter — owns the
         // keyboard so the shortcut keeps its in-field "select all text" meaning.
-        if !ctx.wants_keyboard_input()
+        if !crate::ui::field::wants_keyboard_input(ctx)
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A))
         {
             self.select_all_visible();
@@ -2174,7 +2174,7 @@ impl App {
         // Space bar = play/pause. Toggle the loaded track if one is in the bar;
         // otherwise start the selected row. Skipped while a text field has focus so
         // typing a space in the filter/edit fields doesn't hijack playback.
-        if !ctx.wants_keyboard_input()
+        if !crate::ui::field::wants_keyboard_input(ctx)
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
         {
             self.toggle_play_pause();
@@ -2185,7 +2185,7 @@ impl App {
         // space bar; the modifier-free check also leaves ⌘A alone. On the
         // vinyl shelf with no sheet up the arrows walk the records instead
         // (see `draw_vinyl`), and only A D seek.
-        if !ctx.wants_keyboard_input() {
+        if !crate::ui::field::wants_keyboard_input(ctx) {
             let shelf_keys = self.view == LibraryView::Vinyl && self.vinyl_sheet.is_none();
             let (back, fwd) = ctx.input_mut(|i| {
                 (

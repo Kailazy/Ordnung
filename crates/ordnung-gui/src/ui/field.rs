@@ -199,6 +199,16 @@ impl<'t> Field<'t> {
             })
             .inner
         };
+        // Enter (or Escape, or a click away) drops the field's focus in
+        // this very pass, so a widget drawn after it would see no focused
+        // field and take the same key as a shortcut: Enter in the new-tag
+        // box played the selected song. Remember the pass so
+        // [`wants_keyboard_input`] keeps the keyboard with the field
+        // through the end of it.
+        if field.lost_focus() {
+            let pass = ui.ctx().cumulative_pass_nr();
+            ui.ctx().data_mut(|d| d.insert_temp(lost_focus_pass(), pass));
+        }
         let trailing = trailing.map(|(galley, size)| {
             // The field's response rect is the text; the frame is that
             // rect plus the (widened) margin on each side.
@@ -234,6 +244,24 @@ impl<'t> Field<'t> {
         });
         FieldResponse { field, trailing }
     }
+}
+
+/// The pass in which a [`Field`] last surrendered focus.
+fn lost_focus_pass() -> egui::Id {
+    egui::Id::new("ui::field::lost_focus_pass")
+}
+
+/// Whether a text field owns the keyboard right now: one has focus, or one
+/// gave it up earlier in this pass (its Enter or Escape is still in the
+/// event queue). Every keyboard shortcut is gated on this, not on egui's
+/// `wants_keyboard_input`, so the key that ends an edit never doubles as
+/// a shortcut.
+pub fn wants_keyboard_input(ctx: &egui::Context) -> bool {
+    if ctx.wants_keyboard_input() {
+        return true;
+    }
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data(|d| d.get_temp::<u64>(lost_focus_pass())) == Some(pass)
 }
 
 impl Widget for Field<'_> {
@@ -337,5 +365,41 @@ mod tests {
             out.unwrap().trailing.unwrap().rect.right() + TRAILING_INSET
         };
         assert_eq!(right("Filters"), right("Filters (12)"));
+    }
+
+    /// Enter ends the edit and drops egui's focus in the same pass, but the
+    /// guard keeps the keyboard with the field until the pass is over, and
+    /// lets go on the next one.
+    #[test]
+    fn enter_that_ends_an_edit_still_owns_the_keyboard() {
+        let ctx = egui::Context::default();
+        super::super::theme::install(&ctx);
+        let mut text = String::from("dub");
+        let mut pass = |ctx: &egui::Context, input: egui::RawInput, first: bool| {
+            let mut after = (false, false);
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let r = ui.add(Field::singleline(&mut text));
+                    if first {
+                        r.request_focus();
+                    }
+                    after = (r.lost_focus(), wants_keyboard_input(ui.ctx()));
+                });
+            });
+            after
+        };
+        pass(&ctx, egui::RawInput::default(), true);
+        let enter = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(pass(&ctx, enter, false), (true, true), "lost focus, still guarded");
+        assert_eq!(pass(&ctx, egui::RawInput::default(), false), (false, false), "next pass free");
     }
 }

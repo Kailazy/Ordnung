@@ -779,7 +779,7 @@ impl App {
         // they do for the pointer. Not while a record sheet is up (its own
         // keys), nor while a field has focus. Before `scroll_to_track` is
         // taken below, so the row it lands on is scrolled into view now.
-        if self.vinyl_sheet.is_none() && !ui.ctx().wants_keyboard_input() {
+        if self.vinyl_sheet.is_none() && !crate::ui::field::wants_keyboard_input(ui.ctx()) {
             let (up, down, enter) = ui.ctx().input_mut(|i| {
                 (
                     i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
@@ -877,7 +877,7 @@ impl App {
             i.events.retain(|e| !matches!(e, egui::Event::Copy));
             hit
         });
-        if !ctx_clone.wants_keyboard_input() && copy_pressed {
+        if !crate::ui::field::wants_keyboard_input(&ctx_clone) && copy_pressed {
             let ids: Vec<Id> = if self.selection.is_empty() {
                 self.selected.into_iter().collect()
             } else {
@@ -2275,7 +2275,7 @@ impl App {
         // Skipped while a text field has focus (Escape there cancels the edit) or
         // while a popup/modal is up (it handles its own Escape).
         if (!self.selection.is_empty() || self.selected.is_some())
-            && !ctx_clone.wants_keyboard_input()
+            && !crate::ui::field::wants_keyboard_input(&ctx_clone)
             && !self.escape_consumed_elsewhere()
             && !crate::ui::escape::pending(&ctx_clone)
             && ctx_clone.input(|i| i.key_pressed(egui::Key::Escape))

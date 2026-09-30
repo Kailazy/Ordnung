@@ -1602,7 +1602,7 @@ impl App {
         // the music. Skipped while a text field has focus, like every other
         // single-key shortcut.
         let mut cursor_moved = false;
-        if !ctx.wants_keyboard_input() {
+        if !crate::ui::field::wants_keyboard_input(ctx) {
             let (up, down, enter, want, dig) = ctx.input_mut(|i| {
                 (
                     i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
