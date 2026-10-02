@@ -367,19 +367,6 @@ impl App {
             self.spawn_sweep_seller(ctx.clone(), u);
         }
 
-        // The dig strip works from the crates too: a listing seeds a dig the
-        // same way a shelf record does, and the web stays on screen while the
-        // tab underneath changes. Same placement contract as the shelf view —
-        // above the scrolling grid, so it never scrolls away under what it's
-        // steering. A record the strip asks to open goes through the ordinary
-        // release sheet.
-        if let Some(o) = self.draw_dig(ui) {
-            self.open_release_sheet(o.release_id, o.artist, o.title, o.sub, o.cover_url, ctx);
-        }
-        if self.dig.is_some() {
-            ui.add_space(8.0);
-        }
-
         // --- Empty states. ----------------------------------------------------
         if self.sellers.is_empty() {
             ui.add_space(40.0);

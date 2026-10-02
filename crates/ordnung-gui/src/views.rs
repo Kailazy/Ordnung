@@ -2024,7 +2024,7 @@ impl App {
             let rect = ui.available_rect_before_wrap();
             self.graph_rect = rect;
             if let Some(act) = self.draw_graph(ui, rect, &query, graph::MapScope::Library) {
-                self.apply_graph_act(act, graph::MapScope::Library, ctx);
+                self.apply_graph_act(act, ctx);
             }
             return;
         }
@@ -2110,8 +2110,6 @@ impl App {
         // What the user asked of a cell (jump to the catalog, or a list edit).
         // Applied after the grid so we don't mutate `self` mid-render.
         let mut action: Option<VinylGridAction> = None;
-        // A record the dig strip asked to open, applied with `action` below.
-        let mut open_sheet: Option<dig::DigOpen> = None;
         // Keyboard on the shelf, with no sheet up to take the keys: arrows
         // (and W S) move a cursor over the records, ⏎ opens the one it is
         // on. In the wall ↑ ↓ move by a row of covers, ← → by one record;
@@ -2161,15 +2159,6 @@ impl App {
                     action = Some(VinylGridAction::Open(cells[i].key));
                 }
             }
-        }
-        // The dig strip sits above both shelves rather than inside the scroll
-        // area: it's the thing you're steering, so it shouldn't scroll away
-        // under the wall of covers you're steering past.
-        if let Some(key) = self.draw_dig(ui) {
-            open_sheet = Some(key);
-        }
-        if self.dig.is_some() {
-            ui.add_space(8.0);
         }
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -2284,9 +2273,6 @@ impl App {
                 }
             }
             None => {}
-        }
-        if let Some(o) = open_sheet {
-            self.open_release_sheet(o.release_id, o.artist, o.title, o.sub, o.cover_url, ctx);
         }
     }
 

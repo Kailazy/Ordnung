@@ -1002,6 +1002,7 @@ impl App {
                         (None, None) => String::new(),
                     };
                     self.start_dig_release(r, rel_artist, rel_title, e.rel_label.clone(), sub, e.rel_thumb.clone());
+                    self.show_dig_window();
                 }
             }
             LineAct::Buy(_) => {

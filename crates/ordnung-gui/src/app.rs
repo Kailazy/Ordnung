@@ -261,7 +261,6 @@ impl App {
             dig_cover_tx,
             dig_cover_rx,
             dig_start_keys: HashMap::new(),
-            dig_strip_h: None,
             scroll_to_track: None,
             table_scroll: HashMap::new(),
             table_scroll_view: None,

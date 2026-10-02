@@ -104,7 +104,7 @@ pub(crate) struct VinylSheet {
     /// `None` for a record opened from a dig: it isn't in either list, so it has
     /// no cached cover to key — `cover_url` carries its art instead.
     pub key: Option<VinylCoverKey>,
-    /// Cover thumbnail URL, loaded through [`App::dig_covers`] (which the strip
+    /// Cover thumbnail URL, loaded through [`App::dig_covers`] (which the dig window
     /// already fills for the same release). Set for *every* record, keyed or
     /// not: a dug record has no cached cover at all, and a keyed one loses its
     /// cached cover the moment it leaves its list, while its sheet stays open.
@@ -1452,8 +1452,8 @@ impl App {
             Some(k) => self.can_dig(k),
             None => !artist.trim().is_empty(),
         };
-        // A record reached *by* a dig branches with the strip's own two
-        // buttons — but the sheet is drawn over the strip, so it carries its
+        // A record reached *by* a dig branches with the dig window's own two
+        // buttons — but the sheet is drawn over the window, so it carries its
         // own copy rather than making the user move the window to reach them.
         // Only for the record the dig is actually standing on: taking a thread
         // out of a card you merely walked back to would branch from the head
@@ -1562,7 +1562,7 @@ impl App {
             PlayExtra(usize),
             Goto,
             Dig,
-            /// Move the dig on from the record on screen — the strip's
+            /// Move the dig on from the record on screen — the dig window's
             /// controls, mirrored here.
             Branch(crate::dig::DigAct),
             /// Add this record to that list, or take it off if it's there.
@@ -2055,9 +2055,9 @@ impl App {
                                 act = Some(Act::Dig);
                             }
                             // The dig's controls, for the record the dig is
-                            // standing on: the same two as the strip (see
+                            // standing on: the same two as the dig window (see
                             // `dig_controls`), so the sheet can keep moving
-                            // without going back to the strip.
+                            // without going back to the window.
                             if let Some((hops, resolved, kin, busy)) = &branch {
                                 // Set apart from the four buttons before them:
                                 // those record what you already decided, these
@@ -2293,8 +2293,8 @@ impl App {
             Some(Act::ArtistPage(id, name)) => {
                 self.open_artist_page(id, name);
             }
-            // Starting a dig closes the sheet: the strip it drives sits behind
-            // this window, and the first thing a digger does is look at it.
+            // Starting a dig closes the sheet: the dig window it opens is
+            // the first thing a digger looks at.
             Some(Act::Pressings) => {
                 let sheet_key = self.vinyl_sheet.as_ref().and_then(|s| s.key);
                 match sheet_key {
@@ -2382,7 +2382,7 @@ impl App {
                     }
                 }
                 // The dig lands in its own window, wherever the sheet was
-                // opened from: the strip only shows in the vinyl view.
+                // opened from.
                 self.show_dig_window();
                 self.stop_sheet_video();
                 self.vinyl_sheet = None;
@@ -2391,7 +2391,7 @@ impl App {
             // Branching moves the dig to a new record, and the sheet rides
             // along: digging from the window is a chain of listens, so it
             // re-points at whatever the step lands on rather than closing and
-            // sending the user back to the strip to reopen the next find. The
+            // sending the user back to the window to reopen the next find. The
             // old record's playback stops here — what's on screen is about to
             // be a different record. See `sheet_follows_dig`, spent in
             // `apply_page`.

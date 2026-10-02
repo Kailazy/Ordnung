@@ -2620,9 +2620,8 @@ impl App {
     }
 
     /// Put the dig window up, framed on the whole dig. Every Dig button in
-    /// the app ends here, so a dig started from a release sheet over the
-    /// library lands somewhere the user can see, not only on the strip in
-    /// the vinyl view.
+    /// the app ends here: the window is the one place a dig is seen and
+    /// steered, whichever view it was started from.
     pub(crate) fn show_dig_window(&mut self) {
         self.dig_window_open = true;
         self.dig_graph.follow_fit = true;
@@ -2644,22 +2643,36 @@ impl App {
             .default_size(egui::vec2(960.0, 640.0))
             .min_size(egui::vec2(520.0, 360.0))
             .show(ctx, |ui| {
-                // What's being dug, and the map's own two controls.
-                let (caption, count) = match self.dig.as_ref() {
+                // What's being dug, the head's two dig controls (see
+                // `dig_controls`), and the map's own two controls.
+                let (caption, count, head) = match self.dig.as_ref() {
                     Some(d) => {
                         let start = &d.steps[0];
+                        let h = d.head();
                         (
                             format!("Digging from {} – {}", start.artist, start.title),
                             d.steps.len(),
+                            Some((
+                                h.hops(d.wander_seed(), &d.anchor()),
+                                h.detail_resolved,
+                                h.kin_resolved,
+                                d.pending.is_some(),
+                            )),
                         )
                     }
-                    None => (String::new(), 0),
+                    None => (String::new(), 0, None),
                 };
                 let arrange = Arrange::from_key(&self.config.graph_arrange);
                 let mut pick = arrange;
                 let mut fit = false;
+                let mut dig_act = None;
                 crate::ui::control_row(ui, |ui| {
                     ui.horizontal(|ui| {
+                        if let Some((hops, resolved, kin, busy)) = &head {
+                            dig_act =
+                                crate::dig::dig_controls(ui, hops, *resolved, *kin, *busy, true);
+                            ui.add_space(crate::ui::tokens::space::S2);
+                        }
                         if count > 0 {
                             ui.label(egui::RichText::new(caption).weak());
                             ui.label(
@@ -2704,6 +2717,11 @@ impl App {
                     self.config.graph_arrange = pick.key().to_string();
                     self.save_config();
                 }
+                match dig_act {
+                    Some(crate::dig::DigAct::Wander) => self.dig_wander(),
+                    Some(crate::dig::DigAct::Hop(hop)) => self.dig_hop(hop),
+                    None => {}
+                }
                 ui.add_space(crate::ui::tokens::space::S3);
                 let rect = ui.available_rect_before_wrap();
                 self.dig_graph_rect = rect;
@@ -2713,16 +2731,31 @@ impl App {
                 act = self.draw_graph(ui, rect, "", MapScope::Dig);
             });
         if let Some(act) = act {
-            self.apply_graph_act(act, MapScope::Dig, ctx);
+            self.apply_graph_act(act, ctx);
         }
+        // Whichever way the head moved this frame, what was speculated for the
+        // record it left is dead weight and the new head wants priming. Vary
+        // the roll between clicks (see `dig_roll`).
+        self.dig_evict();
+        self.dig_prime();
+        self.dig_seed = self.dig_seed.wrapping_add(0x2545_F491_4F6C_DD1D);
         if !open {
             self.dig_window_open = false;
+            // Closing the window ends the dig: with nowhere else to show, a
+            // dig left running would only keep speculating on the shared
+            // Discogs pace. The radio's dig is its own and plays on.
+            if !self.radio.on {
+                if let Some(dig) = self.dig.as_ref() {
+                    dig.cancel_prime.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                self.dig = None;
+            }
         }
     }
 
-    /// Carry out what a click on a map in `scope` asked for: open the
-    /// record's sheet, take a thread off it, or start the radio on it.
-    pub(crate) fn apply_graph_act(&mut self, act: GraphAct, scope: MapScope, ctx: &egui::Context) {
+    /// Carry out what a click on either map asked for: open the record's
+    /// sheet, take a thread off it, or start the radio on it.
+    pub(crate) fn apply_graph_act(&mut self, act: GraphAct, ctx: &egui::Context) {
         match act {
             GraphAct::Open(rel) => {
                 let cover_url = rel.cover_url();
@@ -2738,7 +2771,13 @@ impl App {
                     ),
                 }
             }
-            GraphAct::Thread(rel, thread) => self.map_take_thread(&rel, thread, scope),
+            // A thread is only ever taken in the dig window: a knob on the
+            // library map stands the dig on that record and brings the
+            // window up, so every dig is seen in the one place.
+            GraphAct::Thread(rel, thread) => {
+                self.map_take_thread(&rel, thread, MapScope::Dig);
+                self.show_dig_window();
+            }
             GraphAct::Radio(rel) => self.radio_start_from(&rel),
         }
     }
