@@ -135,10 +135,11 @@ pub(crate) struct Release {
     /// The shelf key when the record is on a shelf, so a click opens the
     /// same sheet the grid would.
     pub key: Option<VinylCoverKey>,
-    /// Hops from the dig's start. Zero everywhere on the library map; on
-    /// the dig map it sets the cloud's column, so the dig reads left to
-    /// right.
+    /// Hops from the dig's start, and the row of the dig's tree the record
+    /// sits on. Zero everywhere on the library map; on the dig map they
+    /// are the record's fixed place: one column per hop, one row per leaf.
     pub depth: usize,
+    pub row: f32,
 }
 
 impl Release {
@@ -180,9 +181,6 @@ struct Node {
     release: Option<Release>,
     /// Releases under a hub, counted through its label sub-groups.
     weight: usize,
-    /// A hub's column on a flowing map: the fewest hops any of its records
-    /// is from the dig's start. See [`Release::depth`].
-    depth: usize,
     /// Set during a sync for every node the sources still name.
     alive: bool,
     /// Lowercased search text.
@@ -447,15 +445,10 @@ const SETTLE_DAMPING: f32 = 0.80;
 const MAX_ZOOM: f32 = 3.0;
 /// Canvas padding around the map when fitted.
 const FIT_PAD: f32 = 36.0;
-/// Distance between the columns of a flowing map: each hop of a dig pulls
-/// its cloud this much further right of the one it was dug from.
-const FLOW_PITCH: f32 = 220.0;
-/// On a flowing map, the step between a cloud's records: a cover and a
-/// half along, and the odd ones dropped a cover and a caption, so each
-/// caption has room beside it.
-const FLOW_STEP: egui::Vec2 = egui::vec2(3.5 * REL_R, 2.0 * REL_R + 36.0);
-/// Stiffness of the spring that holds a flowing map's cloud on its column.
-const FLOW_K: f32 = 4.0;
+/// The grid of a flowing map: one column per hop of the dig, one row per
+/// leaf of its tree. A column holds a cover, its knobs and the trail's
+/// pill; a row a cover and the three lines of caption around it.
+const FLOW_GRID: egui::Vec2 = egui::vec2(10.0 * REL_R, 6.0 * REL_R);
 
 fn fold(s: &str) -> String {
     s.trim()
@@ -655,6 +648,7 @@ impl GraphState {
                         cover,
                         key: Some(key),
                         depth: 0,
+                        row: 0.0,
                     },
                     &mut seen,
                 );
@@ -676,6 +670,7 @@ impl GraphState {
                     },
                     key: None,
                     depth: 0,
+                    row: 0.0,
                 },
                 &mut seen,
             );
@@ -751,7 +746,8 @@ impl GraphState {
                     self.nodes[ai].weight += 1;
                     match &r.label {
                         Some(l)
-                            if per_label
+                            if !self.flow
+                                && per_label
                                 .get(&(ak.clone(), fold(l)))
                                 .copied()
                                 .unwrap_or(0)
@@ -770,7 +766,7 @@ impl GraphState {
                     let gk = format!("g:{}", fold(&first));
                     let gi = self.ensure(Kind::Hub, &gk, &first, None);
                     self.nodes[gi].weight += 1;
-                    for style in more {
+                    for style in more.into_iter().filter(|_| !self.flow) {
                         let sk = format!("g:{}", fold(&style));
                         // A tie's far end exists only if something files
                         // under it first; a style nobody leads with isn't
@@ -829,24 +825,6 @@ impl GraphState {
             };
         }
 
-        // A hub's column is its nearest record's.
-        for i in 0..self.nodes.len() {
-            if self.nodes[i].kind == Kind::Hub {
-                self.nodes[i].depth = usize::MAX;
-            }
-        }
-        for i in 0..self.nodes.len() {
-            let Some(d) = self.nodes[i].release.as_ref().map(|r| r.depth) else { continue };
-            if let Some(h) = self.top_hub(i) {
-                self.nodes[h].depth = self.nodes[h].depth.min(d);
-            }
-        }
-        for n in &mut self.nodes {
-            if n.depth == usize::MAX {
-                n.depth = 0;
-            }
-        }
-
         // Newborns: a hub whose records are already on the map appears among
         // them (a rearrangement grows its new hubs out of the old clusters,
         // then the springs sort the records); a hub with no home yet takes a
@@ -881,9 +859,7 @@ impl GraphState {
                 spiral += 1;
                 let r = 30.0 * k.sqrt();
                 let t = k * 2.399_963;
-                egui::vec2(r * t.cos(), r * t.sin())
-                    + jitter * 8.0
-                    + egui::vec2(self.nodes[i].depth as f32 * FLOW_PITCH, 0.0)
+                egui::vec2(r * t.cos(), r * t.sin()) + jitter * 8.0
             };
             self.nodes[i].vel = egui::Vec2::ZERO;
         }
@@ -893,6 +869,7 @@ impl GraphState {
             .map(|n| n.hub.map(|h| self.nodes[h].pos))
             .collect();
         let mut seed = self.seed;
+        let flow = self.flow;
         for ((n, placed), hub_pos) in self.nodes.iter_mut().zip(placed).zip(hub_pos) {
             if placed || n.kind != Kind::Release {
                 continue;
@@ -900,6 +877,7 @@ impl GraphState {
             let a = next_rand(&mut seed) * std::f32::consts::TAU;
             let jitter = egui::vec2(a.cos(), a.sin());
             n.pos = match hub_pos {
+                _ if flow => n.slot - egui::vec2(2.0 * REL_R, 0.0),
                 Some(p) => p + jitter * (n.r + 6.0),
                 None => jitter * 20.0,
             };
@@ -940,27 +918,21 @@ impl GraphState {
             // due east of its artist.
             let phase = (self.nodes[h].key.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32)) % 628) as f32 / 100.0;
             let (slots, outer) = if self.flow {
-                // A flowing map reads left to right inside a cloud too: its
-                // records go in hop order along a zigzag, so each has a
-                // caption's width clear beside it and the next hop is
-                // always to the right of the one it came from.
-                members.sort_by_key(|&m| {
-                    (
-                        self.nodes[m].release.as_ref().map_or(0, |r| r.depth),
-                        self.nodes[m].key.clone(),
-                    )
-                });
-                let n = members.len() as f32;
-                let slots: Vec<egui::Vec2> = (0..members.len())
-                    .map(|k| {
-                        egui::vec2(
-                            (k as f32 - (n - 1.0) * 0.5) * FLOW_STEP.x,
-                            if k % 2 == 1 { FLOW_STEP.y } else { 0.0 },
-                        )
+                // A flowing map is a fixed tree, not a cloud: every record
+                // sits at its own column and row of the grid, and the hub
+                // is an anchor at the origin with no body of its own, so
+                // the simulation has nothing to move.
+                let slots = members
+                    .iter()
+                    .map(|&m| {
+                        let (d, row) = self.nodes[m]
+                            .release
+                            .as_ref()
+                            .map_or((0, 0.0), |r| (r.depth, r.row));
+                        egui::vec2(d as f32 * FLOW_GRID.x, row * FLOW_GRID.y)
                     })
                     .collect();
-                let outer = slots.iter().map(|s| s.length()).fold(0.0, f32::max) + REL_R;
-                (slots, outer)
+                (slots, -RING_GAP)
             } else {
                 ring_slots(members.len(), self.nodes[h].r, REL_R, phase)
             };
@@ -1045,7 +1017,6 @@ impl GraphState {
             hub: None,
             release: None,
             weight: 0,
-            depth: 0,
             alive: true,
             hay: String::new(),
             held: false,
@@ -1180,19 +1151,17 @@ impl GraphState {
                 if node.held {
                     continue;
                 }
-                let off = node.pos - egui::vec2(node.depth as f32 * FLOW_PITCH, 0.0);
-                let len = off.length();
-                let mut pull = if len > 1e-3 {
-                    off / len * (GRAVITY_HUB * (len / 40.0).min(1.0) + GRAVITY_SLOPE * len)
+                if self.flow {
+                    node.pos = egui::Vec2::ZERO;
+                    node.vel = egui::Vec2::ZERO;
+                    continue;
+                }
+                let len = node.pos.length();
+                let pull = if len > 1e-3 {
+                    node.pos / len * (GRAVITY_HUB * (len / 40.0).min(1.0) + GRAVITY_SLOPE * len)
                 } else {
                     egui::Vec2::ZERO
                 };
-                if self.flow {
-                    // The column is a firm spring, not a tug: a cloud a
-                    // spawn collision flung off it must come back before
-                    // the map sleeps, or the dig stops reading in order.
-                    pull.x += off.x * FLOW_K;
-                }
                 let f = forces[i] - pull;
                 let mass = (node.reach / 40.0).max(1.0);
                 node.vel = (node.vel + f / mass * h) * damp;
@@ -1254,10 +1223,13 @@ impl GraphState {
 
     fn fit_zoom(&self, canvas: egui::Rect) -> Option<(egui::Vec2, f32)> {
         let b = self.bounds()?;
-        let w = (canvas.width() - FIT_PAD * 2.0).max(40.0);
+        // A flowing map's head wears its knob block to the right of the
+        // cover, in screen space: leave it room so a fit never clips it.
+        let knobs = if self.flow { THREAD_GAP + 4.0 * THREAD_R + 14.0 } else { 0.0 };
+        let w = (canvas.width() - FIT_PAD * 2.0 - knobs).max(40.0);
         let h = (canvas.height() - FIT_PAD * 2.0).max(40.0);
-        let z = (w / b.width().max(1.0)).min(h / b.height().max(1.0));
-        Some((b.center().to_vec2(), z.clamp(0.02, MAX_ZOOM)))
+        let z = (w / b.width().max(1.0)).min(h / b.height().max(1.0)).clamp(0.02, MAX_ZOOM);
+        Some((b.center().to_vec2() + egui::vec2(knobs * 0.5 / z, 0.0), z))
     }
 
     /// Where record `i`'s knobs sit on screen: the three threads and the
@@ -1816,17 +1788,26 @@ impl App {
         // The feathering is a stack of faint discs, largest first, so the
         // edge fades out rather than stopping.
         for (i, n) in g.nodes.iter().enumerate() {
-            if n.kind != Kind::Hub || n.scale <= 0.01 {
+            // On a flowing map the wash sits under each record instead:
+            // the hub is an anchor with no body (see `rebuild`).
+            let (name, reach) = match (g.flow, n.kind) {
+                (false, Kind::Hub) => (&n.name, n.reach * zoom),
+                (true, Kind::Release) => match g.top_hub(i) {
+                    Some(h) => (&g.nodes[h].name, n.r * 2.4 * zoom),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            if n.scale <= 0.01 {
                 continue;
             }
             let p = to_screen(cam, zoom, n.pos);
-            let reach = n.reach * zoom;
             if !visible(p, reach) {
                 continue;
             }
             let on = matches[i];
             let lit = Some(i) == g.hover || Some(i) == g.drag;
-            let tint = cloud_tint(&n.name);
+            let tint = cloud_tint(name);
             let layers = 7;
             let base = if lit { 9.0 } else { 6.5 } * n.scale.clamp(0.0, 1.0);
             for k in 0..layers {
@@ -1840,7 +1821,7 @@ impl App {
         // Links between clouds.
         let link_w = (1.0 * zoom.sqrt()).clamp(0.5, 1.6);
         for e in &g.edges {
-            if !e.soft {
+            if !e.soft || g.flow {
                 continue;
             }
             let (a, b) = (&g.nodes[e.a], &g.nodes[e.b]);
@@ -2018,7 +1999,7 @@ impl App {
                     // speck on screen stays unlabelled until you lean in,
                     // so the whole-map view isn't a carpet of type.
                     let area = n.reach * zoom;
-                    if (area >= 26.0 || lit) && n.name != UNTAGGED {
+                    if !g.flow && (area >= 26.0 || lit) && n.name != UNTAGGED {
                         hub_names.push((p, area, n.name.clone(), dim(color::LABEL, on)));
                     }
                 }
@@ -2144,26 +2125,45 @@ impl App {
                     }
                 };
                 let ink = dim(if lit { color::LABEL } else { color::LABEL_2 }, on);
-                // Title in bold with the artist under it, both shadowed
-                // like a cloud's name so they stay legible over the wash.
-                let lines = [
-                    (clip(&n.name, 26), font::strong(size)),
-                    (clip(&rel.artist, 26), egui::FontId::proportional(size * 0.9)),
-                ];
-                let mut y = p.y + r + 4.0;
-                for (text, font) in lines {
-                    if text.is_empty() {
-                        continue;
-                    }
-                    let galley = painter.layout_no_wrap(text, font, ink);
-                    let pos = egui::pos2(p.x - galley.size().x * 0.5, y);
-                    y += galley.size().y + 1.0;
+                let shadowed = |galley: std::sync::Arc<egui::Galley>, pos: egui::Pos2| {
                     painter.galley(
                         pos + egui::vec2(0.0, 1.0),
                         galley.clone(),
                         egui::Color32::from_black_alpha(140),
                     );
                     painter.galley(pos, galley, ink);
+                };
+                // On a flowing map the cloud's name (artist or style) sits
+                // over the cover, since the cloud has no body of its own.
+                let cloud = g.top_hub(i).map(|h| g.nodes[h].name.as_str());
+                if let Some(cloud) = cloud.filter(|_| g.flow && cloud != Some(UNTAGGED)) {
+                    let galley = painter.layout_no_wrap(
+                        clip(cloud, 26),
+                        font::strong(size * 0.9),
+                        ink,
+                    );
+                    let pos = egui::pos2(
+                        p.x - galley.size().x * 0.5,
+                        p.y - r - 4.0 - galley.size().y,
+                    );
+                    shadowed(galley, pos);
+                }
+                // Title in bold with the artist under it, both shadowed
+                // like a cloud's name so they stay legible over the wash.
+                let artist = (cloud != Some(rel.artist.as_str())).then(|| clip(&rel.artist, 26));
+                let lines = [
+                    Some((clip(&n.name, 26), font::strong(size))),
+                    artist.map(|a| (a, egui::FontId::proportional(size * 0.9))),
+                ];
+                let mut y = p.y + r + 4.0;
+                for (text, font) in lines.into_iter().flatten() {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let galley = painter.layout_no_wrap(text, font, ink);
+                    let pos = egui::pos2(p.x - galley.size().x * 0.5, y);
+                    y += galley.size().y + 1.0;
+                    shadowed(galley, pos);
                 }
             }
         }
@@ -2534,17 +2534,40 @@ impl App {
             return Vec::new();
         };
         // A step's parent is always an earlier step, so one forward pass
-        // gives every hop its distance from the start.
-        let mut depth = vec![0usize; dig.steps.len()];
-        for i in 0..dig.steps.len() {
+        // gives every hop its distance from the start. Rows come from the
+        // tree: each leaf takes the next row, a branch sits midway between
+        // its first and last child, so every trail leaves to the right.
+        let n = dig.steps.len();
+        let mut depth = vec![0usize; n];
+        for i in 0..n {
             if let Some(p) = dig.steps[i].parent.filter(|&p| p < i) {
                 depth[i] = depth[p] + 1;
             }
         }
+        let mut row = vec![0.0f32; n];
+        let mut leaves = 0.0f32;
+        // Children are listed in landing order, parents before children,
+        // so walking the steps backwards sees every child before its
+        // parent and a leaf before anything.
+        fn place(i: usize, steps: &[crate::dig::DigStep], row: &mut [f32], leaves: &mut f32) {
+            let kids: Vec<usize> = steps[i].children.iter().copied().filter(|&c| c > i && c < steps.len()).collect();
+            if kids.is_empty() {
+                row[i] = *leaves;
+                *leaves += 1.0;
+                return;
+            }
+            for &c in &kids {
+                place(c, steps, row, leaves);
+            }
+            row[i] = (row[kids[0]] + row[kids[kids.len() - 1]]) * 0.5;
+        }
+        if n > 0 {
+            place(0, &dig.steps, &mut row, &mut leaves);
+        }
         dig.steps
             .iter()
-            .zip(depth)
-            .map(|(s, depth)| {
+            .zip(depth.into_iter().zip(row))
+            .map(|(s, (depth, row))| {
                 let status = if self.vinyl_owned.contains(&s.release_id) {
                     Status::Owned
                 } else if self.vinyl_wanted.contains(&s.release_id)
@@ -2590,6 +2613,7 @@ impl App {
                     cover,
                     key,
                     depth,
+                    row,
                 }
             })
             .collect()
