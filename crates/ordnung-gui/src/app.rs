@@ -202,7 +202,7 @@ impl App {
             graph: graph::GraphState::default(),
             radio: radio::Radio::default(),
             graph_rect: egui::Rect::NOTHING,
-            dig_graph: graph::GraphState::default(),
+            dig_graph: graph::GraphState::dig(),
             dig_graph_rect: egui::Rect::NOTHING,
             dig_window_open: false,
             seller_shipping: HashMap::new(),
