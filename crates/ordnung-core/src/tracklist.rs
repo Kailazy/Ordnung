@@ -887,6 +887,22 @@ fn split_artist_title(body: &str) -> (Option<String>, Option<String>, Option<Str
     if let Some((a, tt)) = split_glued_dash(body) {
         return (non_empty(a), non_empty(tt), None);
     }
+    // "Title" by Artist (a SoundCloud description: `"Abyss" by Manoo`).
+    // Quoted only: a bare `by` is in too many titles (`Stand By Me`).
+    if let Some(inner) = body.strip_prefix('"') {
+        if let Some((title, rest)) = inner.split_once('"') {
+            let rest = rest.trim_start();
+            let artist = rest
+                .strip_prefix("by ")
+                .or_else(|| rest.strip_prefix("By "))
+                .map(str::trim);
+            if let (Some(artist), false) = (artist, title.trim().is_empty()) {
+                if !artist.is_empty() {
+                    return (non_empty(artist), non_empty(title), None);
+                }
+            }
+        }
+    }
     // Artist "Title"
     if let Some(open) = body.find('"') {
         if let Some(close) = body[open + 1..].find('"') {
@@ -1309,6 +1325,20 @@ mod tests {
         assert_eq!(l.artist.as_deref(), Some("Pépé Bradock"));
         assert_eq!(l.title.as_deref(), Some("Deep Burnt"));
         assert_eq!(l.label_hint.as_deref(), Some("Kif"));
+    }
+
+    #[test]
+    fn quoted_title_by_artist() {
+        let l = line("04:49 “Direct” by Kris Wadsworth");
+        assert_eq!(l.timestamp, Some(289));
+        assert_eq!(l.artist.as_deref(), Some("Kris Wadsworth"));
+        assert_eq!(l.title.as_deref(), Some("Direct"));
+        let (a, t) = at("\"Track B1\" by Slowhouse Two");
+        assert_eq!(a.as_deref(), Some("Slowhouse Two"));
+        assert_eq!(t.as_deref(), Some("Track B1"));
+        // No `by` after the quote: not this shape.
+        let (a, _) = at("\"Deep Burnt\" (Kif)");
+        assert_eq!(a, None);
     }
 
     #[test]
