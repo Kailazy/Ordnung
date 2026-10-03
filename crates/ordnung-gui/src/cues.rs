@@ -544,7 +544,6 @@ impl App {
         const GAP: f32 = space::S2;
         const SECT_GAP: f32 = space::S5;
         const HEADER_H: f32 = 14.0;
-        const PAD_H: f32 = 40.0;
         const LOOP_W: f32 = 206.0;
         const MEM_MIN_W: f32 = 170.0;
         const ADD_W: f32 = 124.0;
@@ -654,23 +653,20 @@ impl App {
             );
 
             // --- Pads ---------------------------------------------------
-            // Until the track has a hot cue, the eight empty pads are one
-            // thin strip at the loop keys' height, a letter per slot: eight
-            // blank boxes were most of the bar and said nothing. The first
-            // cue brings the full pads back.
-            let bare = !cues.iter().any(|c| c.is_hot());
-            let pad_h = if bare { crate::ui::control_h(ui) } else { PAD_H };
+            // The eight pads are one strip at the loop keys' height, a slot
+            // per letter, whether or not the track has hot cues: a set slot
+            // lights up in its colour inside the strip, so the first cue
+            // never changes the strip's shape.
+            let pad_h = crate::ui::control_h(ui);
             let pad_top = row_top + (row_h - pad_h) / 2.0;
-            if bare {
-                painter.rect_filled(
-                    egui::Rect::from_min_size(
-                        egui::pos2(pads_rect.left(), pad_top),
-                        egui::vec2(pads_w, pad_h),
-                    ),
-                    egui::Rounding::same(radius::SM),
-                    color::FIELD,
-                );
-            }
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(pads_rect.left(), pad_top),
+                    egui::vec2(pads_w, pad_h),
+                ),
+                egui::Rounding::same(radius::SM),
+                color::FIELD,
+            );
             for slot in 0..8u8 {
                 let rect = egui::Rect::from_min_size(
                     egui::pos2(pads_rect.left() + slot as f32 * (pad_w + GAP), pad_top),
@@ -692,8 +688,8 @@ impl App {
                         // pad is hovered: the pointer moving onto it leaves
                         // the pad, and a ✕ that vanished then would flicker
                         // under the pointer and never take the click.
-                        let x_rect = egui::Rect::from_min_size(
-                            rect.right_top() + egui::vec2(-18.0, 2.0),
+                        let x_rect = egui::Rect::from_center_size(
+                            egui::pos2(rect.right() - 10.0, rect.center().y),
                             egui::vec2(16.0, 16.0),
                         );
                         let x_resp = editable.then(|| {
@@ -702,7 +698,7 @@ impl App {
                         });
                         let hot = resp.hovered() || x_resp.as_ref().map_or(false, |x| x.hovered());
                         // A rubber pad: the colour, with a darker lip at the
-                        // bottom so it stands off the bar; full brightness
+                        // bottom so it stands off the strip; full brightness
                         // under the pointer.
                         let body_col = if hot || lit {
                             col
@@ -710,7 +706,7 @@ impl App {
                             egui::Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 205)
                         };
                         painter.rect_filled(rect, egui::Rounding::same(r), col.gamma_multiply(0.45));
-                        let body = egui::Rect::from_min_max(rect.min, rect.max - egui::vec2(0.0, 3.0));
+                        let body = egui::Rect::from_min_max(rect.min, rect.max - egui::vec2(0.0, 2.0));
                         painter.rect_filled(body, egui::Rounding::same(r), body_col);
                         if lit {
                             painter.rect_stroke(
@@ -720,26 +716,17 @@ impl App {
                             );
                         }
                         let ink = egui::Color32::from_gray(16);
+                        let mid = body.center().y;
                         painter.text(
-                            rect.left_top() + egui::vec2(6.0, 3.0),
-                            egui::Align2::LEFT_TOP,
+                            egui::pos2(rect.left() + 6.0, mid),
+                            egui::Align2::LEFT_CENTER,
                             letter,
-                            font::strong(14.0),
+                            font::strong(12.0),
                             ink,
                         );
-                        let sub = match c.label.as_deref().filter(|l| !l.is_empty()) {
-                            Some(l) => l.to_string(),
-                            None => fmt_time(c.position_ms as f32 / 1000.0),
-                        };
-                        painter.text(
-                            rect.left_bottom() + egui::vec2(6.0, -5.0),
-                            egui::Align2::LEFT_BOTTOM,
-                            sub,
-                            font::mono_small(),
-                            ink,
-                        );
-                        // Top right: the loop badge, or the ✕ while hovered.
+                        // Right: the loop badge, or the ✕ while hovered.
                         let show_x = hot && x_resp.is_some();
+                        let mut right = rect.right() - 6.0;
                         if let (true, Some(x)) = (show_x, x_resp.as_ref()) {
                             crate::ui::icon::close(
                                 &painter,
@@ -747,21 +734,40 @@ impl App {
                                 if x.hovered() { egui::Color32::WHITE } else { ink },
                                 3.5,
                             );
+                            right = x_rect.left() - 2.0;
+                        } else if let Some(end) = c.loop_end_ms {
+                            let badge = match loop_beats_of(c.position_ms, end) {
+                                Some(n) if pad_w >= 60.0 => format!("⟲{n}"),
+                                _ => "⟲".to_string(),
+                            };
+                            let g = painter.text(
+                                egui::pos2(rect.right() - 6.0, mid),
+                                egui::Align2::RIGHT_CENTER,
+                                badge,
+                                font::strong(11.0),
+                                ink,
+                            );
+                            right = g.left() - 4.0;
                         }
-                        if !show_x {
-                            if let Some(end) = c.loop_end_ms {
-                                let badge = match loop_beats_of(c.position_ms, end) {
-                                    Some(n) if pad_w >= 60.0 => format!("⟲{n}"),
-                                    _ => "⟲".to_string(),
-                                };
-                                painter.text(
-                                    rect.right_top() + egui::vec2(-6.0, 3.0),
-                                    egui::Align2::RIGHT_TOP,
-                                    badge,
-                                    font::strong(11.0),
+                        // Between: the label or the time, clipped to the room left.
+                        let sub = match c.label.as_deref().filter(|l| !l.is_empty()) {
+                            Some(l) => l.to_string(),
+                            None => fmt_time(c.position_ms as f32 / 1000.0),
+                        };
+                        let sub_left = rect.left() + 20.0;
+                        if right - sub_left >= 24.0 {
+                            painter
+                                .with_clip_rect(egui::Rect::from_min_max(
+                                    egui::pos2(sub_left, rect.top()),
+                                    egui::pos2(right, rect.bottom()),
+                                ))
+                                .text(
+                                    egui::pos2(sub_left, mid),
+                                    egui::Align2::LEFT_CENTER,
+                                    sub,
+                                    font::mono_small(),
                                     ink,
                                 );
-                            }
                         }
                         let note = format!(
                             "Hot cue {letter} at {}{}",
@@ -782,46 +788,20 @@ impl App {
                         });
                     }
                     None => {
+                        // An empty slot: lit under the pointer, the letter
+                        // centred; the hover note says what a click does.
                         let hot = resp.hovered() && editable;
-                        let ink = if hot { color::LABEL_2 } else { color::LABEL_4 };
-                        if bare {
-                            // A slot in the strip: lit under the pointer, the
-                            // letter centred; the hover note says what a
-                            // click does.
-                            if hot {
-                                painter.rect_filled(rect, egui::Rounding::same(r), color::SURFACE_HOVER);
-                            }
-                            painter.text(rect.center(), egui::Align2::CENTER_CENTER, letter, font::strong(12.0), ink);
-                        } else {
-                            painter.rect_filled(
-                                rect,
-                                egui::Rounding::same(r),
-                                if hot { color::SURFACE_HOVER } else { color::FIELD },
-                            );
-                            painter.text(
-                                rect.left_top() + egui::vec2(6.0, 3.0),
-                                egui::Align2::LEFT_TOP,
-                                letter,
-                                font::strong(14.0),
-                                ink,
-                            );
-                        }
-                        if hot && !bare {
-                            let sub = match active {
-                                Some(_) => "store loop".to_string(),
-                                None => fmt_time(self.snap_ms(playhead) as f32 / 1000.0),
-                            };
-                            painter.text(
-                                rect.left_bottom() + egui::vec2(6.0, -5.0),
-                                egui::Align2::LEFT_BOTTOM,
-                                sub,
-                                font::mono_small(),
-                                color::LABEL_2,
-                            );
-                        }
                         if hot {
+                            painter.rect_filled(rect, egui::Rounding::same(r), color::SURFACE_HOVER);
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
+                        painter.text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            letter,
+                            font::strong(12.0),
+                            if hot { color::LABEL_2 } else { color::LABEL_4 },
+                        );
                         if resp.clicked() && editable {
                             pad_hit = Some(slot);
                         }
@@ -835,7 +815,6 @@ impl App {
                     }
                 }
             }
-
             // --- Loop -----------------------------------------------------
             let loop_row = egui::Rect::from_min_max(
                 egui::pos2(loop_rect.left(), row_top),
