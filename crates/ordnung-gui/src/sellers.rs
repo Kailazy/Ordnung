@@ -12,7 +12,83 @@
 //! happens on discogs.com, one click from the card or the sheet.
 
 use super::*;
+use crate::ui::phosphor_icons::{app as icons, named};
 use crate::vinyl_sheet::SellerOffer;
+use ordnung_core::model::{seller_baskets, SellerBasket};
+
+/// The shop's cart: a button counting what the shop stocks from the
+/// wantlist, with the records in a dropdown under it, cheapest copy of each.
+/// A row opens the record carrying that offer, as the watch's rows do; the
+/// last row opens the shop's "in my wantlist" page on discogs.com, where the
+/// real cart lives (the API has no cart endpoint).
+fn draw_cart_button(
+    ui: &mut egui::Ui,
+    seller: &str,
+    cart: Option<&SellerBasket>,
+    open: &mut Option<u64>,
+) {
+    let n = cart.map_or(0, |b| b.wants());
+    let label = match n {
+        0 => "Cart".to_string(),
+        n => format!("Cart · {n}"),
+    };
+    let btn = ui
+        .button(crate::ui::icon_text(
+            named(icons::SHOPPING_CART),
+            &label,
+            crate::ui::tokens::font::body(),
+        ))
+        .on_hover_note("What this shop stocks from your wantlist");
+    crate::ui::menu::dropdown(&btn, 320.0, |m| {
+        let Some(b) = cart.filter(|b| b.wants() > 0) else {
+            m.note("Nothing from your wantlist in stock here");
+            m.note("Update the shop to refresh its stock");
+            return;
+        };
+        m.scroll(360.0, |m| {
+            for l in &b.offers {
+                let mut terms = crate::vinyl_sheet::fmt_market_price(&discogs::MarketPrice {
+                    value: l.price,
+                    currency: l.currency.clone(),
+                });
+                if let Some(c) = l.condition.as_deref() {
+                    terms.push_str(&format!(" · {}", cond_short(c)));
+                }
+                if m.item_detail(format!("{} – {}", l.artist, l.title), terms) {
+                    *open = Some(l.listing_id);
+                    m.close();
+                }
+            }
+        });
+        m.separator();
+        let mut sum = b
+            .subtotal
+            .iter()
+            .map(|(currency, value)| {
+                crate::vinyl_sheet::fmt_market_price(&discogs::MarketPrice {
+                    value: *value,
+                    currency: currency.clone(),
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(" + ");
+        match &b.shipping {
+            Some((p, c)) => sum.push_str(&format!(
+                " + {} shipping",
+                crate::vinyl_sheet::fmt_market_price(&discogs::MarketPrice {
+                    value: *p,
+                    currency: c.clone(),
+                })
+            )),
+            None => sum.push_str(" · shipping not quoted"),
+        }
+        m.note(sum);
+        if m.item("Shop wants on discogs.com ↗") {
+            open_url(&format!("https://www.discogs.com/seller/{seller}/mywants"));
+            m.close();
+        }
+    });
+}
 
 /// What a card click or context-menu pick asked for, applied after the grid
 /// releases its borrows.
@@ -204,6 +280,24 @@ impl App {
         let mut add_clicked = false;
         // A find-box hit picked this frame: `(seller, listing_id)`.
         let mut pick: Option<(String, u64)> = None;
+        // A row of the current shop's cart clicked: open that offer.
+        let mut cart_open: Option<u64> = None;
+        // The current shop's cart: what it stocks from the wantlist, folded
+        // the way the watch folds it (cheapest copy per record, subtotal,
+        // shipping floor), so the two never disagree about a basket.
+        let cart = self.seller_current.as_deref().and_then(|cur| {
+            let mine: Vec<(String, SellerListing)> = self
+                .wantlist_watch
+                .iter()
+                .filter(|(s, _)| s == cur)
+                .cloned()
+                .collect();
+            let mut b = seller_baskets(&mine).pop()?;
+            if b.shipping.is_none() {
+                b.shipping = self.seller_shipping.get(cur).map(|(p, c)| (*p, c.clone()));
+            }
+            Some(b)
+        });
         ui.add_space(8.0);
         // One height for the whole row: the find field sets it, the add
         // button, the picker and the shop actions are sized to match.
@@ -280,6 +374,7 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(cur) = self.seller_current.clone() {
+                    draw_cart_button(ui, &cur, cart.as_ref(), &mut cart_open);
                     // The note sizes the job once the shop's size is known
                     // (stamped by the first page of any earlier update): a
                     // distributor takes half an hour, and saying so up front
@@ -338,6 +433,9 @@ impl App {
             ctx.memory_mut(|m| m.close_popup());
         }
 
+        if let Some(id) = cart_open {
+            self.open_watch_offer(id, ctx);
+        }
         // Apply the shop-row asks now that `self.sellers` is free again.
         if let Some(u) = switch_to {
             self.seller_current = Some(u);

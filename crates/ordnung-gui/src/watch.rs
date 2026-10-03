@@ -429,7 +429,7 @@ impl App {
 
     /// Open the record sheet for one watch row, carrying the seller's concrete
     /// offer — same contract as opening the listing from that shop's crates.
-    fn open_watch_offer(&mut self, listing_id: u64, ctx: &egui::Context) {
+    pub(crate) fn open_watch_offer(&mut self, listing_id: u64, ctx: &egui::Context) {
         let Some((seller, l)) = self
             .wantlist_watch
             .iter()

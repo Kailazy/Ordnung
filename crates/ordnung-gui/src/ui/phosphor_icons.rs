@@ -52,6 +52,7 @@ pub mod app {
     pub const TAG: &str = "tag";
     pub const FOLDER: &str = "folder";
     pub const FILE_AUDIO: &str = "file-audio";
+    pub const SHOPPING_CART: &str = "shopping-cart";
     pub const CARET_UP: &str = "caret-up";
     pub const CARET_DOWN: &str = "caret-down";
 
