@@ -401,7 +401,7 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 ///
 /// Schema 23 adds `crates.kind`: a set is a crate or a tag (see
 /// [`CrateKind`]). Every set that existed before is a crate.
-const SCHEMA_VERSION: i64 = 23;
+const SCHEMA_VERSION: i64 = 24;
 
 /// The columns of the two vinyl list tables (`vinyl_collection`,
 /// `vinyl_wantlist`), shared so both are created alike and so an older
@@ -1112,6 +1112,9 @@ impl Catalog {
         // absence means "not published", never "free".
         self.add_column_if_missing("seller_listings", "shipping_price", "REAL")?;
         self.add_column_if_missing("seller_listings", "shipping_currency", "TEXT")?;
+        // v24: the Discogs genres a seller's sweep keeps, GENRE_SEP-joined;
+        // NULL keeps every genre.
+        self.add_column_if_missing("sellers", "genres", "TEXT")?;
         // v18: the song's title as the matched record spells it.
         self.add_column_if_missing("tracklist_lines", "rel_track", "TEXT")?;
 
@@ -3587,6 +3590,17 @@ impl Catalog {
         Ok(())
     }
 
+    /// Restrict a seller's sweeps to these Discogs genres; empty keeps every
+    /// genre. Listings outside them are never cached (the GUI's sweep checks
+    /// each page against the genre database).
+    pub fn set_seller_genres(&self, username: &str, genres: &[String]) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sellers SET genres=?2 WHERE username=?1",
+            params![username, join_genres(genres)],
+        )?;
+        Ok(())
+    }
+
     /// Drop a seller and (via cascade) every listing cached for them. Returns
     /// whether the seller was there to remove.
     pub fn remove_seller(&self, username: &str) -> Result<bool> {
@@ -3601,7 +3615,8 @@ impl Catalog {
     pub fn list_sellers(&self) -> Result<Vec<SellerShop>> {
         let mut stmt = self.conn.prepare(
             "SELECT s.username, s.reported_items, s.swept_at,
-                    (SELECT COUNT(*) FROM seller_listings l WHERE l.seller = s.username)
+                    (SELECT COUNT(*) FROM seller_listings l WHERE l.seller = s.username),
+                    s.genres
              FROM sellers s
              ORDER BY s.added_at, s.username",
         )?;
@@ -3612,6 +3627,7 @@ impl Catalog {
                     reported: r.get::<_, Option<i64>>(1)?.map(|n| n as u64),
                     swept_at: r.get(2)?,
                     cached: r.get::<_, i64>(3)? as u64,
+                    genres: split_genres(r.get(4)?),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -6627,6 +6643,13 @@ mod tests {
         cat.add_seller("hardwax").unwrap();
         assert_eq!(cat.list_sellers().unwrap().len(), 1);
         assert!(cat.list_sellers().unwrap()[0].swept_at.is_none());
+        // Genre choice: empty keeps everything, a list rides the row.
+        assert!(cat.list_sellers().unwrap()[0].genres.is_empty());
+        cat.set_seller_genres("hardwax", &["Electronic".to_string(), "Jazz".to_string()])
+            .unwrap();
+        assert_eq!(cat.list_sellers().unwrap()[0].genres, ["Electronic", "Jazz"]);
+        cat.set_seller_genres("hardwax", &[]).unwrap();
+        assert!(cat.list_sellers().unwrap()[0].genres.is_empty());
 
         cat.upsert_seller_listing("hardwax", &listing(1, "Monolake", "Cyan", "2024-01-02"))
             .unwrap();

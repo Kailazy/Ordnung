@@ -460,6 +460,9 @@ pub struct SellerShop {
     pub reported: Option<u64>,
     /// Unix time the last completed sweep finished; `None` if never swept.
     pub swept_at: Option<i64>,
+    /// Discogs genres the sweep keeps; empty means every genre. Chosen when
+    /// the seller is added, so a shop only costs the crates you'd dig.
+    pub genres: Vec<String>,
 }
 
 /// One for-sale listing from a seller's Discogs inventory, cached locally so

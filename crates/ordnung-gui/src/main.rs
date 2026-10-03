@@ -1422,6 +1422,8 @@ struct App {
     /// The "add a seller" input box in the Sellers tab (username or a pasted
     /// discogs.com seller/user URL).
     seller_add: String,
+    /// Genres the seller being added will keep; empty keeps every genre.
+    seller_add_genres: Vec<String>,
     /// The Sellers tab's find box: a record search across every saved
     /// seller's cached crates, answered by a dropdown of `seller_find_hits`.
     seller_find: String,

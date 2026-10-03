@@ -314,6 +314,13 @@ pub struct BrowseRelease {
     pub styles: Vec<String>,
 }
 
+/// Deepest page Discogs serves of anyone else's inventory: page 101 answers
+/// "Pagination above 100 disabled for inventories besides your own". A sweep
+/// therefore reads up to this many pages newest-first and as many again
+/// oldest-first ([`Client::seller_inventory`]), which covers a shop whole up
+/// to 20,000 listings.
+pub const INVENTORY_PAGE_CAP: u32 = 100;
+
 /// One page of a seller's marketplace inventory
 /// (`GET /users/{username}/inventory`). Non-vinyl listings are already filtered
 /// out of `listings`, so `items` (Discogs's total across every format) can
@@ -2044,24 +2051,30 @@ impl Client {
     /// was removed; see `docs/design/bulk-sellers-spike.md`.) This is what the
     /// Sellers tab's sweep pages through.
     ///
-    /// Newest listings first (`sort=listed`), so a capped sweep keeps the
-    /// freshest part of the crates. Non-vinyl listings (CDs, cassettes, files)
-    /// are dropped here, matching the records-only vinyl view. `page` is
-    /// 1-based; the caller learns the real page count from
-    /// [`InventoryPage::pages`]. One rate-limited request per call, and
-    /// `per_page` is hard-capped at 100 by Discogs — a large shop takes one
-    /// request per hundred listings, which is why sweeps are explicit,
-    /// backgrounded and cancellable.
-    pub fn seller_inventory(&self, username: &str, page: u32) -> Result<InventoryPage> {
+    /// Walks the `sort=listed` order from the newest end (`newest_first`) or
+    /// the oldest; see [`INVENTORY_PAGE_CAP`] for why a sweep needs both.
+    /// Non-vinyl listings (CDs, cassettes, files) are dropped here, matching
+    /// the records-only vinyl view. `page` is 1-based; the caller learns the
+    /// real page count from [`InventoryPage::pages`]. One rate-limited request
+    /// per call, and `per_page` is hard-capped at 100 by Discogs — a large
+    /// shop takes one request per hundred listings, which is why sweeps are
+    /// explicit, backgrounded and cancellable.
+    pub fn seller_inventory(
+        &self,
+        username: &str,
+        page: u32,
+        newest_first: bool,
+    ) -> Result<InventoryPage> {
         let page = page.max(1);
         let url = format!("https://api.discogs.com/users/{username}/inventory");
+        let order = if newest_first { "desc" } else { "asc" };
         let resp = self.call_with_retry(|| {
             self.authed(self.agent.get(&url))
                 .query("status", "For Sale")
                 .query("per_page", "100")
                 .query("page", &page.to_string())
                 .query("sort", "listed")
-                .query("sort_order", "desc")
+                .query("sort_order", order)
         })?;
         let body: InventoryResponse = resp
             .into_json()

@@ -638,7 +638,13 @@ impl App {
         };
         self.status = format!("Updating {username}'s crates…");
         let db = self.db_path.clone();
-        thread::spawn(move || run_sweep_seller(db, token, username, cancel, tx, ctx));
+        let genres = self
+            .sellers
+            .iter()
+            .find(|s| s.username == username)
+            .map(|s| s.genres.clone())
+            .unwrap_or_default();
+        thread::spawn(move || run_sweep_seller(db, token, username, genres, cancel, tx, ctx));
     }
 
     /// Import the Discogs genre database: one ~10 GB monthly-dump download,
@@ -2402,13 +2408,14 @@ const VINYL_PRICE_MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
 
 /// Page cap for a seller sweep: 100 listings per page, so 2,000 pages =
 /// 200,000 listings ≈ 37 minutes at the background pace. High enough to
-/// cover the big distributors whole (hhv.de lists ~160,000): the wantlist
-/// watch can only count a want a shop stocks if the sweep reached it, and a
-/// 20,000-listing head of a 160,000-listing shop missed most of them. Still
-/// a cap, so a runaway shop is bounded; inventory is fetched newest-listed
-/// first, so what a capped sweep keeps is the freshest slice, and the Done
-/// message says when it was cut short.
-const SELLER_SWEEP_MAX_PAGES: u32 = 2_000;
+/// cover the big distributors whole, but Discogs refuses page 101 and up of
+/// anyone else's inventory ([`discogs::INVENTORY_PAGE_CAP`]). The sweep
+/// walks 100 pages newest-first, then 100 oldest-first: a shop up to 20,000
+/// listings comes whole, a bigger one loses its middle and the Done message
+/// says so.
+// ponytail: two directions of `sort=listed`; other sort keys (price, artist)
+// could add slices if a >20,000-listing shop matters.
+const SELLER_SWEEP_MAX_PAGES: u32 = 2 * discogs::INVENTORY_PAGE_CAP;
 
 /// Seconds one inventory page costs at the background pace (the client's
 /// minimum request interval), for the sweep's time-left estimate and the
@@ -2423,8 +2430,10 @@ pub(crate) fn seller_sweep_minutes(items: u64) -> u64 {
 }
 
 /// Sweep one seller's for-sale inventory into the `seller_listings` cache:
-/// page through `/users/{u}/inventory` newest first, upsert every vinyl
-/// listing, and prune rows the sweep didn't see (sold or delisted) — but only
+/// page through `/users/{u}/inventory` from both ends, upsert every vinyl
+/// listing in the seller's chosen `genres` (every listing when empty; the
+/// endpoint carries no tags, so the genre database decides), and prune rows
+/// the sweep didn't see (sold, delisted or outside the genres) — but only
 /// when it ran to the end, since pruning against a partial walk would delete
 /// everything past the cancel point. The completed-sweep stamp gates the same
 /// way, so a cancelled sweep still reads as stale in the tab header.
@@ -2432,6 +2441,7 @@ pub(crate) fn run_sweep_seller(
     db: PathBuf,
     token: String,
     username: String,
+    genres: Vec<String>,
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
@@ -2443,9 +2453,17 @@ pub(crate) fn run_sweep_seller(
     // slot ahead of this sweep rather than queueing behind it.
     let client = discogs::Client::new(token, "Ordnung/0.1 +https://kailazy.github.io/Ordnung/")
         .background();
+    // Without the genre database there is nothing to filter by, so every
+    // genre is kept and the Done message says why.
+    let gdb = if genres.is_empty() {
+        None
+    } else {
+        genredb::GenreDb::open(&genredb::default_path(&db)).ok().flatten()
+    };
 
     let mut keep: Vec<u64> = Vec::new();
     let mut kept = 0usize;
+    let mut skipped = 0usize;
     let mut reported = 0u32;
     let mut pages = 1u32;
     let mut page = 1u32;
@@ -2455,7 +2473,13 @@ pub(crate) fn run_sweep_seller(
             stopped = true;
             break;
         }
-        let fetched = match client.seller_inventory(&username, page) {
+        // Steps past the cap walk the same list from the oldest end.
+        let (newest_first, api_page) = if page <= discogs::INVENTORY_PAGE_CAP {
+            (true, page)
+        } else {
+            (false, page - discogs::INVENTORY_PAGE_CAP)
+        };
+        let fetched = match client.seller_inventory(&username, api_page, newest_first) {
             Ok(p) => p,
             Err(e) => {
                 // A partial sweep is still useful: everything upserted so far
@@ -2475,11 +2499,24 @@ pub(crate) fn run_sweep_seller(
             // behind rather than a head that reads as the whole shop.
             let _ = catalog.set_seller_reported(&username, reported as u64);
         }
-        for l in &fetched.listings {
+        let mut listings = fetched.listings;
+        if let Some(gdb) = &gdb {
+            let ids: Vec<u64> = listings.iter().map(|l| l.release_id).collect();
+            let tags = gdb.genres_for(&ids).unwrap_or_default();
+            let before = listings.len();
+            listings.retain(|l| {
+                tags.get(&l.release_id).is_some_and(|t| {
+                    t.iter()
+                        .any(|t| genres.iter().any(|g| g.eq_ignore_ascii_case(t)))
+                })
+            });
+            skipped += before - listings.len();
+        }
+        for l in &listings {
             let _ = catalog.upsert_seller_listing(&username, l);
             keep.push(l.listing_id);
         }
-        kept += fetched.listings.len();
+        kept += listings.len();
         let total = pages.min(SELLER_SWEEP_MAX_PAGES) as usize;
         let left_secs = (total.saturating_sub(page as usize)) as f64 * SELLER_SWEEP_SECS_PER_PAGE;
         let left = match left_secs as u64 {
@@ -2506,11 +2543,17 @@ pub(crate) fn run_sweep_seller(
         let _ = catalog.prune_seller_listings_not_in(&username, &keep);
         let _ = catalog.set_seller_swept(&username, reported as u64);
     }
-    let note = match (stopped, capped) {
+    let mut note = match (stopped, capped) {
         (true, _) => " (stopped early — fetched so far kept, nothing pruned)",
-        (false, true) => " (large shop — capped at the newest 200,000 listings)",
+        (false, true) => " (large shop — Discogs shows others 20,000 listings, the middle is missing)",
         (false, false) => "",
-    };
+    }
+    .to_string();
+    if skipped > 0 {
+        note.push_str(&format!(" ({skipped} outside the chosen genres skipped)"));
+    } else if !genres.is_empty() && gdb.is_none() {
+        note.push_str(" (no genre database yet, so every genre was kept)");
+    }
     let _ = tx.send(JobMsg::Done(format!(
         "{username}: {kept} records in the crates{note}"
     )));

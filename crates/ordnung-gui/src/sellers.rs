@@ -243,6 +243,27 @@ impl App {
                             add_clicked = true;
                         }
                     });
+                    // What the sweep keeps: every genre, or a few. The
+                    // inventory endpoint ignores a genre parameter, so the
+                    // sweep applies this against the genre database.
+                    crate::ui::menu::embedded(ui, |m| {
+                        m.header("Save");
+                        if m.selectable(self.seller_add_genres.is_empty(), "All genres") {
+                            self.seller_add_genres.clear();
+                        }
+                        m.scroll(240.0, |m| {
+                            for g in DISCOGS_GENRES {
+                                let on = self.seller_add_genres.iter().any(|s| s == g);
+                                if m.selectable(on, g) {
+                                    if on {
+                                        self.seller_add_genres.retain(|s| s != g);
+                                    } else {
+                                        self.seller_add_genres.push(g.to_string());
+                                    }
+                                }
+                            }
+                        });
+                    });
                 },
             );
             if !self.sellers.is_empty() {
@@ -327,6 +348,7 @@ impl App {
                 Some(name) => {
                     let saved = Catalog::open(&self.db_path).and_then(|c| {
                         c.add_seller(&name)?;
+                        c.set_seller_genres(&name, &self.seller_add_genres)?;
                         c.list_sellers()
                     });
                     match saved {
@@ -334,6 +356,7 @@ impl App {
                             self.sellers = sellers;
                             self.seller_current = Some(name);
                             self.seller_add.clear();
+                            self.seller_add_genres.clear();
                             ctx.memory_mut(|m| m.close_popup());
                             self.ensure_seller_listings();
                         }
