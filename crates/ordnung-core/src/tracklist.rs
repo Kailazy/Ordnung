@@ -593,6 +593,17 @@ fn parse_line(raw: &str) -> TracklistLine {
     let rest = strip_ordinal(&rest).trim().to_string();
     // The mashup credit may sit after the ordinal too: `06. w/ Artist - …`.
     let rest = strip_with_prefix(&rest).to_string();
+    // A clock after the last dash is where the song starts, not its title:
+    // `“Abyss” by Manoo – 00:00` (SoundCloud descriptions).
+    let rest = match rest.rsplit_once(" - ") {
+        Some((head, tail)) if !head.trim().is_empty() && parse_clock(tail.trim()).is_some() => {
+            if line.timestamp.is_none() {
+                line.timestamp = parse_clock(tail.trim());
+            }
+            head.trim().to_string()
+        }
+        _ => rest,
+    };
     if rest.is_empty() {
         return line;
     }
@@ -644,7 +655,7 @@ fn normalise(s: &str) -> String {
             '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' | '\u{00b4}' | '\u{02bc}'
             | '\u{2032}' | '`' => '\'',
             '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{201f}' => '"',
-            '\u{00a0}' | '\u{2007}' | '\u{202f}' | '\t' => ' ',
+            '\u{00a0}' | '\u{2007}' | '\u{202f}' | '\t' | '\r' => ' ',
             c => c,
         });
     }
@@ -1333,6 +1344,18 @@ mod tests {
         assert_eq!(l.timestamp, Some(289));
         assert_eq!(l.artist.as_deref(), Some("Kris Wadsworth"));
         assert_eq!(l.title.as_deref(), Some("Direct"));
+        // The real paste: the clock after a dash at the end, once with a
+        // stray carriage return before it.
+        let l = line("“Abyss” by Manoo – 00:00");
+        assert_eq!(l.timestamp, Some(0));
+        assert_eq!(l.artist.as_deref(), Some("Manoo"));
+        assert_eq!(l.title.as_deref(), Some("Abyss"));
+        let l = line("“Acid Face” by Scott Findley – \r33:18");
+        assert_eq!(l.timestamp, Some(1998));
+        assert_eq!(l.title.as_deref(), Some("Acid Face"));
+        let l = line("Theo Parrish - Solitary Flight – 1:02:03");
+        assert_eq!(l.timestamp, Some(3723));
+        assert_eq!(l.title.as_deref(), Some("Solitary Flight"));
         let (a, t) = at("\"Track B1\" by Slowhouse Two");
         assert_eq!(a.as_deref(), Some("Slowhouse Two"));
         assert_eq!(t.as_deref(), Some("Track B1"));
