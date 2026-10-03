@@ -2055,6 +2055,31 @@ Converted copies go on the stick; your library files stay as they are. Needs ffm
                     self.config.export_convert_for_older_players = convert;
                     self.save_config();
                 }
+                // What the player shows under the song info: the comment
+                // field, filled from the track's Notes, its tags, or both.
+                use crate::config::ExportComment;
+                ui.add_space(6.0);
+                let current = ExportComment::from_key(&self.config.export_comment);
+                let mut picked = current;
+                ui.horizontal(|ui| {
+                    ui.label("Comment on the player:");
+                    egui::ComboBox::from_id_salt("export_comment")
+                        .selected_text(current.label())
+                        .show_ui(ui, |ui| {
+                            for c in ExportComment::ALL {
+                                ui.selectable_value(&mut picked, c, c.label());
+                            }
+                        });
+                })
+                .response
+                .on_hover_note(
+                    "CDJs show the comment under the song info. Tags are the song's \
+Ordnung tags, as in the table's Tags column.",
+                );
+                if picked != current {
+                    self.config.export_comment = picked.key().to_string();
+                    self.save_config();
+                }
                 ui.add_space(12.0);
                 let busy = self.is_busy();
                 if busy {

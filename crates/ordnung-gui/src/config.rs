@@ -123,6 +123,13 @@ pub struct Config {
     /// `ordnung_rbdb::export::PlayerTarget::Classic`.
     #[serde(default)]
     pub export_convert_for_older_players: bool,
+    /// What a USB export writes into each track's comment, the field a CDJ
+    /// shows under the song info: `"notes"` (the track's Notes tag, the
+    /// default), `"tags"` (its Ordnung tags, `dub, dark`), `"notes_tags"`
+    /// (both, notes first) or `"none"`. Remembered from the export
+    /// confirm's dropdown. See `ExportComment`.
+    #[serde(default = "default_export_comment")]
+    pub export_comment: String,
     /// Which of the sidebar's three width tiers is in force: `"icon"`,
     /// `"narrow"` or `"wide"` (the default). The sidebar snaps between designed
     /// layouts rather than resizing freely, so what persists is the chosen tier,
@@ -381,6 +388,10 @@ fn default_startup_view() -> String {
 
 pub(crate) fn default_volume() -> f32 {
     1.0
+}
+
+fn default_export_comment() -> String {
+    ExportComment::Notes.key().to_string()
 }
 
 fn default_waveform_color_mode() -> String {
@@ -686,6 +697,84 @@ impl StartupView {
     ];
 }
 
+/// What a USB export puts in the comment a CDJ shows under the song info.
+/// Parsed from `Config::export_comment`; export policy, so it lives in the
+/// GUI boundary and the exporter only ever sees a finished comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportComment {
+    /// The track's Notes tag, as it is.
+    Notes,
+    /// The track's Ordnung tags, `dub, dark`.
+    Tags,
+    /// Notes, then the tags on a second line.
+    NotesAndTags,
+    /// An empty comment.
+    None,
+}
+
+impl ExportComment {
+    pub const ALL: [ExportComment; 4] = [
+        ExportComment::Notes,
+        ExportComment::Tags,
+        ExportComment::NotesAndTags,
+        ExportComment::None,
+    ];
+
+    /// Parse a config string; anything unrecognized falls back to `Notes`.
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "tags" => ExportComment::Tags,
+            "notes_tags" => ExportComment::NotesAndTags,
+            "none" => ExportComment::None,
+            _ => ExportComment::Notes,
+        }
+    }
+
+    /// Stable lowercase key stored in the config TOML.
+    pub fn key(self) -> &'static str {
+        match self {
+            ExportComment::Notes => "notes",
+            ExportComment::Tags => "tags",
+            ExportComment::NotesAndTags => "notes_tags",
+            ExportComment::None => "none",
+        }
+    }
+
+    /// The dropdown's wording.
+    pub fn label(self) -> &'static str {
+        match self {
+            ExportComment::Notes => "Notes",
+            ExportComment::Tags => "Tags",
+            ExportComment::NotesAndTags => "Notes and tags",
+            ExportComment::None => "Nothing",
+        }
+    }
+
+    /// Whether this choice reads the song's tags at all (so the export can
+    /// skip loading them otherwise).
+    pub fn uses_tags(self) -> bool {
+        matches!(self, ExportComment::Tags | ExportComment::NotesAndTags)
+    }
+
+    /// The comment to export for a track with these `notes` and `tags`
+    /// (`dub, dark`, empty when untagged). Empty parts are dropped so an
+    /// untagged track under "Notes and tags" shows its notes alone.
+    pub fn compose(self, notes: &str, tags: &str) -> String {
+        let (notes, tags) = (notes.trim(), tags.trim());
+        match self {
+            ExportComment::Notes => notes.to_string(),
+            ExportComment::Tags => tags.to_string(),
+            ExportComment::NotesAndTags => [notes, tags]
+                .iter()
+                .filter(|s| !s.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n"),
+            ExportComment::None => String::new(),
+        }
+    }
+}
+
 /// How the player waveform is colored. Parsed from `Config::waveform_color_mode`;
 /// presentation policy, so it lives in the GUI boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -736,6 +825,7 @@ impl Default for Config {
             graph_hide: Vec::new(),
             nav_primary: default_nav_primary(),
             export_convert_for_older_players: false,
+            export_comment: default_export_comment(),
             nav_density: default_nav_density(),
             nav_collapsed: Vec::new(),
             inspector_density: default_inspector_density(),
@@ -889,6 +979,25 @@ pub fn config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exported comment follows the choice, drops empty parts, and an
+    /// old config without the key still means "notes".
+    #[test]
+    fn export_comment_composes_per_choice() {
+        use ExportComment::*;
+        assert_eq!(Notes.compose(" late night ", "dub, dark"), "late night");
+        assert_eq!(Tags.compose("late night", "dub, dark"), "dub, dark");
+        assert_eq!(NotesAndTags.compose("late night", "dub, dark"), "late night\ndub, dark");
+        assert_eq!(NotesAndTags.compose("", "dub, dark"), "dub, dark");
+        assert_eq!(NotesAndTags.compose("late night", ""), "late night");
+        assert_eq!(None.compose("late night", "dub, dark"), "");
+        for c in ExportComment::ALL {
+            assert_eq!(ExportComment::from_key(c.key()), c);
+        }
+        assert_eq!(ExportComment::from_key(""), Notes);
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.export_comment, "notes");
+    }
 
     #[test]
     fn classify_reads_the_carrier_out_of_a_discogs_format_string() {

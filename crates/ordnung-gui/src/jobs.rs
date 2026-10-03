@@ -277,8 +277,19 @@ impl App {
         // the device view (the stick's on-disk playlists just changed).
         self.export_running_to = Some(dest.clone());
         let db = self.db_path.clone();
+        let comment = crate::config::ExportComment::from_key(&self.config.export_comment);
         thread::spawn(move || {
-            run_export(db, dest, playlist_ids, replace, player, cancel, tx, ctx)
+            run_export(
+                db,
+                dest,
+                playlist_ids,
+                replace,
+                player,
+                comment,
+                cancel,
+                tx,
+                ctx,
+            )
         });
     }
 
@@ -1098,6 +1109,35 @@ fn run_usb_setup(
     ctx.request_repaint();
 }
 
+/// What the tag store knows about the library's songs, for the export's
+/// comment: each track's matched record (part of its song key), the tag
+/// sets, and the tag ids under each song key. The same three reads the
+/// track table makes for its Tags column.
+type SongTagWords = (
+    std::collections::HashMap<Id, u64>,
+    Vec<ordnung_core::model::CrateSet>,
+    std::collections::HashMap<String, Vec<Id>>,
+);
+
+fn song_tag_words(catalog: &Catalog) -> Result<SongTagWords, String> {
+    use ordnung_core::model::CrateKind;
+    let release_of = catalog
+        .release_track_links()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(rid, tid)| (tid, rid))
+        .collect();
+    let sets = catalog.list_crate_sets().map_err(|e| e.to_string())?;
+    let mut by_key: std::collections::HashMap<String, Vec<Id>> = Default::default();
+    for (tag, key) in catalog
+        .crate_memberships(CrateKind::Tag)
+        .map_err(|e| e.to_string())?
+    {
+        by_key.entry(key).or_default().push(tag);
+    }
+    Ok((release_of, sets, by_key))
+}
+
 /// Build a native rekordbox export of the whole catalog onto `dest`.
 /// See [`App::spawn_export`]. Audio is copied under `/Contents` (unchanged
 /// files skip the copy), analysis is serialized to ANLZ files, and playlists
@@ -1111,6 +1151,7 @@ pub(crate) fn run_export(
     playlist_ids: Vec<Id>,
     replace: bool,
     player: ordnung_rbdb::export::PlayerTarget,
+    comment: crate::config::ExportComment,
     cancel: Arc<AtomicBool>,
     tx: Sender<JobMsg>,
     ctx: egui::Context,
@@ -1124,7 +1165,7 @@ pub(crate) fn run_export(
     };
     // Whole library (empty ids) or the chosen playlist/folder subtree, with
     // analyses attached — see Catalog::export_selection.
-    let (tracks, playlists) = match catalog.export_selection(&playlist_ids) {
+    let (mut tracks, playlists) = match catalog.export_selection(&playlist_ids) {
         Ok(v) => v,
         Err(e) => {
             let _ = tx.send(JobMsg::Failed(format!("Couldn't read the catalog: {e}")));
@@ -1132,6 +1173,37 @@ pub(crate) fn run_export(
             return;
         }
     };
+    // The comment a CDJ shows is policy (Config::export_comment), so it is
+    // settled here and the exporter writes what it is handed. Tags are
+    // looked up the way the table does: by the song key the tag store uses.
+    if comment != crate::config::ExportComment::Notes {
+        let tagged = if comment.uses_tags() {
+            song_tag_words(&catalog)
+        } else {
+            Ok(Default::default())
+        };
+        let (release_of, sets, by_key) = match tagged {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx.send(JobMsg::Failed(format!("Couldn't read the tags: {e}")));
+                ctx.request_repaint();
+                return;
+            }
+        };
+        for t in &mut tracks {
+            let key = crate::crates::track_song_key(
+                t.tags.artist.as_deref().unwrap_or(""),
+                t.tags.title.as_deref().unwrap_or(""),
+                release_of.get(&t.id).copied(),
+            );
+            let tags = by_key
+                .get(&key)
+                .map(|ids| crate::crates::tag_words(&sets, ids))
+                .unwrap_or_default();
+            let text = comment.compose(t.tags.comment.as_deref().unwrap_or(""), &tags);
+            t.tags.comment = (!text.is_empty()).then_some(text);
+        }
+    }
     if tracks.is_empty() {
         let _ = tx.send(JobMsg::Failed(
             "Nothing to export: the selection has no tracks.".into(),
