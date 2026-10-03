@@ -1557,6 +1557,8 @@ impl App {
             AddToCrate(usize, Id),
             /// Mark the row's song with a tag, or take it off (row, tag, on).
             SetTag(usize, Id, bool),
+            /// Put the row's YouTube link on the clipboard.
+            CopyLink(String),
             /// Play the record, or pause/resume whatever of it is loaded.
             TogglePlay,
             PlayExtra(usize),
@@ -2205,6 +2207,7 @@ impl App {
                                 }
                                 Some(RowHit::AddToCrate(cid)) => act = Some(Act::AddToCrate(i, cid)),
                                 Some(RowHit::SetTag(tag, on)) => act = Some(Act::SetTag(i, tag, on)),
+                                Some(RowHit::CopyLink(url)) => act = Some(Act::CopyLink(url)),
                                 None => {}
                             }
                         }
@@ -2459,6 +2462,10 @@ impl App {
                 if let Some(spec) = self.vinyl_sheet.as_ref().and_then(|s| sheet_row_spec(s, i)) {
                     self.toggle_like(spec);
                 }
+            }
+            Some(Act::CopyLink(url)) => {
+                ctx.copy_text(url);
+                self.status = "Copied the video link.".into();
             }
             Some(Act::AddToCrate(i, cid)) => {
                 if let Some(spec) = self.vinyl_sheet.as_ref().and_then(|s| sheet_row_spec(s, i)) {
@@ -2747,6 +2754,8 @@ enum RowHit {
     AddToCrate(Id),
     /// A tag checked or unchecked in the row's menu (tag id, on).
     SetTag(Id, bool),
+    /// Copy the row's YouTube link, from the row's menu.
+    CopyLink(String),
 }
 
 /// What a row of the sheet carries to a like, a crate or a drag: the song
@@ -3106,7 +3115,20 @@ fn sheet_row_ui(
     if hit.drag_started() {
         hit_what = Some(RowHit::DragStart);
     }
+    // The row's video: the one it plays, or the one beside a local copy.
+    let video_url = match row.source {
+        SheetSource::Video(v) => Some(v),
+        _ => row.also_video,
+    }
+    .and_then(|v| sheet.detail.as_ref()?.videos.get(v))
+    .map(|v| v.uri.clone());
     hit.context_menu(|ui| {
+        if let Some(url) = &video_url {
+            if ui.button("Copy link").clicked() {
+                hit_what = Some(RowHit::CopyLink(url.clone()));
+                ui.close_menu();
+            }
+        }
         if let Some(cid) = crate::crates::add_to_crate_menu(ui, crates, None) {
             hit_what = Some(RowHit::AddToCrate(cid));
         }
