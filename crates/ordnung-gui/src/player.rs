@@ -130,6 +130,9 @@ impl App {
                 cues,
             });
             self.scrub = None;
+            // The inspector follows whatever starts playing. A row click still
+            // inspects something else until the next track starts.
+            self.set_primary(Some(id));
         }
     }
 
