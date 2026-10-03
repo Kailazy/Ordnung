@@ -2110,42 +2110,22 @@ impl App {
         // What the user asked of a cell (jump to the catalog, or a list edit).
         // Applied after the grid so we don't mutate `self` mid-render.
         let mut action: Option<VinylGridAction> = None;
-        // Keyboard on the shelf, with no sheet up to take the keys: arrows
-        // (and W S) move a cursor over the records, ⏎ opens the one it is
-        // on. In the wall ↑ ↓ move by a row of covers, ← → by one record;
-        // the list is one column. The first press lands on the first record.
+        // Keyboard on the shelf, with nothing over it to take the keys:
+        // arrows and WASD move a cursor over the records, ⏎ opens the one
+        // it is on and plays its first track. In the wall ↑ ↓ move by a row
+        // of covers, ← → by one record; the list is one column. The first
+        // press lands on the first record.
         self.vinyl_cursor_moved = false;
-        if self.vinyl_sheet.is_none() && !cells.is_empty() && !crate::ui::field::wants_keyboard_input(ctx) {
+        if self.shelf_keys(ctx) && !cells.is_empty() && !crate::ui::field::wants_keyboard_input(ctx) {
             let cols: usize = if self.config.vinyl_view == "list" {
                 1
             } else {
                 ctx.data(|d| d.get_temp(Self::vinyl_grid_cols_id())).unwrap_or(1)
             };
-            let (up, down, left, right, enter) = ctx.input_mut(|i| {
-                (
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
-                        | i.consume_key(egui::Modifiers::NONE, egui::Key::W),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
-                        | i.consume_key(egui::Modifiers::NONE, egui::Key::S),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
-                )
-            });
+            let (step, enter) = Self::shelf_key_step(ctx, cols);
             let at = self
                 .vinyl_cursor
                 .and_then(|k| cells.iter().position(|c| c.key == k));
-            let step: isize = if down {
-                cols as isize
-            } else if up {
-                -(cols as isize)
-            } else if right {
-                1
-            } else if left {
-                -1
-            } else {
-                0
-            };
             if step != 0 {
                 let last = cells.len() as isize - 1;
                 let next = match at {
@@ -2156,7 +2136,7 @@ impl App {
                 self.vinyl_cursor_moved = true;
             } else if enter {
                 if let Some(i) = at {
-                    action = Some(VinylGridAction::Open(cells[i].key));
+                    action = Some(VinylGridAction::Play(cells[i].key));
                 }
             }
         }
@@ -2385,6 +2365,49 @@ impl App {
     /// Paint one wrapping grid of vinyl covers. Returns whatever the user asked
     /// for by clicking a cell's badge or picking from its right-click menu, for
     /// the caller to apply after the frame's borrows are released.
+    /// Whether the vinyl view's records own the single keys (arrows, WASD,
+    /// ⏎): the view is up and nothing is drawn over it. A record sheet, the
+    /// dig window, a dialog or a dropdown takes the keys instead, and the
+    /// global ←→/A D seek yields to the records on the same test.
+    pub(crate) fn shelf_keys(&self, ctx: &egui::Context) -> bool {
+        self.view == LibraryView::Vinyl
+            && self.vinyl_sheet.is_none()
+            && !crate::ui::escape::pending(ctx)
+            && !ctx.memory(|m| m.any_popup_open())
+            && !ctx.is_context_menu_open()
+    }
+
+    /// Arrow/WASD/⏎ pressed this frame, consumed: `(rows, cols, enter)` as
+    /// signed steps, with `cols` the width of one row of records. Shared
+    /// by the shelves and the sellers' crates so both walk the same way.
+    pub(crate) fn shelf_key_step(ctx: &egui::Context, cols: usize) -> (isize, bool) {
+        let (up, down, left, right, enter) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                    | i.consume_key(egui::Modifiers::NONE, egui::Key::W),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                    | i.consume_key(egui::Modifiers::NONE, egui::Key::S),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
+                    | i.consume_key(egui::Modifiers::NONE, egui::Key::A),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
+                    | i.consume_key(egui::Modifiers::NONE, egui::Key::D),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            )
+        });
+        let step: isize = if down {
+            cols as isize
+        } else if up {
+            -(cols as isize)
+        } else if right {
+            1
+        } else if left {
+            -1
+        } else {
+            0
+        };
+        (step, enter)
+    }
+
     /// Where the wall leaves the column count it laid out with, so the
     /// keyboard's ↑ ↓ move by exactly one row of covers.
     fn vinyl_grid_cols_id() -> egui::Id {

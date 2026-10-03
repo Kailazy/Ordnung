@@ -21,6 +21,8 @@ enum SellerAct {
     LabelPage(usize),
     /// Open the record sheet, carrying this seller's concrete offer.
     Open(usize),
+    /// Open the record sheet and play its first track (⏎ on the cursor).
+    Play(usize),
     /// Open the listing itself on discogs.com — where the purchase happens.
     Buy(usize),
     /// Add the listing's release to the Discogs wantlist.
@@ -544,63 +546,105 @@ impl App {
         // list toggle applies here too: rows put price and grade in a column,
         // which is how a shop's crates get compared.
         let mut act: Option<SellerAct> = None;
-        if self.config.vinyl_view == "list" {
-            const ROW_H: f32 = 54.0;
-            let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
-            if let Some(p) = highlight_pos.filter(|_| self.seller_scroll_to) {
-                // One row of context above the ringed one, so it doesn't sit
-                // flush against the top edge.
-                area = area.vertical_scroll_offset((p as f32 - 1.0).max(0.0) * ROW_H);
-                self.seller_scroll_to = false;
-            }
-            area.show_rows(ui, ROW_H, filtered.len(), |ui, rows| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for i in rows {
-                        let idx = filtered[i];
-                        if let Some(a) = self.seller_row(ui, idx, ROW_H) {
-                            act = Some(a);
-                        }
-                    }
-                });
+        let list_mode = self.config.vinyl_view == "list";
+        const GAP: f32 = 14.0;
+        const MIN_COVER: f32 = 132.0;
+        const MAX_COVER: f32 = 170.0;
+        /// Caption budget under each cover: artist, title, price line.
+        const CAPTION_H: f32 = 58.0;
+        const ROW_H: f32 = 54.0;
+        let avail = ui.available_width();
+        let cols = if list_mode {
+            1
         } else {
-            const GAP: f32 = 14.0;
-            const MIN_COVER: f32 = 132.0;
-            const MAX_COVER: f32 = 170.0;
-            /// Caption budget under each cover: artist, title, price line.
-            const CAPTION_H: f32 = 58.0;
-            let avail = ui.available_width();
-            let cols = (((avail + GAP) / (MIN_COVER + GAP)).floor().max(1.0)) as usize;
-            let cover_side = ((avail - GAP * (cols as f32 - 1.0)) / cols as f32)
-                .floor()
-                .clamp(MIN_COVER.min(avail.max(1.0)), MAX_COVER);
-            let row_h = cover_side + CAPTION_H + GAP;
-            let n_rows = filtered.len().div_ceil(cols);
+            (((avail + GAP) / (MIN_COVER + GAP)).floor().max(1.0)) as usize
+        };
+        let cover_side = ((avail - GAP * (cols as f32 - 1.0)) / cols as f32)
+            .floor()
+            .clamp(MIN_COVER.min(avail.max(1.0)), MAX_COVER);
+        let row_h = if list_mode { ROW_H } else { cover_side + CAPTION_H + GAP };
+        let n_rows = filtered.len().div_ceil(cols);
 
-            let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
-            if let Some(p) = highlight_pos.filter(|_| self.seller_scroll_to) {
-                area = area.vertical_scroll_offset((p / cols) as f32 * row_h);
-                self.seller_scroll_to = false;
+        // Keyboard over the crates, the same walk as the shelves: the find
+        // box's ring is the cursor, arrows and WASD move it, ⏎ opens the
+        // record and plays its first track. A step onto a row scrolled away
+        // brings it into view (the grid is virtualized, so the row's place
+        // is computed rather than measured).
+        let mut highlight_pos = highlight_pos;
+        let mut key_scroll: Option<usize> = None;
+        if self.shelf_keys(ctx) && !filtered.is_empty() && !crate::ui::field::wants_keyboard_input(ctx) {
+            let (step, enter) = Self::shelf_key_step(ctx, cols);
+            if step != 0 {
+                let last = filtered.len() as isize - 1;
+                let next = match highlight_pos {
+                    None => 0,
+                    Some(i) => (i as isize + step).clamp(0, last),
+                } as usize;
+                self.seller_highlight = Some(self.seller_listings[filtered[next]].listing_id);
+                highlight_pos = Some(next);
+                key_scroll = Some(next / cols);
+            } else if enter {
+                if let Some(p) = highlight_pos {
+                    act = Some(SellerAct::Play(filtered[p]));
+                }
             }
-            area.show_rows(ui, row_h, n_rows, |ui, rows| {
-                    ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
-                    for row in rows {
-                        ui.horizontal_top(|ui| {
-                            for slot in 0..cols {
-                                let Some(&idx) = filtered.get(row * cols + slot) else {
-                                    break;
-                                };
-                                if let Some(a) = self.seller_card(ui, idx, cover_side) {
-                                    act = Some(a);
-                                }
-                            }
-                        });
-                    }
-                    ui.add_space(8.0);
-                });
         }
+
+        let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(p) = highlight_pos.filter(|_| self.seller_scroll_to) {
+            // One row of context above the ringed one, so it doesn't sit
+            // flush against the top edge.
+            area = area.vertical_scroll_offset(((p / cols) as f32 - 1.0).max(0.0) * row_h);
+            self.seller_scroll_to = false;
+        }
+        let row_h_sp = row_h + ui.spacing().item_spacing.y;
+        area.show_rows(ui, row_h, n_rows, |ui, rows| {
+            if let Some(r) = key_scroll {
+                let top = ui.min_rect().top() - rows.start as f32 * row_h_sp;
+                ui.scroll_to_rect(
+                    egui::Rect::from_min_size(
+                        egui::pos2(ui.min_rect().left(), top + r as f32 * row_h_sp),
+                        egui::vec2(avail, row_h),
+                    ),
+                    None,
+                );
+            }
+            if list_mode {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for i in rows {
+                    let idx = filtered[i];
+                    if let Some(a) = self.seller_row(ui, idx, ROW_H) {
+                        act = Some(a);
+                    }
+                }
+            } else {
+                ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+                for row in rows {
+                    ui.horizontal_top(|ui| {
+                        for slot in 0..cols {
+                            let Some(&idx) = filtered.get(row * cols + slot) else {
+                                break;
+                            };
+                            if let Some(a) = self.seller_card(ui, idx, cover_side) {
+                                act = Some(a);
+                            }
+                        }
+                    });
+                }
+                ui.add_space(8.0);
+            }
+        });
 
         match act {
             Some(SellerAct::Open(idx)) => self.open_seller_listing(idx, ctx),
+            Some(SellerAct::Play(idx)) => {
+                // The tracklist may still be loading; the sheet starts
+                // playback itself once it has one (see `pending_play`).
+                self.open_seller_listing(idx, ctx);
+                if let Some(sheet) = self.vinyl_sheet.as_mut() {
+                    sheet.pending_play = true;
+                }
+            }
             Some(SellerAct::Buy(idx)) => {
                 if let Some(l) = self.seller_listings.get(idx) {
                     let url = l.uri.clone().unwrap_or_else(|| {

@@ -2184,15 +2184,14 @@ impl App {
         // ← → and A D nudge the playhead of whatever is loaded, video or
         // file, by a few seconds each press. Same text-field gate as the
         // space bar; the modifier-free check also leaves ⌘A alone. On the
-        // vinyl shelf with no sheet up the arrows walk the records instead
-        // (see `draw_vinyl`), and only A D seek.
-        if !crate::ui::field::wants_keyboard_input(ctx) {
-            let shelf_keys = self.view == LibraryView::Vinyl && self.vinyl_sheet.is_none();
+        // vinyl view with nothing drawn over it the arrows and WASD walk
+        // the records instead (see `shelf_keys`).
+        if !crate::ui::field::wants_keyboard_input(ctx) && !self.shelf_keys(ctx) {
             let (back, fwd) = ctx.input_mut(|i| {
                 (
-                    (!shelf_keys && i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft))
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
                         | i.consume_key(egui::Modifiers::NONE, egui::Key::A),
-                    (!shelf_keys && i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight))
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
                         | i.consume_key(egui::Modifiers::NONE, egui::Key::D),
                 )
             });
