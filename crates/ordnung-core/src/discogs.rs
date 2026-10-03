@@ -976,8 +976,10 @@ impl ReleaseDetail {
 
     /// Which of `titles` (the track titles of local files linked to this
     /// release) plays each tracklist position. Same conservative matching as
-    /// [`match_videos`](Self::match_videos), minus the positional fallback —
-    /// a file named `A1` is a filename convention, not a title.
+    /// [`match_videos`](Self::match_videos), minus the "names the position
+    /// among other words" rule: a file that is *only* its position (`A1`,
+    /// `Untitled B2`, how a label shop names untitled cuts) takes that slot,
+    /// a file called `Valis A1` does not.
     pub fn file_matches(&self, titles: &[String]) -> Vec<Option<usize>> {
         let candidates: Vec<Vec<Cand>> = titles
             .iter()
@@ -1025,6 +1027,16 @@ impl ReleaseDetail {
                     && pos.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
                     && !pos.contains(' ');
                 let same = |c: &Cand| keys[ti].iter().any(|k| title_key(&c.text) == *k);
+                // A reading that is *only* this position (`a1`, `untitled
+                // b2`, or `a` once `Artist - PIN6` is peeled) names the slot
+                // as surely as the title would. Tight enough for a lone
+                // side letter, which `names_position` must not trust among
+                // other words.
+                let is_pos = |c: &Cand| {
+                    !pos.is_empty()
+                        && (c.text == pos
+                            || bare_position(&c.text).is_some_and(|p| same_position(&p, &pos)))
+                };
                 // A reading peeled from a position belongs to that position.
                 let placed = |c: &Cand| {
                     c.position
@@ -1033,7 +1045,7 @@ impl ReleaseDetail {
                 };
                 let fits = |c: &Cand| match rule {
                     Rule::ExactLiteral => c.literal && same(c),
-                    Rule::ExactDerived => placed(c) && same(c),
+                    Rule::ExactDerived => placed(c) && (same(c) || is_pos(c)),
                     Rule::Prefix => {
                         let by_title = !c.exact_only
                             && placed(c)
@@ -3115,6 +3127,10 @@ impl TitleContext {
             }
         };
         add(&detail.title);
+        // The catalogue number too: a label's own upload is `Artist - PIN6 A`.
+        if let Some(cn) = detail.catalog_number.as_deref() {
+            add(cn);
+        }
         // Credits joined by Discogs connectors name several artists at once;
         // a video usually names one.
         for credit in std::iter::once(release_artist)
@@ -3491,21 +3507,35 @@ fn trim_filler(text: String) -> String {
 /// Discogs's `track` filter has nothing to match such a title against but
 /// text that happens to contain it, so no search is built on one.
 pub fn is_position_title(title: &str) -> bool {
+    position_tail(title).is_some()
+}
+
+/// The slot a position-only title names, lowercased: `A1` → `a1`, `Untitled
+/// B2` → `b2`, `Side A` → `a`, `Track 3` → `3`. `None` for a song's name and
+/// for a bare `Untitled`, which is a position title that names no slot.
+pub fn bare_position(title: &str) -> Option<String> {
+    position_tail(title).filter(|p| !p.is_empty())
+}
+
+/// What's left of `title` once the position wrapping is read off, when the
+/// whole title is a position (see [`is_position_title`]).
+fn position_tail(title: &str) -> Option<String> {
     let t = title.trim().to_ascii_lowercase();
     let t = t.trim_start_matches("untitled").trim();
     let side = t.strip_prefix("side").map(str::trim);
     let t = side.or_else(|| t.strip_prefix("track").map(str::trim)).unwrap_or(t);
     if t.is_empty() {
-        return true;
+        return Some(String::new());
     }
     let letters = t.chars().take_while(|c| c.is_ascii_alphabetic()).count();
     let digits = &t[letters..];
     // A side alone (`Side A`) is a position; a lone letter otherwise is a
     // title, however short.
-    letters <= 1
+    (letters <= 1
         && (!digits.is_empty() || side.is_some())
         && digits.len() <= 2
-        && digits.chars().all(|c| c.is_ascii_digit())
+        && digits.chars().all(|c| c.is_ascii_digit()))
+    .then(|| t.to_string())
 }
 
 /// Drop a trailing "(Original Mix)"-style marker from a title before searching
@@ -5021,6 +5051,41 @@ mod tests {
         ];
         // Each side takes its own; a title naming two positions names neither.
         assert_eq!(d.video_matches(), vec![Some(1), Some(0)]);
+    }
+
+    /// The CN² case: a label shop's download names its untitled cuts by
+    /// slot, so the linked files are called `A1`, `A2`, `B1`. Each takes
+    /// its position; a title merely containing a position does not.
+    #[test]
+    fn files_that_are_only_their_position_take_that_slot() {
+        let mut d = detail();
+        d.tracklist = vec![
+            track("A1", "Untitled"),
+            track("A2", "Untitled"),
+            track("B1", "Untitled"),
+        ];
+        let files = vec!["B1".to_string(), "Untitled A2".to_string(), "Valis A1".to_string()];
+        assert_eq!(d.file_matches(&files), vec![None, Some(1), Some(0)]);
+    }
+
+    /// The SnPLO case: sides `A` and `B`, both `Untitled`, and the label's
+    /// videos are `SnPLO - Pin-6 A` / `... B`. Once artist and catalogue
+    /// number are read off, `a` is the whole reading and takes the side;
+    /// an `a` among other words (the article) never does.
+    #[test]
+    fn a_video_that_reads_down_to_a_side_letter_takes_that_side() {
+        let mut d = detail();
+        d.title = "Infinity Substance".into();
+        d.catalog_number = Some("Pin-6".into());
+        d.tracklist = vec![track("A", "Untitled"), track("B", "Untitled")];
+        d.videos = vec![
+            video("https://youtu.be/v1", "SnPLO - Pin-6 B"),
+            video("https://youtu.be/v2", "SnPLO - Pin-6 A"),
+            video("https://youtu.be/v3", "SnPLO - Love Is A Battlefield"),
+        ];
+        let m = d.match_videos("SnPLO");
+        assert_eq!(m.tracks, vec![Some(1), Some(0)]);
+        assert_eq!(m.leftover, vec![2]);
     }
 
     #[test]
