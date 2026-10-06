@@ -512,8 +512,8 @@ fn vinyl_cell_menu(
     action: &mut Option<VinylGridAction>,
 ) {
     let (list, _) = c.key;
-    ui.label(egui::RichText::new(&c.title).strong());
-    ui.label(egui::RichText::new(&c.artist).weak());
+    crate::ui::menu::text(ui, egui::RichText::new(&c.title).strong());
+    crate::ui::menu::text(ui, egui::RichText::new(&c.artist).weak());
     ui.separator();
     if ui
         .button("Open on Discogs ↗")
@@ -2677,7 +2677,7 @@ impl App {
                         // drop it. Both write straight to the user's Discogs
                         // account, so the wording says which list is which rather
                         // than a bare "Move".
-                        resp.context_menu(|ui| vinyl_cell_menu(ui, c, &release_url, &mut action));
+                        crate::ui::menu::context(&resp, |ui| vinyl_cell_menu(ui, c, &release_url, &mut action));
                         ui.set_max_width(cover_side);
                         // Title and artist sit close: 2pt between the lines.
                         ui.spacing_mut().item_spacing.y = 2.0;
@@ -2866,7 +2866,7 @@ impl App {
                 if resp.clicked() && !badge_clicked {
                     action = Some(VinylGridAction::Open(c.key));
                 }
-                resp.context_menu(|ui| vinyl_cell_menu(ui, c, &release_url, &mut action));
+                crate::ui::menu::context(&resp, |ui| vinyl_cell_menu(ui, c, &release_url, &mut action));
             }
         });
         action

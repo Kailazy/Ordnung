@@ -3140,7 +3140,7 @@ fn sheet_row_ui(
     }
     .and_then(|v| sheet.detail.as_ref()?.videos.get(v))
     .map(|v| v.uri.clone());
-    hit.context_menu(|ui| {
+    crate::ui::menu::context(&hit, |ui| {
         if let Some(url) = &video_url {
             if ui.button("Copy link").clicked() {
                 hit_what = Some(RowHit::CopyLink(url.clone()));

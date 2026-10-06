@@ -394,7 +394,7 @@ pub(crate) fn draw_playlist_nodes(
                     job.into()
                 }
             };
-            egui::CollapsingHeader::new(header)
+            let header = egui::CollapsingHeader::new(header)
             .id_salt(("pl-folder", p.id))
             .default_open(true)
             .show(ui, |ui| {
@@ -410,8 +410,8 @@ pub(crate) fn draw_playlist_nodes(
                     drop_rects,
                 );
             })
-            .header_response
-            .context_menu(|ui| folder_context_menu(ui, p, volumes, renaming, action));
+            .header_response;
+            crate::ui::menu::context(&header, |ui| folder_context_menu(ui, p, volumes, renaming, action));
             playlist_row_gap(ui, density);
         } else {
             draw_playlist_leaf(ui, density, p, volumes, view, renaming, action, drop_rects);
@@ -831,7 +831,7 @@ pub(crate) fn draw_playlist_leaf(
     if resp.clicked() {
         *view = LibraryView::Playlist(p.id);
     }
-    resp.clone().context_menu(|ui| {
+    crate::ui::menu::context(&resp, |ui| {
         export_menu_items(ui, p.id, volumes, action);
         if ui
             .button("Save track list…")
@@ -910,7 +910,7 @@ pub(crate) fn draw_usb_playlist_nodes(
             // Same header style as the catalog's folders; only the open
             // default differs — a device tree is a big imported hierarchy, so
             // its folders start collapsed.
-            egui::CollapsingHeader::new(
+            let header = egui::CollapsingHeader::new(
                 egui::RichText::new(p.name.as_str()).font(crate::ui::tokens::font::body()),
             )
             .id_salt(("usb-pl-folder", vol, p.id))
@@ -928,8 +928,8 @@ pub(crate) fn draw_usb_playlist_nodes(
                     action,
                 );
             })
-            .header_response
-            .context_menu(|ui| {
+            .header_response;
+            crate::ui::menu::context(&header, |ui| {
                 if ui.button("New playlist here").clicked() {
                     *action = Some(SidebarAction::NewUsbPlaylist(p.id));
                     ui.close_menu();
@@ -988,7 +988,7 @@ pub(crate) fn draw_usb_playlist_nodes(
             if resp.clicked() {
                 *view = LibraryView::Usb(vol.to_path_buf(), Some(p.id));
             }
-            resp.context_menu(|ui| {
+            crate::ui::menu::context(&resp, |ui| {
                 if ui
                     .button("⤵ Import to library…")
                     .on_hover_note(
@@ -1314,7 +1314,7 @@ pub(crate) fn draw_crate_rows(
         if resp.clicked() {
             *view = LibraryView::CrateSet(c.id);
         }
-        resp.context_menu(|ui| {
+        crate::ui::menu::context(&resp, |ui| {
             if ui.button("Rename").clicked() {
                 *renaming = Some(Renaming {
                     id: c.id,

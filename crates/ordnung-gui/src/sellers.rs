@@ -1252,7 +1252,7 @@ impl App {
                 if resp.clicked() && !dig_clicked && !cart_clicked {
                     act = Some(SellerAct::Open(idx));
                 }
-                resp.context_menu(|ui| {
+                crate::ui::menu::context(&resp, |ui| {
                     if ui
                         .button("💰 Add to cart on Discogs ↗")
                         .on_hover_note("Opens the listing; cart and checkout live on discogs.com")
@@ -1532,7 +1532,7 @@ impl App {
         if resp.clicked() && !cart_clicked {
             act = Some(SellerAct::Open(idx));
         }
-        resp.context_menu(|ui| {
+        crate::ui::menu::context(&resp, |ui| {
             if ui
                 .button("💰 Add to cart on Discogs ↗")
                 .on_hover_note("Opens the listing; cart and checkout live on discogs.com")

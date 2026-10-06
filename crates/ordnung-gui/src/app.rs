@@ -2406,7 +2406,7 @@ impl App {
                         )
                         .fill(crate::sidebar::NAV_ACCENT)
                         .stroke(egui::Stroke::NONE);
-                        let add = egui::menu::menu_custom_button(ui, add_btn, |ui| {
+                        let add = crate::ui::menu::custom_menu_button(ui, add_btn, |ui| {
                             if ui
                                 .button(crate::ui::icon_text(
                                     named(icons::FILE_AUDIO),

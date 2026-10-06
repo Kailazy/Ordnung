@@ -1736,13 +1736,13 @@ impl App {
                                     // carry the menu. Acts on the whole selection when this
                                     // row is part of it, else just this row (the same payload
                                     // a drag carries, already computed as `drag_ids`).
-                                    resp.context_menu(|ui| {
+                                    crate::ui::menu::context(&resp, |ui| {
                                         let title = if drag_ids.len() > 1 {
                                             format!("{} tracks", drag_ids.len())
                                         } else {
                                             short(&r.title, "Untitled").to_string()
                                         };
-                                        ui.label(egui::RichText::new(title).strong());
+                                        crate::ui::menu::text(ui, egui::RichText::new(title).strong());
                                         ui.separator();
                                         if audio_enabled && ui.button("▶  Preview").clicked() {
                                             menu_action = Some(TrackMenuAction::Preview(
@@ -1836,9 +1836,10 @@ impl App {
                                                 Some(TrackMenuAction::Analyze(drag_ids.clone()));
                                             ui.close_menu();
                                         }
-                                        ui.menu_button("Add to playlist", |ui| {
+                                        crate::ui::menu::menu_button(ui, "Add to playlist", |ui| {
                                             if menu_playlists.is_empty() {
-                                                ui.label(
+                                                crate::ui::menu::text(
+                                                    ui,
                                                     egui::RichText::new("No playlists yet")
                                                         .weak()
                                                         .italics(),

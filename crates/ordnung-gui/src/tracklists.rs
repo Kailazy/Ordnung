@@ -567,7 +567,7 @@ impl App {
                     if resp.clicked() {
                         pick = Some(t.id);
                     }
-                    resp.context_menu(|ui| {
+                    crate::ui::menu::context(&resp, |ui| {
                         if let Some(a) = list_menu(ui, busy, true) {
                             act = Some((t.id, a));
                         }
@@ -653,7 +653,7 @@ impl App {
         ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
             {
                 crate::ui::control_row(ui, |ui| {
-                    ui.menu_button("⋯", |ui| {
+                    crate::ui::menu::menu_button(ui, "⋯", |ui| {
                         act = list_menu(ui, busy, false);
                     });
                     let unsettled = self
@@ -894,7 +894,7 @@ impl App {
                             line_act = Some(LineAct::SearchDiscogs(i));
                         }
                     }
-                    resp.context_menu(|ui| {
+                    crate::ui::menu::context(&resp, |ui| {
                         if let Some(r) = e.release_id {
                             if ui.button("Open record").clicked() {
                                 line_act = Some(LineAct::Open(i));

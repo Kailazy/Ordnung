@@ -250,7 +250,7 @@ impl App {
                         egui::DragAndDrop::set_payload(ctx, DraggedSongs(vec![LikeSpec::from_pin(s)]));
                     }
                     let crates = self.crate_sets.clone();
-                    resp.context_menu(|ui| {
+                    crate::ui::menu::context(&resp, |ui| {
                         if s.release_id.is_some() && ui.button("Open record").clicked() {
                             act = Some(SongAct::Open(i));
                             ui.close_menu();

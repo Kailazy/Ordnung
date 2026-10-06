@@ -783,7 +783,7 @@ impl App {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
                         let is_loop = c.is_loop();
-                        resp.clone().on_hover_note(note).context_menu(|ui| {
+                        crate::ui::menu::context(&resp.clone().on_hover_note(note), |ui| {
                             cue_context_menu(ui, idx, is_loop, editable, playhead > c.position_ms, &mut action);
                         });
                     }
@@ -1072,8 +1072,7 @@ impl App {
                                 }
                                 let is_loop = c.is_loop();
                                 let after = playhead > c.position_ms;
-                                resp.on_hover_note(if is_loop { "Play this loop" } else { "Jump to this cue" })
-                                    .context_menu(|ui| {
+                                crate::ui::menu::context(&resp.on_hover_note(if is_loop { "Play this loop" } else { "Jump to this cue" }), |ui| {
                                         cue_context_menu(ui, idx, is_loop, editable, after, &mut action);
                                     });
                             }

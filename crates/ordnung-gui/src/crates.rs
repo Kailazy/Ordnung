@@ -94,7 +94,7 @@ pub(crate) fn add_to_crate_menu(
     here: Option<Id>,
 ) -> Option<Id> {
     let mut pick = None;
-    ui.menu_button("Add to crate", |ui| {
+    crate::ui::menu::menu_button(ui, "Add to crate", |ui| {
         let mut any = false;
         for c in crates.iter().filter(|c| c.kind == CrateKind::Crate && Some(c.id) != here) {
             any = true;
@@ -119,7 +119,7 @@ pub(crate) fn add_to_crate_menu(
 /// saying so, so the way in is found.
 pub(crate) fn tag_menu(ui: &mut egui::Ui, sets: &[CrateSet], on: &[Id]) -> Option<(Id, bool)> {
     let mut pick = None;
-    ui.menu_button("Tags", |ui| {
+    crate::ui::menu::menu_button(ui, "Tags", |ui| {
         crate::ui::menu::embedded(ui, |m| {
             let mut any = false;
             for t in sets.iter().filter(|c| c.kind == CrateKind::Tag) {
@@ -666,7 +666,7 @@ impl App {
                     if resp.clicked() && g.release_id.is_some() {
                         act = Some(RecordAct::Open(gi));
                     }
-                    resp.context_menu(|ui| {
+                    crate::ui::menu::context(&resp, |ui| {
                         if g.release_id.is_some() && ui.button("Open record").clicked() {
                             act = Some(RecordAct::Open(gi));
                             ui.close_menu();

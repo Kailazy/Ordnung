@@ -50,6 +50,13 @@ const ROW_H: f32 = 26.0;
 const CHECK_W: f32 = 18.0;
 /// Horizontal text inset inside a row.
 const ROW_PAD: f32 = space::S3;
+/// The panel's drop shadow, shared with egui's own menus (see [`context`]).
+const SHADOW: egui::epaint::Shadow = egui::epaint::Shadow {
+    offset: egui::vec2(0.0, 6.0),
+    blur: 22.0,
+    spread: 0.0,
+    color: egui::Color32::from_black_alpha(90),
+};
 
 /// Attach an animated dropdown to `anchor`. Clicking the anchor toggles it;
 /// `width` is the panel's fixed content width. Fixed, not a minimum: inside an
@@ -113,12 +120,7 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
                 .fill(egui::Color32::TRANSPARENT)
                 .rounding(egui::Rounding::same(radius::MD))
                 .inner_margin(egui::Margin::symmetric(space::S2, space::S2))
-                .shadow(egui::epaint::Shadow {
-                    offset: egui::vec2(0.0, 6.0),
-                    blur: 22.0,
-                    spread: 0.0,
-                    color: egui::Color32::from_black_alpha(90),
-                })
+                .shadow(SHADOW)
                 .show(ui, |ui| {
                     ui.set_min_width(width);
                     ui.set_max_width(width);
@@ -172,6 +174,106 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
     ctx.data_mut(|d| d.insert_temp(id, open));
 }
 
+/// A right-click menu on `resp`, in the dropdown's chrome. egui's context
+/// menu does the work (its placement at the pointer, its submenus, its
+/// dismissal); this only dresses it: the panel on glass with the dropdown's
+/// inset, rounding and shadow, and every plain `ui.button` in it at the
+/// dropdown's row height and text inset, so a right-click menu and a
+/// dropdown read as one component. Like the tooltip, it swaps egui's menu
+/// frame to transparent in the style for the call and puts it back after.
+/// Nested menus inside go through [`menu_button`].
+pub fn context(resp: &egui::Response, add: impl FnOnce(&mut egui::Ui)) {
+    let ctx = resp.ctx.clone();
+    let style = ctx.style();
+    ctx.style_mut(native_style);
+    resp.context_menu(|ui| panel(ui, add));
+    ctx.set_style(style);
+}
+
+/// egui's `menu_button` in the same chrome: a submenu inside a [`context`]
+/// menu (egui makes it one when the ui is a menu's), or a button that opens
+/// one. Drop-in for `ui.menu_button`.
+pub fn menu_button<R>(
+    ui: &mut egui::Ui,
+    label: impl Into<egui::WidgetText>,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<Option<R>> {
+    styled(ui, |ui| ui.menu_button(label, |ui| panel(ui, add)))
+}
+
+/// A top-level menu opened by a button of the caller's own styling, in the
+/// same chrome. Drop-in for `egui::menu::menu_custom_button`.
+pub fn custom_menu_button<R>(
+    ui: &mut egui::Ui,
+    button: egui::Button<'_>,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<Option<R>> {
+    styled(ui, |ui| egui::menu::menu_custom_button(ui, button, |ui| panel(ui, add)))
+}
+
+/// Run `show` with egui's menu frame styled by [`native_style`], the global
+/// style put back after.
+fn styled<R>(ui: &mut egui::Ui, show: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let ctx = ui.ctx().clone();
+    let style = ctx.style();
+    ctx.style_mut(native_style);
+    let r = show(ui);
+    ctx.set_style(style);
+    r
+}
+
+/// A line of text in a native menu (a title over the rows, a "nothing
+/// here" note), aligned with the rows' labels.
+pub fn text(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) {
+    ui.horizontal(|ui| {
+        ui.add_space(ROW_PAD);
+        ui.label(text);
+    });
+}
+
+/// egui's menu frame made transparent and inset like the dropdown's: the
+/// glass painted in [`panel`] is the fill.
+fn native_style(s: &mut egui::Style) {
+    s.visuals.window_fill = egui::Color32::TRANSPARENT;
+    s.visuals.window_stroke = egui::Stroke::NONE;
+    s.visuals.popup_shadow = SHADOW;
+    s.spacing.menu_margin = egui::Margin::same(space::S2);
+}
+
+/// A native menu's content on glass, its rows at the dropdown's metrics.
+fn panel<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let ctx = ui.ctx().clone();
+    let slot = super::glass::begin(ui);
+    rows(ui);
+    let r = add(ui);
+    // The frame wraps the content's `min_rect` in the menu margin; the glass
+    // covers the same. One glass entry per open menu: the Area's id is one.
+    let rect = ui.style().spacing.menu_margin.expand_rect(ui.min_rect());
+    super::glass::end(
+        &ctx,
+        slot,
+        ui.layer_id().id,
+        rect,
+        egui::Rounding::same(radius::MD),
+        super::window::edge(),
+    );
+    r
+}
+
+/// Size egui's own widgets in a menu like this module's rows: a `ui.button`
+/// comes out `ROW_H` tall with its label `ROW_PAD` in, rows sit 2pt apart,
+/// and a disabled row paints no slab on the glass.
+fn rows(ui: &mut egui::Ui) {
+    let s = ui.spacing_mut();
+    s.button_padding = egui::vec2(ROW_PAD, 0.0);
+    s.interact_size.y = ROW_H;
+    s.item_spacing.y = 2.0;
+    // As good as transparent, but not `TRANSPARENT`: a disabled widget fades
+    // its colours towards this fill, and egui reads a fade to exactly
+    // transparent as "invisible" and drops the widget's shapes.
+    ui.visuals_mut().widgets.noninteractive.weak_bg_fill = egui::Color32::from_black_alpha(1);
+}
+
 /// The same rows inside a native egui menu (a context menu's submenu),
 /// where the panel is egui's and only the rows are ours: a `menu_button`
 /// submenu that offers a multi-select (the Tags submenu of a song's menu)
@@ -180,7 +282,7 @@ pub fn dropdown(anchor: &egui::Response, width: f32, add: impl FnOnce(&mut MenuU
 /// the rows should not unroll after the panel has popped. A `close()`
 /// from within closes the native menu.
 pub fn embedded(ui: &mut egui::Ui, add: impl FnOnce(&mut MenuUi)) {
-    ui.spacing_mut().item_spacing.y = 2.0;
+    rows(ui);
     let mut m = MenuUi {
         ui,
         since_open: f32::MAX,
