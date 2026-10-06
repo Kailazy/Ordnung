@@ -2471,29 +2471,29 @@ files elsewhere on the device stay plain storage.",
                     .weak(),
                 );
                 ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        self.collect_wanted = None;
+                match choices(
+                    ui,
+                    &[
+                        Choice::cancel("Cancel"),
+                        Choice::plain("Keep wanted"),
+                        Choice::primary("Remove from wantlist"),
+                    ],
+                ) {
+                    Some(0) => self.collect_wanted = None,
+                    Some(1) => {
+                        choice = Some(VinylEdit::Collect {
+                            release_id: pending.release_id,
+                            label: pending.label.clone(),
+                        })
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let remove = egui::Button::new(
-                            egui::RichText::new("Remove from wantlist").color(egui::Color32::WHITE),
-                        )
-                        .fill(crate::ui::tokens::color::ACCENT);
-                        if ui.add(remove).clicked() {
-                            choice = Some(VinylEdit::Move {
-                                from: VinylList::Wantlist,
-                                record: pending.record.clone(),
-                            });
-                        }
-                        if ui.button("Keep wanted").clicked() {
-                            choice = Some(VinylEdit::Collect {
-                                release_id: pending.release_id,
-                                label: pending.label.clone(),
-                            });
-                        }
-                    });
-                });
+                    Some(_) => {
+                        choice = Some(VinylEdit::Move {
+                            from: VinylList::Wantlist,
+                            record: pending.record.clone(),
+                        })
+                    }
+                    None => {}
+                }
             });
 
         if let Some(edit) = choice {

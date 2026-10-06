@@ -29,7 +29,8 @@
 
 use super::*;
 use crate::liked::LikeSpec;
-use crate::song_rows::{center_two, song_matches, thumb, SongSet};
+use crate::song_rows::{center_two, song_matches, SongSet};
+use crate::ui::cover::thumb;
 use crate::ui::hover::HoverNoteExt;
 use crate::ui::tokens::{color, font, space};
 use ordnung_core::catalog::song_key;

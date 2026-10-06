@@ -102,29 +102,6 @@ pub(crate) fn center_two(ui: &mut egui::Ui, two: bool) {
     ui.add_space(((ui.available_height() - block) / 2.0).max(0.0));
 }
 
-/// A cover thumb, or the blank square with a note where there is none.
-pub(crate) fn thumb(ui: &mut egui::Ui, side: f32, tex: Option<&Tex>) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
-    match tex {
-        Some(h) => {
-            egui::Image::new(h)
-                .fit_to_exact_size(egui::vec2(side, side))
-                .rounding(egui::Rounding::same(4.0))
-                .paint_at(ui, rect);
-        }
-        None => {
-            ui.painter().rect_filled(rect, egui::Rounding::same(4.0), egui::Color32::from_gray(34));
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "♪",
-                egui::FontId::proportional(side * 0.45),
-                egui::Color32::from_gray(70),
-            );
-        }
-    }
-}
-
 impl App {
     /// The table: `rows` are the set's songs, `shown` the indices to draw
     /// (the rest are filtered out), `in_library` the library track that is
@@ -175,7 +152,7 @@ impl App {
                     let s = &rows[i];
                     let local = in_library[i];
                     let tex = s.rel_thumb.as_deref().and_then(|u| self.dig_cover(u).cloned());
-                    row.col(|ui| thumb(ui, THUMB, tex.as_ref()));
+                    row.col(|ui| crate::ui::cover::thumb(ui, THUMB, tex.as_ref()));
                     // The song: title over artist, and the tags it
                     // carries after the artist (`Artist · dub, dark`).
                     let tags = self.tag_words(&s.song().key());

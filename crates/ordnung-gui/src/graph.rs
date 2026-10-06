@@ -3111,26 +3111,3 @@ pub(crate) fn unix_now() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
-
-/// The tab strip's map button: a small solar system, painted rather than
-/// set in type so it sits with the drawn controls. `active` fills it the
-/// way the active tab is filled; the sun and orbits carry the accent then.
-pub(crate) fn solar_icon(p: &egui::Painter, c: egui::Pos2, ink: egui::Color32, r: f32) {
-    let thin = egui::Stroke::new(1.1, ink.gamma_multiply(0.55));
-    p.circle_stroke(c, r * 0.52, thin);
-    p.circle_stroke(c, r * 0.92, thin);
-    p.circle_filled(c, r * 0.2, ink);
-    // Two planets on the orbits, off-axis so it reads as motion, not a dial.
-    let a1 = -0.9f32;
-    let a2 = 2.35f32;
-    p.circle_filled(
-        c + egui::vec2(a1.cos(), a1.sin()) * r * 0.52,
-        r * 0.11,
-        ink,
-    );
-    p.circle_filled(
-        c + egui::vec2(a2.cos(), a2.sin()) * r * 0.92,
-        r * 0.14,
-        ink,
-    );
-}

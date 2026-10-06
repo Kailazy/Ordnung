@@ -1181,7 +1181,7 @@ impl App {
                     let c = egui::pos2(rect.right() - 13.0, rect.top() + 13.0);
                     ui.painter()
                         .circle_filled(c, 10.0, egui::Color32::from_black_alpha(170));
-                    crate::records::draw_eye(
+                    crate::ui::icon::eye(
                         ui.painter(),
                         c,
                         5.0,
@@ -1239,7 +1239,7 @@ impl App {
                         egui::Color32::from_gray(240)
                     };
                     ui.painter().circle_filled(cart_rect.center(), D / 2.0, bg);
-                    crate::records::draw_cart(ui.painter(), cart_rect.center(), 6.0, fg);
+                    crate::ui::icon::cart(ui.painter(), cart_rect.center(), 6.0, fg);
                     let cart_hit = cart_hit.on_hover_cursor(egui::CursorIcon::PointingHand);
                     if cart_hit
                         .on_hover_note("Add to cart on discogs.com (opens the listing)")
@@ -1465,7 +1465,7 @@ impl App {
         // wears in its corner.
         if viewed {
             let c = egui::pos2(right_edge - 9.0, rect.center().y);
-            crate::records::draw_eye(ui.painter(), c, 5.5, egui::Color32::from_gray(150), true);
+            crate::ui::icon::eye(ui.painter(), c, 5.5, egui::Color32::from_gray(150), true);
             right_edge = c.x - 9.0 - 8.0;
         }
         // Cart disc, left of the marker column: the same shortcut the card
@@ -1496,7 +1496,7 @@ impl App {
             };
             ui.painter()
                 .circle_filled(cart_rect.center(), CART_D / 2.0, bg);
-            crate::records::draw_cart(ui.painter(), cart_rect.center(), 5.0, fg);
+            crate::ui::icon::cart(ui.painter(), cart_rect.center(), 5.0, fg);
             let cart_hit = cart_hit.on_hover_cursor(egui::CursorIcon::PointingHand);
             if cart_hit
                 .on_hover_note("Add to cart on discogs.com (opens the listing)")

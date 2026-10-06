@@ -598,7 +598,7 @@ impl App {
                     } else {
                         egui::Color32::from_gray(170)
                     };
-                    draw_shuffle_glyph(ui.painter(), sh_rect.center(), col);
+                    crate::ui::icon::shuffle(ui.painter(), sh_rect.center(), col);
                     if sh.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
@@ -2173,26 +2173,6 @@ fn random_index(len: usize) -> usize {
     use std::hash::{BuildHasher, Hasher};
     let h = std::collections::hash_map::RandomState::new().build_hasher();
     h.finish() as usize % len
-}
-
-/// Hand-drawn shuffle glyph (two crossing arrows), sized for the 28px player
-/// buttons. Drawn like the play/pause glyph so it renders identically
-/// regardless of which fonts are present.
-fn draw_shuffle_glyph(painter: &egui::Painter, c: egui::Pos2, color: egui::Color32) {
-    let (w, h) = (8.0, 5.0);
-    let stroke = egui::Stroke::new(1.8, color);
-    for dir in [-1.0_f32, 1.0] {
-        let from = egui::pos2(c.x - w, c.y - dir * h);
-        let to = egui::pos2(c.x + w, c.y + dir * h);
-        painter.line_segment([from, to], stroke);
-        let v = (to - from).normalized();
-        let n = egui::vec2(-v.y, v.x);
-        painter.add(egui::Shape::convex_polygon(
-            vec![to + v * 2.5, to - v * 3.5 + n * 3.0, to - v * 3.5 - n * 3.0],
-            color,
-            egui::Stroke::NONE,
-        ));
-    }
 }
 
 /// Hand-drawn vinyl-record glyph with an accent sparkle for the smart-shuffle

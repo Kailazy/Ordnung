@@ -198,7 +198,7 @@ fn vinyl_tabs(
         } else {
             color::LABEL_2
         };
-        crate::graph::solar_icon(ui.painter(), rect.center(), ink, h * 0.34);
+        crate::ui::icon::solar(ui.painter(), rect.center(), ink, h * 0.34);
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }

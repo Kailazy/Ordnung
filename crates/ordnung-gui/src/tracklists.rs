@@ -23,6 +23,7 @@
 use super::*;
 use crate::jobs::MatchScope;
 use crate::records::SearchScope;
+use crate::song_rows::center_two;
 use crate::ui::tokens::{color, font, space};
 use egui_extras::{Column, TableBuilder};
 use ordnung_core::model::{ChosenBy, DugRelease};
@@ -158,18 +159,6 @@ fn table_min_width(style: &egui::Style) -> f32 {
     let scroll = &style.spacing.scroll;
     let bar = scroll.bar_width + scroll.bar_inner_margin + scroll.bar_outer_margin;
     COL_INDEX + COL_COVER + 2.0 * COL_TEXT_MIN + COL_BADGES + gaps + bar
-}
-
-/// Pad a cell so its one- or two-line text block (body line, 1 pt, caption
-/// line) sits in the middle of the row rather than against its top.
-fn center_lines(ui: &mut egui::Ui, two: bool) {
-    let body = ui.text_style_height(&egui::TextStyle::Body);
-    let block = if two {
-        body + 1.0 + ui.fonts(|f| f.row_height(&font::caption()))
-    } else {
-        body
-    };
-    ui.add_space(((ui.available_height() - block) / 2.0).max(0.0));
 }
 
 /// The song a line names, for the crate of liked songs: the pasted artist
@@ -781,7 +770,7 @@ impl App {
                             if let Some(c) = e.catno_hint.as_deref() {
                                 sub.push(c.to_string());
                             }
-                            center_lines(ui, !sub.is_empty());
+                            center_two(ui, !sub.is_empty());
                             let name = ui.add(egui::Label::new(egui::RichText::new(label).color(color::LABEL)).truncate());
                             if let (Some(_), Some(pasted)) = (e.rel_track.as_deref(), e.title.as_deref()) {
                                 name.on_hover_note(format!("Pasted as {pasted}"));
@@ -802,7 +791,7 @@ impl App {
                                         (_, Some(t)) => t.to_string(),
                                         _ => String::new(),
                                     };
-                                    center_lines(ui, true);
+                                    center_two(ui, true);
                                     ui.add(egui::Label::new(egui::RichText::new(name).color(color::LABEL)).truncate());
                                     ui.add(egui::Label::new(egui::RichText::new(record_sub(&e)).font(font::caption()).color(color::LABEL_3)).truncate());
                                 }
@@ -818,13 +807,13 @@ impl App {
                                     };
                                     match e.artist.as_deref().filter(|a| !a.is_empty() && e.kind != LineKind::Id) {
                                         Some(a) => {
-                                            center_lines(ui, true);
+                                            center_two(ui, true);
                                             ui.add(egui::Label::new(egui::RichText::new(a).color(color::LABEL_2)).truncate());
                                             ui.add(egui::Label::new(egui::RichText::new(text).font(font::caption()).color(color::LABEL_3)).truncate())
                                                 .on_hover_note(words);
                                         }
                                         None => {
-                                            center_lines(ui, false);
+                                            center_two(ui, false);
                                             ui.label(egui::RichText::new(text).color(color::LABEL_3)).on_hover_note(words);
                                         }
                                     }

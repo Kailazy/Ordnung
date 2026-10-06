@@ -1076,62 +1076,6 @@ fn draw_list_button(
     crate::ui::icon::shelf(p, c, crate::ui::icon::SHELF_R, ink, present, list);
 }
 
-/// A shopping cart, drawn with painter strokes because egui's bundled fonts
-/// have no glyph for U+1F6D2 (it renders as a tofu box): a tilted handle into
-/// a tapered basket over two wheels. `r` is roughly half the icon's width.
-pub(crate) fn draw_cart(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32) {
-    let s = r / 5.0;
-    let stroke = egui::Stroke::new(f32::max(1.2, s * 1.5), ink);
-    let at = |x: f32, y: f32| egui::pos2(c.x + x * s, c.y + y * s);
-    // Basket: a trapezoid, open corners squared off by the closed path.
-    p.add(egui::Shape::closed_line(
-        vec![at(-3.2, -2.6), at(4.4, -2.6), at(3.2, 1.6), at(-2.4, 1.6)],
-        stroke,
-    ));
-    // Handle, out to the upper left the way the emoji draws it.
-    p.line_segment([at(-5.2, -4.4), at(-3.2, -2.6)], stroke);
-    // Wheels.
-    p.circle_filled(at(-1.6, 3.4), f32::max(1.0, s * 1.1), ink);
-    p.circle_filled(at(2.4, 3.4), f32::max(1.0, s * 1.1), ink);
-}
-
-/// An eye: a pointed-oval outline with a pupil, filled when the record is on
-/// the wantlist.
-///
-/// The lid is two mirrored quadratic arcs meeting at sharp corners — a plain
-/// ellipse reads as a coin, and the corners are what make it an eye. Sampled
-/// into one closed path so the outline and the fill describe the same shape.
-pub(crate) fn draw_eye(p: &egui::Painter, c: egui::Pos2, r: f32, ink: egui::Color32, filled: bool) {
-    let hw = r * 1.15; // half-width, corner to corner
-    let hh = r * 0.72; // how far the lids bow from the centre line
-    const STEPS: usize = 14;
-    let mut pts: Vec<egui::Pos2> = Vec::with_capacity(STEPS * 2 + 2);
-    // Upper lid left→right, then lower lid back, giving one closed outline.
-    for side in [-1.0_f32, 1.0] {
-        for i in 0..=STEPS {
-            // Traverse the lower lid in reverse so the path stays continuous.
-            let t = if side < 0.0 {
-                i as f32 / STEPS as f32
-            } else {
-                1.0 - i as f32 / STEPS as f32
-            };
-            let x = -hw + 2.0 * hw * t;
-            // Quadratic bow: zero at the corners, `hh` at the centre.
-            let bow = (1.0 - (2.0 * t - 1.0).powi(2)) * hh;
-            pts.push(egui::pos2(c.x + x, c.y + side * bow));
-        }
-    }
-    if filled {
-        p.add(egui::Shape::convex_polygon(pts, ink, egui::Stroke::NONE));
-        // The pupil is punched back out in the row's own background so a solid
-        // eye still reads as an eye rather than as a filled leaf.
-        p.circle_filled(c, r * 0.34, color::SURFACE);
-    } else {
-        p.add(egui::Shape::closed_line(pts, egui::Stroke::new(1.3, ink)));
-        p.circle_filled(c, r * 0.30, ink);
-    }
-}
-
 /// The small category label above the title: the *carrier*, not the full format
 /// string.
 ///

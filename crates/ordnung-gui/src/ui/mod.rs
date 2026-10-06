@@ -3,7 +3,7 @@
 //! [`tokens`] holds the design tokens (colours, radii, spacing, type ramp) and
 //! [`theme`] pushes them into egui's global style. The components sit beside
 //! them: [`button`] is the one push button, [`field`] the one text box,
-//! [`chip`] the avatar pill, [`menu`] the dropdown a button anchors,
+//! [`chip`] the avatar pill, [`cover`] the record's sleeve or its stand-in, [`menu`] the dropdown a button anchors,
 //! [`window`] the one floating window, [`sidebar`] the window docked to an
 //! edge, [`nav`] the docked panel that snaps between designed widths,
 //! [`tooltip`] the hover note, [`choices`] the row of buttons a dialog
@@ -13,6 +13,7 @@
 pub mod button;
 pub mod chip;
 pub mod choices;
+pub mod cover;
 pub mod escape;
 pub mod fader;
 pub mod field;
