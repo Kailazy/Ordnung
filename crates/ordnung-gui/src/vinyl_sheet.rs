@@ -131,6 +131,10 @@ pub(crate) struct VinylSheet {
     /// Videos no track claimed, as indices into the detail's `videos`.
     pub extra_videos: Vec<usize>,
     pub loading: bool,
+    /// When the sheet was opened. The window is held back while the
+    /// tracklist loads so it opens at its full height instead of growing
+    /// a frame later; `SHEET_HOLD` caps the wait for a slow fetch.
+    pub opened: Instant,
     pub error: Option<String>,
     /// The video index currently loaded in the mini-player, for the row marker.
     pub playing_video: Option<usize>,
@@ -592,6 +596,7 @@ impl App {
             rows: Vec::new(),
             extra_videos: Vec::new(),
             loading: true,
+            opened: Instant::now(),
             error: None,
             playing_video: None,
             video_uri: None,
@@ -1251,6 +1256,17 @@ impl App {
         // A sheet is where videos get played from, so have the player built
         // before the first track is clicked.
         webview::prewarm();
+        // A cached record lands a frame or two after the open; drawing the
+        // window before then shows it short and then taller, the resize the
+        // user sees on every open. Hold it until the rows are in, up to
+        // `SHEET_HOLD`, so a slow fetch still gets the loading sheet.
+        if let Some(s) = self.vinyl_sheet.as_ref() {
+            let waited = s.opened.elapsed();
+            if s.loading && waited < SHEET_HOLD {
+                ctx.request_repaint_after(SHEET_HOLD - waited);
+                return;
+            }
+        }
         // The panel can be closed by its own title-bar button, which we only
         // find out about by asking.
         if let Some(sheet) = self.vinyl_sheet.as_mut() {
@@ -2519,6 +2535,8 @@ enum RecordPlay {
 /// The record sheet's content width. Fixed, and the single source the
 /// transport bar sizes against — see the `set_max_width` note in the sheet.
 const SHEET_W: f32 = 620.0;
+/// How long a loading sheet is held off screen before it opens anyway.
+const SHEET_HOLD: Duration = Duration::from_millis(400);
 
 /// The tracklist's two fixed left-hand columns: the play marker, then the
 /// position. Shared with the transport bar, whose own play button is drawn
