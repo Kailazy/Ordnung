@@ -3508,11 +3508,18 @@ impl App {
                 const GAP: f32 = 4.0;
                 let cols = ((ui.available_width() + GAP) / (CELL + GAP)).floor().max(1.0) as usize;
                 let rows = matches.len().div_ceil(cols);
+                // The grid's spacing is set outside `show_rows`, which
+                // takes the row pitch from it, and the button padding is
+                // zeroed so a cell is exactly `CELL` wide: with the
+                // theme's padding a row overran the window's width and
+                // the last column slid under the scrollbar.
+                ui.scope(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+                ui.spacing_mut().button_padding = egui::Vec2::ZERO;
                 egui::ScrollArea::vertical()
                     .max_height(CELL * 6.0 + GAP * 5.0)
                     .auto_shrink([false, false])
                     .show_rows(ui, CELL, rows, |ui, range| {
-                        ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
                         for row in range {
                             ui.horizontal(|ui| {
                                 for (name, glyph) in matches.iter().skip(row * cols).take(cols) {
@@ -3538,6 +3545,7 @@ impl App {
                             });
                         }
                     });
+                });
                 if matches.is_empty() {
                     ui.label(egui::RichText::new("No icons match.").weak());
                 }
