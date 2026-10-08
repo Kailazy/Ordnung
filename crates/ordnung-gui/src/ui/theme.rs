@@ -44,6 +44,11 @@ fn install_fonts(ctx: &egui::Context) {
     // nothing in the binary, and each is only consulted for glyphs the faces
     // ahead of it lack.
     let fallbacks = load_system_fallback_fonts(&mut fonts);
+    crate::util::mark(&format!(
+        "fonts read ({} system fallbacks, {} MB)",
+        fallbacks.len(),
+        fonts.font_data.values().map(|f| f.font.len()).sum::<usize>() / 1_000_000
+    ));
 
     for family in [FontFamily::Proportional, FontFamily::Monospace] {
         let chain = fonts.families.entry(family).or_default();
@@ -179,6 +184,12 @@ fn load_system_fallback_fonts(fonts: &mut FontDefinitions) -> Vec<String> {
 
     let mut keys = Vec::new();
     for (key, candidates) in GROUPS {
+        // Arial Unicode covers Hangul; the 55 MB Apple SD Gothic Neo
+        // collection behind it would only be read, held and parsed for
+        // nothing.
+        if *key == "fallback-korean" && keys.iter().any(|k| k == "fallback-unicode") {
+            continue;
+        }
         for path in *candidates {
             if let Ok(bytes) = std::fs::read(path) {
                 fonts
