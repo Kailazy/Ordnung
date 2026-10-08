@@ -1801,20 +1801,26 @@ impl App {
                             ui.label(egui::RichText::new(line).small().weak());
                         }
                         // What it costs, right under what it is — the sheet is
-                        // where the buy decision happens.
-                        // Next to it, the shops the user already digs
-                        // through that have this pressing in stock, folded
-                        // into one dropdown so five copies don't take five
-                        // lines. Reads from the sellers' cached crates, so
-                        // it's exactly as fresh as the last sweep.
-                        if price_line.is_some() || !stocked.is_empty() {
+                        // where the buy decision happens. One row, each
+                        // price under the name of the shop it comes from:
+                        // the Discogs market on the left, the same record
+                        // new from the artist or label on Bandcamp on the
+                        // right, a rule between them. Next to the Discogs
+                        // price, the shops the user already digs through
+                        // that have this pressing in stock, folded into one
+                        // dropdown so five copies don't take five lines; it
+                        // reads from the sellers' cached crates, so it's
+                        // exactly as fresh as the last sweep.
+                        let discogs_side = price_line.is_some() || !stocked.is_empty();
+                        if discogs_side || bandcamp.is_some() {
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
+                                let price_ink = egui::Color32::from_rgb(120, 200, 140);
+                                if discogs_side {
+                                    ui.label(egui::RichText::new("Discogs").weak());
+                                }
                                 if let Some(line) = &price_line {
-                                    ui.label(
-                                        egui::RichText::new(line)
-                                            .color(egui::Color32::from_rgb(120, 200, 140)),
-                                    );
+                                    ui.label(egui::RichText::new(line).color(price_ink));
                                 }
                                 if !stocked.is_empty() {
                                     let shops = stocked
@@ -1845,33 +1851,51 @@ impl App {
                                         }
                                     });
                                 }
-                            });
-                        }
-                        // The same record new from the artist or label, on
-                        // Bandcamp: the line says what can be bought, the
-                        // dropdown lists every format with its buy link.
-                        if let Some((line, rows, page)) = &bandcamp {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
-                                let btn = crate::ui::button::menu_button(ui, "Bandcamp")
-                                    .on_hover_note("Formats on Bandcamp");
-                                crate::ui::menu::dropdown(&btn, 360.0, |m| {
-                                    for (name, detail, url) in rows {
-                                        if m.item_detail(name, detail) {
+                                if let Some((line, rows, page)) = &bandcamp {
+                                    if discogs_side {
+                                        ui.separator();
+                                    }
+                                    // Name and price wrap as one, so a narrow
+                                    // sheet never strands the name on the line
+                                    // above.
+                                    ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Bandcamp").weak());
+                                    // The line is the dropdown only when there
+                                    // is something to choose: several formats
+                                    // open the list, one format is the link
+                                    // to it.
+                                    if rows.len() > 1 {
+                                        let btn = crate::ui::button::menu_button(ui, line.as_str())
+                                            .on_hover_note("Formats on Bandcamp");
+                                        crate::ui::menu::dropdown(&btn, 360.0, |m| {
+                                            for (name, detail, url) in rows {
+                                                if m.item_detail(name, detail) {
+                                                    open_url(url);
+                                                    m.close();
+                                                }
+                                            }
+                                            m.separator();
+                                            if m.item("Open album page") {
+                                                open_url(page);
+                                                m.close();
+                                            }
+                                        });
+                                    } else {
+                                        let url = rows.first().map_or(page.as_str(), |r| r.2.as_str());
+                                        if crate::ui::button::name_link(
+                                            ui,
+                                            line,
+                                            crate::ui::tokens::font::body(),
+                                            price_ink,
+                                        )
+                                        .on_hover_note("Open on Bandcamp")
+                                        .clicked()
+                                        {
                                             open_url(url);
-                                            m.close();
                                         }
                                     }
-                                    m.separator();
-                                    if m.item("Open album page") {
-                                        open_url(page);
-                                        m.close();
-                                    }
-                                });
-                                ui.label(
-                                    egui::RichText::new(line)
-                                        .color(egui::Color32::from_rgb(120, 200, 140)),
-                                );
+                                    });
+                                }
                             });
                         }
                         // The copy the user was actually looking at, when the
