@@ -401,7 +401,10 @@ const RECENTLY_ADDED_WINDOW_SECS: i64 = 24 * 60 * 60;
 ///
 /// Schema 23 adds `crates.kind`: a set is a crate or a tag (see
 /// [`CrateKind`]). Every set that existed before is a crate.
-const SCHEMA_VERSION: i64 = 24;
+///
+/// Schema 25 adds the covering indexes the GUI's launch reads run on, so
+/// they stop walking the waveform and cover blobs (see `init_schema`).
+const SCHEMA_VERSION: i64 = 25;
 
 /// The columns of the two vinyl list tables (`vinyl_collection`,
 /// `vinyl_wantlist`), shared so both are created alike and so an older
@@ -1027,6 +1030,27 @@ impl Catalog {
         self.add_column_if_missing("analysis", "grid_auto_offset_ms", "INTEGER")?;
         self.add_column_if_missing("analysis", "grid_auto_bpm", "REAL")?;
         self.add_column_if_missing("analysis", "grid_auto_beat_number", "INTEGER")?;
+
+        // Covering indexes for the reads the GUI makes on every launch and
+        // after every catalog change. `analysis.waveform`/`waveform_bands`
+        // and `tracks.cover_thumb` are stored before the columns those reads
+        // need, so each read walked every blob's overflow pages to get past
+        // them: on a cold page cache ~290 ms for the analyses and ~110 ms
+        // for the playlist stats of a 1,400-track catalog, against 2 ms and
+        // 1 ms from an index. The art indexes likewise answer "which tracks
+        // have a fetched cover" and "which carry a release id" without
+        // touching the PNG rows. Last, after the columns they index exist.
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_analysis_light ON analysis(
+                 track_id, analyzed_at, bpm, key_tonic, key_mode, beat_offset_ms, peak,
+                 loudness, content_hash, analyzer_version, lowpass_hz, lowpass_edge,
+                 first_beat_number);
+             CREATE INDEX IF NOT EXISTS idx_tracks_size ON tracks(id, src_size, duration_ms);
+             CREATE INDEX IF NOT EXISTS idx_extart_fetched ON track_external_artwork(track_id)
+                 WHERE typeof(png_bytes) = 'blob';
+             CREATE INDEX IF NOT EXISTS idx_extart_release
+                 ON track_external_artwork(external_id, track_id);",
+        )?;
 
         // Full-resolution external artwork kept for tag embedding (`tag --write
         // --art`). Older catalogs only had the small `png_bytes` thumbnail.
@@ -3328,54 +3352,6 @@ impl Catalog {
             })? as u64)
     }
 
-    /// Which catalog tracks you already have on vinyl in `list`, by the same
-    /// matching the vinyl grid's "in catalog" badge uses (see
-    /// [`Self::vinyl_catalog_links`]): the exact Discogs release id first,
-    /// falling back to album/artist metadata.
-    ///
-    /// The fallback is the point. Plenty of tracks never had their artwork
-    /// fetched from Discogs and so carry no release id at all, yet the record is
-    /// plainly sitting in the collection under the same album name. Keying on the
-    /// release id alone would tell those tracks they aren't yours.
-    pub fn vinyl_tracks_in(&self, list: VinylList) -> Result<Vec<Id>> {
-        let records = self.list_vinyl(list)?;
-        // `vinyl_catalog_links` folds in *every* release-id link in the catalog,
-        // not just this list's (harmless for the grid, which looks up by a
-        // record's own release id). Here the result is the answer, so narrow it
-        // to the releases actually in `list` — otherwise every Discogs-fetched
-        // track would read as one you own on vinyl.
-        let in_list: std::collections::HashSet<u64> =
-            records.iter().map(|r| r.release_id).collect();
-        let mut ids: Vec<Id> = self
-            .vinyl_catalog_links(&records)?
-            .into_iter()
-            .filter(|(release_id, _)| in_list.contains(release_id))
-            .map(|(_, track_id)| track_id)
-            .collect();
-        ids.sort_unstable();
-        ids.dedup();
-        Ok(ids)
-    }
-
-    /// Every record in `list` as `(release_id, artist, title)`, one row per
-    /// pressing. This is what lets the front-end recognise a record by *work*
-    /// rather than by pressing: a label run or a shop listing may show a
-    /// different Discogs release of a record you own (the test pressing, a
-    /// repress), and the exact-id check alone would call it unowned. Skips the
-    /// cover blob, so it is cheap enough to load on every reload.
-    pub fn vinyl_titles(&self, list: VinylList) -> Result<Vec<(u64, String, String)>> {
-        let table = vinyl_table(list);
-        let mut stmt = self
-            .conn
-            .prepare(&format!("SELECT release_id, artist, title FROM {table}"))?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
-    }
-
     /// Every Discogs release id cached in `list`. Deliberately release ids rather
     /// than row keys: this answers "do I already have this record?", and the two
     /// lists key their rows differently. Owning two pressings of one release
@@ -4829,7 +4805,8 @@ impl Catalog {
         let mut stmt = self.conn.prepare(
             "SELECT pt.playlist_id, COUNT(*),
                     COALESCE(SUM(t.src_size), 0), COALESCE(SUM(t.duration_ms), 0)
-             FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
+             FROM playlist_tracks pt
+             JOIN tracks t INDEXED BY idx_tracks_size ON t.id = pt.track_id
              GROUP BY pt.playlist_id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -7263,68 +7240,6 @@ mod tests {
         assert_eq!(list[0].instance_id, 55);
         assert_eq!(list[0].folder_id, Some(1));
         assert!(list[0].has_cover);
-    }
-
-    #[test]
-    fn vinyl_tracks_in_matches_on_metadata_and_stays_within_its_list() {
-        let cat = Catalog::open(":memory:").unwrap();
-        let (own, want) = (VinylList::Collection, VinylList::Wantlist);
-
-        // Track A: never Discogs-fetched, but its album is the record's title.
-        // This is the case that matters — most of the library has no release id.
-        let mut a = scanned("/m/a.mp3", "11:68PM", "Techno", 1000);
-        a.tags.album = Some("Craft Services 001".into());
-        a.tags.title = Some("Lessons".into());
-        let (a, _) = cat.upsert_scanned(&a).unwrap();
-        // Track B: linked by exact release id to a record in the wantlist.
-        let (b, _) = cat
-            .upsert_scanned(&scanned("/m/b.mp3", "Surgeon", "Techno", 1000))
-            .unwrap();
-        cat.set_external_artwork(b, "discogs", Some("7000"), None, Some(&[1]), None)
-            .unwrap();
-        // Track C: linked by exact release id to a record in NEITHER list. It
-        // must not leak into either answer.
-        let (c, _) = cat
-            .upsert_scanned(&scanned("/m/c.mp3", "Jeff Mills", "Techno", 1000))
-            .unwrap();
-        cat.set_external_artwork(c, "discogs", Some("8000"), None, Some(&[1]), None)
-            .unwrap();
-
-        cat.upsert_vinyl(own, &vinyl(1, "11:68PM", "Craft Services 001"))
-            .unwrap();
-        let mut wanted_rec = vinyl(2, "Surgeon", "Some EP");
-        wanted_rec.release_id = 7000;
-        cat.upsert_vinyl(want, &wanted_rec).unwrap();
-
-        assert_eq!(
-            cat.vinyl_tracks_in(own).unwrap(),
-            vec![a],
-            "matched on album name alone"
-        );
-        assert_eq!(
-            cat.vinyl_tracks_in(want).unwrap(),
-            vec![b],
-            "matched on release id"
-        );
-        // Track c's release is in no list, so it belongs to neither answer.
-        for list in [own, want] {
-            assert!(!cat.vinyl_tracks_in(list).unwrap().contains(&c));
-        }
-    }
-
-    #[test]
-    fn vinyl_titles_list_every_row_by_record() {
-        let cat = Catalog::open(":memory:").unwrap();
-        cat.upsert_vinyl(VinylList::Collection, &vinyl(1, "Various", "Night Drive EP"))
-            .unwrap();
-        cat.upsert_vinyl(VinylList::Wantlist, &vinyl(2, "Jeff Mills", "Waveform"))
-            .unwrap();
-        let owned = cat.vinyl_titles(VinylList::Collection).unwrap();
-        assert_eq!(
-            owned,
-            vec![(9001, "Various".to_string(), "Night Drive EP".to_string())]
-        );
-        assert_eq!(cat.vinyl_titles(VinylList::Wantlist).unwrap().len(), 1);
     }
 
     #[test]

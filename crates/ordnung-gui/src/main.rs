@@ -122,6 +122,7 @@ fn main() -> eframe::Result<()> {
     // a variable already set in the real environment.
     let _ = dotenvy::dotenv();
     let db_path = default_db_path().unwrap_or_else(|| PathBuf::from("ordnung.db"));
+    util::mark("main");
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1100.0, 680.0])
         .with_min_inner_size([MIN_WINDOW_W, MIN_WINDOW_H])
@@ -133,10 +134,12 @@ fn main() -> eframe::Result<()> {
         viewport,
         ..Default::default()
     };
+    util::mark("window requested");
     eframe::run_native(
         "Ordnung",
         opts,
         Box::new(move |cc| {
+            util::mark("window + gpu ready");
             Ok(Box::new(App::new(
                 db_path,
                 cc.egui_ctx.clone(),
@@ -1901,6 +1904,9 @@ struct App {
     /// Audio output for the cover snippet-preview button. `None` if the machine
     /// has no usable output device (the button is then hidden).
     audio: Option<AudioEngine>,
+    /// True until the second pass builds `audio` (see `update_inner`): the
+    /// output device is opened once the first frame is on screen, not before.
+    audio_pending: bool,
     /// Carries the now-playing track's resolved cover (a `file://` temp-file URL,
     /// or `None`) back from the off-thread loader so the OS Now Playing panel can
     /// show artwork. Tagged with the track `Id` to ignore stale results.

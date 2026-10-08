@@ -2781,11 +2781,13 @@ impl RowSources {
         if !self.stale {
             return Ok(());
         }
+        util::mark_early("rows: refreshing sources");
         self.ext_art = catalog
             .external_artwork_ids()
             .map_err(|e| e.to_string())?
             .into_iter()
             .collect();
+        util::mark_early("rows: external art ids");
         // `added_at` is catalog bookkeeping (not on `Track`), pulled in one
         // query; `load_rows` formats it relative to now.
         self.added_at = catalog
@@ -2800,7 +2802,9 @@ impl RowSources {
         // track is re-analyzed, which restamps `analyzed_at`. So each row
         // keeps the buffers it already holds while its stamp is unchanged,
         // and only new or restamped rows fetch theirs.
+        util::mark_early("rows: added_at");
         let light = catalog.analyses_light().map_err(|e| e.to_string())?;
+        util::mark_early("rows: analyses (light)");
         let mut old = std::mem::take(&mut self.analyses);
         let mut need: Vec<Id> = Vec::new();
         let mut fresh: HashMap<Id, RowAnalysis> = HashMap::with_capacity(light.len());
@@ -2841,6 +2845,11 @@ impl RowSources {
             });
             self.envelopes_rx = Some(rx);
         }
+        util::mark_early(&format!(
+            "rows: sources refreshed ({} analyses, {} envelopes pending)",
+            fresh.len(),
+            fresh.values().filter(|a| a.waveform.is_empty()).count()
+        ));
         self.analyses = fresh;
         self.stale = false;
         Ok(())
@@ -2853,6 +2862,7 @@ impl RowSources {
             return;
         };
         self.envelopes_rx = None;
+        util::mark(&format!("envelopes landed ({})", env.len()));
         for (id, (waveform, waveform_bands)) in env {
             if let Some(a) = self.analyses.get_mut(&id).filter(|a| stamps.get(&id) == Some(&a.stamp)) {
                 a.waveform = Arc::new(waveform);
@@ -2878,6 +2888,9 @@ pub(crate) fn load_rows(
     ctx: &egui::Context,
 ) -> Result<Vec<TrackRow>, String> {
     let catalog = Catalog::open(db).map_err(|e| e.to_string())?;
+    if sources.stale {
+        util::mark_early("rows: catalog opened");
+    }
     sources.ensure_fresh(&catalog, db, ctx)?;
     let q = if filter.trim().is_empty() {
         None

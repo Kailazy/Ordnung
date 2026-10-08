@@ -633,6 +633,7 @@ impl App {
             return;
         };
         self.missing_rx = None;
+        util::mark(&format!("missing-file stat landed ({})", labels.len()));
         self.missing_count = labels.len() as u64;
         self.missing_labels = labels;
     }

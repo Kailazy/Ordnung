@@ -49,8 +49,10 @@ impl App {
         // matches the Ordnung visual language (see `ui::theme`). DejaVu Sans stays
         // in the fallback chain for the wide-Unicode glyphs Inter lacks.
         crate::ui::theme::install(&egui_ctx);
+        util::mark("theme + fonts installed");
         let tex_graveyard = TexGraveyard::default();
         crate::ui::glass::install(&egui_ctx, render_state);
+        util::mark("glass installed");
         // Dig cover downloads: many small CDN fetches, each answering on this
         // one channel (the dig is a single path, so there's no per-request
         // routing to do).
@@ -109,6 +111,7 @@ impl App {
         // without blocking the UI on a catalog read when a track starts.
         let (media_cover_tx, media_cover_rx) = mpsc::channel::<(Id, Option<String>)>();
         let (hires_tx, hires_rx) = mpsc::channel::<(Id, Vec<u8>)>();
+        util::mark("loaders spawned");
         let mut app = App {
             catalog_probe: None,
             db_path,
@@ -321,7 +324,8 @@ impl App {
             failure_report: Vec::new(),
             show_failure_report: false,
             hidden_format_notice: None,
-            audio: AudioEngine::new(egui_ctx),
+            audio: None,
+            audio_pending: true,
             media_cover_tx,
             media_cover_rx,
             hires_tx,
@@ -394,17 +398,10 @@ impl App {
             ffmpeg_state: FfmpegState::Unknown,
         };
         let config = Config::load();
+        util::mark("config loaded");
         app.token_input = config.discogs_token.clone();
         app.config = config;
-        // The engine is built before the config is read, so hand it the saved
-        // level now — otherwise the first track plays at unity while the knob
-        // shows whatever the user left it at.
-        if let Some(a) = &mut app.audio {
-            a.set_volume(app.config.volume);
-            a.set_key_lock(app.config.key_lock);
-        }
-        app.apply_mid_start();
-        // Same for the video player. It has no panel yet — that's built on the
+        // The video player's level. It has no panel yet — that's built on the
         // first video — but the level is recorded now so the first one to play
         // comes in at the saved volume rather than at full.
         webview::set_volume(app.config.volume);
@@ -432,6 +429,7 @@ impl App {
         // newest first") before the first load so it's applied on launch.
         app.sort = app.default_sort();
         app.reload();
+        util::mark("first reload done");
         app.recount_missing();
         // Refresh anything we always want current (Discogs vinyl collection)
         // in the background as soon as the catalog is loaded.
@@ -445,6 +443,7 @@ impl App {
         // Last, so the tour draws over a fully built window rather than an
         // empty one: a new user should see what they're being told about.
         app.maybe_open_tour();
+        util::mark("app built (background: missing stat, sync, ffmpeg, update check)");
         app
     }
 
@@ -664,6 +663,7 @@ impl App {
     }
 
     pub(crate) fn reload(&mut self) {
+        let began = Instant::now();
         // One question first: has anything written the catalog since the last
         // reload? A view switch or a search keystroke hasn't, and then every
         // catalog-wide refresh below (playlist stats, the analysis blobs, the
@@ -678,6 +678,7 @@ impl App {
         }
         let changed = self.catalog_probe.as_mut().map_or(true, |p| p.changed());
         if changed {
+            util::mark_early("reload: probe says changed");
             // Whatever view is showing, every cache built from the catalog is
             // now stale; each refills on its next use.
             self.row_sources.invalidate();
@@ -692,8 +693,14 @@ impl App {
             // deleted (or turned out to be a folder), fall back to the Library
             // below so the table never queries a playlist that no longer exists.
             (self.playlists, self.playlist_stats) = Catalog::open(&self.db_path)
-                .and_then(|c| Ok((c.list_playlists()?, c.playlist_stats()?)))
+                .and_then(|c| {
+                    util::mark_early("reload: catalog opened");
+                    let p = c.list_playlists()?;
+                    util::mark_early("reload: playlists listed");
+                    Ok((p, c.playlist_stats()?))
+                })
                 .unwrap_or_default();
+            util::mark_early("reload: playlist stats");
         }
         if let LibraryView::Playlist(id) = self.view {
             let still_valid = self.playlists.iter().any(|p| p.id == id && !p.is_folder);
@@ -715,6 +722,9 @@ impl App {
                 &self.egui_ctx,
             )
         };
+        if changed {
+            util::mark_early("reload: rows loaded");
+        }
         match loaded {
             Ok(rows) => {
                 // Narrow to the rows passing every active per-column filter before
@@ -837,11 +847,20 @@ impl App {
         // The rest of this bookkeeping is catalog-wide, so it only moves when
         // the catalog does.
         if changed {
-            // Keep the sidebar's vinyl badge current from the cache count
-            // regardless of the active view.
-            self.vinyl_count = Catalog::open(&self.db_path)
-                .and_then(|c| c.vinyl_count(VinylList::Collection))
-                .unwrap_or(0);
+            util::mark_early("reload: rows sorted, counts");
+            // Both shelves, read once: the badge count, the by-release and
+            // by-song sets the menus check, the by-track sets and the Vinyl
+            // section's lists and link map below all come from this one pair
+            // of reads instead of each querying the tables again.
+            (self.vinyl, self.wantlist) = Catalog::open(&self.db_path)
+                .and_then(|c| {
+                    Ok((
+                        c.list_vinyl(VinylList::Collection)?,
+                        c.list_vinyl(VinylList::Wantlist)?,
+                    ))
+                })
+                .unwrap_or_default();
+            self.vinyl_count = self.vinyl.len() as u64;
             // track → Discogs release, so the library's right-click menu knows which
             // tracks have a release worth wantlisting. Loaded in every view (unlike
             // the grid's reverse map below) because that menu is the library's.
@@ -849,39 +868,52 @@ impl App {
                 .and_then(|c| c.release_track_links())
                 .map(|pairs| pairs.into_iter().map(|(rid, tid)| (tid, rid)).collect())
                 .unwrap_or_default();
-            // …and which records are already yours, so the menu can say where one
-            // already is instead of offering to want it again. Two views of the same
-            // membership: by release (the grid's both-lists check) and by track (the
-            // library's, which needs the metadata fallback since most tracks carry
-            // no Discogs release id).
-            for (list, releases, keys, tracks) in [
+            // Which catalog tracks are a record on either shelf: the exact
+            // Discogs release id first, album/artist metadata as the fallback
+            // (see `Catalog::vinyl_catalog_links`; the fallback is the point,
+            // since most tracks carry no release id). One pass over the
+            // catalog for both lists; each list keeps the links to its own
+            // releases, so a wanted record never reads as owned. Three views
+            // of the same membership: by release (the grid's both-lists
+            // check), by work key and by track (the library's menu).
+            let records: Vec<VinylRecord> = self
+                .vinyl
+                .iter()
+                .chain(self.wantlist.iter())
+                .cloned()
+                .collect();
+            let links = Catalog::open(&self.db_path)
+                .and_then(|c| c.vinyl_catalog_links(&records))
+                .unwrap_or_default();
+            for (rows, releases, keys, tracks) in [
                 (
-                    VinylList::Collection,
+                    &self.vinyl,
                     &mut self.vinyl_owned,
                     &mut self.vinyl_owned_keys,
                     &mut self.vinyl_owned_tracks,
                 ),
                 (
-                    VinylList::Wantlist,
+                    &self.wantlist,
                     &mut self.vinyl_wanted,
                     &mut self.vinyl_wanted_keys,
                     &mut self.vinyl_wanted_tracks,
                 ),
             ] {
-                // One pass over the rows feeds both the by-pressing and the
-                // by-record views, so they can never disagree about a shelf.
-                let rows = Catalog::open(&self.db_path)
-                    .and_then(|c| c.vinyl_titles(list))
-                    .unwrap_or_default();
-                *releases = rows.iter().map(|(id, _, _)| *id).collect();
+                *releases = rows.iter().map(|r| r.release_id).collect();
                 *keys = rows
                     .iter()
-                    .map(|(_, artist, title)| crate::dig::work_key(artist, title))
+                    .map(|r| crate::dig::work_key(&r.artist, &r.title))
                     .collect();
-                *tracks = Catalog::open(&self.db_path)
-                    .and_then(|c| c.vinyl_tracks_in(list))
-                    .map(|ids| ids.into_iter().collect())
-                    .unwrap_or_default();
+                *tracks = links
+                    .iter()
+                    .filter(|(rid, _)| releases.contains(rid))
+                    .map(|(_, tid)| *tid)
+                    .collect();
+            }
+            // release_id → [track_id], the grid's "in catalog" badge.
+            self.vinyl_links = HashMap::new();
+            for (rid, tid) in links {
+                self.vinyl_links.entry(rid).or_default().push(tid);
             }
             // The sidebar and the menus show these in every view, so they
             // refresh here rather than in the Vinyl-only block below (where
@@ -902,17 +934,14 @@ impl App {
             {
                 self.tracklist_current = None;
             }
+            util::mark_early("reload: vinyl refs, liked, crates, tracklists");
         }
         // The Vinyl section's lists load on the first visit and again whenever
         // the catalog changes; a plain switch back to the section reuses them.
         if self.view == LibraryView::Vinyl && (changed || !self.vinyl_loaded) {
+            // The shelves themselves (and the link map) are held from the
+            // catalog-wide block above.
             self.vinyl_loaded = true;
-            self.vinyl = Catalog::open(&self.db_path)
-                .and_then(|c| c.list_vinyl(VinylList::Collection))
-                .unwrap_or_default();
-            self.wantlist = Catalog::open(&self.db_path)
-                .and_then(|c| c.list_vinyl(VinylList::Wantlist))
-                .unwrap_or_default();
             self.dug = Catalog::open(&self.db_path)
                 .and_then(|c| c.list_dug_releases())
                 .unwrap_or_default();
@@ -1053,27 +1082,6 @@ impl App {
                 )
                 .collect();
             self.vinyl_covers.retain(|key, _| live.contains(key));
-            // Cross-reference the catalog: which records do we already own a
-            // digital copy of? Build release_id → [track_id] once for the grid.
-            // Exact release-id links first, metadata matching as a fallback.
-            // Both lists are cross-referenced: a wanted record you already have
-            // digitally is worth flagging too.
-            let records: Vec<VinylRecord> = self
-                .vinyl
-                .iter()
-                .chain(self.wantlist.iter())
-                .cloned()
-                .collect();
-            self.vinyl_links = Catalog::open(&self.db_path)
-                .and_then(|c| c.vinyl_catalog_links(&records))
-                .map(|pairs| {
-                    let mut m: HashMap<u64, Vec<Id>> = HashMap::new();
-                    for (rid, tid) in pairs {
-                        m.entry(rid).or_default().push(tid);
-                    }
-                    m
-                })
-                .unwrap_or_default();
         } else if self.view != LibraryView::Vinyl && !self.seller_listings.is_empty() {
             // Leaving the section keeps the record lists and the cover
             // textures, so coming back is instant: the wall is painted from
@@ -1084,6 +1092,13 @@ impl App {
             self.seller_hay = Vec::new();
             self.seller_genres = HashMap::new();
             self.seller_listings_for = None;
+        }
+        if changed && util::startup_done() {
+            util::mark(&format!(
+                "reload after a catalog change: {} rows, {:.0} ms",
+                self.rows.len(),
+                began.elapsed().as_secs_f64() * 1000.0
+            ));
         }
     }
 
@@ -1973,7 +1988,12 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let first = !self.menu_installed;
         self.update_inner(ctx, frame);
+        if first {
+            util::mark("first frame built");
+            util::finish_startup();
+        }
         // Where the keyboard ended up, for the next pass's Escape (see
         // `ui::escape`).
         crate::ui::escape::end_pass(ctx);
@@ -1991,7 +2011,26 @@ impl App {
         // created it, and AppKit would otherwise install its own stub over ours.
         if !self.menu_installed {
             self.menu_installed = true;
+            util::mark("first frame begins");
             crate::macos_menu::install();
+            // The pass after this one builds the audio engine; make it come
+            // at once rather than on the next mouse move.
+            ctx.request_repaint();
+        } else if self.audio_pending {
+            // The output device is opened on the second pass, once the first
+            // frame is on screen: CoreAudio takes 75-200 ms to hand over a
+            // stream (measured in `startup.log`), which held the window back
+            // for that long, and before the window exists nothing can have
+            // asked to play. The saved level and key lock go on at once, so
+            // the first track plays as the knob shows it.
+            self.audio_pending = false;
+            self.audio = AudioEngine::new(ctx.clone());
+            if let Some(a) = &mut self.audio {
+                a.set_volume(self.config.volume);
+                a.set_key_lock(self.config.key_lock);
+            }
+            self.apply_mid_start();
+            util::mark("audio engine + media controls");
         }
         self.settle_panel(ctx);
         // The file-drop landing zones are re-recorded by whatever draws them

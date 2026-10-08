@@ -543,3 +543,53 @@ mod wheel_tests {
         assert!(matches!(ev.last(), Some(Event::Cut)));
     }
 }
+
+static STARTUP_DONE: AtomicBool = AtomicBool::new(false);
+
+/// The first frame is on screen: from here [`mark_early`] stays quiet.
+pub(crate) fn finish_startup() {
+    STARTUP_DONE.store(true, Ordering::Relaxed);
+}
+
+/// True once the first frame has been built (see [`finish_startup`]).
+pub(crate) fn startup_done() -> bool {
+    STARTUP_DONE.load(Ordering::Relaxed)
+}
+
+/// [`mark`] for a stage that is only interesting during launch, such as the
+/// steps of a reload: later reloads log one summary line instead.
+pub(crate) fn mark_early(stage: &str) {
+    if !startup_done() {
+        mark(stage);
+    }
+}
+
+/// Stamp one launch stage: milliseconds since the first mark (and since the
+/// previous one), to stderr and to `~/.ordnung/startup.log`, rewritten on
+/// every launch. Finder launches swallow stderr, so the file is what to read
+/// when a cold start feels slow. Callable from any thread.
+pub(crate) fn mark(stage: &str) {
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+    static T0: OnceLock<Instant> = OnceLock::new();
+    static LAST: Mutex<f64> = Mutex::new(0.0);
+    static LOG: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
+    let ms = T0.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0;
+    let delta = {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let d = ms - *last;
+        *last = ms;
+        d
+    };
+    let line = format!("[startup] {ms:8.1} ms  +{delta:7.1}  {stage}\n");
+    eprint!("{line}");
+    let log = LOG.get_or_init(|| {
+        Mutex::new(
+            ordnung_core::tools::data_dir()
+                .and_then(|d| std::fs::File::create(d.join("startup.log")).ok()),
+        )
+    });
+    if let Some(f) = log.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        let _ = f.write_all(line.as_bytes());
+    }
+}

@@ -757,6 +757,7 @@ impl AudioEngine {
     /// where `poll` actually applies the command.
     pub fn new(ctx: egui::Context) -> Option<Self> {
         let (stream, handle) = OutputStream::try_default().ok()?;
+        crate::util::mark("audio: output stream");
         let (tx, rx) = mpsc::channel();
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let controls = init_media_controls(cmd_tx, ctx);
