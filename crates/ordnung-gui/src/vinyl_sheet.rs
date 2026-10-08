@@ -149,6 +149,9 @@ pub(crate) struct VinylSheet {
     /// Set when the user hit play on the cover rather than opening the sheet:
     /// start the record as soon as there's a tracklist to start it from.
     pub pending_play: bool,
+    /// The row a play would start on and since when it has been that row,
+    /// so the readying of its video waits for the choice to settle.
+    pub preload_since: Option<(usize, Instant)>,
     /// Lowest current marketplace listing for this release, once looked up.
     /// `Loading` while the request is out, `Ready(None)` when nothing is for
     /// sale (or Discogs blocks the release from sale).
@@ -602,6 +605,7 @@ impl App {
             video_uri: None,
             video_scrub: None,
             pending_play: false,
+            preload_since: None,
             price: PriceState::Idle,
             bandcamp: None,
             offer: None,
@@ -1238,6 +1242,41 @@ impl App {
         }
     }
 
+    /// Ready the video a play would start on (see [`VinylSheet::start_row`])
+    /// in the mini-player, once that row has stood for [`SHEET_PRELOAD_AFTER`]:
+    /// the first play then swaps a loaded, buffered page in instead of
+    /// paying for a watch page load. The wait keeps a step through the shelf
+    /// or down the rows from loading a page per keystroke. Nothing to do
+    /// while a video is already on, or on the radio, which readies its own.
+    fn preload_sheet_start(&mut self, ctx: &egui::Context) {
+        let radio = self.radio.on;
+        let Some(sheet) = self.vinyl_sheet.as_mut() else {
+            return;
+        };
+        if radio || sheet.loading || sheet.playing_video.is_some() {
+            sheet.preload_since = None;
+            return;
+        }
+        let Some(row) = sheet.start_row() else {
+            return;
+        };
+        let since = match sheet.preload_since {
+            Some((r, t)) if r == row => t,
+            _ => {
+                sheet.preload_since = Some((row, Instant::now()));
+                ctx.request_repaint_after(SHEET_PRELOAD_AFTER);
+                return;
+            }
+        };
+        if since.elapsed() < SHEET_PRELOAD_AFTER {
+            ctx.request_repaint_after(SHEET_PRELOAD_AFTER - since.elapsed());
+            return;
+        }
+        if let Some(id) = self.sheet_video_queue(row).into_iter().next() {
+            webview::preload(&id);
+        }
+    }
+
     /// Start a stopped record from [`VinylSheet::start_row`]: the song it was
     /// opened on when that one can play, else the first row that can.
     fn play_sheet_from_start(&mut self, frame: &eframe::Frame) {
@@ -1285,6 +1324,7 @@ impl App {
         if start_now {
             self.play_sheet_from_start(frame);
         }
+        self.preload_sheet_start(ctx);
 
         // Snapshot what the closure paints so it never borrows `self` (actions
         // below need it mutably).
@@ -2561,6 +2601,9 @@ enum RecordPlay {
 const SHEET_W: f32 = 620.0;
 /// How long a loading sheet is held off screen before it opens anyway.
 const SHEET_HOLD: Duration = Duration::from_millis(400);
+/// How long the row a play would start on must stand before its video is
+/// readied in the mini-player (see `App::preload_sheet_start`).
+const SHEET_PRELOAD_AFTER: Duration = Duration::from_millis(600);
 
 /// The tracklist's two fixed left-hand columns: the play marker, then the
 /// position. Shared with the transport bar, whose own play button is drawn

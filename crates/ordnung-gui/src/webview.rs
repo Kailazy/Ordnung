@@ -422,6 +422,12 @@ mod imp {
             // it when it comes on.
             set_page_muted(&next.web, true);
             next.load(youtube_id);
+            // With nothing on air the panel is ordered out, and WebKit
+            // suspends media in a window it considers hidden; parked off
+            // screen it loads and buffers like any visible window.
+            if !mini.live {
+                park(mini);
+            }
         });
     }
 
@@ -680,19 +686,22 @@ mod imp {
             let Some(mini) = slot.as_mut() else {
                 return (None, None);
             };
-            if !mini.live {
-                return (None, None);
-            }
             let volume = mini.volume;
-            if mini.page.polled_at.elapsed() >= mini.page.poll_interval() {
-                mini.page.polled_at = Instant::now();
-                ask_state(&mini.page.web, mini.page.serial, volume, false);
-            }
+            // The readied page is asked whether or not anything is on air:
+            // asking is what holds it at its start, and a record sheet
+            // readies its first song before anything plays.
             if let Some(next) = mini.next.as_mut() {
                 if next.polled_at.elapsed() >= next.poll_interval() {
                     next.polled_at = Instant::now();
                     ask_state(&next.web, next.serial, volume, true);
                 }
+            }
+            if !mini.live {
+                return (None, None);
+            }
+            if mini.page.polled_at.elapsed() >= mini.page.poll_interval() {
+                mini.page.polled_at = Instant::now();
+                ask_state(&mini.page.web, mini.page.serial, volume, false);
             }
             // Take the next video the moment the current one reports it's done.
             let advance =
@@ -734,10 +743,11 @@ mod imp {
         PANEL.with(|slot| {
             let slot = slot.borrow();
             let mini = slot.as_ref()?;
-            if !mini.live {
-                return None;
-            }
             let due = |p: &Page| p.poll_interval().saturating_sub(p.polled_at.elapsed());
+            if !mini.live {
+                // Only a page being readied wants driving.
+                return mini.next.as_ref().map(due);
+            }
             let mut soonest = due(&mini.page);
             if let Some(next) = &mini.next {
                 soonest = soonest.min(due(next));
