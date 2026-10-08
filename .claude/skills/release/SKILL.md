@@ -62,6 +62,10 @@ CLAUDE.md). Then:
    and report the outcome; if it fails, read the log with
    `gh run view <id> --log-failed` and fix before re-tagging. The result
    is a dev prerelease; it reaches users only when promoted (see Channels).
+6. Install it locally: from the tagged commit run `make app`, which builds,
+   signs and installs the bundle to `/Applications` and relaunches it. The
+   installed app must never lag the latest tag; also run it after
+   fast-forwarding `main` to a newer tag at session start.
 
 Never re-use or move a tag that has already been pushed; a botched release
 gets a new patch version.
