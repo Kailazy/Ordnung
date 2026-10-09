@@ -1534,8 +1534,8 @@ impl App {
         // behind it, and both update together on the reload an edit triggers.
         let in_collection = self.vinyl_owned.contains(&release_id);
         let in_wantlist = self.vinyl_wanted.contains(&release_id);
-        // The imprint, once the detail names it — what the ⌂ Label button
-        // opens the label page with.
+        // The imprint, once the detail names it — what the label link on
+        // the header opens the label page with.
         let sheet_label = self
             .vinyl_sheet
             .as_ref()
@@ -1817,8 +1817,32 @@ impl App {
                         );
                         // The imprint gets the same standing as the artist
                         // and the title: for a record it's the third name.
+                        // The label's name is a link to its page, the way
+                        // each artist's name is; the catalogue number after
+                        // the dot stays plain text.
                         if let Some(line) = &label_line {
-                            ui.label(egui::RichText::new(line).color(crate::ui::tokens::color::LABEL_2));
+                            let (name, rest) = match line.split_once(" · ") {
+                                Some((n, r)) => (n, Some(r)),
+                                None => (line.as_str(), None),
+                            };
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                let ink = crate::ui::tokens::color::LABEL_2;
+                                if crate::ui::button::name_link(
+                                    ui,
+                                    name,
+                                    crate::ui::tokens::font::body(),
+                                    ink,
+                                )
+                                .on_hover_note(format!("Every release on {name}"))
+                                .clicked()
+                                {
+                                    act = Some(Act::LabelPage);
+                                }
+                                if let Some(rest) = rest {
+                                    ui.label(egui::RichText::new(format!(" · {rest}")).color(ink));
+                                }
+                            });
                         }
                         // Which version is on the sheet is a choice, not a
                         // fact: the one a dig landed on is whichever the page
@@ -2042,23 +2066,6 @@ impl App {
                                 .clicked()
                             {
                                 open_url(&format!("https://www.discogs.com/release/{release_id}"));
-                            }
-                            // The deliberate label move: not one random pull
-                            // down the thread, the whole run as a list.
-                            let label_page_tip = match &sheet_label {
-                                Some(l) => format!("Every release on {l}"),
-                                None => "Looking up this record's label…".to_string(),
-                            };
-                            if crate::ui::button::button_enabled(
-                                ui,
-                                sheet_label.is_some(),
-                                "⌂ Label",
-                            )
-                            .on_hover_note(label_page_tip.clone())
-                                .on_disabled_hover_note(label_page_tip)
-                                .clicked()
-                            {
-                                act = Some(Act::LabelPage);
                             }
                             // Collection and wantlist, each showing this
                             // record's actual state — so one button always says
