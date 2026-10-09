@@ -2664,7 +2664,7 @@ dependencies = [
 
 [[package]]
 name = "ordnung-core"
-version = "0.174.0"
+version = "0.174.1"
 dependencies = [
  "flate2",
  "image",
@@ -2684,7 +2684,7 @@ dependencies = [
 
 [[package]]
 name = "ordnung-gui"
-version = "0.174.0"
+version = "0.174.1"
 dependencies = [
  "block2 0.5.1",
  "dotenvy",
@@ -2711,7 +2711,7 @@ dependencies = [
 
 [[package]]
 name = "ordnung-rbdb"
-version = "0.174.0"
+version = "0.174.1"
 dependencies = [
  "image",
  "libc",
