@@ -1042,7 +1042,8 @@ mod imp {
                {hold_js}\
                var s=v.ended?'ended':(v.paused?'paused':'playing');\
                var d=isFinite(v.duration)?v.duration:0;\
-               return s+'|'+v.currentTime+'|'+d;\
+               var id=new URLSearchParams(location.search).get('v')||'';\
+               return s+'|'+v.currentTime+'|'+d+'|'+id;\
              }})()",
             inject = inject_js()
         );
@@ -1059,13 +1060,14 @@ mod imp {
                 let s: Retained<NSString> = unsafe { objc2::msg_send_id![obj, description] };
                 s.to_string()
             };
-            // `state|position|duration` since the transport landed; a bare
+            // `state|position|duration|id` since the transport landed; a bare
             // word (`novideo`, or an empty answer from a page mid-navigation)
             // still parses, leaving the clock where it was.
             let mut parts = state.split('|');
             let word = parts.next().unwrap_or_default().to_string();
             let pos = parts.next().and_then(|s| s.parse::<f32>().ok());
             let dur = parts.next().and_then(|s| s.parse::<f32>().ok());
+            let id = parts.next().map(str::to_string);
             // WebKit runs completion handlers on the main thread, which is the
             // thread that owns `PANEL`. The answer is for whichever page was
             // asked, wherever it has been moved to since — or for none, when
@@ -1079,6 +1081,16 @@ mod imp {
                     mini.next.as_mut().filter(|n| n.serial == serial)
                 };
                 if let Some(page) = page {
+                    // A page navigated to a new video keeps its old document,
+                    // still answering about the old video, until the new one
+                    // commits. Those answers describe a video this page is no
+                    // longer on: taken, they would confirm the new video's
+                    // mid-song jump against the old one's clock, and the new
+                    // video then plays from the top with the scrubber
+                    // jumping after it.
+                    if id.as_ref().is_some_and(|id| *id != page.id) {
+                        return;
+                    }
                     // The length is a fact about the video, not about where
                     // it is, so even a stale answer may supply it.
                     if let Some(d) = dur {
