@@ -1165,7 +1165,7 @@ pub(crate) fn edit_row_multiline(ui: &mut egui::Ui, label: &str, value: &mut Str
 /// The inspector's two layouts, the tiers its edge snaps between (see
 /// `ui::nav`). Expanded is the drawer as first designed: 320pt, the label
 /// column plus a value that fits "Original release" without truncating.
-/// Compact takes 80pt off that: the label column keeps its measure and the
+/// Compact takes 120pt off that: the label column keeps its measure and the
 /// values and sleeve give up the room, for when the table matters more than
 /// the detail. A wider 440pt tier used to sit above these; it only
 /// stretched the same rows, so it went.
@@ -1179,7 +1179,7 @@ impl InspectorDensity {
     /// Snapped panel width for this tier, in points.
     pub(crate) fn width(self) -> f32 {
         match self {
-            InspectorDensity::Compact => 240.0,
+            InspectorDensity::Compact => 200.0,
             InspectorDensity::Expanded => 320.0,
         }
     }
