@@ -530,6 +530,12 @@ impl App {
                 egui::ScrollArea::vertical()
                     .max_height(440.0)
                     .show(ui, |ui| {
+                        // A paged run keeps the list at full height on every
+                        // page, so the pager under it stays put under the
+                        // cursor when a short last page turns up.
+                        if pages > 1 {
+                            ui.set_min_height(440.0);
+                        }
                         for (i, r) in rows.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 let (trect, tresp) = ui.allocate_exact_size(
@@ -566,60 +572,12 @@ impl App {
                                     act = Some(Act::Open(i));
                                 }
                                 ui.add_space(8.0);
-                                ui.vertical(|ui| {
-                                    ui.spacing_mut().item_spacing.y = 1.0;
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 6.0;
-                                        let t = ui
-                                            .add(
-                                                egui::Label::new(
-                                                    egui::RichText::new(format!(
-                                                        "{} — {}",
-                                                        r.artist, r.title
-                                                    ))
-                                                    .strong(),
-                                                )
-                                                .truncate()
-                                                .sense(egui::Sense::click()),
-                                            )
-                                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                            .on_hover_note("Open the record");
-                                        if t.clicked() {
-                                            act = Some(Act::Open(i));
-                                        }
-                                        // Your shelves, marked: the mark
-                                        // itself, solid, in the row's quiet ink.
-                                        for (show, list) in [
-                                            (r.owned, VinylList::Collection),
-                                            (!r.owned && r.wanted, VinylList::Wantlist),
-                                        ] {
-                                            if show {
-                                                let (rect, _) = ui.allocate_exact_size(
-                                                    egui::vec2(14.0, 14.0),
-                                                    egui::Sense::hover(),
-                                                );
-                                                crate::ui::icon::shelf(
-                                                    ui.painter(),
-                                                    rect.center(),
-                                                    5.5,
-                                                    egui::Color32::from_gray(150),
-                                                    true,
-                                                    list,
-                                                );
-                                            }
-                                        }
-                                        if r.remix {
-                                            ui.label(
-                                                egui::RichText::new("REMIX")
-                                                    .small()
-                                                    .color(egui::Color32::from_gray(140)),
-                                            );
-                                        }
-                                    });
-                                    if !r.sub.is_empty() {
-                                        ui.label(egui::RichText::new(&r.sub).small().weak());
-                                    }
-                                });
+                                // The buttons claim their width first, from
+                                // the right, so the text column gets what is
+                                // left and cuts its title there: a long title
+                                // would otherwise run under the buttons and
+                                // widen the window, for good (egui keeps the
+                                // widest width a window's content ever took).
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
@@ -644,6 +602,96 @@ impl App {
                                         {
                                             act = Some(Act::Want(i));
                                         }
+                                        ui.with_layout(
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                ui.spacing_mut().item_spacing.y = 1.0;
+                                                ui.horizontal(|ui| {
+                                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                                    // What follows the title on its
+                                                    // line, reserved before the title
+                                                    // is cut: a shelf mark and the
+                                                    // remix tag.
+                                                    let marks = [
+                                                        (r.owned, VinylList::Collection),
+                                                        (!r.owned && r.wanted, VinylList::Wantlist),
+                                                    ];
+                                                    let remix = r.remix.then(|| {
+                                                        egui::WidgetText::from(
+                                                            egui::RichText::new("REMIX")
+                                                                .small()
+                                                                .color(egui::Color32::from_gray(140)),
+                                                        )
+                                                        .into_galley(
+                                                            ui,
+                                                            Some(egui::TextWrapMode::Extend),
+                                                            f32::INFINITY,
+                                                            egui::TextStyle::Small,
+                                                        )
+                                                    });
+                                                    let reserve = marks
+                                                        .iter()
+                                                        .filter(|(show, _)| *show)
+                                                        .count() as f32
+                                                        * (14.0 + 6.0)
+                                                        + remix.as_ref().map_or(0.0, |g| g.size().x + 6.0);
+                                                    let t = ui
+                                                        .scope(|ui| {
+                                                            ui.set_max_width(
+                                                                (ui.available_width() - reserve).max(0.0),
+                                                            );
+                                                            ui.add(
+                                                                egui::Label::new(
+                                                                    egui::RichText::new(format!(
+                                                                        "{} — {}",
+                                                                        r.artist, r.title
+                                                                    ))
+                                                                    .strong(),
+                                                                )
+                                                                .truncate()
+                                                                .sense(egui::Sense::click()),
+                                                            )
+                                                        })
+                                                        .inner
+                                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                        .on_hover_note("Open the record");
+                                                    if t.clicked() {
+                                                        act = Some(Act::Open(i));
+                                                    }
+                                                    // Your shelves, marked: the mark
+                                                    // itself, solid, in the row's quiet ink.
+                                                    for (show, list) in marks {
+                                                        if show {
+                                                            let (rect, _) = ui.allocate_exact_size(
+                                                                egui::vec2(14.0, 14.0),
+                                                                egui::Sense::hover(),
+                                                            );
+                                                            crate::ui::icon::shelf(
+                                                                ui.painter(),
+                                                                rect.center(),
+                                                                5.5,
+                                                                egui::Color32::from_gray(150),
+                                                                true,
+                                                                list,
+                                                            );
+                                                        }
+                                                    }
+                                                    if let Some(g) = remix {
+                                                        ui.add(egui::Label::new(g));
+                                                    }
+                                                });
+                                                if !r.sub.is_empty() {
+                                                    // Cut, never widen: a long catalogue
+                                                    // line would push the frame out.
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(&r.sub).small().weak(),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                }
+                                            },
+                                        );
                                     },
                                 );
                             });

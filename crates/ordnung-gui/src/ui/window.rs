@@ -420,6 +420,24 @@ impl<'o> Window<'o> {
             if resizable == [true, true] {
                 ui.expand_to_include_rect(ui.max_rect());
             }
+            // One sized in height alone grows with its content and never
+            // shrinks while open: a list that turns to a shorter page or
+            // layout keeps the frame, and the controls in it, where the
+            // cursor is. The held height resets on each open.
+            if resizable == [false, true] {
+                let held_id = id.with("held-height");
+                let was = if opening {
+                    0.0
+                } else {
+                    ui.ctx().data(|d| d.get_temp::<f32>(held_id)).unwrap_or(0.0)
+                };
+                let h = ui.min_rect().height().max(was);
+                ui.expand_to_include_rect(egui::Rect::from_min_size(
+                    ui.min_rect().min,
+                    egui::vec2(0.0, h),
+                ));
+                ui.ctx().data_mut(|d| d.insert_temp(held_id, h));
+            }
             // After the content, not before: the chrome is placed from
             // what the content took (`min_rect`), which is what the frame
             // wraps. The rect egui offers before layout (`max_rect`) is its
