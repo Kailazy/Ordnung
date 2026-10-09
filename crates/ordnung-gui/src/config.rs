@@ -142,7 +142,7 @@ pub struct Config {
     #[serde(default)]
     pub nav_collapsed: Vec<String>,
     /// Which of the inspector drawer's two width tiers is in force:
-    /// `"compact"` (the default) or `"expanded"`. Like `nav_density`, a tier
+    /// `"narrow"` or `"regular"` (the default). Like `nav_density`, a tier
     /// rather than a pixel width. See `InspectorDensity`.
     #[serde(default = "default_inspector_density")]
     pub inspector_density: String,
@@ -374,7 +374,7 @@ fn default_nav_density() -> String {
 }
 
 fn default_inspector_density() -> String {
-    "compact".into()
+    "regular".into()
 }
 
 fn default_nav_primary() -> String {

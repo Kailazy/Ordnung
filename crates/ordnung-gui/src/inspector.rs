@@ -1163,10 +1163,12 @@ pub(crate) fn edit_row_multiline(ui: &mut egui::Ui, label: &str, value: &mut Str
 }
 
 /// The inspector's two layouts, the tiers its edge snaps between (see
-/// `ui::nav`). Compact is the drawer as first designed: 320pt, the label
+/// `ui::nav`). Expanded is the drawer as first designed: 320pt, the label
 /// column plus a value that fits "Original release" without truncating.
-/// Expanded gives the artwork and the values 120pt more, for long titles
-/// and a sleeve you can actually look at.
+/// Compact takes 80pt off that: the label column keeps its measure and the
+/// values and sleeve give up the room, for when the table matters more than
+/// the detail. A wider 440pt tier used to sit above these; it only
+/// stretched the same rows, so it went.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum InspectorDensity {
     Compact,
@@ -1177,25 +1179,27 @@ impl InspectorDensity {
     /// Snapped panel width for this tier, in points.
     pub(crate) fn width(self) -> f32 {
         match self {
-            InspectorDensity::Compact => 320.0,
-            InspectorDensity::Expanded => 440.0,
+            InspectorDensity::Compact => 240.0,
+            InspectorDensity::Expanded => 320.0,
         }
     }
 
     /// Parse the persisted `Config::inspector_density` key; anything
-    /// unrecognised falls back to the designed default.
+    /// unrecognised falls back to the designed default. The retired
+    /// "compact"/"expanded" keys named the old 320/440 pair, so a config
+    /// still carrying one lands on the default, which is the width it had.
     pub(crate) fn from_key(key: &str) -> Self {
         match key {
-            "expanded" => InspectorDensity::Expanded,
-            _ => InspectorDensity::Compact,
+            "narrow" => InspectorDensity::Compact,
+            _ => InspectorDensity::Expanded,
         }
     }
 
     /// The config key for this tier.
     pub(crate) fn key(self) -> &'static str {
         match self {
-            InspectorDensity::Compact => "compact",
-            InspectorDensity::Expanded => "expanded",
+            InspectorDensity::Compact => "narrow",
+            InspectorDensity::Expanded => "regular",
         }
     }
 }

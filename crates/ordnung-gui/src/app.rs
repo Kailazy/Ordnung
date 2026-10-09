@@ -373,7 +373,7 @@ impl App {
             usb_analysis_cancel: None,
             nav: crate::ui::nav::NavState::new(NavDensity::Narrow),
             inspector_nav: crate::ui::nav::NavState::new(
-                crate::inspector::InspectorDensity::Compact,
+                crate::inspector::InspectorDensity::Expanded,
             ),
             view: LibraryView::Library,
             renaming: None,
