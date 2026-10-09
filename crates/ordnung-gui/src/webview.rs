@@ -133,6 +133,7 @@ mod imp {
 
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
+    use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSPanel, NSView, NSWindow,
         NSWindowOrderingMode, NSWindowStyleMask,
@@ -765,13 +766,15 @@ mod imp {
             | NSWindowStyleMask::Resizable
             | NSWindowStyleMask::UtilityWindow;
         let panel: Retained<NSPanel> = unsafe {
-            NSPanel::initWithContentRect_styleMask_backing_defer(
-                mtm.alloc(),
-                content,
-                style,
-                NSBackingStoreType::NSBackingStoreBuffered,
-                false,
-            )
+            let this = mtm.alloc::<ParkedPanel>().set_ivars(());
+            let panel: Retained<ParkedPanel> = msg_send_id![
+                super(this),
+                initWithContentRect: content,
+                styleMask: style,
+                backing: NSBackingStoreType::NSBackingStoreBuffered,
+                defer: false,
+            ];
+            Retained::into_super(panel)
         };
         unsafe {
             // We keep the panel across shows, so AppKit must not free it when
@@ -1104,8 +1107,37 @@ mod imp {
         unsafe {
             mini.panel.setFrameOrigin(OFFSCREEN);
             mini.panel.orderFront(None);
+            // A panel's first order-front relocates it onto the screen when
+            // its frame touches none (that is not constrainFrameRect:, so
+            // the subclass can't stop it); moving it again afterwards sticks.
+            mini.panel.setFrameOrigin(OFFSCREEN);
         }
     }
+
+    declare_class!(
+        /// An `NSPanel` that lets its frame leave the screen. Stock AppKit
+        /// (macOS 26) clamps every frame change so a sliver of the window
+        /// stays reachable, which turned the parking spot into a corner of
+        /// black window at the bottom left of the screen.
+        struct ParkedPanel;
+
+        unsafe impl ClassType for ParkedPanel {
+            type Super = NSPanel;
+            type Mutability = mutability::MainThreadOnly;
+            const NAME: &'static str = "OrdnungMiniPanel";
+        }
+
+        impl DeclaredClass for ParkedPanel {
+            type Ivars = ();
+        }
+
+        unsafe impl ParkedPanel {
+            #[method(constrainFrameRect:toScreen:)]
+            fn constrain_frame_rect(&self, rect: NSRect, _screen: *mut AnyObject) -> NSRect {
+                rect
+            }
+        }
+    );
 
     /// The app's main `NSWindow`, via eframe's AppKit handle. Borrowed for the
     /// duration of the call only — never stashed, since eframe may recreate the
